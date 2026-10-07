@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 )
 
@@ -66,6 +67,13 @@ type Telemetry struct {
 	requestBytes   *prometheus.CounterVec
 	portCalls      *prometheus.CounterVec
 	portSeconds    *prometheus.HistogramVec
+	healObjects    *prometheus.CounterVec
+	healShards     prometheus.Counter
+	scrubPasses    prometheus.Counter
+	scrubObjects   prometheus.Counter
+	scrubBytes     prometheus.Counter
+	gcPasses       prometheus.Counter
+	gcRemoved      prometheus.Counter
 }
 
 // New returns the node's Telemetry. The caller must call Shutdown.
@@ -98,8 +106,31 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 		Buckets: prometheus.ExponentialBuckets(0.0001, 4, 9),
 	}, []string{"port", "method"})
 
+	t.healObjects = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_heal_objects_total", Help: "Objects checked by healing, by result: healthy, healed or unrecoverable.",
+	}, []string{"result"})
+	t.healShards = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_heal_shards_rebuilt_total", Help: "Shards rebuilt from the remaining shards of their object.",
+	})
+	t.scrubPasses = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_scrub_passes_total", Help: "Completed passes of the scrubber over every object.",
+	})
+	t.scrubObjects = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_scrub_objects_total", Help: "Objects verified by the scrubber.",
+	})
+	t.scrubBytes = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_scrub_bytes_total", Help: "Stored bytes verified by the scrubber.",
+	})
+	t.gcPasses = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_gc_passes_total", Help: "Completed passes of the garbage collector over every drive.",
+	})
+	t.gcRemoved = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_gc_shards_removed_total", Help: "Unreferenced shards removed by the garbage collector.",
+	})
+
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.portCalls, t.portSeconds,
+		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
@@ -216,4 +247,30 @@ func errorClass(err error) string {
 		}
 	}
 	return "error"
+}
+
+// ObserveHeal records the outcome of healing one object.
+func (t *Telemetry) ObserveHeal(r app.HealResult) {
+	result := "healthy"
+	switch {
+	case r.Unrecoverable:
+		result = "unrecoverable"
+	case r.Damaged > 0:
+		result = "healed"
+	}
+	t.healObjects.WithLabelValues(result).Inc()
+	t.healShards.Add(float64(r.Rebuilt))
+}
+
+// ObserveScrub records a completed pass of the scrubber.
+func (t *Telemetry) ObserveScrub(s app.ScrubStats) {
+	t.scrubPasses.Inc()
+	t.scrubObjects.Add(float64(s.Objects))
+	t.scrubBytes.Add(float64(s.Bytes))
+}
+
+// ObserveGC records a completed pass of the garbage collector.
+func (t *Telemetry) ObserveGC(s app.GCStats) {
+	t.gcPasses.Inc()
+	t.gcRemoved.Add(float64(s.Removed))
 }

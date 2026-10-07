@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -25,6 +26,7 @@ type ObjectService struct {
 	authz   ports.Authorizer
 	clock   ports.Clock
 	logger  *slog.Logger
+	healer  *Healer
 
 	// entropy is the source of identifiers and nonce prefixes. It is read
 	// under entropyMu because a source need not be safe for concurrent use.
@@ -36,8 +38,14 @@ type ObjectService struct {
 type ObjectServiceConfig struct {
 	Index   ports.ObjectIndex
 	Buckets ports.BucketStore
-	// Drives are the drives objects are stored on; at least one.
-	Drives []ports.ShardStore
+	// Topology assigns the drives to erasure sets; Drives are the attached
+	// drives, which must include every drive of the topology.
+	Topology cluster.Topology
+	Drives   []ports.ShardStore
+	// Codec computes parity.
+	Codec ports.ErasureCodec
+	// OnHeal, when not nil, is called with the outcome of every heal.
+	OnHeal func(HealResult)
 	KMS    ports.KMS
 	Authz  ports.Authorizer
 	Clock  ports.Clock
@@ -48,14 +56,21 @@ type ObjectServiceConfig struct {
 
 // NewObjectService returns an ObjectService.
 func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
-	storage, err := newShardStorage(cfg.Drives, cfg.Logger)
+	storage, err := newShardStorage(cfg.Topology, cfg.Drives, cfg.Codec, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("app.NewObjectService: %w", err)
 	}
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy,
+		healer: newHealer(cfg.Index, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
+}
+
+// Healer returns the service that repairs damaged objects. Its Run method
+// must be running for degraded reads and writes to be repaired.
+func (s *ObjectService) Healer() *Healer {
+	return s.healer
 }
 
 // PutInput describes an object to store.
@@ -127,12 +142,7 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if err != nil {
 		return object.Version{}, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = writer.abort()
-		}
-	}()
+	defer writer.abort()
 
 	body := &countingReader{reader: io.LimitReader(in.Body, object.MaxSize+1)}
 	if _, err := io.Copy(writer, stream.Encrypt(body)); err != nil {
@@ -157,11 +167,11 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		}
 	}
 
-	// Durable on the drive first ...
-	if version.Layout, err = writer.commit(ctx); err != nil {
+	// Durable on a write quorum of drives first ...
+	var degraded bool
+	if version.Layout, degraded, err = writer.commit(ctx); err != nil {
 		return object.Version{}, err
 	}
-	committed = true
 
 	// ... then visible, through Raft. Nothing was acknowledged before this.
 	version.ModifiedAt = s.clock.Now().UTC()
@@ -179,6 +189,10 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	}
 	if replaced != nil {
 		s.storage.remove(ctx, replaced.DataID, replaced.Layout)
+	}
+	if degraded {
+		// Committed on a quorum, but not on every drive: rebuild the rest.
+		s.healer.Enqueue(version.Bucket, version.Key)
 	}
 	return version, nil
 }
@@ -275,10 +289,12 @@ func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in Get
 		out, err := s.open(ctx, version, in)
 		// A concurrent overwrite or delete removes the replaced shards
 		// right after its commit. A reader that fetched the old version
-		// just before must then serve the new state, not an error: it
-		// looks again, and gives up only when the same version is still
-		// current and its data is really missing.
-		if errors.Is(err, domain.ErrShardNotFound) && attempt < getAttempts && version.DataID != lastData {
+		// just before finds some or all of them gone and must then serve
+		// the new state, not an error: it looks again, and gives up only
+		// when the same version is still current and its data is really
+		// missing or damaged.
+		gone := errors.Is(err, domain.ErrShardNotFound) || errors.Is(err, domain.ErrIntegrity)
+		if gone && attempt < getAttempts && version.DataID != lastData {
 			lastData = version.DataID
 			continue
 		}
@@ -329,7 +345,7 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 	if span.Length > 0 {
 		body = io.LimitReader(plain, span.Length)
 	}
-	return GetOutput{Version: version, Range: span, Body: &objectBody{Reader: body, shard: shard}}, nil
+	return GetOutput{Version: version, Range: span, Body: &objectBody{Reader: body, shards: shard, healer: s.healer}}, nil
 }
 
 // openVersionKeys unwraps the data key of a stored version and returns the
@@ -353,12 +369,17 @@ func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Vers
 
 type objectBody struct {
 	io.Reader
-	shard ports.ShardReader
+	shards *streamReader
+	healer *Healer
 }
 
-// Close releases the underlying shard.
+// Close releases the underlying shards. A read that had to work around a
+// missing or damaged shard queues the object for healing.
 func (b *objectBody) Close() error {
-	return b.shard.Close()
+	if b.shards.Degraded() {
+		b.healer.Enqueue(b.shards.version.Bucket, b.shards.version.Key)
+	}
+	return b.shards.Close()
 }
 
 // Head returns the current version of an object without reading its content.

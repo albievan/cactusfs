@@ -12,6 +12,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -31,6 +32,27 @@ type fixture struct {
 	buckets *app.BucketService
 	objects *app.ObjectService
 	events  *eventLog
+	// topology is the drive topology the object service was built with.
+	topology cluster.Topology
+	heals    *healLog
+}
+
+// healLog records the outcome of every heal.
+type healLog struct {
+	mu      sync.Mutex
+	results []app.HealResult
+}
+
+func (l *healLog) add(r app.HealResult) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.results = append(l.results, r)
+}
+
+func (l *healLog) list() []app.HealResult {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]app.HealResult(nil), l.results...)
 }
 
 // eventLog records the order of the steps of the write path.
@@ -119,20 +141,41 @@ func (i recordingIndex) PutVersion(ctx context.Context, v object.Version) (*obje
 	return replaced, err
 }
 
+// newFixture wires the use cases over two drives: too few for parity, so
+// every object is one shard on one drive.
 func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	return newFixtureWithDrives(t, 2)
+}
+
+// newFixtureWithDrives wires the use cases over n drives. With four or more
+// the objects are erasure coded.
+func newFixtureWithDrives(t *testing.T, n int) *fixture {
 	t.Helper()
 	kms, err := porttest.NewKMS("test:1")
 	if err != nil {
 		t.Fatalf("NewKMS: %v", err)
 	}
+	drives := make([]*porttest.MemShardStore, n)
+	ids := make([]string, n)
+	for i := range drives {
+		ids[i] = "drive-" + string(rune('a'+i))
+		drives[i] = porttest.NewMemShardStore(ids[i])
+	}
+	topology, err := cluster.NewTopology(ids)
+	if err != nil {
+		t.Fatalf("NewTopology: %v", err)
+	}
 	f := &fixture{
-		meta:   porttest.NewMemMetadata(),
-		drives: []*porttest.MemShardStore{porttest.NewMemShardStore("drive-a"), porttest.NewMemShardStore("drive-b")},
-		kms:    kms,
-		authz:  &porttest.Authorizer{},
-		clock:  porttest.NewClock(testNow),
-		logs:   &syncBuffer{},
-		events: &eventLog{},
+		meta:     porttest.NewMemMetadata(),
+		drives:   drives,
+		topology: topology,
+		heals:    &healLog{},
+		kms:      kms,
+		authz:    &porttest.Authorizer{},
+		clock:    porttest.NewClock(testNow),
+		logs:     &syncBuffer{},
+		events:   &eventLog{},
 	}
 	f.buckets = app.NewBucketService(f.meta, f.authz, f.clock)
 	f.objects = f.objectService(t, f.kms)
@@ -148,14 +191,17 @@ func (f *fixture) objectService(t *testing.T, kms ports.KMS) *app.ObjectService 
 		drives[i] = recordingDrive{ShardStore: d, events: f.events}
 	}
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index:   recordingIndex{ObjectIndex: f.meta, events: f.events},
-		Buckets: f.meta,
-		Drives:  drives,
-		KMS:     kms,
-		Authz:   f.authz,
-		Clock:   f.clock,
-		Entropy: rand.Reader,
-		Logger:  slog.New(slog.NewJSONHandler(f.logs, nil)),
+		Index:    recordingIndex{ObjectIndex: f.meta, events: f.events},
+		Buckets:  f.meta,
+		Topology: f.topology,
+		Drives:   drives,
+		Codec:    porttest.NewCodec(),
+		OnHeal:   f.heals.add,
+		KMS:      kms,
+		Authz:    f.authz,
+		Clock:    f.clock,
+		Entropy:  rand.Reader,
+		Logger:   slog.New(slog.NewJSONHandler(f.logs, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)

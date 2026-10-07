@@ -274,6 +274,44 @@ func TestS3ObservationsAndSpans(t *testing.T) {
 	}
 }
 
+func TestBackgroundWorkIsCounted(t *testing.T) {
+	t.Parallel()
+	tel := newTelemetry(t, nil)
+
+	tel.ObserveHeal(app.HealResult{Shards: 6})
+	tel.ObserveHeal(app.HealResult{Shards: 6, Damaged: 2, Rebuilt: 2})
+	tel.ObserveHeal(app.HealResult{Shards: 6, Damaged: 4, Unrecoverable: true})
+	tel.ObserveScrub(app.ScrubStats{Objects: 10, Bytes: 4096})
+	tel.ObserveGC(app.GCStats{Shards: 30, Removed: 3})
+
+	families, err := tel.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			name := family.GetName()
+			for _, label := range metric.GetLabel() {
+				name += "{" + label.GetValue() + "}"
+			}
+			if counter := metric.GetCounter(); counter != nil {
+				got[name] = counter.GetValue()
+			}
+		}
+	}
+	want := map[string]float64{
+		"cactusfs_heal_objects_total{healthy}": 1, "cactusfs_heal_objects_total{healed}": 1, "cactusfs_heal_objects_total{unrecoverable}": 1,
+		"cactusfs_heal_shards_rebuilt_total": 2, "cactusfs_scrub_passes_total": 1, "cactusfs_scrub_objects_total": 10,
+		"cactusfs_scrub_bytes_total": 4096, "cactusfs_gc_passes_total": 1, "cactusfs_gc_shards_removed_total": 3,
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Errorf("%s = %v, want %v", name, got[name], value)
+		}
+	}
+}
+
 func TestNoExporterWithoutAnEndpoint(t *testing.T) {
 	t.Parallel()
 

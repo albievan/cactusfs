@@ -169,8 +169,12 @@ s3-compat:
 s3-compat-record:
 	@scripts/s3compat.sh record
 
+# Fault injection against the built binary: corrupt and delete shards, wipe
+# drives, kill the process during writes. Must pass before a milestone that
+# touches the write path, quorum, Raft or healing is marked done.
 test-chaos:
-	@echo "make $@: the fault-injection suite is PLAN steps 2.8 and 3.9 and does not exist yet." >&2; exit 1
+	go test -count=1 -tags=chaos -timeout 20m ./test/chaos/...
+	@echo "test-chaos: PASS"
 
 vuln:
 	go tool govulncheck ./...

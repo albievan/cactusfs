@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
@@ -101,8 +102,12 @@ func newTestServer(t *testing.T, domainName string) *testServer {
 	}
 	s.keyID, s.key = generated.AccessKeyID, []byte(generated.SecretKey)
 
+	topology, err := cluster.NewTopology([]string{s.drive.DriveID()})
+	if err != nil {
+		t.Fatalf("NewTopology: %v", err)
+	}
 	s.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: s.meta, Buckets: s.meta, Drives: []ports.ShardStore{s.drive}, KMS: kms,
+		Index: s.meta, Buckets: s.meta, Topology: topology, Drives: []ports.ShardStore{s.drive}, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {

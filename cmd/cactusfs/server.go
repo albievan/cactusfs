@@ -97,6 +97,8 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		}
 	}()
 
+	n.startBackground(ctx, cfg)
+
 	gate := health.NewGate()
 	admin := http.NewServeMux()
 	health.NewHandler(app.NewHealthService(gate, n.meta), logger, readinessTimeout).Register(admin)

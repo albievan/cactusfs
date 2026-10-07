@@ -7,6 +7,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -31,6 +32,7 @@ const (
 	cmdPutObject    = "object.put"
 	cmdDeleteObject = "object.delete"
 	cmdSetRoot      = "root.set"
+	cmdSetTopology  = "topology.set"
 )
 
 // entry is the decoded form of a Raft log entry. Exactly one of the command
@@ -42,6 +44,7 @@ type entry struct {
 	PutObject    *versionRecord   `json:"put_object,omitempty"`
 	DeleteObject *deleteObjectCmd `json:"delete_object,omitempty"`
 	SetRoot      *rootRecord      `json:"set_root,omitempty"`
+	SetTopology  *topologyRecord  `json:"set_topology,omitempty"`
 }
 
 type deleteBucketCmd struct {
@@ -112,6 +115,41 @@ type rootRecord struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// topologyRecord is the drive topology as it is stored and replicated. In a
+// topology.set command, Version is the version the change is based on; in
+// the state it is the version of what is stored.
+type topologyRecord struct {
+	Version uint64         `json:"version"`
+	Sets    [][]slotRecord `json:"sets"`
+}
+
+type slotRecord struct {
+	DriveID string   `json:"drive_id"`
+	Retired []string `json:"retired,omitempty"`
+}
+
+func topologyToRecord(t cluster.Topology) *topologyRecord {
+	record := &topologyRecord{Version: t.Version, Sets: make([][]slotRecord, len(t.Sets))}
+	for s, set := range t.Sets {
+		record.Sets[s] = make([]slotRecord, len(set))
+		for i, slot := range set {
+			record.Sets[s][i] = slotRecord{DriveID: slot.DriveID, Retired: slot.Retired}
+		}
+	}
+	return record
+}
+
+func (r topologyRecord) toDomain() cluster.Topology {
+	t := cluster.Topology{Version: r.Version, Sets: make([][]cluster.Slot, len(r.Sets))}
+	for s, set := range r.Sets {
+		t.Sets[s] = make([]cluster.Slot, len(set))
+		for i, slot := range set {
+			t.Sets[s][i] = cluster.Slot{DriveID: slot.DriveID, Retired: slot.Retired}
+		}
+	}
+	return t
+}
+
 // encodeEntry serialises an entry for the Raft log.
 func encodeEntry(e entry) ([]byte, error) {
 	body, err := json.Marshal(e)
@@ -136,7 +174,9 @@ func decodeEntry(data []byte) (entry, error) {
 		return entry{}, fmt.Errorf("%w: malformed metadata entry: %w", domain.ErrUnsupportedFormat, err)
 	}
 	set := 0
-	for _, present := range []bool{e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil} {
+	for _, present := range []bool{
+		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
+	} {
 		if present {
 			set++
 		}
@@ -153,6 +193,8 @@ func decodeEntry(data []byte) (entry, error) {
 		ok = ok && e.DeleteObject != nil
 	case cmdSetRoot:
 		ok = ok && e.SetRoot != nil
+	case cmdSetTopology:
+		ok = ok && e.SetTopology != nil
 	default:
 		return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
 	}

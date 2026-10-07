@@ -13,6 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 // Names inside the state database. The layout is part of the snapshot format.
@@ -22,6 +23,11 @@ import (
 //	buckets  <bucket name> -> bucketRecord (JSON)
 //	objects  <bucket name> (nested bucket) -> <object key> -> versionRecord (JSON)
 //	iam      "root" -> rootRecord (JSON)
+//	cluster  "topology" -> topologyRecord (JSON)
+//	data     <data ID, 16 bytes> -> number of object versions that refer to it
+//	         (uint64, big endian). Derived from "objects": it is rebuilt when
+//	         missing, and exists so that the garbage collector can ask whether
+//	         stored data is still in use without scanning every object.
 const (
 	stateSchemaVersion = 1
 	stateFileMode      = 0o600
@@ -34,6 +40,9 @@ func iamBucket() []byte     { return []byte("iam") }
 func appliedKey() []byte    { return []byte("applied") }
 func schemaKey() []byte     { return []byte("schema") }
 func rootKey() []byte       { return []byte("root") }
+func clusterBucket() []byte { return []byte("cluster") }
+func topologyKey() []byte   { return []byte("topology") }
+func dataBucket() []byte    { return []byte("data") }
 
 // applyResult is what the state machine returns for one entry. err is a
 // domain error for a command that was validly applied but refused (the state
@@ -77,10 +86,13 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket()} {
+		for _, name := range [][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket()} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
+		}
+		if err := ensureDataIndex(tx); err != nil {
+			return err
 		}
 		meta := tx.Bucket(metaBucket())
 		switch raw := meta.Get(schemaKey()); {
@@ -96,6 +108,51 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	return db, nil
+}
+
+// ensureDataIndex creates the data-reference index when the state does not
+// have one, from the object index it is derived from. A state written before
+// the index existed is brought up to date here, deterministically.
+func ensureDataIndex(tx *bbolt.Tx) error {
+	if tx.Bucket(dataBucket()) != nil {
+		return nil
+	}
+	index, err := tx.CreateBucket(dataBucket())
+	if err != nil {
+		return err
+	}
+	objects := tx.Bucket(objectsBucket())
+	return objects.ForEachBucket(func(name []byte) error {
+		return objects.Bucket(name).ForEach(func(_, raw []byte) error {
+			var v versionRecord
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+			}
+			return addDataReference(index, v.DataID, 1)
+		})
+	})
+}
+
+// addDataReference changes the number of versions that refer to a data ID.
+func addDataReference(index *bbolt.Bucket, dataID string, delta int) error {
+	id, err := object.ParseID(dataID)
+	if err != nil {
+		return fmt.Errorf("%w: stored data ID: %w", domain.ErrIntegrity, err)
+	}
+	var count uint64
+	if raw := index.Get(id[:]); len(raw) == 8 {
+		count = binary.BigEndian.Uint64(raw)
+	}
+	switch {
+	case delta > 0:
+		count++
+	case count > 0:
+		count--
+	}
+	if count == 0 {
+		return index.Delete(id[:])
+	}
+	return index.Put(id[:], binary.BigEndian.AppendUint64(nil, count))
 }
 
 func (f *fsm) close() error {
@@ -198,6 +255,8 @@ func applyEntry(tx *bbolt.Tx, e entry) (applyResult, error) {
 		return applyDeleteObject(tx, *e.DeleteObject)
 	case cmdSetRoot:
 		return applySetRoot(tx, *e.SetRoot)
+	case cmdSetTopology:
+		return applySetTopology(tx, *e.SetTopology)
 	default:
 		return applyResult{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
 	}
@@ -261,6 +320,15 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord) (applyResult, error) {
 	if err := index.Put([]byte(v.Key), data); err != nil {
 		return applyResult{}, err
 	}
+	references := tx.Bucket(dataBucket())
+	if err := addDataReference(references, v.DataID, 1); err != nil {
+		return applyResult{}, err
+	}
+	if previous != nil {
+		if err := addDataReference(references, previous.DataID, -1); err != nil {
+			return applyResult{}, err
+		}
+	}
 	return applyResult{previous: previous}, nil
 }
 
@@ -276,6 +344,9 @@ func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd) (applyResult, error) {
 	if err := index.Delete([]byte(cmd.Key)); err != nil {
 		return applyResult{}, err
 	}
+	if err := addDataReference(tx.Bucket(dataBucket()), previous.DataID, -1); err != nil {
+		return applyResult{}, err
+	}
 	return applyResult{previous: previous}, nil
 }
 
@@ -289,6 +360,30 @@ func applySetRoot(tx *bbolt.Tx, root rootRecord) (applyResult, error) {
 		return applyResult{}, err
 	}
 	return applyResult{}, bucket.Put(rootKey(), data)
+}
+
+// applySetTopology replaces the topology when the change is based on the
+// stored version, and refuses it otherwise.
+func applySetTopology(tx *bbolt.Tx, next topologyRecord) (applyResult, error) {
+	if err := next.toDomain().Validate(); err != nil {
+		return applyResult{err: err}, nil
+	}
+	bucket := tx.Bucket(clusterBucket())
+	var stored topologyRecord
+	if raw := bucket.Get(topologyKey()); raw != nil {
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return applyResult{}, fmt.Errorf("%w: stored topology: %w", domain.ErrIntegrity, err)
+		}
+	}
+	if next.Version != stored.Version {
+		return refuse(domain.ErrConflict, "topology is at version %d, the change was based on %d", stored.Version, next.Version)
+	}
+	next.Version = stored.Version + 1
+	data, err := json.Marshal(next)
+	if err != nil {
+		return applyResult{}, err
+	}
+	return applyResult{}, bucket.Put(topologyKey(), data)
 }
 
 // readVersion returns the stored version of key, or nil when there is none.

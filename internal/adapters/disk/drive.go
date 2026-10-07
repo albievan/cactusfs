@@ -56,6 +56,8 @@ type Drive struct {
 	root *os.Root
 	lock *os.File
 	info driveInfo
+	// fresh reports that this Open formatted the drive.
+	fresh bool
 
 	// commit serialises the existence check and rename that make a shard
 	// visible, which keeps shards immutable within this process; the drive
@@ -172,6 +174,7 @@ func (d *Drive) format(entropy io.Reader, now time.Time) error {
 		return err
 	}
 	d.info = info
+	d.fresh = true
 	return nil
 }
 
@@ -216,6 +219,70 @@ func (d *Drive) Close() error {
 		d.root = nil
 	}
 	return errors.Join(errs...)
+}
+
+// Fresh reports whether the drive was empty and has just been formatted. Only
+// a fresh drive may take the place of a missing one.
+func (d *Drive) Fresh() bool {
+	return d.fresh
+}
+
+// List implements ports.ShardStore. It reads one directory at a time, so the
+// visitor may delete the shard it is shown.
+func (d *Drive) List(ctx context.Context, visit func(ports.ShardInfo) error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("disk.List: %w", err)
+	}
+	level1, err := fs.ReadDir(d.root.FS(), shardsDir)
+	if err != nil {
+		return fmt.Errorf("disk.List: %w", err)
+	}
+	for _, a := range level1 {
+		if !a.IsDir() {
+			continue
+		}
+		level2, err := fs.ReadDir(d.root.FS(), shardsDir+"/"+a.Name())
+		if err != nil {
+			return fmt.Errorf("disk.List: %w", err)
+		}
+		for _, b := range level2 {
+			if !b.IsDir() {
+				continue
+			}
+			if err := d.listDir(ctx, shardsDir+"/"+a.Name()+"/"+b.Name(), visit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (d *Drive) listDir(ctx context.Context, dir string, visit func(ports.ShardInfo) error) error {
+	entries, err := fs.ReadDir(d.root.FS(), dir)
+	if err != nil {
+		return fmt.Errorf("disk.List: %w", err)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("disk.List: %w", err)
+		}
+		id, ok := parseShardName(entry.Name())
+		if !ok || entry.IsDir() {
+			// Not something this adapter wrote; it is left alone.
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("disk.List: %w", err)
+		}
+		if err := visit(ports.ShardInfo{ID: id, CommittedAt: info.ModTime()}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DriveID implements ports.ShardStore.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -24,6 +25,7 @@ type Metadata interface {
 	ports.BucketStore
 	ports.ObjectIndex
 	ports.RootCredentialStore
+	ports.TopologyStore
 }
 
 // MemMetadata is an in-memory Metadata. The zero value is not usable; call
@@ -33,6 +35,7 @@ type MemMetadata struct {
 	buckets map[string]bucket.Bucket
 	objects map[string]map[string]object.Version
 	root    *iam.RootCredential
+	topo    *cluster.Topology
 
 	// FailWrites, when set, is returned by every mutating call. Tests use
 	// it to simulate a failed Raft commit.
@@ -153,6 +156,53 @@ func (m *MemMetadata) GetObject(_ context.Context, bucketName, key string) (obje
 		return object.Version{}, fmt.Errorf("%w: %s/%s", domain.ErrObjectNotFound, bucketName, key)
 	}
 	return CloneVersion(v), nil
+}
+
+// IsDataReferenced implements ports.ObjectIndex.
+func (m *MemMetadata) IsDataReferenced(_ context.Context, dataID object.ID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, objects := range m.objects {
+		for _, v := range objects {
+			if v.DataID == dataID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// GetTopology implements ports.TopologyStore.
+func (m *MemMetadata) GetTopology(context.Context) (cluster.Topology, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.topo == nil {
+		return cluster.Topology{}, domain.ErrNoTopology
+	}
+	return m.topo.Clone(), nil
+}
+
+// SetTopology implements ports.TopologyStore.
+func (m *MemMetadata) SetTopology(_ context.Context, t cluster.Topology) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailWrites != nil {
+		return m.FailWrites
+	}
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	var stored uint64
+	if m.topo != nil {
+		stored = m.topo.Version
+	}
+	if t.Version != stored {
+		return fmt.Errorf("%w: topology is at version %d, the change was based on %d", domain.ErrConflict, stored, t.Version)
+	}
+	next := t.Clone()
+	next.Version = stored + 1
+	m.topo = &next
+	return nil
 }
 
 // ScanObjects implements ports.ObjectIndex.

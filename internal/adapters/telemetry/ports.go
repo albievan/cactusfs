@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -14,6 +15,7 @@ type Metadata interface {
 	ports.BucketStore
 	ports.ObjectIndex
 	ports.RootCredentialStore
+	ports.TopologyStore
 }
 
 // InstrumentKMS returns next wrapped so that every call is traced and
@@ -88,6 +90,14 @@ func (s *shardStore) Open(ctx context.Context, id object.ShardID) (ports.ShardRe
 func (s *shardStore) Delete(ctx context.Context, id object.ShardID) error {
 	ctx, done := s.t.call(ctx, portShards, "Delete")
 	err := s.next.Delete(ctx, id)
+	done(err)
+	return err
+}
+
+// List implements ports.ShardStore.
+func (s *shardStore) List(ctx context.Context, visit func(ports.ShardInfo) error) error {
+	ctx, done := s.t.call(ctx, portShards, "List")
+	err := s.next.List(ctx, visit)
 	done(err)
 	return err
 }
@@ -172,6 +182,30 @@ func (m *metadata) GetObject(ctx context.Context, bucketName, key string) (objec
 	v, err := m.next.GetObject(ctx, bucketName, key)
 	done(err)
 	return v, err
+}
+
+// IsDataReferenced implements ports.ObjectIndex.
+func (m *metadata) IsDataReferenced(ctx context.Context, dataID object.ID) (bool, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "IsDataReferenced")
+	referenced, err := m.next.IsDataReferenced(ctx, dataID)
+	done(err)
+	return referenced, err
+}
+
+// GetTopology implements ports.TopologyStore.
+func (m *metadata) GetTopology(ctx context.Context) (cluster.Topology, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "GetTopology")
+	t, err := m.next.GetTopology(ctx)
+	done(err)
+	return t, err
+}
+
+// SetTopology implements ports.TopologyStore.
+func (m *metadata) SetTopology(ctx context.Context, t cluster.Topology) error {
+	ctx, done := m.t.call(ctx, portMetadata, "SetTopology")
+	err := m.next.SetTopology(ctx, t)
+	done(err)
+	return err
 }
 
 // ScanObjects implements ports.ObjectIndex.

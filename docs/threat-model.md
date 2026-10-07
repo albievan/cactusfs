@@ -66,7 +66,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Traffic modified in transit | TLS 1.2+ for clients (1.3 preferred), ECDHE with AEAD suites only; a plaintext listener exists only behind `--dev-plaintext` and binds to a loopback IP | **implemented** (S3 and admin listeners) |
 | Upload corrupted or cut short in transit | Declared SHA-256, `Content-MD5` (which must be signed) and CRC32/CRC32C/CRC64NVME/SHA-256 checksums are verified before anything becomes durable; a body the transport reports as cut short is never stored | **implemented** |
 | A write reported as failed takes effect later | A commit whose outcome is unknown keeps its data; the state machine is fail-stop; a stale state database is rebuilt from the newest snapshot | **implemented** |
-| Bitrot or deliberate modification of shards on disk | Position-bound SHA-256 per block and AES-GCM per segment, both verified on every read; unverified bytes are never returned | **implemented** (detection); scrub and heal from parity M2 |
+| Bitrot or deliberate modification of shards on disk | Position-bound SHA-256 per block and AES-GCM per segment, both verified on every read; unverified bytes are never returned; reads rebuild from parity; a scrubber verifies everything in the background and heals | **implemented** with four or more drives; below that, detection only |
 | Reordered, truncated or spliced ciphertext | Streaming AEAD with a unique nonce per segment and the segment index and final flag bound into the AAD (ADR-0002) | **implemented** |
 | Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs, and all drive I/O is confined by `os.Root` | **implemented** |
 | Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order and exactly once; an entry this binary cannot interpret stops the node rather than being skipped | **implemented** (single voter); mTLS between voters M3 |
@@ -100,7 +100,10 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Slow or oversized requests exhaust a listener | Read-header and idle timeouts and a header size limit on both listeners; whole-request timeouts on the admin listener; object size and XML body limits | **implemented**; a slow *body* on the S3 listener is not bounded yet |
-| Loss of drives or nodes | Reed-Solomon parity; quorum writes; self-healing | M2, M3 |
+| Loss of drives | Reed-Solomon parity (2–4 shards by set size); writes need a write quorum; healing refills a replaced drive | **implemented** on one node; all drives must be present to start |
+| Loss of a node | Distributed erasure sets and Raft voters | M3 |
+| A drive from another deployment, or a stale drive, is attached | Drives are known by ID in replicated metadata; only an empty drive may replace a missing one, one at a time; a retired drive is refused | **implemented** |
+| Unreferenced data accumulates, or is removed while still needed | Garbage collection by data-ID reference count, only for shards older than a grace period (at least 1 minute, default 24 hours) | **implemented**; the grace period is the only protection of an upload between durability and commit |
 | Requests routed to a node that is going away | `/readyz` answers 503 for `--drain-delay` before the listener closes; in-flight requests then finish within `--shutdown-timeout` | **implemented**; the delay defaults to `0s` (off) and must be set per deployment (chart default: M7) |
 | One tenant fills the cluster | Per-bucket quotas | M8 |
 

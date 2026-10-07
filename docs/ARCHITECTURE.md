@@ -70,14 +70,17 @@ Conventions that follow from it:
 | `internal/domain/bucket` | bucket naming rules |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals, actions, the default-deny decision, credential rules, sealed secrets |
-| `internal/domain/cluster` | readiness |
-| `internal/ports` | `KMS`, `ShardStore`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `Authorizer`, `Clock`, `ReadinessCheck` |
+| `internal/domain/cluster` | readiness; drive topology: slots, reconciliation, replacement |
+| `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
+| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `Authorizer`, `Clock`, `ReadinessCheck` |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object and identity use cases; the authorizer; health |
+| `internal/app` | bucket, object and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
 | `internal/adapters/health` | in: `GET /healthz`, `GET /readyz`; the shutdown gate |
 | `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port |
 | `internal/adapters/disk` | out: shards on a local drive (ADR-0001) |
+| `internal/adapters/erasurecodec` | out: Reed-Solomon (ADR-0004) |
+| `internal/adapters/fsutil` | durable file creation and directory sync per OS |
 | `internal/adapters/raftmeta` | out: Raft + bbolt metadata (ADR-0003) |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `cmd/cactusfs` | composition root: configuration, node wiring, listeners, shutdown |
@@ -106,6 +109,10 @@ matching flag, and the flag wins.
 | `--tls-cert` | `CACTUSFS_TLS_CERT` | — | PEM certificate chain |
 | `--tls-key` | `CACTUSFS_TLS_KEY` | — | PEM private key |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
+| `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
+| `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | scrub read limit in MiB/s; `0` is no limit |
+| `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
+| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1m`) |
 | `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | OTLP/HTTP trace collector; nothing is exported when empty |
 | `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listeners close |
@@ -160,35 +167,39 @@ API, authentication, erasure encode/decode, stateless), `meta` (Raft voter), `st
 
 Standalone is a cluster of one, not a second implementation.
 
-## 4. Storage engine **(milestone 1 implemented; erasure coding, heal and scrub are milestone 2; cluster is milestone 3)**
+## 4. Storage engine **(implemented on local drives, ADR-0001, 0002, 0004; distributed sets are milestone 3)**
 
-**Today:** every object is encrypted (ADR-0002) and stored as one checksummed shard on one
-drive (ADR-0001), with the layout recorded in erasure-coded form (`1` data shard, `0`
-parity) so that milestone 2 changes values, not formats. With several `--data`
-directories objects are spread across them; there is no parity yet, and the node says so
-at start. Shards of failed, replaced and deleted objects are removed best-effort; a crash
-can leave unreferenced shards until the collector of PLAN 2.7.
-
-- **Erasure coding (milestone 2).** Objects are split into Reed-Solomon data and parity shards over
-  erasure sets of 4–16 drives. Default parity is 2 for 4–5 drives, 3 for 6–7 and 4 for 8
-  or more, configurable per storage class. Shards of one object never share a drive and
-  are spread across nodes, then racks and zones when nodes are labelled.
-- **Quorum (milestones 2–3).** Write quorum is the number of data shards, plus one when data equals
+- **Erasure coding.** The encrypted stream of an object is cut into 1 MiB stripes; each
+  stripe is split into data chunks and extended with Reed-Solomon parity chunks, and
+  chunk *i* of every stripe goes to shard *i*. Erasure sets have 4–16 drives. Default
+  parity is 2 for 4–5 drives, 3 for 6–7 and 4 for 8 or more. Shards of one object never
+  share a drive. More than 16 drives form several equal sets. With fewer than four
+  drives an object is one shard on one drive, encrypted and checksummed but **without
+  parity**, and the node says so at start. Spreading across nodes, racks and zones, and
+  parity per storage class, are milestone 3.
+- **Quorum.** Write quorum is the number of data shards, plus one when data equals
   parity. Read quorum is the number of data shards.
 - **Write path.** Encrypt → erasure-code → write shards under a new immutable ID and
   fsync on a write quorum → commit the object version through Raft → acknowledge. The
-  Raft commit is the only visibility switch. Shards without a committed version are
-  garbage-collected.
+  Raft commit is the only visibility switch. A commit whose outcome is unknown keeps its
+  shards; shards that end up unreferenced are garbage-collected after a grace period.
 - **Consistency.** Reads and listings are strongly consistent (read-after-write).
 - **Integrity.** Every shard block carries a SHA-256 checksum, bound to its position,
-  that is verified on every read, and every segment is authenticated by AES-GCM. A
-  background scrubber that finds bitrot and heals from parity is milestone 2. Bytes that fail verification
-  are never returned.
+  that is verified on every read, and every segment is authenticated by AES-GCM. A read
+  that meets a missing or damaged shard rebuilds the stripe from parity and queues the
+  object for healing. Bytes that fail verification are never returned.
+- **Self-healing.** Healing rewrites missing, truncated and corrupt shards from the
+  others. A scrubber verifies every block of every object in the background and heals
+  what it finds; it is also what refills a replaced drive.
+- **Topology.** Which drive is in which slot of which erasure set is recorded in Raft
+  metadata at the first start and addressed by drive ID, so the order of `--data` does
+  not matter. One empty drive may take the place of one missing drive; anything else
+  stops the node. All drives must open for a node to start.
 - **Keys are not paths.** Object keys and bucket names never become filesystem paths.
   Data lives under generated IDs, so case-insensitive filesystems, Windows reserved
   names, path length limits and `../` cannot affect it.
 - **Portability.** OS differences (directory fsync, file locking, service control) live
-  in `adapters/disk` and `cmd/cactusfs` behind build tags.
+  in `adapters/disk`, `adapters/fsutil` and `cmd/cactusfs` behind build tags.
 
 ## 5. Metadata **(implemented for a single voter, ADR-0003; multi-node is milestone 3)**
 

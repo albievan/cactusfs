@@ -3,6 +3,7 @@ package ports
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -23,6 +24,17 @@ type ShardStore interface {
 	// Delete removes a shard. Deleting a shard that does not exist is not an
 	// error.
 	Delete(ctx context.Context, id object.ShardID) error
+	// List visits every committed shard on the drive, in no particular
+	// order. visit may delete the shard it is shown. A visit error stops the
+	// listing and is returned.
+	List(ctx context.Context, visit func(ShardInfo) error) error
+}
+
+// ShardInfo describes a committed shard without opening it.
+type ShardInfo struct {
+	ID object.ShardID
+	// CommittedAt is when the shard was made durable.
+	CommittedAt time.Time
 }
 
 // ShardWriter writes one shard. Exactly one of Commit or Abort must be

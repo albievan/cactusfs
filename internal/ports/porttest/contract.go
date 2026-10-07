@@ -12,6 +12,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -262,6 +263,96 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		}
 	})
 
+	t.Run("data references", func(t *testing.T) {
+		store := open(t)
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {
+			t.Fatalf("CreateBucket: %v", err)
+		}
+		first, second := SampleVersion("b", "k", 1), SampleVersion("b", "k", 5)
+		referenced := func(v object.Version) bool {
+			t.Helper()
+			ok, err := store.IsDataReferenced(ctx, v.DataID)
+			if err != nil {
+				t.Fatalf("IsDataReferenced: %v", err)
+			}
+			return ok
+		}
+
+		if referenced(first) {
+			t.Error("data is referenced before any version exists")
+		}
+		if _, err := store.PutVersion(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		if !referenced(first) {
+			t.Error("the data of the current version is not referenced")
+		}
+		// An overwrite releases the old data and holds the new.
+		if _, err := store.PutVersion(ctx, second); err != nil {
+			t.Fatal(err)
+		}
+		if referenced(first) || !referenced(second) {
+			t.Errorf("after overwrite: old referenced = %v, new referenced = %v", referenced(first), referenced(second))
+		}
+		// The same data ID under another key keeps it referenced.
+		other := second
+		other.Key = "other"
+		if _, err := store.PutVersion(ctx, other); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DeleteObject(ctx, "b", "k"); err != nil {
+			t.Fatal(err)
+		}
+		if !referenced(second) {
+			t.Error("data still used by another object is reported as unreferenced")
+		}
+		if _, err := store.DeleteObject(ctx, "b", "other"); err != nil {
+			t.Fatal(err)
+		}
+		if referenced(second) {
+			t.Error("data is still referenced after its last version was deleted")
+		}
+	})
+
+	t.Run("topology", func(t *testing.T) {
+		store := open(t)
+		if _, err := store.GetTopology(ctx); !errors.Is(err, domain.ErrNoTopology) {
+			t.Errorf("GetTopology on a new store error = %v, want %v", err, domain.ErrNoTopology)
+		}
+		first, err := cluster.NewTopology([]string{"d0", "d1", "d2", "d3"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetTopology(ctx, cluster.Topology{}); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("SetTopology(empty) error = %v, want %v", err, domain.ErrInvalidArgument)
+		}
+		if err := store.SetTopology(ctx, first); err != nil {
+			t.Fatalf("SetTopology: %v", err)
+		}
+		stored, err := store.GetTopology(ctx)
+		if err != nil || stored.Version != 1 || !reflect.DeepEqual(stored.DriveIDs(), first.DriveIDs()) {
+			t.Fatalf("GetTopology = %+v, %v", stored, err)
+		}
+		// A change based on the state before the first one is refused.
+		if err := store.SetTopology(ctx, first); !errors.Is(err, domain.ErrConflict) {
+			t.Errorf("SetTopology(stale) error = %v, want %v", err, domain.ErrConflict)
+		}
+		replaced := stored.Replace(cluster.Replacement{Position: cluster.Position{Set: 0, Slot: 2}, Old: "d2", New: "d9"})
+		if err := store.SetTopology(ctx, replaced); err != nil {
+			t.Fatalf("SetTopology(replacement): %v", err)
+		}
+		got, err := store.GetTopology(ctx)
+		if err != nil || got.Version != 2 {
+			t.Fatalf("GetTopology = %+v, %v", got, err)
+		}
+		if current, ok := got.Current("d2"); !ok || current != "d9" {
+			t.Errorf("Current(d2) = %q, %v; want d9", current, ok)
+		}
+		if !reflect.DeepEqual(got.Sets[0][2].Retired, []string{"d2"}) {
+			t.Errorf("retired drives = %v", got.Sets[0][2].Retired)
+		}
+	})
+
 	t.Run("root credential", func(t *testing.T) {
 		store := open(t)
 		if _, err := store.GetRootCredential(ctx); !errors.Is(err, domain.ErrNotBootstrapped) {
@@ -497,6 +588,81 @@ func ShardStoreContract(t *testing.T, open func(t *testing.T) ports.ShardStore) 
 		}
 		if err := store.Delete(ctx, shard(9, 9)); err != nil {
 			t.Errorf("Delete(never existed) = %v, want nil", err)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		store := open(t)
+		listed := func() map[object.ShardID]ports.ShardInfo {
+			t.Helper()
+			out := map[object.ShardID]ports.ShardInfo{}
+			err := store.List(ctx, func(info ports.ShardInfo) error {
+				if _, dup := out[info.ID]; dup {
+					t.Errorf("shard %s was listed twice", info.ID)
+				}
+				out[info.ID] = info
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			return out
+		}
+		if got := listed(); len(got) != 0 {
+			t.Fatalf("an empty store lists %d shards", len(got))
+		}
+
+		before := time.Now().Add(-time.Minute)
+		want := []object.ShardID{shard(1, 0), shard(1, 5), shard(2, 0), shard(0xAB, 255)}
+		for _, id := range want {
+			write(t, store, id, []byte("data"))
+		}
+		// A shard being written is not listed.
+		pending, err := store.Create(ctx, shard(9, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = pending.Abort() }()
+
+		got := listed()
+		if len(got) != len(want) {
+			t.Fatalf("listed %d shards, want %d: %v", len(got), len(want), got)
+		}
+		for _, id := range want {
+			info, ok := got[id]
+			if !ok {
+				t.Errorf("shard %s is not listed", id)
+				continue
+			}
+			if info.CommittedAt.Before(before) || info.CommittedAt.After(time.Now().Add(time.Minute)) {
+				t.Errorf("shard %s: CommittedAt = %v, want about now", id, info.CommittedAt)
+			}
+		}
+
+		// The visitor may delete what it is shown, and may stop the listing.
+		boom := errors.New("stop")
+		visits := 0
+		err = store.List(ctx, func(info ports.ShardInfo) error {
+			visits++
+			if err := store.Delete(ctx, info.ID); err != nil {
+				t.Errorf("Delete during List: %v", err)
+			}
+			if visits == 2 {
+				return boom
+			}
+			return nil
+		})
+		if !errors.Is(err, boom) || visits != 2 {
+			t.Errorf("List stopped by its visitor: %d visits, error %v", visits, err)
+		}
+		if got := listed(); len(got) != len(want)-2 {
+			t.Errorf("%d shards after deleting two during a listing, want %d", len(got), len(want)-2)
+		}
+
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := store.List(cancelled, func(ports.ShardInfo) error { return nil }); !errors.Is(err, context.Canceled) {
+			t.Errorf("List with a cancelled context: %v", err)
 		}
 	})
 

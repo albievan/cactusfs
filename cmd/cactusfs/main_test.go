@@ -157,6 +157,7 @@ func TestParseServerConfig(t *testing.T) {
 			AdminAddr: "127.0.0.1:9001", S3Addr: "127.0.0.1:9000", Data: []string{dataDir},
 			MetaDir: filepath.Join(dataDir, "meta"), KMS: "local", KMSKeyFile: filepath.Join(dataDir, "meta", "kms-local.json"),
 			DevPlaintext: true, LogLevel: slog.LevelInfo, ShutdownTimeout: 30 * time.Second,
+			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
 		if change != nil {
@@ -219,6 +220,7 @@ func TestParseServerConfig(t *testing.T) {
 				envShutdownTimeout: "5s", envDrainDelay: "3s", envData: dataDir + ", " + otherDir, envKMS: "local",
 				envMetaDir: "m", envKMSKeyFile: "k.json", envS3Domain: "s3.test", envRegion: "eu-1",
 				envRootKeyID: "ROOTKEY", envRootKeyValue: "root-secret-value", envOTLPEndpoint: "https://otel.test:4318",
+				envScrubInterval: "6h", envScrubRate: "8", envGCInterval: "30m", envGCGrace: "48h",
 			}),
 			want: base(func(c *serverConfig) {
 				c.AdminAddr, c.S3Addr, c.LogLevel = "127.0.0.1:19001", "127.0.0.1:19000", slog.LevelDebug
@@ -226,6 +228,7 @@ func TestParseServerConfig(t *testing.T) {
 				c.Data, c.MetaDir, c.KMSKeyFile, c.S3Domain, c.Region = []string{dataDir, otherDir}, "m", "k.json", "s3.test", "eu-1"
 				c.secrets.rootAccessKey, c.secrets.rootSecretKey = "ROOTKEY", "root-secret-value"
 				c.OTLPEndpoint = "https://otel.test:4318"
+				c.ScrubInterval, c.ScrubRateMiB, c.GCInterval, c.GCGrace = 6*time.Hour, 8, 30*time.Minute, 48*time.Hour
 			}),
 		},
 		{
@@ -241,6 +244,17 @@ func TestParseServerConfig(t *testing.T) {
 		},
 		{name: "root access key without secret", args: dev(), env: withPassphrase(map[string]string{envRootKeyID: "ROOTKEY"}), wantErr: "or neither"},
 		{name: "root secret without access key", args: dev(), env: withPassphrase(map[string]string{envRootKeyValue: "s"}), wantErr: "or neither"},
+		{
+			name: "background work switched off", args: dev("--scrub-interval", "0", "--gc-interval", "0", "--scrub-rate-mib", "0"), env: passphrase,
+			want: base(func(c *serverConfig) { c.ScrubInterval, c.GCInterval, c.ScrubRateMiB = 0, 0, 0 }),
+		},
+		{name: "negative scrub interval", args: dev("--scrub-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
+		{name: "negative scrub rate", args: dev("--scrub-rate-mib", "-1"), env: passphrase, wantErr: "must not be negative"},
+		{name: "grace period too short to be safe", args: dev("--gc-grace", "5s"), env: passphrase, wantErr: "grace period"},
+		{name: "bad scrub rate variable", env: withPassphrase(map[string]string{envScrubRate: "fast"}), wantErr: envScrubRate},
+		{name: "bad scrub interval variable", env: withPassphrase(map[string]string{envScrubInterval: "often"}), wantErr: envScrubInterval},
+		{name: "bad collection interval variable", env: withPassphrase(map[string]string{envGCInterval: "often"}), wantErr: envGCInterval},
+		{name: "bad grace variable", env: withPassphrase(map[string]string{envGCGrace: "long"}), wantErr: envGCGrace},
 		{name: "bad boolean variable", env: withPassphrase(map[string]string{envDevPlaintext: "maybe"}), wantErr: envDevPlaintext},
 		{name: "bad duration variable", env: withPassphrase(map[string]string{envShutdownTimeout: "soon"}), wantErr: envShutdownTimeout},
 		{name: "bad drain delay variable", env: withPassphrase(map[string]string{envDrainDelay: "soon"}), wantErr: envDrainDelay},

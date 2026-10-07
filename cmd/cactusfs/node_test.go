@@ -95,7 +95,7 @@ func TestNewDeploymentGeneratesRootCredentialsOnce(t *testing.T) {
 	if strings.Contains(first.logs, nodePassphrase) {
 		t.Fatal("the log contains the KMS passphrase")
 	}
-	if !strings.Contains(first.logs, "without parity") {
+	if !strings.Contains(first.logs, "WITHOUT PARITY") {
 		t.Error("the log does not say that objects are stored without parity")
 	}
 	secret, principal, err := first.node.identities.SecretFor(t.Context(), creds.AccessKeyID)

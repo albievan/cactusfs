@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -142,4 +144,22 @@ func shardPath(id object.ShardID) (dir, path string, err error) {
 	name := id.DataID.String()
 	dir = shardsDir + "/" + name[:2] + "/" + name[2:4]
 	return dir, fmt.Sprintf("%s/%s.%d", dir, name, id.Index), nil
+}
+
+// parseShardName is the inverse of the file name shardPath builds:
+// "<32 hexadecimal characters>.<index>".
+func parseShardName(name string) (object.ShardID, bool) {
+	hexID, indexText, ok := strings.Cut(name, ".")
+	if !ok {
+		return object.ShardID{}, false
+	}
+	dataID, err := object.ParseID(hexID)
+	if err != nil {
+		return object.ShardID{}, false
+	}
+	index, err := strconv.Atoi(indexText)
+	if err != nil || index < 0 || index > maxShardIndex || strconv.Itoa(index) != indexText {
+		return object.ShardID{}, false
+	}
+	return object.ShardID{DataID: dataID, Index: index}, true
 }

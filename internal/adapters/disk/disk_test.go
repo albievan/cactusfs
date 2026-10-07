@@ -496,3 +496,50 @@ func TestAbortIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+func TestFreshIsTrueOnlyForADriveJustFormatted(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := openDrive(t, dir)
+	if !first.Fresh() {
+		t.Error("a drive that was just formatted does not report itself fresh")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Only an empty drive may replace a missing one; a drive that has been
+	// used before must never be mistaken for one.
+	if again := openDrive(t, dir); again.Fresh() {
+		t.Error("a drive that was formatted earlier reports itself fresh")
+	}
+}
+
+func TestListIgnoresWhatItDidNotWrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	d := openDrive(t, dir)
+	id := shardID(0xAB, 3)
+	writeShard(t, d, id, []byte("data"))
+
+	leaf := filepath.Dir(shardFile(dir, id))
+	for _, stray := range []string{"notes.txt", "abababababababababababababababab", "abababababababababababababababab.x", "abababababababababababababababab.999", "abababababababababababababababab.03", "ABABABABABABABABABABABABABABABAB.1", "../escape.0"} {
+		if strings.Contains(stray, "/") {
+			continue // cannot be created inside the directory; listed for the parser test below
+		}
+		writeFile(t, filepath.Join(leaf, stray), []byte("stray"))
+	}
+	writeFile(t, filepath.Join(dir, "shards", "stray-at-the-top"), []byte("stray"))
+
+	var listed []object.ShardID
+	if err := d.List(context.Background(), func(info ports.ShardInfo) error {
+		listed = append(listed, info.ID)
+		return nil
+	}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0] != id {
+		t.Errorf("List = %v, want only %v", listed, id)
+	}
+}

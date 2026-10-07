@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -41,6 +42,10 @@ type ObjectIndex interface {
 	// GetObject returns the current version of an object. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrObjectNotFound.
 	GetObject(ctx context.Context, bucketName, key string) (object.Version, error)
+	// IsDataReferenced reports whether any object version refers to the
+	// stored data with this ID. The garbage collector asks before it
+	// removes a shard.
+	IsDataReferenced(ctx context.Context, dataID object.ID) (bool, error)
 	// ScanObjects visits the current versions in a bucket in key order,
 	// beginning with the first key greater than or equal to start. visit
 	// steers the scan through its return value. The error wraps
@@ -68,4 +73,17 @@ type RootCredentialStore interface {
 	// SetRootCredential stores the root credential of a new deployment. The
 	// error wraps domain.ErrAlreadyBootstrapped when one exists.
 	SetRootCredential(ctx context.Context, c iam.RootCredential) error
+}
+
+// TopologyStore is the replicated record of which drive is in which slot of
+// which erasure set.
+type TopologyStore interface {
+	// GetTopology returns the topology. The error wraps
+	// domain.ErrNoTopology when none has been set.
+	GetTopology(ctx context.Context) (cluster.Topology, error)
+	// SetTopology replaces the topology, provided the stored one still has
+	// the version the change was based on: t.Version, which is zero for the
+	// first topology. The stored version is then one higher. The error
+	// wraps domain.ErrConflict when the stored topology has changed.
+	SetTopology(ctx context.Context, t cluster.Topology) error
 }

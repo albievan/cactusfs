@@ -29,6 +29,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/fsutil"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -99,6 +100,7 @@ var (
 	_ ports.BucketStore         = (*Store)(nil)
 	_ ports.ObjectIndex         = (*Store)(nil)
 	_ ports.RootCredentialStore = (*Store)(nil)
+	_ ports.TopologyStore       = (*Store)(nil)
 	_ ports.ReadinessCheck      = (*Store)(nil)
 )
 
@@ -603,6 +605,52 @@ func (s *Store) GetRootCredential(ctx context.Context) (iam.RootCredential, erro
 func (s *Store) SetRootCredential(ctx context.Context, c iam.RootCredential) error {
 	if _, err := s.propose(ctx, entry{Type: cmdSetRoot, SetRoot: rootToRecord(c)}); err != nil {
 		return fmt.Errorf("raftmeta.SetRootCredential: %w", err)
+	}
+	return nil
+}
+
+// IsDataReferenced implements ports.ObjectIndex.
+func (s *Store) IsDataReferenced(ctx context.Context, dataID object.ID) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("raftmeta.IsDataReferenced: %w", err)
+	}
+	var referenced bool
+	err := s.view(func(tx *bbolt.Tx) error {
+		referenced = tx.Bucket(dataBucket()).Get(dataID[:]) != nil
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("raftmeta.IsDataReferenced: %w", err)
+	}
+	return referenced, nil
+}
+
+// GetTopology implements ports.TopologyStore.
+func (s *Store) GetTopology(ctx context.Context) (cluster.Topology, error) {
+	if err := ctx.Err(); err != nil {
+		return cluster.Topology{}, fmt.Errorf("raftmeta.GetTopology: %w", err)
+	}
+	var record topologyRecord
+	err := s.view(func(tx *bbolt.Tx) error {
+		raw := tx.Bucket(clusterBucket()).Get(topologyKey())
+		if raw == nil {
+			return domain.ErrNoTopology
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return fmt.Errorf("%w: stored topology: %w", domain.ErrIntegrity, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return cluster.Topology{}, fmt.Errorf("raftmeta.GetTopology: %w", err)
+	}
+	return record.toDomain(), nil
+}
+
+// SetTopology implements ports.TopologyStore.
+func (s *Store) SetTopology(ctx context.Context, t cluster.Topology) error {
+	if _, err := s.propose(ctx, entry{Type: cmdSetTopology, SetTopology: topologyToRecord(t)}); err != nil {
+		return fmt.Errorf("raftmeta.SetTopology: %w", err)
 	}
 	return nil
 }

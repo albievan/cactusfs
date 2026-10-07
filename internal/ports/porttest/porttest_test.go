@@ -23,6 +23,11 @@ func TestMemShardStoreContract(t *testing.T) {
 	porttest.ShardStoreContract(t, func(*testing.T) ports.ShardStore { return porttest.NewMemShardStore("mem-drive") })
 }
 
+func TestCodecContract(t *testing.T) {
+	t.Parallel()
+	porttest.ErasureCodecContract(t, porttest.NewCodec())
+}
+
 func TestKMS(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

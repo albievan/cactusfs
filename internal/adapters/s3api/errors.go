@@ -67,6 +67,7 @@ func errorMappings() []mapping {
 		{domain.ErrInvalidArgument, apiError{http.StatusBadRequest, "InvalidArgument", "Invalid argument."}},
 
 		// Availability.
+		{domain.ErrInsufficientDrives, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 		{domain.ErrNotLeader, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 		{domain.ErrShuttingDown, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 	}

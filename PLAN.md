@@ -12,7 +12,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 |---|---|---|
 | 0 | Scaffold | done |
 | 1 | Standalone store | done |
-| 2 | Erasure coding and integrity on local drives | todo |
+| 2 | Erasure coding and integrity on local drives | in_progress |
 | 3 | Cluster | todo |
 | 4 | IAM | todo |
 | 5 | Admin API, Swagger UI, console | todo |
@@ -78,16 +78,20 @@ subset with encryption on.
 
 ## Milestone 2 — Erasure coding and integrity on local drives
 
+Done when a standalone node with four or more drives survives the loss or corruption of
+up to *parity* drives without a failed read, repairs itself, and `make test-chaos` is
+green.
+
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
-| 2.1 | todo | Erasure domain: sets, parity defaults, quorum rules | 4–16 drives; parity 2/3/4 by set size; write quorum = data (+1 when data = parity) | `internal/domain/erasure/` |
-| 2.2 | todo | Reed-Solomon codec (`klauspost/reedsolomon`) behind a port | property test: encode → lose ≤ parity shards → decode equals original; fuzz | `internal/adapters/erasurecodec/`, `internal/ports/` |
-| 2.3 | todo | Shard placement and SHA-256 checksums | shards of one object never share a drive; checksum verified on every read; failed bytes never returned | `internal/app/`, `internal/adapters/disk/` |
-| 2.4 | todo | Heal on read | degraded read reconstructs and rewrites missing/corrupt shards | `internal/app/heal.go` |
-| 2.5 | todo | Background scrubber | detects bitrot, heals from parity, rate-limited, metrics | `internal/app/scrub.go` |
-| 2.6 | todo | Fewer than 4 drives | still encrypts and checksums; logs that there is no parity | `internal/app/`, `cmd/cactusfs/` |
-| 2.7 | todo | Garbage collection of uncommitted shards | shards without a committed version are removed after a grace period | `internal/app/gc.go` |
-| 2.8 | todo | Chaos: shard corruption and drive loss | `make test-chaos` passes | `test/chaos/` |
+| 2.1 | done | Erasure domain: parameters, quorum, stripe geometry, set layout | parity 2/3/4 by set size, 1+0 below four drives; write quorum = data (+1 when data = parity); sets of 4–16 drives, equal size; property tests on the geometry | `internal/domain/erasure/` |
+| 2.2 | done | Reed-Solomon codec behind `ports.ErasureCodec` | `klauspost/reedsolomon`; property test: encode → lose ≤ parity shards → decode equals original; fuzz; contract test | `internal/ports/erasure.go`, `internal/adapters/erasurecodec/` |
+| 2.3 | done | Topology in metadata and striped storage | drive slots recorded through Raft and addressed by drive ID, so reordering `--data` is harmless; shards of one object never share a drive; write succeeds on a write quorum and fails below it; reads reconstruct from any *data* shards; ADR | `internal/adapters/raftmeta/`, `internal/app/storage.go`, `internal/app/topology.go`, `docs/adr/0004-erasure-and-topology.md` |
+| 2.4 | done | Heal | a degraded read queues the version; healing rebuilds missing, truncated and corrupt shards from the others and verifies the object is still current; a replaced (empty) drive is adopted into its slot and refilled | `internal/app/heal.go` |
+| 2.5 | done | Background scrubber | walks every object, verifies every shard block, heals what it finds; rate-limited; `--scrub-interval`; metrics | `internal/app/scrub.go`, `cmd/cactusfs/` |
+| 2.6 | done | Fewer than four drives | 1+0 on one drive each, encrypted and checksummed; logs that there is no parity | `internal/domain/erasure/`, `cmd/cactusfs/` |
+| 2.7 | done | Garbage collection of unreferenced shards | `ShardStore.List`; a data-ID index in the state machine; shards older than `--gc-grace` that no version refers to are removed | `internal/ports/shards.go`, `internal/adapters/disk/`, `internal/adapters/raftmeta/`, `internal/app/gc.go` |
+| 2.8 | done | Chaos suite | against the built binary with six drives: corrupt shards, delete shards, wipe up to *parity* drives → every read is correct and the drives are repaired; one more than parity → reads fail, never wrong data; `make test-chaos` | `test/chaos/`, `Makefile`, `scripts/` |
 
 ## Milestone 3 — Cluster
 
@@ -213,3 +217,6 @@ subset with encryption on.
 | 2026-10-07 | `serve` returns only when every request handler has returned; the metadata store refuses use after `Close` and `Close` waits for operations in flight. If handlers do not return within 60 s the process exits without closing the stores. | Major: after a shutdown timeout the stores were closed under running handlers. |
 | 2026-10-07 | The KMS key file and `node.json` are created with their directory entry flushed (`internal/adapters/fsutil`). | Major: a power loss after first start could lose the key file while acknowledged objects existed. |
 | 2026-10-07 | `Content-MD5` must be covered by the signature when present; the CreateBucket body is verified against its declared hash; a shard whose rename could not be made durable is removed again; the local KMS key ID format is validated. | Minor review findings. |
+| 2026-10-07 | M2 dependency: `github.com/klauspost/reedsolomon` v1.14.2 (MIT; brings `klauspost/cpuid/v2`, MIT). Pure Go, builds for all six targets. | Named by `CLAUDE.md` §2. |
+| 2026-10-07 | Erasure sets must be of equal size: the number of drives is divided into the fewest sets of at most 16; a count that does not divide evenly (17, 19, …) is refused at start. | Unequal sets would have different durability; refusing is explicit. |
+| 2026-10-07 | Drives are bound to slots (set, position) in Raft metadata by drive ID at first start. An object's layout names drive IDs. A drive whose directory comes back empty is adopted into the slot of the one missing drive; more than one unknown or missing drive at a time needs the operator. All drives must open at start. | Addressing by ID makes `--data` order irrelevant; replacement must be unambiguous to be automatic. Starting with a drive offline is deferred (risk: a dead drive needs replacing before restart). |

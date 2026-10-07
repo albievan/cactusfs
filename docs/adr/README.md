@@ -39,3 +39,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0001](0001-on-disk-format.md) | On-disk format of drives and shards | accepted |
 | [0002](0002-encryption.md) | Encryption at rest: streaming AEAD and envelope keys | accepted |
 | [0003](0003-metadata.md) | Metadata: embedded Raft with a bbolt state machine | accepted |
+| [0004](0004-erasure-and-topology.md) | Erasure coding, drive topology and self-healing | accepted |

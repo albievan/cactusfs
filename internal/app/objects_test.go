@@ -14,6 +14,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -158,17 +159,17 @@ func TestFailedPutLeavesNothingBehind(t *testing.T) {
 			for _, d := range f.drives {
 				d.FailCreate = boom
 			}
-		}, wantErr: boom},
+		}, wantErr: domain.ErrInsufficientDrives},
 		{name: "drive write fails", sabotage: func(f *fixture) {
 			for _, d := range f.drives {
 				d.FailWrite = boom
 			}
-		}, wantErr: boom},
+		}, wantErr: domain.ErrInsufficientDrives},
 		{name: "drive cannot make the shard durable", sabotage: func(f *fixture) {
 			for _, d := range f.drives {
 				d.FailCommit = boom
 			}
-		}, wantErr: boom},
+		}, wantErr: domain.ErrInsufficientDrives},
 		{name: "raft commit fails", sabotage: func(f *fixture) { f.meta.FailWrites = boom }, wantErr: boom},
 	}
 
@@ -596,13 +597,18 @@ func TestObjectServiceAuthorizesEveryCall(t *testing.T) {
 func TestNewObjectServiceValidatesDrives(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string][]ports.ShardStore{
-		"no drives":      nil,
-		"duplicate IDs":  {porttest.NewMemShardStore("same"), porttest.NewMemShardStore("same")},
-		"empty drive ID": {porttest.NewMemShardStore("")},
+	two, err := cluster.NewTopology([]string{"a", "b"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, drives := range tests {
-		if _, err := app.NewObjectService(app.ObjectServiceConfig{Drives: drives}); !errors.Is(err, domain.ErrInvalidArgument) {
+	tests := map[string]app.ObjectServiceConfig{
+		"no topology":                     {Drives: []ports.ShardStore{porttest.NewMemShardStore("a")}},
+		"duplicate drive IDs":             {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("a")}},
+		"empty drive ID":                  {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("")}},
+		"a drive of the topology missing": {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a")}},
+	}
+	for name, cfg := range tests {
+		if _, err := app.NewObjectService(cfg); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: error = %v, want %v", name, err, domain.ErrInvalidArgument)
 		}
 	}
@@ -629,7 +635,8 @@ func TestPutWithoutEntropyFails(t *testing.T) {
 	f := newFixture(t)
 	f.createBucket(t, "b")
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: f.meta, Buckets: f.meta, Drives: []ports.ShardStore{f.drives[0]}, KMS: f.kms,
+		Index: f.meta, Buckets: f.meta, Topology: f.topology, Drives: []ports.ShardStore{f.drives[0], f.drives[1]},
+		Codec: porttest.NewCodec(), KMS: f.kms,
 		Authz: f.authz, Clock: f.clock, Entropy: iotest.ErrReader(errBoom),
 	})
 	if err != nil {

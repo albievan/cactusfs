@@ -20,6 +20,12 @@ var (
 	// observed, so it can still take effect, for example after a restart.
 	// Nothing that the change refers to may be cleaned up on this error.
 	ErrOutcomeUnknown = errors.New("outcome of the metadata change is unknown")
+	// ErrNoTopology reports that the deployment's drives have not been
+	// assigned to erasure sets yet.
+	ErrNoTopology = errors.New("deployment has no drive topology")
+	// ErrConflict reports that a change was based on a state that has since
+	// changed.
+	ErrConflict = errors.New("state has changed")
 	// ErrNotBootstrapped reports that the deployment has no root credentials
 	// yet.
 	ErrNotBootstrapped = errors.New("deployment is not bootstrapped")
@@ -79,6 +85,9 @@ var (
 	// ErrIntegrity reports stored bytes that failed checksum or
 	// authentication. Such bytes are never returned to a client.
 	ErrIntegrity = errors.New("stored data failed integrity verification")
+	// ErrInsufficientDrives reports that too few drives are usable to make
+	// a write durable on a write quorum.
+	ErrInsufficientDrives = errors.New("not enough drives for a write quorum")
 	// ErrShardNotFound reports that a shard is missing from a drive.
 	ErrShardNotFound = errors.New("shard not found")
 	// ErrKeyUnavailable reports that the KMS cannot unwrap a data key, for

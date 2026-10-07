@@ -14,9 +14,11 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
+	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
@@ -305,7 +307,9 @@ func FuzzDecodeEntry(f *testing.F) {
 			return
 		}
 		payloads := 0
-		for _, set := range []bool{e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil} {
+		for _, set := range []bool{
+			e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
+		} {
 			if set {
 				payloads++
 			}
@@ -461,5 +465,81 @@ func TestApplyResultsOfAStoppedStateMachineAreFatal(t *testing.T) {
 	_ = g.Apply(command(t, 1, createBucket("x")))
 	if refused := result(t, g.Apply(command(t, 2, createBucket("x")))); refused.fatal || refused.err == nil {
 		t.Errorf("a refusal: %+v, want an error that is not fatal", refused)
+	}
+}
+
+// TestDataIndexIsRebuiltForAnOlderState: the data-reference index is derived
+// from the object index. A state written before it existed gets it on open.
+func TestDataIndexIsRebuiltForAnOlderState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	store := openStore(t, dir)
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "bkt"}); err != nil {
+		t.Fatal(err)
+	}
+	kept, shared := porttest.SampleVersion("bkt", "a", 1), porttest.SampleVersion("bkt", "b", 5)
+	also := shared
+	also.Key = "c"
+	for _, v := range []object.Version{kept, shared, also} {
+		if _, err := store.PutVersion(ctx, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Make the state look as it did before the index existed.
+	if err := store.fsm.db.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket(dataBucket()) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openStore(t, dir)
+	for _, v := range []object.Version{kept, shared} {
+		if ok, err := reopened.IsDataReferenced(ctx, v.DataID); err != nil || !ok {
+			t.Errorf("data %s is not referenced after the index was rebuilt: %v", v.DataID, err)
+		}
+	}
+	// The rebuilt counts are right: data used twice survives one delete.
+	if _, err := reopened.DeleteObject(ctx, "bkt", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); !ok {
+		t.Error("data still used by another object is reported as unreferenced")
+	}
+	if _, err := reopened.DeleteObject(ctx, "bkt", "c"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); ok {
+		t.Error("data is still referenced after its last object was deleted")
+	}
+}
+
+func TestTopologyCommandsAreValidatedByTheStateMachine(t *testing.T) {
+	t.Parallel()
+
+	f := newFSM(t)
+	set := func(index uint64, record topologyRecord) applyResult {
+		return result(t, f.Apply(command(t, index, entry{Type: cmdSetTopology, SetTopology: &record})))
+	}
+	good := topologyRecord{Sets: [][]slotRecord{{{DriveID: "a"}, {DriveID: "b"}}}}
+
+	if r := set(1, topologyRecord{}); !errors.Is(r.err, domain.ErrInvalidArgument) || r.fatal {
+		t.Errorf("empty topology: %+v, want a refusal", r)
+	}
+	if r := set(2, topologyRecord{Sets: [][]slotRecord{{{DriveID: "a"}, {DriveID: "a"}}}}); !errors.Is(r.err, domain.ErrInvalidArgument) {
+		t.Errorf("duplicate drive: %+v, want a refusal", r)
+	}
+	if r := set(3, good); r.err != nil {
+		t.Fatalf("first topology: %v", r.err)
+	}
+	if r := set(4, good); !errors.Is(r.err, domain.ErrConflict) || r.fatal {
+		t.Errorf("stale change: %+v, want a conflict", r)
+	}
+	next := good
+	next.Version = 1
+	if r := set(5, next); r.err != nil {
+		t.Errorf("change based on the stored version: %v", r.err)
 	}
 }

@@ -4,11 +4,12 @@ An S3-compatible, erasure-coded, multi-node object store in a single Go binary, 
 data security first: encryption at rest and in transit, checksums on every read,
 self-healing, RBAC and an audit trail.
 
-> **Status: milestone 1 (standalone store).** One node stores objects encrypted and
-> checksummed, behind an S3-compatible API with SigV4. There is **no erasure coding and
-> no parity yet** (milestone 2), no cluster (milestone 3) and no users or policies
-> beyond the root key (milestone 4): do not keep data here that you cannot lose.
-> `PLAN.md` lists what comes next.
+> **Status: milestone 2 (erasure coding on local drives).** One node stores objects
+> encrypted, checksummed and — with four or more drives — erasure coded, heals itself,
+> and speaks an S3-compatible API with SigV4. There is no cluster yet (milestone 3) and
+> no users or policies beyond the root key (milestone 4): a node is a single point of
+> failure, so do not keep data here that you cannot lose. `PLAN.md` lists what comes
+> next.
 
 ## Build from source
 
@@ -65,10 +66,16 @@ aws --endpoint-url http://127.0.0.1:9000 s3 cp cactus.jpg s3://photos/
 aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://photos/
 ```
 
+Give it four or more drives and objects are erasure coded: six drives store every object
+as three data and three parity shards and survive the loss of any three. With fewer than
+four drives there is no parity, and the node says so. A drive that died can be replaced
+by an empty one, one at a time, while the node is stopped; it is refilled in the
+background. All drives must be present for the node to start.
+
 In production, give it a certificate; it refuses to start without one:
 
 ```sh
-./cactusfs server --data /mnt/drive1 --data /mnt/drive2 --kms local \
+./cactusfs server --data /mnt/drive1,/mnt/drive2,/mnt/drive3,/mnt/drive4 --kms local \
   --tls-cert server.crt --tls-key server.key
 curl --cacert ca.crt https://localhost:9001/readyz      # {"status":"ok"}
 ```
@@ -141,6 +148,7 @@ make help                  # all targets
 | `make build-all` | six OS/arch binaries in `dist/` |
 | `make image` | `cactusfs:<version>-amd64` and `-arm64` |
 | `make verify-clone` | proves both build paths above from a clean export |
+| `make test-chaos` | fault injection against the built binary: corruption, lost shards, replaced drives, kill during writes |
 | `make run` | build and run a development node on `./.data` (set `CACTUSFS_KMS_PASSPHRASE`) |
 
 Notes:

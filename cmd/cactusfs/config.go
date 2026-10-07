@@ -32,6 +32,10 @@ const (
 	envDevPlaintext    = "CACTUSFS_DEV_PLAINTEXT"
 	envLogLevel        = "CACTUSFS_LOG_LEVEL"
 	envOTLPEndpoint    = "CACTUSFS_OTLP_ENDPOINT"
+	envScrubInterval   = "CACTUSFS_SCRUB_INTERVAL"
+	envScrubRate       = "CACTUSFS_SCRUB_RATE_MIB"
+	envGCInterval      = "CACTUSFS_GC_INTERVAL"
+	envGCGrace         = "CACTUSFS_GC_GRACE"
 	envDrainDelay      = "CACTUSFS_DRAIN_DELAY"
 	envShutdownTimeout = "CACTUSFS_SHUTDOWN_TIMEOUT"
 )
@@ -49,10 +53,18 @@ const (
 	defaultS3Addr          = ":9000"
 	defaultLogLevel        = "info"
 	defaultShutdownTimeout = 30 * time.Second
-	loopbackHost           = "127.0.0.1"
-	metaDirName            = "meta"
-	kmsKeyFileName         = "kms-local.json"
-	kmsLocal               = "local"
+	defaultScrubInterval   = 24 * time.Hour
+	defaultScrubRateMiB    = 64
+	defaultGCInterval      = time.Hour
+	defaultGCGrace         = 24 * time.Hour
+	// minGCGrace is the shortest grace period accepted: a shard younger
+	// than the grace period may belong to a write that has not committed
+	// yet, and removing it would lose that write.
+	minGCGrace     = time.Minute
+	loopbackHost   = "127.0.0.1"
+	metaDirName    = "meta"
+	kmsKeyFileName = "kms-local.json"
+	kmsLocal       = "local"
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -87,6 +99,16 @@ type serverConfig struct {
 	DevPlaintext bool
 	// LogLevel is the minimum level written to the log.
 	LogLevel slog.Level
+	// ScrubInterval is the pause between two passes of the scrubber; zero
+	// disables scrubbing. ScrubRateMiB limits how fast it reads, in MiB per
+	// second; zero is no limit.
+	ScrubInterval time.Duration
+	ScrubRateMiB  int
+	// GCInterval is the pause between two passes of the garbage collector;
+	// zero disables it. GCGrace is the minimum age of an unreferenced shard
+	// before it is removed.
+	GCInterval time.Duration
+	GCGrace    time.Duration
 	// OTLPEndpoint is the URL of an OTLP/HTTP trace collector. Empty, the
 	// default, exports nothing.
 	OTLPEndpoint string
@@ -152,6 +174,23 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		return cfg, err
 	}
 
+	scrubInterval, err := envDuration(getenv, envScrubInterval, defaultScrubInterval)
+	if err != nil {
+		return cfg, err
+	}
+	gcInterval, err := envDuration(getenv, envGCInterval, defaultGCInterval)
+	if err != nil {
+		return cfg, err
+	}
+	gcGrace, err := envDuration(getenv, envGCGrace, defaultGCGrace)
+	if err != nil {
+		return cfg, err
+	}
+	scrubRate, err := envInt(getenv, envScrubRate, defaultScrubRateMiB)
+	if err != nil {
+		return cfg, err
+	}
+
 	fs := flag.NewFlagSet("cactusfs server", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var data stringList
@@ -182,6 +221,14 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"on shutdown, keep serving this long with /readyz answering 503 before closing the listeners ($"+envDrainDelay+")")
 	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", shutdownTimeout,
 		"time allowed for in-flight requests to finish once the listeners have closed ($"+envShutdownTimeout+")")
+	fs.DurationVar(&cfg.ScrubInterval, "scrub-interval", scrubInterval,
+		"pause between two passes of the scrubber, which verifies and heals every object; 0 disables it ($"+envScrubInterval+")")
+	fs.IntVar(&cfg.ScrubRateMiB, "scrub-rate-mib", scrubRate,
+		"limit on how fast the scrubber reads, in MiB per second; 0 is no limit ($"+envScrubRate+")")
+	fs.DurationVar(&cfg.GCInterval, "gc-interval", gcInterval,
+		"pause between two passes of the garbage collector for unreferenced shards; 0 disables it ($"+envGCInterval+")")
+	fs.DurationVar(&cfg.GCGrace, "gc-grace", gcGrace,
+		"minimum age of an unreferenced shard before it is removed ($"+envGCGrace+")")
 	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", getenv(envOTLPEndpoint),
 		"`URL` of an OTLP/HTTP trace collector; traces are not exported when empty ($"+envOTLPEndpoint+")")
 	logLevel := fs.String("log-level", envString(getenv, envLogLevel, defaultLogLevel),
@@ -220,6 +267,13 @@ func (c *serverConfig) validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("shutdown timeout %s: must be positive", c.ShutdownTimeout)
+	}
+	if c.ScrubInterval < 0 || c.GCInterval < 0 || c.ScrubRateMiB < 0 {
+		return errors.New("scrub interval, scrub rate and garbage collection interval must not be negative")
+	}
+	if c.GCGrace < minGCGrace {
+		return fmt.Errorf("garbage collection grace period %s: must be at least %s, and much longer than any upload takes to commit",
+			c.GCGrace, minGCGrace)
 	}
 	if err := c.validateTransport(); err != nil {
 		return err
@@ -337,4 +391,16 @@ func envDuration(getenv func(string) string, key string, fallback time.Duration)
 		return 0, fmt.Errorf("%s=%q: want a duration such as 30s", key, v)
 	}
 	return d, nil
+}
+
+func envInt(getenv func(string) string, key string, fallback int) (int, error) {
+	v := getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: want a whole number", key, v)
+	}
+	return n, nil
 }

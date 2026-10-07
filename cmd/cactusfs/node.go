@@ -11,13 +11,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/disk"
+	"github.com/albievan/cactusfs/internal/adapters/erasurecodec"
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -44,6 +48,13 @@ type node struct {
 	authorizer *app.Authorizer
 	clock      ports.Clock
 	telemetry  *telemetry.Telemetry
+
+	scrubber  *app.Scrubber
+	collector *app.Collector
+	// stopBackground cancels the background tasks; background is done when
+	// they have returned.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // openNode opens the drives, the KMS and the metadata store, wires the use
@@ -62,6 +73,7 @@ func openNode(
 
 func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, notice io.Writer) error {
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
+	attached := make([]cluster.DriveState, 0, len(cfg.Data))
 	for _, dir := range cfg.Data {
 		drive, err := disk.Open(ctx, dir, rand.Reader, n.clock.Now())
 		if err != nil {
@@ -69,10 +81,10 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		}
 		n.drives = append(n.drives, drive)
 		stores = append(stores, n.telemetry.InstrumentShardStore(drive))
-		logger.InfoContext(ctx, "drive opened", slog.String("drive_id", drive.DriveID()), slog.String("dir", dir))
+		attached = append(attached, cluster.DriveState{ID: drive.DriveID(), Fresh: drive.Fresh()})
+		logger.InfoContext(ctx, "drive opened",
+			slog.String("drive_id", drive.DriveID()), slog.String("dir", dir), slog.Bool("fresh", drive.Fresh()))
 	}
-	logger.WarnContext(ctx, "objects are stored encrypted and checksummed on one drive each, without parity: "+
-		"erasure coding is not available in this version", slog.Int("drives", len(stores)))
 
 	localKMS, err := openKMS(ctx, cfg, logger)
 	if err != nil {
@@ -92,16 +104,41 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// Every outbound port is reached through a decorator that traces and
 	// counts the call.
 	meta := n.telemetry.InstrumentMetadata(n.meta)
+
+	topology, err := app.EnsureTopology(ctx, meta, attached, logger)
+	if err != nil {
+		return err
+	}
+	params, err := erasure.ParamsFor(topology.SetSize())
+	if err != nil {
+		return err
+	}
+	if params.Parity == 0 {
+		logger.WarnContext(ctx, "fewer than four drives: objects are stored encrypted and checksummed on one drive each, "+
+			"WITHOUT PARITY; the loss of a drive loses the objects on it", slog.Int("drives", len(stores)))
+	} else {
+		logger.InfoContext(ctx, "erasure coding enabled",
+			slog.Int("erasure_sets", len(topology.Sets)), slog.Int("data_shards", params.Data),
+			slog.Int("parity_shards", params.Parity), slog.Int("write_quorum", params.WriteQuorum()))
+	}
 	n.authorizer = app.NewAuthorizer(logger)
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: meta, Buckets: meta, Drives: stores, KMS: kms,
-		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
+		Index: meta, Buckets: meta, Topology: topology, Drives: stores, Codec: erasurecodec.New(), KMS: kms,
+		OnHeal: n.telemetry.ObserveHeal,
+		Authz:  n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {
 		return err
 	}
 	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader)
+	n.scrubber = app.NewScrubber(app.ScrubberConfig{
+		Buckets: meta, Index: meta, Healer: n.objects.Healer(), Logger: logger,
+		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20, OnPass: n.telemetry.ObserveScrub,
+	})
+	n.collector = app.NewCollector(app.CollectorConfig{
+		Drives: stores, Index: meta, Clock: n.clock, Grace: cfg.GCGrace, Logger: logger, OnPass: n.telemetry.ObserveGC,
+	})
 
 	var provided *app.Credentials
 	if cfg.secrets.rootAccessKey != "" {
@@ -222,8 +259,27 @@ func readPassphrase(cfg serverConfig) ([]byte, error) {
 	return passphrase, nil
 }
 
-// Close stops the metadata store and releases the drives.
+// startBackground starts healing, scrubbing and garbage collection. They run
+// until Close.
+func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
+	ctx, n.stopBackground = context.WithCancel(context.WithoutCancel(ctx))
+	n.background.Go(func() { n.objects.Healer().Run(ctx) })
+	if cfg.ScrubInterval > 0 {
+		n.background.Go(func() { n.scrubber.Run(ctx, cfg.ScrubInterval) })
+	}
+	if cfg.GCInterval > 0 {
+		n.background.Go(func() { n.collector.Run(ctx, cfg.GCInterval) })
+	}
+}
+
+// Close stops the background tasks, then the metadata store, and releases
+// the drives.
 func (n *node) Close() error {
+	if n.stopBackground != nil {
+		n.stopBackground()
+		n.background.Wait()
+		n.stopBackground = nil
+	}
 	var errs []error
 	if n.meta != nil {
 		errs = append(errs, n.meta.Close())

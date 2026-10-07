@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -16,8 +17,14 @@ import (
 type MemShardStore struct {
 	id string
 
-	mu     sync.Mutex
-	shards map[object.ShardID][]byte
+	mu        sync.Mutex
+	shards    map[object.ShardID][]byte
+	committed map[object.ShardID]time.Time
+	damaged   map[object.ShardID]bool
+
+	// Now tells the store what time it is when a shard is committed; the
+	// real time when nil.
+	Now func() time.Time
 
 	// FailCreate, FailWrite, FailCommit and FailOpen, when set, are returned
 	// by the corresponding operation.
@@ -31,7 +38,7 @@ type MemShardStore struct {
 
 // NewMemShardStore returns an empty store that reports the given drive ID.
 func NewMemShardStore(driveID string) *MemShardStore {
-	return &MemShardStore{id: driveID, shards: map[object.ShardID][]byte{}}
+	return &MemShardStore{id: driveID, shards: map[object.ShardID][]byte{}, committed: map[object.ShardID]time.Time{}, damaged: map[object.ShardID]bool{}}
 }
 
 // DriveID implements ports.ShardStore.
@@ -61,7 +68,7 @@ func (m *MemShardStore) Open(_ context.Context, id object.ShardID) (ports.ShardR
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", domain.ErrShardNotFound, id)
 	}
-	return &memShardReader{Reader: bytes.NewReader(data), size: int64(len(data))}, nil
+	return &memShardReader{Reader: bytes.NewReader(data), size: int64(len(data)), damaged: m.damaged[id]}, nil
 }
 
 // Delete implements ports.ShardStore.
@@ -72,7 +79,37 @@ func (m *MemShardStore) Delete(_ context.Context, id object.ShardID) error {
 		return m.FailDelete
 	}
 	delete(m.shards, id)
+	delete(m.committed, id)
+	delete(m.damaged, id)
 	return nil
+}
+
+// List implements ports.ShardStore.
+func (m *MemShardStore) List(ctx context.Context, visit func(ports.ShardInfo) error) error {
+	m.mu.Lock()
+	infos := make([]ports.ShardInfo, 0, len(m.shards))
+	for id := range m.shards {
+		infos = append(infos, ports.ShardInfo{ID: id, CommittedAt: m.committed[id]})
+	}
+	m.mu.Unlock()
+	for _, info := range infos {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Put stores a shard directly, as if it had been committed at the given
+// time. Tests use it to plant shards.
+func (m *MemShardStore) Put(id object.ShardID, data []byte, committedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shards[id] = bytes.Clone(data)
+	m.committed[id] = committedAt
 }
 
 // IDs returns the identifiers of every committed shard.
@@ -138,6 +175,11 @@ func (w *memShardWriter) Commit(context.Context) error {
 	}
 	w.done = true
 	w.store.shards[w.id] = bytes.Clone(w.buf.Bytes())
+	now := time.Now()
+	if w.store.Now != nil {
+		now = w.store.Now()
+	}
+	w.store.committed[w.id] = now
 	return nil
 }
 
@@ -147,9 +189,27 @@ func (w *memShardWriter) Abort() error {
 	return nil
 }
 
+// Damage makes a shard fail verification when it is read, the way a drive
+// reports a block whose checksum does not match. Corrupt, in contrast,
+// changes the bytes without the store noticing.
+func (m *MemShardStore) Damage(id object.ShardID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.damaged[id] = true
+}
+
 type memShardReader struct {
 	*bytes.Reader
-	size int64
+	size    int64
+	damaged bool
+}
+
+// ReadAt implements ports.ShardReader.
+func (r *memShardReader) ReadAt(p []byte, off int64) (int, error) {
+	if r.damaged {
+		return 0, fmt.Errorf("%w: block checksum mismatch", domain.ErrIntegrity)
+	}
+	return r.Reader.ReadAt(p, off)
 }
 
 // Size implements ports.ShardReader.

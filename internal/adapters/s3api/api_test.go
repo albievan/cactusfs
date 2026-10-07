@@ -905,6 +905,7 @@ func TestErrorMapping(t *testing.T) {
 		{domain.ErrIncompleteBody, 400, "IncompleteBody"},
 		{domain.ErrEntityTooLarge, 400, "EntityTooLarge"},
 		{domain.ErrNotLeader, 503, "ServiceUnavailable"},
+		{domain.ErrInsufficientDrives, 503, "ServiceUnavailable"},
 		{domain.ErrShuttingDown, 503, "ServiceUnavailable"},
 		// Nothing about these may reach a client.
 		{domain.ErrIntegrity, 500, "InternalError"},
