@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/domain/cluster"
+
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
@@ -25,7 +27,7 @@ func nodeConfig(dir string) serverConfig {
 	meta := filepath.Join(dir, "d1", metaDirName)
 	return serverConfig{
 		Data: []string{filepath.Join(dir, "d1"), filepath.Join(dir, "d2")}, MetaDir: meta,
-		KMS: kmsLocal, KMSKeyFile: filepath.Join(meta, kmsKeyFileName),
+		KMS: kmsLocal, KMSKeyFile: filepath.Join(meta, kmsKeyFileName), Roles: cluster.AllRoles(),
 		secrets: secrets{kmsPassphrase: nodePassphrase},
 		raftTiming: raftmeta.Timing{
 			Heartbeat: 50 * time.Millisecond, Election: 50 * time.Millisecond,

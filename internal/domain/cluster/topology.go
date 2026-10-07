@@ -16,6 +16,8 @@ import (
 type Slot struct {
 	// DriveID is the drive currently in the slot.
 	DriveID string
+	// NodeID is the node the slot's drive is attached to.
+	NodeID string
 	// Retired lists the drives that were in the slot before.
 	Retired []string
 }
@@ -44,6 +46,8 @@ type Position struct {
 type DriveState struct {
 	// ID is the drive's generated identifier.
 	ID string
+	// NodeID is the node the drive is attached to.
+	NodeID string
 	// Empty reports that the drive holds no shard.
 	Empty bool
 	// DeploymentID is the deployment the drive has been claimed for, or ""
@@ -89,6 +93,159 @@ func NewTopology(driveIDs []string) (Topology, error) {
 		t.Sets[i/size] = append(t.Sets[i/size], Slot{DriveID: id})
 	}
 	return t, nil
+}
+
+// PlanTopology assigns the drives of a new deployment to erasure sets so that
+// the drives of every set are spread as widely as the cluster allows: across
+// zones, then racks, then nodes. An object's shards go to the drives of one
+// set, so this is what decides how many node or zone failures it survives.
+//
+// labels gives the location of each node; a node without an entry has none.
+// The drives of a node keep the order they are given in, and the result is
+// the same for the same input. The error wraps
+// domain.ErrInvalidArgument when the drives cannot form equal sets.
+func PlanTopology(drives []DriveState, labels map[string]Labels) (Topology, error) {
+	sets, size, err := erasure.SetLayout(len(drives))
+	if err != nil {
+		return Topology{}, err
+	}
+	seen := map[string]bool{}
+	byNode := map[string][]string{}
+	for _, drive := range drives {
+		if drive.ID == "" || seen[drive.ID] {
+			return Topology{}, fmt.Errorf("%w: drive ID %q is empty or listed twice", domain.ErrInvalidArgument, drive.ID)
+		}
+		seen[drive.ID] = true
+		byNode[drive.NodeID] = append(byNode[drive.NodeID], drive.ID)
+	}
+	// Deal the drives out one node at a time, visiting the nodes in an order
+	// that alternates zones and, within a zone, racks. Consecutive drives in
+	// the deal are then as far apart as possible, and so are the drives of
+	// each set, which is a run of the deal.
+	order := spreadNodes(byNode, labels)
+	t := Topology{Sets: make([][]Slot, sets)}
+	dealt := 0
+	for round := 0; dealt < len(drives); round++ {
+		for _, node := range order {
+			if round >= len(byNode[node]) {
+				continue
+			}
+			t.Sets[dealt/size] = append(t.Sets[dealt/size], Slot{DriveID: byNode[node][round], NodeID: node})
+			dealt++
+		}
+	}
+	return t, nil
+}
+
+// spreadNodes orders nodes so that neighbours are in different zones where
+// possible, and in different racks within a zone.
+func spreadNodes(byNode map[string][]string, labels map[string]Labels) []string {
+	type group struct {
+		key   string
+		nodes []string
+	}
+	interleave := func(groups []group) []string {
+		slices.SortFunc(groups, func(a, b group) int { return strings.Compare(a.key, b.key) })
+		var out []string
+		for round := 0; ; round++ {
+			added := false
+			for _, g := range groups {
+				if round < len(g.nodes) {
+					out = append(out, g.nodes[round])
+					added = true
+				}
+			}
+			if !added {
+				return out
+			}
+		}
+	}
+	collect := func(nodes []string, key func(Labels) string) []group {
+		index := map[string]int{}
+		var groups []group
+		for _, node := range nodes {
+			k := key(labels[node])
+			if _, ok := index[k]; !ok {
+				index[k] = len(groups)
+				groups = append(groups, group{key: k})
+			}
+			groups[index[k]].nodes = append(groups[index[k]].nodes, node)
+		}
+		return groups
+	}
+
+	nodes := make([]string, 0, len(byNode))
+	for node := range byNode {
+		nodes = append(nodes, node)
+	}
+	slices.Sort(nodes)
+
+	zones := collect(nodes, func(l Labels) string { return l.Region + "/" + l.Zone })
+	for i, zone := range zones {
+		zones[i].nodes = interleave(collect(zone.nodes, func(l Labels) string { return l.Rack }))
+	}
+	return interleave(zones)
+}
+
+// Unassigned reports whether the topology was recorded before slots carried
+// their node: by a node on its own, whose drives were all its own.
+func (t Topology) Unassigned() bool {
+	for _, set := range t.Sets {
+		for _, slot := range set {
+			if slot.NodeID != "" {
+				return false
+			}
+		}
+	}
+	return !t.Empty()
+}
+
+// AssignedTo returns a copy of the topology with every slot on the given
+// node. It is the migration of a topology for which Unassigned holds.
+func (t Topology) AssignedTo(nodeID string) Topology {
+	next := t.Clone()
+	for s := range next.Sets {
+		for i := range next.Sets[s] {
+			next.Sets[s][i].NodeID = nodeID
+		}
+	}
+	return next
+}
+
+// NodeIDs returns the nodes that hold a drive of the topology, sorted.
+func (t Topology) NodeIDs() []string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, set := range t.Sets {
+		for _, slot := range set {
+			if !seen[slot.NodeID] {
+				seen[slot.NodeID] = true
+				ids = append(ids, slot.NodeID)
+			}
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// NodeFailuresTolerated returns how many whole nodes can be lost, whichever
+// they are, with every object still readable: the parity count divided by the
+// most drives any one node contributes to a set. Zero means that a single
+// node failure can make objects unreadable.
+func (t Topology) NodeFailuresTolerated() int {
+	params, err := erasure.ParamsFor(t.SetSize())
+	if err != nil || params.Parity == 0 {
+		return 0
+	}
+	worst := 1
+	for _, set := range t.Sets {
+		perNode := map[string]int{}
+		for _, slot := range set {
+			perNode[slot.NodeID]++
+			worst = max(worst, perNode[slot.NodeID])
+		}
+	}
+	return params.Parity / worst
 }
 
 // Empty reports whether no topology has been set.
@@ -173,7 +330,8 @@ type Replacement struct {
 	New      string
 }
 
-// Reconcile compares the topology with the drives that are attached now.
+// Reconcile compares the slots of one node with the drives that are attached
+// to it now.
 //
 // When they match it returns no replacement. A drive that is claimed for
 // another deployment, a drive that was retired earlier, and an unknown drive
@@ -187,7 +345,7 @@ type Replacement struct {
 // good, so it is never assumed.
 //
 // Every refusal wraps domain.ErrInvalidArgument.
-func (t Topology) Reconcile(attached []DriveState, allowReplacement bool) (*Replacement, error) {
+func (t Topology) Reconcile(nodeID string, attached []DriveState, allowReplacement bool) (*Replacement, error) {
 	present := map[string]DriveState{}
 	for _, drive := range attached {
 		if _, dup := present[drive.ID]; dup {
@@ -200,14 +358,23 @@ func (t Topology) Reconcile(attached []DriveState, allowReplacement bool) (*Repl
 		present[drive.ID] = drive
 	}
 
+	// A node answers for its own drives only: the drives of a node that is
+	// down are that node's business when it comes back, and do not keep the
+	// others from starting.
 	var missing, unknown, stale []string
-	for _, id := range t.DriveIDs() {
-		if _, ok := present[id]; !ok {
-			missing = append(missing, id)
+	for _, set := range t.Sets {
+		for _, slot := range set {
+			if _, ok := present[slot.DriveID]; !ok && slot.NodeID == nodeID {
+				missing = append(missing, slot.DriveID)
+			}
 		}
 	}
 	for _, drive := range attached {
 		current, known := t.Current(drive.ID)
+		if pos, ok := t.Locate(drive.ID); ok && t.Sets[pos.Set][pos.Slot].NodeID != nodeID {
+			return nil, fmt.Errorf("%w: drive %s belongs to node %s, not to this node (%s); moving a drive between "+
+				"nodes is not supported", domain.ErrInvalidArgument, drive.ID, t.Sets[pos.Set][pos.Slot].NodeID, nodeID)
+		}
 		switch {
 		case !known && !drive.Empty:
 			return nil, fmt.Errorf("%w: drive %s is not part of this deployment and holds data; "+
@@ -256,7 +423,7 @@ func (t Topology) Clone() Topology {
 	for s, set := range t.Sets {
 		next.Sets[s] = make([]Slot, len(set))
 		for i, slot := range set {
-			next.Sets[s][i] = Slot{DriveID: slot.DriveID, Retired: slices.Clone(slot.Retired)}
+			next.Sets[s][i] = Slot{DriveID: slot.DriveID, NodeID: slot.NodeID, Retired: slices.Clone(slot.Retired)}
 		}
 	}
 	return next

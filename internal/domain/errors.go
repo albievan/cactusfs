@@ -97,3 +97,85 @@ var (
 	// in a format version this binary does not understand.
 	ErrUnsupportedFormat = errors.New("unsupported format version")
 )
+
+// Errors that describe the state of the cluster.
+var (
+	// ErrUnavailable means that something the request needs cannot be
+	// reached right now: a node is down, the metadata group has no leader.
+	// Nothing is wrong with the data; the request can be repeated.
+	ErrUnavailable = errors.New("temporarily unavailable")
+	// ErrDriveOffline means that a drive could not be reached. It says
+	// nothing about what is stored on it.
+	ErrDriveOffline = errors.New("drive is offline")
+)
+
+// wireCodes names the sentinels that cross a node boundary. The names are
+// part of the node RPC contract: never change one, only add.
+func wireCodes() []struct {
+	code string
+	err  error
+} {
+	return []struct {
+		code string
+		err  error
+	}{
+		{"shutting_down", ErrShuttingDown},
+		{"not_leader", ErrNotLeader},
+		{"outcome_unknown", ErrOutcomeUnknown},
+		{"no_topology", ErrNoTopology},
+		{"conflict", ErrConflict},
+		{"not_bootstrapped", ErrNotBootstrapped},
+		{"already_bootstrapped", ErrAlreadyBootstrapped},
+		{"invalid_argument", ErrInvalidArgument},
+		{"access_denied", ErrAccessDenied},
+		{"invalid_bucket_name", ErrInvalidBucketName},
+		{"bucket_not_found", ErrBucketNotFound},
+		{"bucket_already_exists", ErrBucketAlreadyExists},
+		{"bucket_not_empty", ErrBucketNotEmpty},
+		{"invalid_object_key", ErrInvalidObjectKey},
+		{"object_not_found", ErrObjectNotFound},
+		{"invalid_id", ErrInvalidID},
+		{"integrity", ErrIntegrity},
+		{"insufficient_drives", ErrInsufficientDrives},
+		{"shard_not_found", ErrShardNotFound},
+		{"unsupported_format", ErrUnsupportedFormat},
+		{"unavailable", ErrUnavailable},
+		{"drive_offline", ErrDriveOffline},
+	}
+}
+
+// Codes returns the wire names of the sentinels err wraps, for sending an
+// error to another node. An error that wraps none has no codes.
+func Codes(err error) []string {
+	var codes []string
+	for _, entry := range wireCodes() {
+		if errors.Is(err, entry.err) {
+			codes = append(codes, entry.code)
+		}
+	}
+	return codes
+}
+
+// remoteError is an error that was received from another node.
+type remoteError struct {
+	sentinels []error
+	message   string
+}
+
+func (e *remoteError) Error() string   { return e.message }
+func (e *remoteError) Unwrap() []error { return e.sentinels }
+
+// FromCodes rebuilds an error received from another node: it reads as
+// message and wraps the sentinels the codes name. Codes this binary does not
+// know are ignored, so the error is then an unclassified failure.
+func FromCodes(codes []string, message string) error {
+	e := &remoteError{message: message}
+	for _, code := range codes {
+		for _, entry := range wireCodes() {
+			if entry.code == code {
+				e.sentinels = append(e.sentinels, entry.err)
+			}
+		}
+	}
+	return e
+}

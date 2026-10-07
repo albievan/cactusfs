@@ -191,17 +191,16 @@ func (f *fixture) objectService(t *testing.T, kms ports.KMS) *app.ObjectService 
 		drives[i] = recordingDrive{ShardStore: d, events: f.events}
 	}
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index:    recordingIndex{ObjectIndex: f.meta, events: f.events},
-		Buckets:  f.meta,
-		Topology: f.topology,
-		Drives:   drives,
-		Codec:    porttest.NewCodec(),
-		OnHeal:   f.heals.add,
-		KMS:      kms,
-		Authz:    f.authz,
-		Clock:    f.clock,
-		Entropy:  rand.Reader,
-		Logger:   slog.New(slog.NewJSONHandler(f.logs, nil)),
+		Index:   recordingIndex{ObjectIndex: f.meta, events: f.events},
+		Buckets: f.meta,
+		Drives:  fixed(t, f.topology, drives),
+		Codec:   porttest.NewCodec(),
+		OnHeal:  f.heals.add,
+		KMS:     kms,
+		Authz:   f.authz,
+		Clock:   f.clock,
+		Entropy: rand.Reader,
+		Logger:  slog.New(slog.NewJSONHandler(f.logs, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)
@@ -268,3 +267,13 @@ func randomBytes(t *testing.T, n int) []byte {
 }
 
 func anonymous() iam.Principal { return iam.Principal{} }
+
+// fixed returns the DriveSource of a node on its own.
+func fixed(t *testing.T, topology cluster.Topology, drives []ports.ShardStore) ports.DriveSource {
+	t.Helper()
+	source, err := app.FixedDrives(topology, drives)
+	if err != nil {
+		t.Fatalf("FixedDrives: %v", err)
+	}
+	return source
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
@@ -253,5 +254,119 @@ func TestSecretFor(t *testing.T) {
 	other := app.NewIdentityService(moved, kms, porttest.NewClock(testNow), rand.Reader)
 	if secret, _, err := other.SecretFor(ctx, "ATTACKER"); !errors.Is(err, domain.ErrKeyUnavailable) || secret != nil {
 		t.Errorf("a sealed secret opened under another access key ID: %v", err)
+	}
+}
+
+// lateStore answers the first question about the root credential as if the
+// deployment were new, which is what a node sees when another node of the
+// cluster is bootstrapping at the same moment.
+type lateStore struct {
+	ports.RootCredentialStore
+	asked bool
+}
+
+func (l *lateStore) GetRootCredential(ctx context.Context) (iam.RootCredential, error) {
+	if !l.asked {
+		l.asked = true
+		return iam.RootCredential{}, domain.ErrNotBootstrapped
+	}
+	return l.RootCredentialStore.GetRootCredential(ctx)
+}
+
+// TestEnsureRootWhenAnotherNodeIsFirst: the nodes of a new cluster all try to
+// bootstrap it. One wins. The others must end up with the winner's
+// credential - not fail, not show a credential that was never stored, and not
+// accept a supplied credential that differs from the stored one.
+func TestEnsureRootWhenAnotherNodeIsFirst(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	supplied, other := testCredentials(t), testCredentials(t)
+	tests := map[string]struct {
+		winner, loser *app.Credentials
+		wantErr       error
+	}{
+		"both generate":               {},
+		"both supply the same":        {winner: supplied, loser: supplied},
+		"winner supplies, loser none": {winner: supplied},
+		"they supply different ones":  {winner: supplied, loser: other, wantErr: domain.ErrInvalidArgument},
+	}
+	for name, tt := range tests {
+		meta := porttest.NewMemMetadata()
+		kms, err := porttest.NewKMS("test:1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock := porttest.NewClock(testNow)
+		first := app.NewIdentityService(meta, kms, clock, porttest.Entropy())
+		shown, err := first.EnsureRoot(ctx, tt.winner)
+		if err != nil {
+			t.Fatalf("%s: winner: %v", name, err)
+		}
+		winning := tt.winner
+		if winning == nil {
+			winning = shown
+		}
+
+		second := app.NewIdentityService(&lateStore{RootCredentialStore: meta}, kms, clock, rand.Reader)
+		generated, err := second.EnsureRoot(ctx, tt.loser)
+		if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+			t.Errorf("%s: loser: error = %v, want %v", name, err, tt.wantErr)
+		}
+		if generated != nil {
+			t.Errorf("%s: the loser returned credentials to show, though they were never stored", name)
+		}
+		// The deployment has one credential: the winner's, on both.
+		secret, principal, err := second.SecretFor(ctx, winning.AccessKeyID)
+		if err != nil || !principal.Root || string(secret) != winning.SecretKey {
+			t.Errorf("%s: the loser does not know the winner's credential: %v", name, err)
+		}
+	}
+}
+
+// unsureStore stores the root credential and then reports that it does not
+// know whether it did.
+type unsureStore struct {
+	ports.RootCredentialStore
+	store bool
+}
+
+func (u *unsureStore) SetRootCredential(ctx context.Context, c iam.RootCredential) error {
+	if u.store {
+		if err := u.RootCredentialStore.SetRootCredential(ctx, c); err != nil {
+			return err
+		}
+	}
+	return domain.ErrOutcomeUnknown
+}
+
+// TestGeneratedRootCredentialsAreShownEvenWhenTheCommitIsUncertain: the node
+// generates credentials, proposes them, and gets no answer. If they were
+// stored after all they must be shown now - they are sealed, and nobody can
+// ever show them again. If they were not, nothing is shown and the node
+// fails, to try again.
+func TestGeneratedRootCredentialsAreShownEvenWhenTheCommitIsUncertain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	kms, err := porttest.NewKMS("test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta := porttest.NewMemMetadata()
+	svc := app.NewIdentityService(&unsureStore{RootCredentialStore: meta, store: true}, kms, porttest.NewClock(testNow), rand.Reader)
+	generated, err := svc.EnsureRoot(ctx, nil)
+	if err != nil || generated == nil {
+		t.Fatalf("EnsureRoot when the credential was stored after all = %v, %v; want the credentials", generated, err)
+	}
+	if secret, principal, err := svc.SecretFor(ctx, generated.AccessKeyID); err != nil || !principal.Root || string(secret) != generated.SecretKey {
+		t.Errorf("the credentials that were shown are not the stored ones: %v", err)
+	}
+
+	empty := porttest.NewMemMetadata()
+	svc = app.NewIdentityService(&unsureStore{RootCredentialStore: empty}, kms, porttest.NewClock(testNow), rand.Reader)
+	generated, err = svc.EnsureRoot(ctx, nil)
+	if !errors.Is(err, domain.ErrOutcomeUnknown) || generated != nil {
+		t.Errorf("EnsureRoot when nothing was stored = %v, %v; want the error and nothing shown", generated, err)
 	}
 }

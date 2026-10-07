@@ -88,7 +88,8 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-v $(NODE_VOLUME):/src/web/node_modules \
 	$(SOCKET_MOUNT) $(BUILDKIT_ENV) \
 	-e VERSION=$(VERSION) -e IMAGE=$(IMAGE) \
-	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH)
+	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
+	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE
 
 builder:
 	@echo "builder: $(BUILDER_IMAGE) ($(ENGINE))"
@@ -105,8 +106,20 @@ shell: builder
 run: build
 	./bin/cactusfs$(EXE) server --dev-plaintext --data ./.data --kms local
 
-up down:
-	@echo "make $@: the 4-node compose cluster is PLAN step 3.8 and does not exist yet." >&2; exit 1
+# The four-node development cluster of deploy/compose/compose.yaml, with the
+# engine's own compose (docker compose, or podman compose). The KMS passphrase
+# comes from the environment and must be the same at every start:
+#   export CACTUSFS_KMS_PASSPHRASE='...'; make up
+COMPOSE := $(ENGINE) compose -f deploy/compose/compose.yaml
+
+up:
+	$(COMPOSE) up -d --build
+	@echo "make up: S3 on https://localhost:9000 (node1), :9010, :9020, :9030 - see deploy/compose/compose.yaml"
+
+# Stops the cluster and keeps its volumes. To delete the data as well:
+#   $(ENGINE) compose -f deploy/compose/compose.yaml down --volumes
+down:
+	$(COMPOSE) down
 
 clean: builder
 	@$(BUILDER_RUN) $(BUILDER_IMAGE) rm -rf bin dist web/dist .cache
@@ -159,8 +172,10 @@ test:
 cover:
 	@scripts/coverage.sh
 
+# The cluster tests run containers of the product image; they build it
+# themselves, from this tree, unless CACTUSFS_TEST_IMAGE names one.
 test-int:
-	go test -race -count=1 -tags=integration ./...
+	go test -race -count=1 -timeout 30m -tags=integration ./...
 	@echo "test-int: PASS"
 
 s3-compat:
@@ -169,18 +184,20 @@ s3-compat:
 s3-compat-record:
 	@scripts/s3compat.sh record
 
-# Fault injection against the built binary: corrupt and delete shards, wipe
-# drives, kill the process during writes. Must pass before a milestone that
-# touches the write path, quorum, Raft or healing is marked done.
+# Fault injection. Against the built binary: corrupt and delete shards, wipe
+# drives, kill the process during writes. Against a cluster of containers:
+# kill nodes during writes, kill the leader, partition the network, take two
+# nodes away, corrupt and delete shards on other nodes. Must pass before a
+# milestone that touches the write path, quorum, Raft or healing is marked done.
 test-chaos:
-	go test -count=1 -tags=chaos -timeout 20m ./test/chaos/...
+	go test -count=1 -tags=chaos -timeout 40m ./test/chaos/...
 	@echo "test-chaos: PASS"
 
 vuln:
 	go tool govulncheck ./...
 	@echo "vuln: PASS"
 
-contracts:
+contracts: web-install
 	@scripts/contracts.sh
 
 licences: web-install
@@ -220,6 +237,8 @@ image:
 
 helm-lint:
 	@scripts/helm-lint.sh
+	@CACTUSFS_KMS_PASSPHRASE=only-to-render-the-file docker compose -f deploy/compose/compose.yaml config --quiet
+	@echo "compose: deploy/compose/compose.yaml is valid"
 
 verify-clone:
 	@scripts/verify-clone.sh

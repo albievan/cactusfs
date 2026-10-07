@@ -33,6 +33,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 const (
@@ -74,6 +75,7 @@ type Telemetry struct {
 	scrubBytes     prometheus.Counter
 	gcPasses       prometheus.Counter
 	gcRemoved      prometheus.Counter
+	events         *prometheus.CounterVec
 }
 
 // New returns the node's Telemetry. The caller must call Shutdown.
@@ -128,9 +130,13 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 		Name: "cactusfs_gc_shards_removed_total", Help: "Unreferenced shards removed by the garbage collector.",
 	})
 
+	t.events = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_events_total", Help: "Events derived from applied metadata entries on this node, by type.",
+	}, []string{"type"})
+
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.portCalls, t.portSeconds,
-		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved,
+		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.events,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
@@ -273,4 +279,9 @@ func (t *Telemetry) ObserveScrub(s app.ScrubStats) {
 func (t *Telemetry) ObserveGC(s app.GCStats) {
 	t.gcPasses.Inc()
 	t.gcRemoved.Add(float64(s.Removed))
+}
+
+// ObserveEvent counts an event. It is a consumer of the event bus.
+func (t *Telemetry) ObserveEvent(_ context.Context, e ports.Event) {
+	t.events.WithLabelValues(e.Type).Inc()
 }

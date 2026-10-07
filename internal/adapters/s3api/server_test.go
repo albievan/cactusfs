@@ -106,8 +106,12 @@ func newTestServer(t *testing.T, domainName string) *testServer {
 	if err != nil {
 		t.Fatalf("NewTopology: %v", err)
 	}
+	drives, err := app.FixedDrives(topology, []ports.ShardStore{s.drive})
+	if err != nil {
+		t.Fatalf("FixedDrives: %v", err)
+	}
 	s.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: s.meta, Buckets: s.meta, Topology: topology, Drives: []ports.ShardStore{s.drive}, Codec: porttest.NewCodec(), KMS: kms,
+		Index: s.meta, Buckets: s.meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {

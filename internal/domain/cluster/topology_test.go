@@ -159,7 +159,7 @@ func TestReconcile(t *testing.T) {
 		{name: "nothing attached", allow: true, wantErr: "do not match the deployment"},
 	}
 	for _, tt := range tests {
-		got, err := topology.Reconcile(tt.attached, tt.allow)
+		got, err := topology.Reconcile("", tt.attached, tt.allow)
 		if tt.wantErr != "" {
 			if !errors.Is(err, domain.ErrInvalidArgument) || got != nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("%s: Reconcile = %+v, %v; want an error containing %q", tt.name, got, err, tt.wantErr)
@@ -187,7 +187,7 @@ func TestNoReplacementWithoutParity(t *testing.T) {
 		present := attached(ids(n)[1:]...)
 		present = append(present, cluster.DriveState{ID: "empty-mount-point", Empty: true})
 		for _, allow := range []bool{false, true} {
-			got, err := topology.Reconcile(present, allow)
+			got, err := topology.Reconcile("", present, allow)
 			if !errors.Is(err, domain.ErrInvalidArgument) || got != nil || !strings.Contains(err.Error(), "no parity") {
 				t.Errorf("%d drives, confirmed=%v: Reconcile = %+v, %v; want a refusal naming the missing parity", n, allow, got, err)
 			}
@@ -206,7 +206,7 @@ func TestReplace(t *testing.T) {
 	rest := func() []cluster.DriveState {
 		return attached("drive-00", "drive-01", "drive-03", "drive-04", "drive-05")
 	}
-	replacement, err := original.Reconcile(append(rest(), newDrive("new-a")), true)
+	replacement, err := original.Reconcile("", append(rest(), newDrive("new-a")), true)
 	if err != nil || replacement == nil {
 		t.Fatalf("Reconcile: %+v, %v", replacement, err)
 	}
@@ -237,10 +237,10 @@ func TestReplace(t *testing.T) {
 
 	// The retired drive must not come back, and the slot can be replaced
 	// again.
-	if _, err := replaced.Reconcile(append(rest(), cluster.DriveState{ID: "drive-02"}), true); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := replaced.Reconcile("", append(rest(), cluster.DriveState{ID: "drive-02"}), true); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("re-attaching a replaced drive: error = %v, want %v", err, domain.ErrInvalidArgument)
 	}
-	second, err := replaced.Reconcile(append(rest(), newDrive("new-b")), true)
+	second, err := replaced.Reconcile("", append(rest(), newDrive("new-b")), true)
 	if err != nil || second == nil || second.Old != "new-a" {
 		t.Fatalf("second replacement: %+v, %v", second, err)
 	}

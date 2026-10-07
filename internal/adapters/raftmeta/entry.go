@@ -25,6 +25,10 @@ import (
 // that every replica computes the same state.
 const entrySchemaVersion = 1
 
+// MetadataVersion is the newest entry schema this binary can apply. A node
+// announces it when it registers; see Store.entryVersion.
+const MetadataVersion = entrySchemaVersion
+
 // Command types.
 const (
 	cmdCreateBucket = "bucket.create"
@@ -33,6 +37,8 @@ const (
 	cmdDeleteObject = "object.delete"
 	cmdSetRoot      = "root.set"
 	cmdSetTopology  = "topology.set"
+	cmdSetNode      = "node.set"
+	cmdRemoveNode   = "node.remove"
 )
 
 // entry is the decoded form of a Raft log entry. Exactly one of the command
@@ -45,6 +51,49 @@ type entry struct {
 	DeleteObject *deleteObjectCmd `json:"delete_object,omitempty"`
 	SetRoot      *rootRecord      `json:"set_root,omitempty"`
 	SetTopology  *topologyRecord  `json:"set_topology,omitempty"`
+	SetNode      *nodeRecord      `json:"set_node,omitempty"`
+	RemoveNode   *removeNodeCmd   `json:"remove_node,omitempty"`
+}
+
+type removeNodeCmd struct {
+	ID string `json:"id"`
+}
+
+// nodeRecord is a node of the cluster as it is stored and replicated.
+type nodeRecord struct {
+	ID              string   `json:"id"`
+	RPCAddr         string   `json:"rpc_addr"`
+	RaftAddr        string   `json:"raft_addr"`
+	Roles           []string `json:"roles"`
+	Region          string   `json:"region,omitempty"`
+	Zone            string   `json:"zone,omitempty"`
+	Rack            string   `json:"rack,omitempty"`
+	Host            string   `json:"host,omitempty"`
+	MetadataVersion int      `json:"metadata_version"`
+}
+
+func nodeToRecord(n cluster.Node) *nodeRecord {
+	roles := make([]string, len(n.Roles))
+	for i, role := range n.Roles {
+		roles[i] = string(role)
+	}
+	return &nodeRecord{
+		ID: n.ID, RPCAddr: n.RPCAddr, RaftAddr: n.RaftAddr, Roles: roles,
+		Region: n.Labels.Region, Zone: n.Labels.Zone, Rack: n.Labels.Rack, Host: n.Labels.Host,
+		MetadataVersion: n.MetadataVersion,
+	}
+}
+
+func (r nodeRecord) toDomain() cluster.Node {
+	roles := make(cluster.Roles, len(r.Roles))
+	for i, role := range r.Roles {
+		roles[i] = cluster.Role(role)
+	}
+	return cluster.Node{
+		ID: r.ID, RPCAddr: r.RPCAddr, RaftAddr: r.RaftAddr, Roles: roles,
+		Labels:          cluster.Labels{Region: r.Region, Zone: r.Zone, Rack: r.Rack, Host: r.Host},
+		MetadataVersion: r.MetadataVersion,
+	}
 }
 
 type deleteBucketCmd struct {
@@ -126,6 +175,7 @@ type topologyRecord struct {
 
 type slotRecord struct {
 	DriveID string   `json:"drive_id"`
+	NodeID  string   `json:"node_id,omitempty"`
 	Retired []string `json:"retired,omitempty"`
 }
 
@@ -134,7 +184,7 @@ func topologyToRecord(t cluster.Topology) *topologyRecord {
 	for s, set := range t.Sets {
 		record.Sets[s] = make([]slotRecord, len(set))
 		for i, slot := range set {
-			record.Sets[s][i] = slotRecord{DriveID: slot.DriveID, Retired: slot.Retired}
+			record.Sets[s][i] = slotRecord{DriveID: slot.DriveID, NodeID: slot.NodeID, Retired: slot.Retired}
 		}
 	}
 	return record
@@ -145,29 +195,36 @@ func (r topologyRecord) toDomain() cluster.Topology {
 	for s, set := range r.Sets {
 		t.Sets[s] = make([]cluster.Slot, len(set))
 		for i, slot := range set {
-			t.Sets[s][i] = cluster.Slot{DriveID: slot.DriveID, Retired: slot.Retired}
+			t.Sets[s][i] = cluster.Slot{DriveID: slot.DriveID, NodeID: slot.NodeID, Retired: slot.Retired}
 		}
 	}
 	return t
 }
 
-// encodeEntry serialises an entry for the Raft log.
-func encodeEntry(e entry) ([]byte, error) {
+// encodeEntry serialises an entry for the Raft log, in the given schema
+// version.
+func encodeEntry(e entry, version byte) ([]byte, error) {
 	body, err := json.Marshal(e)
 	if err != nil {
 		return nil, fmt.Errorf("raftmeta: encode entry: %w", err)
 	}
-	return append([]byte{entrySchemaVersion}, body...), nil
+	return append([]byte{version}, body...), nil
+}
+
+// versionOf returns the oldest schema version that can express an entry.
+// Every command that exists today is part of version 1.
+func versionOf(entry) byte {
+	return entrySchemaVersion
 }
 
 // decodeEntry parses a Raft log entry. An entry of another schema version, or
 // one this binary cannot interpret, wraps domain.ErrUnsupportedFormat: it must
 // stop the state machine, never be skipped.
-func decodeEntry(data []byte) (entry, error) {
+func decodeEntry(data []byte, supported byte) (entry, error) {
 	if len(data) == 0 {
 		return entry{}, fmt.Errorf("%w: empty metadata entry", domain.ErrUnsupportedFormat)
 	}
-	if data[0] != entrySchemaVersion {
+	if data[0] < entrySchemaVersion || data[0] > supported {
 		return entry{}, fmt.Errorf("%w: metadata entry schema version %d", domain.ErrUnsupportedFormat, data[0])
 	}
 	var e entry
@@ -177,6 +234,7 @@ func decodeEntry(data []byte) (entry, error) {
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
+		e.SetNode != nil, e.RemoveNode != nil,
 	} {
 		if present {
 			set++
@@ -196,6 +254,10 @@ func decodeEntry(data []byte) (entry, error) {
 		ok = ok && e.SetRoot != nil
 	case cmdSetTopology:
 		ok = ok && e.SetTopology != nil
+	case cmdSetNode:
+		ok = ok && e.SetNode != nil
+	case cmdRemoveNode:
+		ok = ok && e.RemoveNode != nil
 	default:
 		return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
 	}
@@ -312,4 +374,38 @@ func (r rootRecord) toDomain() iam.RootCredential {
 		},
 		CreatedAt: r.CreatedAt,
 	}
+}
+
+// wireResult is the state machine's answer to an entry as it travels from the
+// leader back to the node that proposed it.
+type wireResult struct {
+	// Codes and Message describe a refusal: the entry was applied and
+	// changed nothing. Both are empty when it took effect.
+	Codes    []string       `json:"codes,omitempty"`
+	Message  string         `json:"message,omitempty"`
+	Previous *versionRecord `json:"previous,omitempty"`
+}
+
+func encodeResult(r applyResult) ([]byte, error) {
+	w := wireResult{Previous: r.previous}
+	if r.err != nil {
+		w.Codes, w.Message = domain.Codes(r.err), r.err.Error()
+		if len(w.Codes) == 0 {
+			// A refusal must stay a refusal on the other side.
+			w.Codes = []string{"invalid_argument"}
+		}
+	}
+	return json.Marshal(w)
+}
+
+func decodeResult(data []byte) (applyResult, error) {
+	var w wireResult
+	if err := json.Unmarshal(data, &w); err != nil {
+		return applyResult{}, fmt.Errorf("malformed answer from the metadata leader: %w", err)
+	}
+	r := applyResult{previous: w.Previous}
+	if len(w.Codes) > 0 {
+		r.err = domain.FromCodes(w.Codes, w.Message)
+	}
+	return r, nil
 }

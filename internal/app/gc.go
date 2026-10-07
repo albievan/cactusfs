@@ -48,7 +48,7 @@ type Collector struct {
 	logger   *slog.Logger
 	onPass   func(GCStats)
 	ready    func(ctx context.Context) error
-	inFlight func(object.ID) bool
+	inFlight func(ctx context.Context, dataID object.ID) (bool, error)
 }
 
 // CollectorConfig lists what a Collector depends on.
@@ -65,8 +65,9 @@ type CollectorConfig struct {
 	// is referenced. A pass is skipped while it returns an error.
 	Ready func(ctx context.Context) error
 	// InFlight reports whether a data ID belongs to a write that is not
-	// resolved yet.
-	InFlight func(object.ID) bool
+	// resolved yet, on any node. An error means that some node could not
+	// be asked, which the collector takes for a yes.
+	InFlight func(ctx context.Context, dataID object.ID) (bool, error)
 }
 
 // NewCollector returns a Collector.
@@ -79,7 +80,7 @@ func NewCollector(cfg CollectorConfig) *Collector {
 		c.ready = func(context.Context) error { return nil }
 	}
 	if c.inFlight == nil {
-		c.inFlight = func(object.ID) bool { return false }
+		c.inFlight = func(context.Context, object.ID) (bool, error) { return false, nil }
 	}
 	return c
 }
@@ -115,23 +116,24 @@ func (c *Collector) RunOnce(ctx context.Context) (GCStats, error) {
 	}
 	cutoff := c.clock.Now().Add(-c.grace)
 	for _, drive := range c.drives {
-		// Shards of one object sit on several drives; remember the answer
-		// for the data ID seen last on this drive.
+		// Shards of one object can sit on several drives of a node;
+		// remember the verdict for the data ID seen last on this drive.
 		var lastID object.ID
-		var lastReferenced, haveLast bool
+		var last verdict
+		var haveLast bool
 
 		err := drive.List(ctx, func(info ports.ShardInfo) error {
 			stats.Shards++
 			if !haveLast || info.ID.DataID != lastID {
-				referenced, err := c.index.IsDataReferenced(ctx, info.ID.DataID)
+				v, err := c.judge(ctx, info.ID.DataID)
 				if err != nil {
 					return err
 				}
-				lastID, lastReferenced, haveLast = info.ID.DataID, referenced, true
+				lastID, last, haveLast = info.ID.DataID, v, true
 			}
 			switch {
-			case lastReferenced:
-			case c.inFlight(info.ID.DataID):
+			case last == referenced:
+			case last == inFlight:
 				stats.InFlight++
 			case info.ModifiedAt.After(cutoff):
 				stats.Young++
@@ -150,4 +152,45 @@ func (c *Collector) RunOnce(ctx context.Context) (GCStats, error) {
 		}
 	}
 	return stats, nil
+}
+
+// verdict is what the collector found out about stored data.
+type verdict int
+
+const (
+	// unreferenced: no version refers to the data and no write is using it.
+	unreferenced verdict = iota
+	referenced
+	inFlight
+)
+
+// judge decides whether stored data is in use. The order of the questions
+// is what makes the answer safe.
+//
+// A write pins its data, makes its shards durable, commits its version and
+// only then lets go of the pin. So if the data is found not pinned, the
+// write is either finished - and a look at the index made afterwards sees
+// its version - or was never begun. Looking at the index first and at the
+// pins second would leave a gap: a write could commit and let go in between,
+// and be found neither referenced nor pinned.
+func (c *Collector) judge(ctx context.Context, dataID object.ID) (verdict, error) {
+	// Most shards are referenced; that is the cheap question, asked first
+	// to spare the expensive one. A "no" here decides nothing yet.
+	if used, err := c.index.IsDataReferenced(ctx, dataID); err != nil || used {
+		return referenced, err
+	}
+	busy, err := c.inFlight(ctx, dataID)
+	if err != nil {
+		c.logger.DebugContext(ctx, "a node could not be asked whether a write is in progress; the data is kept",
+			slog.String("data_id", dataID.String()), slog.Any("error", err))
+		return inFlight, nil
+	}
+	if busy {
+		return inFlight, nil
+	}
+	used, err := c.index.IsDataReferenced(ctx, dataID)
+	if err != nil || used {
+		return referenced, err
+	}
+	return unreferenced, nil
 }

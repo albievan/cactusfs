@@ -66,13 +66,13 @@ Conventions that follow from it:
 
 | Package | Purpose |
 |---|---|
-| `internal/domain` | typed sentinel errors |
+| `internal/domain` | typed sentinel errors, and their names on the wire between nodes |
 | `internal/domain/bucket` | bucket naming rules |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals, actions, the default-deny decision, credential rules, sealed secrets |
-| `internal/domain/cluster` | readiness; drive topology: slots, reconciliation, replacement |
+| `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
-| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `Authorizer`, `Clock`, `ReadinessCheck` |
+| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `EventPublisher`, `Authorizer`, `Clock`, `ReadinessCheck` |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
 | `internal/app` | bucket, object and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
@@ -81,16 +81,24 @@ Conventions that follow from it:
 | `internal/adapters/disk` | out: shards on a local drive (ADR-0001) |
 | `internal/adapters/erasurecodec` | out: Reed-Solomon (ADR-0004) |
 | `internal/adapters/fsutil` | durable file creation and directory sync per OS |
-| `internal/adapters/raftmeta` | out: Raft + bbolt metadata (ADR-0003) |
+| `internal/adapters/raftmeta` | out: Raft + bbolt metadata, one voter or a cluster (ADR-0003, 0005) |
+| `internal/adapters/noderpc` | both: node-to-node gRPC; drives of other nodes as `ShardStore` (ADR-0005) |
+| `internal/adapters/nodetls` | mutual TLS 1.3 between nodes; development certificates |
+| `internal/adapters/events/inproc` | out: in-process event bus |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `cmd/cactusfs` | composition root: configuration, node wiring, listeners, shutdown |
 
-## 3. The binary **(implemented: `version`, `server` standalone; roles are target, milestone 3)**
+## 3. The binary **(implemented: `version`, `server` standalone and clustered, `dev-init`)**
 
 ```
 cactusfs version
 cactusfs server [flags]
+cactusfs dev-init --dir <directory> --nodes <id>[,<id>...]
 ```
+
+`dev-init` writes what the nodes of a development cluster must share: a throw-away node
+CA with a certificate per node, a second CA with a certificate for the S3 listener, and
+one sealed KMS key file. It never overwrites; a complete directory is left alone.
 
 Configuration is 12-factor: every setting is a `CACTUSFS_*` environment variable with a
 matching flag, and the flag wins.
@@ -114,6 +122,13 @@ matching flag, and the flag wins.
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
 | `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`) |
 | `--allow-drive-replacement` | `CACTUSFS_ALLOW_DRIVE_REPLACEMENT` | `false` | confirm, for this start, that one empty drive replaces one missing drive; permanent |
+| `--node-id` | `CACTUSFS_NODE_ID` | generated when alone | name of the node; in a cluster required, and the name in its certificate |
+| `--roles` | `CACTUSFS_ROLES` | all | `gateway`, `meta`, `storage`, `console` (cluster only) |
+| `--peers` | `CACTUSFS_PEERS` | — | every node of the cluster, this one included, as `id=host:port` of its node RPC; makes the node a cluster member |
+| `--rpc-addr`, `--raft-addr` | `CACTUSFS_RPC_ADDR`, `CACTUSFS_RAFT_ADDR` | `:9002`, `:9003` | listeners for node RPC and Raft |
+| `--advertise-rpc`, `--advertise-raft` | `CACTUSFS_ADVERTISE_RPC`, `…_RAFT` | from `--peers` | addresses at which other nodes reach them |
+| `--node-tls-cert`, `--node-tls-key`, `--node-tls-ca` | `CACTUSFS_NODE_TLS_CERT`, `…_KEY`, `…_CA` | — | node certificate, key and node CA; required in a cluster |
+| `--topology-region`, `-zone`, `-rack`, `-host` | `CACTUSFS_TOPOLOGY_REGION`, … | — | where the node is, for placement |
 | `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | OTLP/HTTP trace collector; nothing is exported when empty |
 | `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listeners close |
@@ -154,21 +169,37 @@ Behaviour:
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
 
-### Roles and run modes **(target, milestone 3)**
+### Roles and run modes **(implemented, ADR-0005)**
 
-One binary, four roles selected with `--roles` (default: all): `gateway` (S3 and admin
-API, authentication, erasure encode/decode, stateless), `meta` (Raft voter), `storage`
-(drives, scrub, heal) and `console` (UI).
+One binary, four roles selected with `--roles` (default: all): `gateway` (S3 API,
+authentication, erasure encode/decode; holds nothing that cannot be rebuilt), `meta`
+(Raft voter), `storage` (drives; collects garbage on them) and `console` (UI, milestone
+5). Every node answers probes and serves metrics; only gateways open the S3 listener.
 
 - **Standalone** — `cactusfs server --data <dir>...` runs every role in one process with
   a single-node Raft group. With four or more drives it erasure-codes across them; with
   fewer it still encrypts and checksums and logs that it has no parity.
 - **Cluster** — the same binary on four or more storage nodes with three or five `meta`
-  voters.
+  voters, started with `--peers` and node certificates. The nodes form the cluster
+  themselves when all of them are up for the first time: the voters bootstrap the
+  metadata group, the leader records the drive topology across all nodes. After that a
+  node needs only a majority of voters to start and serve.
 
-Standalone is a cluster of one, not a second implementation.
+Standalone is a cluster of one, not a second implementation: the same store, the same
+read and write paths, with a transport that has nobody to talk to.
 
-## 4. Storage engine **(implemented on local drives, ADR-0001, 0002, 0004; distributed sets are milestone 3)**
+What a cluster does when things fail:
+
+| Situation | Behaviour |
+|---|---|
+| Nodes down, up to (parity ÷ drives per node per set) | reads and writes continue; what the nodes missed is rebuilt on them by the scrubber |
+| More nodes down, read quorum of shards reachable | reads continue; writes answer 503 |
+| Fewer shards reachable than needed | reads answer 503; nothing is reported lost, nothing is rewritten |
+| Metadata leader lost | the voters elect another; requests wait up to 10 s, then 503 |
+| A node cut off from the majority | it answers nothing — no read from what it knew, no write |
+| No majority of voters | no reads, no writes, until it returns |
+
+## 4. Storage engine **(implemented, ADR-0001, 0002, 0004, 0005)**
 
 - **Erasure coding.** The encrypted stream of an object is cut into 1 MiB stripes; each
   stripe is split into data chunks and extended with Reed-Solomon parity chunks, and
@@ -209,15 +240,18 @@ Standalone is a cluster of one, not a second implementation.
 - **Portability.** OS differences (directory fsync, file locking, service control) live
   in `adapters/disk`, `adapters/fsutil` and `cmd/cactusfs` behind build tags.
 
-## 5. Metadata **(implemented for a single voter, ADR-0003; multi-node is milestone 3)**
+## 5. Metadata **(implemented, ADR-0003, 0005)**
 
-IAM, API keys, policies, bucket configuration, cluster topology and the object index are
-replicated with Raft and stored in bbolt. The object index sits behind
-`ports.ObjectIndex` so it can move to sharded Raft groups later; that move needs an ADR.
-On-disk formats and Raft entries carry a version from the first release, and version N
-must run alongside N+1 for rolling upgrades.
+Bucket configuration, the root credential, the record of nodes, the drive topology and
+the object index are replicated with Raft and stored in bbolt. (Users, groups, policies
+and API keys join them in milestone 4.) Every node holds a replica; nodes with the
+`meta` role vote. Changes go through the leader; reads are linearizable on every node,
+by read index. The object index sits behind `ports.ObjectIndex` so it can move to
+sharded Raft groups later; that move needs an ADR. On-disk formats and Raft entries
+carry a version; no node writes an entry format newer than the oldest member of the
+cluster understands, so version N runs alongside N+1 during a rolling upgrade.
 
-## 6. APIs **(S3 subset implemented; the rest is target, milestones 3, 5 and 6)**
+## 6. APIs **(S3 subset, node RPC and events implemented; the rest is target, milestones 5 and 6)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -236,9 +270,12 @@ must run alongside N+1 for rolling upgrades.
 - **Events.** Every state change other components care about is an event named
   `cactusfs.<aggregate>.<event>.v1`, defined in `api/asyncapi/events.yaml` and derived
   from **applied Raft entries**, never published from a handler. Delivery goes through
-  `ports.EventPublisher`: in-process by default, NATS JetStream and webhooks optionally.
-  Consumers dedupe by event ID.
-- **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/`.
+  `ports.EventPublisher`. **Implemented:** the contract, eight events, and the
+  in-process publisher (at most once per node; counted in `cactusfs_events_total`).
+  NATS JetStream and webhooks are milestone 8. Consumers dedupe by event ID.
+- **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
+  with `buf lint` and `buf breaking`. **Implemented:** node description and in-flight
+  questions, the metadata leader's services, and shard storage.
 
 ## 7. Security **(see the threat model for what is implemented)**
 
@@ -291,12 +328,12 @@ so the `console` build tag has no effect today. Logos come from the brand assets
 masters in `docs/brand/`, the console's copies in `web/src/assets/brand/`, the tab icon
 in `web/public/favicon.svg`. They are used as they are and never redrawn.
 
-## 9. Deployment targets **(target, milestones 3 and 7)**
+## 9. Deployment targets **(binary and compose implemented; Helm is milestone 7)**
 
 | Target | Artifact |
 |---|---|
 | Single binary | `dist/cactusfs-<os>-<arch>` — implemented, six targets |
-| Docker Desktop, Podman | `deploy/compose/compose.yaml` — 4-node cluster, rootless-safe |
+| Docker Desktop, Podman | `deploy/compose/compose.yaml` — implemented: 4-node development cluster over mTLS, rootless-safe; `make up` / `make down` |
 | k3s, k8s | `deploy/helm/cactusfs` — StatefulSet, PVC per drive, PDB, default-deny NetworkPolicy, `restricted` Pod Security Standard |
 
 Core code uses no cloud-provider API. Hybrid means separate clusters per site linked by

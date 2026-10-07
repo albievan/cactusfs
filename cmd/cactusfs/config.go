@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
 // Environment variables read by "cactusfs server". Each has a matching flag,
@@ -37,6 +39,20 @@ const (
 	envGCInterval      = "CACTUSFS_GC_INTERVAL"
 	envGCGrace         = "CACTUSFS_GC_GRACE"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
+	envNodeID          = "CACTUSFS_NODE_ID"
+	envRoles           = "CACTUSFS_ROLES"
+	envPeers           = "CACTUSFS_PEERS"
+	envRPCAddr         = "CACTUSFS_RPC_ADDR"
+	envRaftAddr        = "CACTUSFS_RAFT_ADDR"
+	envAdvertiseRPC    = "CACTUSFS_ADVERTISE_RPC"
+	envAdvertiseRaft   = "CACTUSFS_ADVERTISE_RAFT"
+	envNodeTLSCert     = "CACTUSFS_NODE_TLS_CERT"
+	envNodeTLSKey      = "CACTUSFS_NODE_TLS_KEY"
+	envNodeTLSCA       = "CACTUSFS_NODE_TLS_CA"
+	envTopologyRegion  = "CACTUSFS_TOPOLOGY_REGION"
+	envTopologyZone    = "CACTUSFS_TOPOLOGY_ZONE"
+	envTopologyRack    = "CACTUSFS_TOPOLOGY_RACK"
+	envTopologyHost    = "CACTUSFS_TOPOLOGY_HOST"
 	envDrainDelay      = "CACTUSFS_DRAIN_DELAY"
 	envShutdownTimeout = "CACTUSFS_SHUTDOWN_TIMEOUT"
 )
@@ -52,6 +68,8 @@ const (
 const (
 	defaultAdminAddr       = ":9001"
 	defaultS3Addr          = ":9000"
+	defaultRPCAddr         = ":9002"
+	defaultRaftAddr        = ":9003"
 	defaultLogLevel        = "info"
 	defaultShutdownTimeout = 30 * time.Second
 	defaultScrubInterval   = 24 * time.Hour
@@ -124,6 +142,29 @@ type serverConfig struct {
 	// listeners have closed.
 	ShutdownTimeout time.Duration
 
+	// NodeID names the node. A node of a cluster must be given one; a node
+	// on its own generates one.
+	NodeID string
+	// Roles are the jobs this node does.
+	Roles cluster.Roles
+	// Peers lists every node of the cluster, this one included, by ID with
+	// the address of its node RPC. It is what makes a node a member of a
+	// cluster; empty, the node runs on its own.
+	Peers map[string]string
+	// RPCAddr and RaftAddr are the listen addresses of node RPC and Raft;
+	// AdvertiseRPC and AdvertiseRaft are the addresses at which the other
+	// nodes reach them.
+	RPCAddr       string
+	RaftAddr      string
+	AdvertiseRPC  string
+	AdvertiseRaft string
+	// NodeTLSCert, NodeTLSKey and NodeTLSCA are the node's certificate and
+	// key and the CA of the cluster's nodes, for mutual TLS between nodes.
+	NodeTLSCert string
+	NodeTLSKey  string
+	NodeTLSCA   string
+	// Labels say where the node is, for placement.
+	Labels cluster.Labels
 	// secrets come from the environment and are never logged or printed.
 	secrets secrets
 	// raftTiming overrides Raft's timeouts. It has no flag: tests shorten
@@ -241,6 +282,37 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 	fs.BoolVar(&cfg.AllowDriveReplacement, "allow-drive-replacement", allowReplace,
 		"confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is "+
 			"refused afterwards ($"+envAllowReplace+")")
+	fs.StringVar(&cfg.NodeID, "node-id", getenv(envNodeID),
+		"`name` of this node: lowercase letters, digits and hyphens; required in a cluster, where it must be "+
+			"the name in the node certificate ($"+envNodeID+")")
+	roles := fs.String("roles", getenv(envRoles),
+		"`roles` of this node: gateway, meta, storage, console; default all ($"+envRoles+")")
+	peers := fs.String("peers", getenv(envPeers),
+		"every node of the cluster, this one included, as `id=host:port` of its node RPC, separated by commas; "+
+			"makes the node a member of a cluster ($"+envPeers+")")
+	fs.StringVar(&cfg.RPCAddr, "rpc-addr", envString(getenv, envRPCAddr, defaultRPCAddr),
+		"listen `address` of node RPC ($"+envRPCAddr+")")
+	fs.StringVar(&cfg.RaftAddr, "raft-addr", envString(getenv, envRaftAddr, defaultRaftAddr),
+		"listen `address` of the Raft transport ($"+envRaftAddr+")")
+	fs.StringVar(&cfg.AdvertiseRPC, "advertise-rpc", getenv(envAdvertiseRPC),
+		"`host:port` at which other nodes reach this node's RPC; default its entry in --peers ($"+envAdvertiseRPC+")")
+	fs.StringVar(&cfg.AdvertiseRaft, "advertise-raft", getenv(envAdvertiseRaft),
+		"`host:port` at which other nodes reach this node's Raft transport; default the host of "+
+			"--advertise-rpc with the port of --raft-addr ($"+envAdvertiseRaft+")")
+	fs.StringVar(&cfg.NodeTLSCert, "node-tls-cert", getenv(envNodeTLSCert),
+		"`path` of the node certificate for mutual TLS between nodes ($"+envNodeTLSCert+")")
+	fs.StringVar(&cfg.NodeTLSKey, "node-tls-key", getenv(envNodeTLSKey),
+		"`path` of the node certificate's private key ($"+envNodeTLSKey+")")
+	fs.StringVar(&cfg.NodeTLSCA, "node-tls-ca", getenv(envNodeTLSCA),
+		"`path` of the CA certificate that issues the cluster's node certificates, and nothing else ($"+envNodeTLSCA+")")
+	fs.StringVar(&cfg.Labels.Region, "topology-region", getenv(envTopologyRegion),
+		"`region` this node is in, for placement ($"+envTopologyRegion+")")
+	fs.StringVar(&cfg.Labels.Zone, "topology-zone", getenv(envTopologyZone),
+		"`zone` this node is in, for placement ($"+envTopologyZone+")")
+	fs.StringVar(&cfg.Labels.Rack, "topology-rack", getenv(envTopologyRack),
+		"`rack` this node is in, for placement ($"+envTopologyRack+")")
+	fs.StringVar(&cfg.Labels.Host, "topology-host", getenv(envTopologyHost),
+		"`host` this node runs on, for placement ($"+envTopologyHost+")")
 	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", getenv(envOTLPEndpoint),
 		"`URL` of an OTLP/HTTP trace collector; traces are not exported when empty ($"+envOTLPEndpoint+")")
 	logLevel := fs.String("log-level", envString(getenv, envLogLevel, defaultLogLevel),
@@ -262,6 +334,12 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		}
 	}
 	cfg.Data = data
+	if cfg.Roles, err = cluster.ParseRoles(*roles); err != nil {
+		return cfg, err
+	}
+	if cfg.Peers, err = parsePeers(*peers); err != nil {
+		return cfg, err
+	}
 	if err := cfg.LogLevel.UnmarshalText([]byte(*logLevel)); err != nil {
 		return cfg, fmt.Errorf("log level %q: want debug, info, warn or error", *logLevel)
 	}
@@ -289,10 +367,94 @@ func (c *serverConfig) validate() error {
 	if err := c.validateTransport(); err != nil {
 		return err
 	}
+	if err := c.validateCluster(); err != nil {
+		return err
+	}
 	if err := c.validateStorage(); err != nil {
 		return err
 	}
 	return c.validateSecrets()
+}
+
+// parsePeers parses the --peers list.
+func parsePeers(list string) (map[string]string, error) {
+	if strings.TrimSpace(list) == "" {
+		return nil, nil
+	}
+	peers := map[string]string{}
+	for item := range strings.SplitSeq(list, ",") {
+		id, address, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if !ok {
+			return nil, fmt.Errorf("peer %q: want id=host:port", item)
+		}
+		if err := cluster.ValidateNodeID(id); err != nil {
+			return nil, fmt.Errorf("peer %q: %w", item, err)
+		}
+		if host, _, err := net.SplitHostPort(address); err != nil || host == "" {
+			return nil, fmt.Errorf("peer %q: address %q: want host:port", item, address)
+		}
+		if _, dup := peers[id]; dup {
+			return nil, fmt.Errorf("peer %s is listed twice", id)
+		}
+		peers[id] = address
+	}
+	return peers, nil
+}
+
+// clustered reports whether the node is a member of a cluster.
+func (c *serverConfig) clustered() bool {
+	return len(c.Peers) > 0
+}
+
+// validateCluster checks what a member of a cluster needs: a name, its place
+// in the list of peers, and a certificate - there is no node RPC and no Raft
+// transport without mutual TLS, in development mode either.
+func (c *serverConfig) validateCluster() error {
+	if c.NodeID != "" {
+		if err := cluster.ValidateNodeID(c.NodeID); err != nil {
+			return err
+		}
+	}
+	if !c.clustered() {
+		if c.NodeTLSCert != "" || c.NodeTLSKey != "" || c.NodeTLSCA != "" || c.AdvertiseRPC != "" || c.AdvertiseRaft != "" {
+			return errors.New("node certificates and advertised addresses are for members of a cluster: set --peers")
+		}
+		if !slices.Equal(c.Roles, cluster.AllRoles()) {
+			return errors.New("a node on its own has every role: --roles is for members of a cluster (set --peers)")
+		}
+		return nil
+	}
+	if c.NodeID == "" {
+		return errors.New("a member of a cluster needs a name: set --node-id")
+	}
+	own, listed := c.Peers[c.NodeID]
+	if !listed {
+		return fmt.Errorf("--peers must list every node of the cluster, this one (%s) included", c.NodeID)
+	}
+	if c.NodeTLSCert == "" || c.NodeTLSKey == "" || c.NodeTLSCA == "" {
+		return errors.New("nodes of a cluster talk to each other over mutual TLS only: " +
+			"set --node-tls-cert, --node-tls-key and --node-tls-ca")
+	}
+	if c.AdvertiseRPC == "" {
+		c.AdvertiseRPC = own
+	}
+	host, _, err := net.SplitHostPort(c.AdvertiseRPC)
+	if err != nil || host == "" {
+		return fmt.Errorf("advertised RPC address %q: want host:port", c.AdvertiseRPC)
+	}
+	for name, addr := range map[string]string{"RPC": c.RPCAddr, "Raft": c.RaftAddr} {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("%s address %q: %w", name, addr, err)
+		}
+	}
+	if c.AdvertiseRaft == "" {
+		_, port, _ := net.SplitHostPort(c.RaftAddr)
+		c.AdvertiseRaft = net.JoinHostPort(host, port)
+	}
+	if h, _, err := net.SplitHostPort(c.AdvertiseRaft); err != nil || h == "" {
+		return fmt.Errorf("advertised Raft address %q: want host:port", c.AdvertiseRaft)
+	}
+	return nil
 }
 
 // validateTransport enforces encryption in transit: TLS, or development
@@ -328,8 +490,13 @@ func (c *serverConfig) validateTransport() error {
 // validateStorage requires drives and an explicitly chosen KMS: there is no
 // mode that stores data unencrypted.
 func (c *serverConfig) validateStorage() error {
-	if len(c.Data) == 0 {
+	switch storage := c.Roles.Has(cluster.RoleStorage); {
+	case storage && len(c.Data) == 0:
 		return errors.New("at least one drive is required: set --data <directory>")
+	case !storage && len(c.Data) > 0:
+		return errors.New("--data is for nodes with the storage role")
+	case !storage && c.MetaDir == "":
+		return errors.New("a node without drives needs a metadata directory: set --meta-dir")
 	}
 	seen := map[string]bool{}
 	for i, dir := range c.Data {
@@ -355,6 +522,12 @@ func (c *serverConfig) validateStorage() error {
 		return fmt.Errorf("unknown key management service %q: want %q", c.KMS, kmsLocal)
 	}
 	if c.KMSKeyFile == "" {
+		if c.clustered() {
+			// Every node must open the same key; one made here would be
+			// this node's alone.
+			return errors.New("the nodes of a cluster share one KMS key: set --kms-key-file to the key file " +
+				"they all have (\"cactusfs dev-init\" writes one for development)")
+		}
 		c.KMSKeyFile = filepath.Join(c.MetaDir, kmsKeyFileName)
 	}
 	return nil

@@ -38,7 +38,7 @@ func newFSM(t *testing.T) *fsm {
 
 func command(t *testing.T, index uint64, e entry) *raft.Log {
 	t.Helper()
-	data, err := encodeEntry(e)
+	data, err := encodeEntry(e, entrySchemaVersion)
 	if err != nil {
 		t.Fatalf("encodeEntry: %v", err)
 	}
@@ -259,14 +259,14 @@ func TestEntryRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	version := porttest.SampleVersion("b", "k", 7)
-	data, err := encodeEntry(entry{Type: cmdPutObject, PutObject: versionToRecord(version)})
+	data, err := encodeEntry(entry{Type: cmdPutObject, PutObject: versionToRecord(version)}, entrySchemaVersion)
 	if err != nil {
 		t.Fatalf("encodeEntry: %v", err)
 	}
 	if data[0] != entrySchemaVersion {
 		t.Errorf("first byte = %d, want the schema version %d", data[0], entrySchemaVersion)
 	}
-	decoded, err := decodeEntry(data)
+	decoded, err := decodeEntry(data, entrySchemaVersion)
 	if err != nil {
 		t.Fatalf("decodeEntry: %v", err)
 	}
@@ -299,7 +299,7 @@ func FuzzDecodeEntry(f *testing.F) {
 	f.Add(append([]byte{1}, `{"type":"bucket.delete","delete_bucket":{"name":"x"}}`...))
 	f.Add(append([]byte{2}, `{}`...))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		e, err := decodeEntry(data)
+		e, err := decodeEntry(data, entrySchemaVersion)
 		if err != nil {
 			if !errors.Is(err, domain.ErrUnsupportedFormat) {
 				t.Fatalf("untyped error: %v", err)

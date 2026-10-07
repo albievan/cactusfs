@@ -31,6 +31,10 @@ type HealResult struct {
 	Unrecoverable bool
 	// Verified is the number of stored bytes that were read and verified.
 	Verified int64
+	// Offline is the number of shards on drives that could not be reached.
+	// Nothing is known about them; they are checked when the drives are
+	// back.
+	Offline int
 }
 
 type healTarget struct {
@@ -134,6 +138,7 @@ func (h *Healer) heal(ctx context.Context, bucketName, key string, slow throttle
 
 	outcome, healErr := h.storage.heal(ctx, version, slow)
 	result.Shards, result.Damaged, result.Rebuilt, result.Verified = outcome.shards, outcome.damaged, len(outcome.rebuilt), outcome.verified
+	result.Offline = outcome.offline
 	if healErr == nil && result.Damaged == 0 {
 		h.observe(result)
 		return result, nil

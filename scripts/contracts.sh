@@ -54,8 +54,51 @@ pending() {
 }
 
 pending api/openapi "oapi-codegen diff + oasdiff" 5.1
-pending api/asyncapi "AsyncAPI validation" 3.6
-pending api/proto "buf lint + buf breaking" 3.2
+
+# Events: every AsyncAPI document must be valid. The validator runs on the
+# packages of web/, so those must be installed (`make contracts` does it).
+found=0
+for doc in api/asyncapi/*.yaml; do
+	[ -f "$doc" ] || continue
+	found=1
+	if ! node scripts/asyncapi-validate.mjs "$doc"; then
+		status=1
+	fi
+done
+if [ "$found" -eq 0 ]; then
+	echo "contracts: FAIL - api/asyncapi holds no event contract" >&2
+	status=1
+fi
+
+# Node RPC: style, formatting, and no change that breaks a node of the
+# previous release. The reference is the commit this work is based on;
+# CONTRACT_BASE overrides it (CI sets it to the target branch).
+if ! buf lint; then
+	echo "contracts: FAIL - buf lint" >&2
+	status=1
+fi
+if ! buf format --diff --exit-code >/dev/null; then
+	echo "contracts: FAIL - api/proto is not formatted; run 'buf format -w'" >&2
+	status=1
+fi
+base=${CONTRACT_BASE:-HEAD}
+case "$base" in
+*[!0]*) ;;
+*) base=HEAD ;; # all zeros: the first push of a branch has no "before"
+esac
+if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+	echo "contracts: FAIL - reference commit '$base' not found" >&2
+	status=1
+elif git ls-tree -r --name-only "$base" -- api/proto | grep -q '\.proto$'; then
+	if buf breaking --against ".git#ref=$base"; then
+		echo "contracts: node RPC - no breaking change against $base"
+	else
+		echo "contracts: FAIL - breaking change in api/proto against $base" >&2
+		status=1
+	fi
+else
+	echo "contracts: node RPC - $base has no contract yet, nothing to compare with"
+fi
 
 [ "$status" -eq 0 ] && echo "contracts: PASS"
 exit "$status"

@@ -12,14 +12,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/disk"
 	"github.com/albievan/cactusfs/internal/adapters/erasurecodec"
+	"github.com/albievan/cactusfs/internal/adapters/events/inproc"
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
+	"github.com/albievan/cactusfs/internal/adapters/noderpc"
+	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -40,6 +45,20 @@ func (systemClock) Now() time.Time { return time.Now() }
 type node struct {
 	drives []*disk.Drive
 	meta   *raftmeta.Store
+	// id is the node's name; roles are its jobs.
+	id    string
+	roles cluster.Roles
+	// The fields below are set on a member of a cluster only.
+	identity  *nodetls.Identity
+	rpc       *noderpc.Client
+	rpcServer *noderpc.Server
+	rpcDone   chan error
+	events    *inproc.Bus
+	// inFlight answers other nodes' collectors; it is set once the object
+	// service exists. started is the metadata store as node RPC sees it:
+	// node RPC serves before the store is open, and from other goroutines.
+	inFlight atomic.Pointer[app.ObjectService]
+	started  atomic.Pointer[raftmeta.Store]
 
 	buckets    *app.BucketService
 	objects    *app.ObjectService
@@ -71,6 +90,9 @@ func openNode(
 }
 
 func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, notice io.Writer) error {
+	n.roles = cfg.Roles
+	// The one authorization decision point. Node RPC needs it first.
+	n.authorizer = app.NewAuthorizer(logger)
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
 	attached := make([]app.AttachedDrive, 0, len(cfg.Data))
 	for _, dir := range cfg.Data {
@@ -91,22 +113,25 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	}
 	kms := n.telemetry.InstrumentKMS(localKMS)
 
-	startCtx, cancel := context.WithTimeout(ctx, metadataStartTimeout)
-	defer cancel()
-	n.meta, err = raftmeta.Open(startCtx, raftmeta.Config{
-		Dir: cfg.MetaDir, Logger: logger, Entropy: rand.Reader, Timing: cfg.raftTiming,
-	})
-	if err != nil {
+	// Events are derived from applied metadata entries and delivered inside
+	// the process.
+	n.events = inproc.New(logger)
+	n.events.Subscribe("telemetry", inproc.Deduplicate(n.telemetry.ObserveEvent))
+
+	if err := n.openMetadata(ctx, cfg, logger); err != nil {
 		return err
 	}
-
+	n.id = n.meta.NodeID()
 	// Every outbound port is reached through a decorator that traces and
 	// counts the call.
 	meta := n.telemetry.InstrumentMetadata(n.meta)
 
-	topology, err := app.EnsureTopology(ctx, meta, attached, app.TopologyOptions{
-		AllowReplacement: cfg.AllowDriveReplacement, Entropy: rand.Reader, Logger: logger,
-	})
+	if cfg.clustered() {
+		if err := n.joinCluster(ctx, cfg, logger); err != nil {
+			return err
+		}
+	}
+	topology, err := n.ensureTopology(ctx, cfg, meta, attached, logger)
 	if err != nil {
 		return err
 	}
@@ -120,28 +145,36 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	} else {
 		logger.InfoContext(ctx, "erasure coding enabled",
 			slog.Int("erasure_sets", len(topology.Sets)), slog.Int("data_shards", params.Data),
-			slog.Int("parity_shards", params.Parity), slog.Int("write_quorum", params.WriteQuorum()))
+			slog.Int("parity_shards", params.Parity), slog.Int("write_quorum", params.WriteQuorum()),
+			slog.Int("nodes", len(topology.NodeIDs())), slog.Int("node_failures_tolerated", topology.NodeFailuresTolerated()))
 	}
-	n.authorizer = app.NewAuthorizer(logger)
+	if cfg.clustered() && topology.NodeFailuresTolerated() == 0 {
+		logger.WarnContext(ctx, "the drives of this cluster are spread so that the loss of ONE NODE can make objects unreadable")
+	}
+
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: meta, Buckets: meta, Topology: topology, Drives: stores, Codec: erasurecodec.New(), KMS: kms,
+		Index: meta, Buckets: meta, Drives: n.driveSource(stores), Codec: erasurecodec.New(), KMS: kms,
 		OnHeal: n.telemetry.ObserveHeal,
 		Authz:  n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {
 		return err
 	}
+	n.inFlight.Store(n.objects)
 	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader)
 	n.scrubber = app.NewScrubber(app.ScrubberConfig{
 		Buckets: meta, Index: meta, Healer: n.objects.Healer(), Logger: logger,
 		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20, OnPass: n.telemetry.ObserveScrub,
+		// One node scrubs at a time: the one that leads the metadata group.
+		Active: n.meta.IsLeader,
 	})
 	n.collector = app.NewCollector(app.CollectorConfig{
+		// Every node collects on its own drives.
 		Drives: stores, Index: meta, Clock: n.clock, Grace: cfg.GCGrace, Logger: logger, OnPass: n.telemetry.ObserveGC,
 		// Nothing is collected while the metadata cannot be trusted, nor
-		// what a write in progress has put on the drives.
-		Ready: n.meta.Check, InFlight: n.objects.InFlight,
+		// what a write in progress on any node has put on the drives.
+		Ready: n.meta.Check, InFlight: n.inFlightAnywhere,
 	})
 
 	var provided *app.Credentials
@@ -157,6 +190,98 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		showCredentials(notice, *generated)
 	}
 	return nil
+}
+
+// openMetadata opens the metadata store: a Raft group of this node alone,
+// or, for a member of a cluster, a store that waits to be part of one.
+func (n *node) openMetadata(ctx context.Context, cfg serverConfig, logger *slog.Logger) (err error) {
+	config := raftmeta.Config{
+		Dir: cfg.MetaDir, Logger: logger, Entropy: rand.Reader, Timing: cfg.raftTiming, NodeID: cfg.NodeID, Events: n.events,
+	}
+	if cfg.clustered() {
+		if config.Cluster, err = n.openCluster(ctx, cfg, logger); err != nil {
+			return err
+		}
+	}
+	startCtx, cancel := context.WithTimeout(ctx, metadataStartTimeout)
+	defer cancel()
+	if n.meta, err = raftmeta.Open(startCtx, config); err != nil {
+		return err
+	}
+	n.started.Store(n.meta)
+	return nil
+}
+
+// ensureTopology returns the deployment's topology, once this node's drives
+// agree with it. On a member of a new cluster that means waiting until the
+// leader has recorded the topology, which it can only when it has heard from
+// every node.
+func (n *node) ensureTopology(
+	ctx context.Context, cfg serverConfig, meta ports.TopologyStore, attached []app.AttachedDrive, logger *slog.Logger,
+) (cluster.Topology, error) {
+	opts := app.TopologyOptions{
+		AllowReplacement: cfg.AllowDriveReplacement, NodeID: n.id, Labels: cfg.Labels, Entropy: rand.Reader, Logger: logger,
+	}
+	if !cfg.clustered() {
+		return app.EnsureTopology(ctx, meta, attached, opts)
+	}
+	opts.Survey = func(ctx context.Context) ([]cluster.DriveState, map[string]cluster.Labels, error) {
+		return n.surveyDrives(ctx, cfg)
+	}
+	waiting := newProgress(logger, "waiting for the drive topology of the cluster")
+	for {
+		topology, err := app.EnsureTopology(ctx, meta, attached, opts)
+		if err == nil || !transient(err) {
+			return topology, err
+		}
+		if err := waiting.pause(ctx, err); err != nil {
+			return cluster.Topology{}, err
+		}
+	}
+}
+
+// driveSource finds drives for the object service: this node's by their ID,
+// those of other nodes through node RPC.
+func (n *node) driveSource(local []ports.ShardStore) ports.DriveSource {
+	source := &driveSource{node: n, view: n.meta.Local(), local: map[string]ports.ShardStore{}, remote: map[string]ports.ShardStore{}}
+	for _, drive := range local {
+		source.local[drive.DriveID()] = drive
+	}
+	return source
+}
+
+type driveSource struct {
+	node  *node
+	view  ports.ClusterView
+	local map[string]ports.ShardStore
+
+	mu     sync.Mutex
+	remote map[string]ports.ShardStore
+}
+
+// Topology implements ports.DriveSource.
+func (d *driveSource) Topology(ctx context.Context) (cluster.Topology, error) {
+	return d.view.Topology(ctx)
+}
+
+// Drive implements ports.DriveSource.
+func (d *driveSource) Drive(slot cluster.Slot) (ports.ShardStore, bool) {
+	if slot.NodeID == d.node.id {
+		drive, ok := d.local[slot.DriveID]
+		return drive, ok
+	}
+	if d.node.rpc == nil {
+		return nil, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key := slot.NodeID + "/" + slot.DriveID
+	drive, ok := d.remote[key]
+	if !ok {
+		drive = d.node.telemetry.InstrumentShardStore(d.node.rpc.Drive(slot.NodeID, slot.DriveID))
+		d.remote[key] = drive
+	}
+	return drive, true
 }
 
 // showCredentials prints generated root credentials. This is the only place
@@ -271,9 +396,10 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	if cfg.ScrubInterval > 0 {
 		n.background.Go(func() { n.scrubber.Run(ctx, cfg.ScrubInterval) })
 	}
-	if cfg.GCInterval > 0 {
+	if cfg.GCInterval > 0 && len(n.drives) > 0 {
 		n.background.Go(func() { n.collector.Run(ctx, cfg.GCInterval) })
 	}
+	n.background.Go(func() { n.events.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases
@@ -286,8 +412,22 @@ func (n *node) Close() error {
 	}
 	var errs []error
 	if n.meta != nil {
+		// Let the others carry on without waiting for an election timeout.
+		n.meta.HandOver()
+	}
+	if n.rpcServer != nil {
+		n.rpcServer.Stop(rpcStopTimeout)
+		<-n.rpcDone
+		n.rpcServer = nil
+	}
+	n.started.Store(nil)
+	if n.meta != nil {
 		errs = append(errs, n.meta.Close())
 		n.meta = nil
+	}
+	if n.rpc != nil {
+		errs = append(errs, n.rpc.Close())
+		n.rpc = nil
 	}
 	for _, drive := range n.drives {
 		errs = append(errs, drive.Close())

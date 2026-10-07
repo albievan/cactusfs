@@ -44,11 +44,17 @@ const (
 	restoreFile  = "state.db.restore"
 	snapshotsDir = "snapshots"
 
-	dirMode           = 0o700
-	lockTimeout       = 2 * time.Second
-	retainedSnapshots = 2
-	nodeIDSize        = 8
-	defaultApplyWait  = 10 * time.Second
+	dirMode            = 0o700
+	lockTimeout        = 2 * time.Second
+	retainedSnapshots  = 2
+	nodeIDSize         = 8
+	defaultApplyWait   = 10 * time.Second
+	defaultLeaderWait  = 10 * time.Second
+	defaultConfirmWait = 2 * time.Second
+
+	clusterCommitTimeout = 10 * time.Millisecond
+	raftConnectionPool   = 3
+	raftIOTimeout        = 10 * time.Second
 )
 
 // Config configures a Store.
@@ -62,6 +68,15 @@ type Config struct {
 	// Timing overrides Raft's timeouts; the zero value keeps the defaults.
 	// Tests shorten them.
 	Timing Timing
+	// NodeID names this node. It is fixed at the first start: when empty a
+	// name is generated then, and a later start with another name is
+	// refused.
+	NodeID string
+	// Cluster makes the store a member of a Raft group of several nodes.
+	// When nil the node is the only voter of its own group.
+	Cluster *Cluster
+	// Events, when not nil, receives the events of every applied entry.
+	Events ports.EventPublisher
 }
 
 // Timing holds the Raft timeouts a caller may override.
@@ -70,6 +85,13 @@ type Timing struct {
 	Election    time.Duration
 	LeaderLease time.Duration
 	Commit      time.Duration
+	// LeaderWait is how long an operation waits for the group to have a
+	// leader before it fails as unavailable. The default is ten seconds.
+	LeaderWait time.Duration
+	// TrailingLogs is how many entries stay in the log behind a snapshot;
+	// zero keeps Raft's default. A node further behind than that is sent
+	// the snapshot instead.
+	TrailingLogs uint64
 }
 
 // nodeInfo is the content of node.json: the stable identity of this metadata
@@ -94,6 +116,28 @@ type Store struct {
 	fsm    *fsm
 	logs   *raftboltdb.BoltStore
 	raft   *raft.Raft
+
+	logger *slog.Logger
+	// leader reaches the leader of the group from a node that is not it;
+	// nil when the node is alone.
+	leader     LeaderClient
+	transport  *raft.NetworkTransport
+	leaderWait time.Duration
+	// confirmWait bounds one round of asking the voters for their term.
+	confirmWait time.Duration
+	verifier    verifier
+	// readyTerm is the term in which this node, as leader, has made sure
+	// its state machine holds everything from earlier terms.
+	readyMu   sync.Mutex
+	readyTerm uint64
+	// supported is the newest entry schema this binary applies; versionOf
+	// names the schema an entry needs. Tests replace both to stand in for
+	// the binary of a later release.
+	supported byte
+	versionOf func(entry) byte
+	// stopped is closed when the state machine has stopped.
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 var (
@@ -101,12 +145,16 @@ var (
 	_ ports.ObjectIndex         = (*Store)(nil)
 	_ ports.RootCredentialStore = (*Store)(nil)
 	_ ports.TopologyStore       = (*Store)(nil)
+	_ ports.NodeRegistry        = (*Store)(nil)
 	_ ports.ReadinessCheck      = (*Store)(nil)
 )
 
-// Open opens the metadata store in cfg.Dir, creating a single-voter Raft
-// group on first use, and waits until this node leads it or ctx ends. The
-// caller must Close the store.
+// Open opens the metadata store in cfg.Dir. The caller must Close the store.
+//
+// A node on its own creates a single-voter Raft group on first use, and Open
+// waits until the node leads it or ctx ends. A member of a cluster starts
+// without a group and returns at once: the group is formed with Bootstrap, or
+// the node is added to an existing one by its leader.
 func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err := os.MkdirAll(cfg.Dir, dirMode); err != nil {
 		return nil, fmt.Errorf("raftmeta.Open: %w", err)
@@ -115,10 +163,21 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("raftmeta.Open: %w", err)
 	}
-	s := &Store{root: root}
-	if err := s.start(cfg); err != nil {
+	s := &Store{
+		root: root, logger: cfg.Logger, leaderWait: cfg.Timing.LeaderWait,
+		supported: entrySchemaVersion, versionOf: versionOf, stopped: make(chan struct{}),
+	}
+	if s.leaderWait <= 0 {
+		s.leaderWait = defaultLeaderWait
+	}
+	s.confirmWait = min(s.leaderWait, defaultConfirmWait)
+	if err := s.start(ctx, cfg); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("raftmeta.Open: %s: %w", cfg.Dir, err)
+	}
+	go s.leaveWhenStopped()
+	if cfg.Cluster != nil {
+		return s, nil
 	}
 	if err := s.waitForLeadership(ctx); err != nil {
 		_ = s.Close()
@@ -127,13 +186,43 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) start(cfg Config) error {
+// leaveWhenStopped takes the node out of the Raft group when its state
+// machine can no longer apply entries. A leader in that condition would hold
+// the whole cluster up; this way the others elect a new one. The node stays
+// out until it is restarted.
+func (s *Store) leaveWhenStopped() {
+	<-s.stopped
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.closed {
+		_ = s.raft.Shutdown().Error()
+	}
+}
+
+func (s *Store) start(ctx context.Context, cfg Config) error {
 	var err error
-	if s.nodeID, err = loadOrCreateNodeID(s.root, cfg.Entropy); err != nil {
+	if s.nodeID, err = loadOrCreateNodeID(s.root, cfg.Entropy, cfg.NodeID); err != nil {
 		return err
 	}
 	if s.fsm, err = openFSM(s.root); err != nil {
 		return err
+	}
+	s.fsm.supported = s.supported
+	if events := cfg.Events; events != nil {
+		// Events are published for as long as the store lives, not for as
+		// long as opening it took.
+		ctx := context.WithoutCancel(ctx)
+		s.fsm.publish = func(e ports.Event) {
+			if err := events.Publish(ctx, e); err != nil {
+				// The publisher counts what it drops; a line per event
+				// would flood the log of a node that replays a long log.
+				cfg.Logger.Debug("event not delivered", slog.String("event_id", e.ID), slog.String("type", e.Type), slog.Any("error", err))
+			}
+		}
+	}
+	s.fsm.onFail = func(err error) {
+		cfg.Logger.Error("metadata state machine stopped; this node leaves the metadata group until it is restarted", slog.Any("error", err))
+		s.stopOnce.Do(func() { close(s.stopped) })
 	}
 	dir := s.root.Name()
 	s.logs, err = raftboltdb.New(raftboltdb.Options{
@@ -155,22 +244,47 @@ func (s *Store) start(cfg Config) error {
 	// The state database is durable on its own. Restoring the latest
 	// snapshot over it at every start would move it back in time.
 	conf.NoSnapshotRestoreOnStart = true
+	if cfg.Cluster != nil {
+		// A follower learns that an entry is committed with the leader's
+		// next message, at the latest after this long. Every read on a
+		// node that does not lead waits for that, so it is kept short;
+		// the price is more frequent heartbeats on an idle cluster.
+		conf.CommitTimeout = clusterCommitTimeout
+	}
+	if cfg.Timing.TrailingLogs > 0 {
+		conf.TrailingLogs = cfg.Timing.TrailingLogs
+	}
 	if t := cfg.Timing; t.Heartbeat > 0 {
 		conf.HeartbeatTimeout, conf.ElectionTimeout = t.Heartbeat, t.Election
 		conf.LeaderLeaseTimeout, conf.CommitTimeout = t.LeaderLease, t.Commit
 	}
 
-	// One voter needs no network. The address is fixed because Raft stores
-	// it in its configuration; node RPC over mTLS replaces this transport
-	// when clusters arrive (PLAN 3.3).
+	var transport raft.Transport
 	address := raft.ServerAddress(s.nodeID)
-	_, transport := raft.NewInmemTransport(address)
+	if c := cfg.Cluster; c != nil {
+		// Members of a cluster talk Raft over connections the caller has
+		// secured with mutual TLS.
+		s.leader = c.Leader
+		address = raft.ServerAddress(c.Advertise)
+		s.transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
+			Stream:                &streamLayer{Listener: c.Listener, dial: c.Dial},
+			MaxPool:               raftConnectionPool,
+			Timeout:               raftIOTimeout,
+			Logger:                logger,
+			ServerAddressProvider: addressProvider{advertise: address, local: conf.LocalID},
+		})
+		transport = s.transport
+	} else {
+		// One voter needs no network. The address is fixed because Raft
+		// stores it in its configuration.
+		_, transport = raft.NewInmemTransport(address)
+	}
 
 	existing, err := raft.HasExistingState(s.logs, s.logs, snapshots)
 	if err != nil {
 		return fmt.Errorf("inspect raft state: %w", err)
 	}
-	if !existing {
+	if !existing && cfg.Cluster == nil {
 		servers := raft.Configuration{Servers: []raft.Server{{Suffrage: raft.Voter, ID: conf.LocalID, Address: address}}}
 		if err := raft.BootstrapCluster(conf, s.logs, s.logs, snapshots, transport, servers); err != nil {
 			return fmt.Errorf("bootstrap raft: %w", err)
@@ -236,7 +350,11 @@ func (s *Store) waitForLeadership(ctx context.Context) error {
 	return s.fsm.health()
 }
 
-func loadOrCreateNodeID(root *os.Root, entropy io.Reader) (string, error) {
+// loadOrCreateNodeID returns the node's identity. The first start fixes it:
+// as want when that is given, generated otherwise. A later start that asks
+// for another name is refused, because Raft and the drive topology know the
+// node by the first.
+func loadOrCreateNodeID(root *os.Root, entropy io.Reader, want string) (string, error) {
 	data, err := root.ReadFile(nodeFile)
 	if err == nil {
 		var info nodeInfo
@@ -246,17 +364,27 @@ func loadOrCreateNodeID(root *os.Root, entropy io.Reader) (string, error) {
 		if info.FormatVersion != nodeVersion {
 			return "", fmt.Errorf("%w: node file version %d", domain.ErrUnsupportedFormat, info.FormatVersion)
 		}
+		if want != "" && want != info.NodeID {
+			return "", fmt.Errorf("%w: this metadata directory belongs to node %q, not %q; a node keeps its name",
+				domain.ErrInvalidArgument, info.NodeID, want)
+		}
 		return info.NodeID, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
 
-	id := make([]byte, nodeIDSize)
-	if _, err := io.ReadFull(entropy, id); err != nil {
-		return "", fmt.Errorf("generate node ID: %w", err)
+	info := nodeInfo{Magic: nodeMagic, FormatVersion: nodeVersion, NodeID: want}
+	if want == "" {
+		id := make([]byte, nodeIDSize)
+		if _, err := io.ReadFull(entropy, id); err != nil {
+			return "", fmt.Errorf("generate node ID: %w", err)
+		}
+		info.NodeID = "node-" + hex.EncodeToString(id)
 	}
-	info := nodeInfo{Magic: nodeMagic, FormatVersion: nodeVersion, NodeID: "node-" + hex.EncodeToString(id)}
+	if err := cluster.ValidateNodeID(info.NodeID); err != nil {
+		return "", err
+	}
 	data, err = json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return "", err
@@ -278,8 +406,12 @@ func (s *Store) Close() error {
 	s.closed = true
 
 	var errs []error
+	s.stopOnce.Do(func() { close(s.stopped) })
 	if s.raft != nil {
 		errs = append(errs, s.raft.Shutdown().Error())
+	}
+	if s.transport != nil {
+		errs = append(errs, s.transport.Close())
 	}
 	if s.logs != nil {
 		errs = append(errs, s.logs.Close())
@@ -314,14 +446,17 @@ func (s *Store) Name() string {
 	return "metadata"
 }
 
-// Check implements ports.ReadinessCheck: the node is ready when it leads the
-// metadata group and its state machine is healthy.
+// Check implements ports.ReadinessCheck: the node is ready when its state
+// machine is healthy and the metadata group has a leader it knows of.
 func (s *Store) Check(context.Context) error {
 	return s.use(func() error {
-		if state := s.raft.State(); state != raft.Leader {
-			return fmt.Errorf("%w: raft state is %s", domain.ErrNotLeader, state)
+		if err := s.fsm.health(); err != nil {
+			return err
 		}
-		return s.fsm.health()
+		if address, _ := s.raft.LeaderWithID(); address == "" {
+			return fmt.Errorf("%w: the metadata group has no leader (raft state is %s)", domain.ErrNotLeader, s.raft.State())
+		}
+		return nil
 	})
 }
 
@@ -346,8 +481,20 @@ func (s *Store) AppliedIndex() (uint64, error) {
 	return index, err
 }
 
-// view runs fn in a read transaction on the state.
-func (s *Store) view(fn func(tx *bbolt.Tx) error) error {
+// view runs fn in a read transaction on the state, once the state reflects
+// everything that was committed before the call: reads are linearizable on
+// every node, whether it leads or not.
+func (s *Store) view(ctx context.Context, fn func(tx *bbolt.Tx) error) error {
+	return s.use(func() error {
+		if err := s.consistent(ctx); err != nil {
+			return err
+		}
+		return s.fsm.view(fn)
+	})
+}
+
+// peek runs fn in a read transaction on the state as it is on this node now.
+func (s *Store) peek(fn func(tx *bbolt.Tx) error) error {
 	return s.use(func() error { return s.fsm.view(fn) })
 }
 
@@ -372,31 +519,57 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 		if err := s.fsm.health(); err != nil {
 			return err
 		}
-		data, err := encodeEntry(e)
+		version := s.versionOf(e)
+		if level, err := s.entryVersion(); err != nil {
+			return err
+		} else if version > level {
+			return fmt.Errorf("%w: the cluster is being upgraded: this change needs metadata version %d, "+
+				"and a node that only understands version %d is still a member", domain.ErrUnavailable, version, level)
+		}
+		data, err := encodeEntry(e, version)
 		if err != nil {
 			return err
 		}
-		wait := defaultApplyWait
-		if deadline, ok := ctx.Deadline(); ok {
-			wait = max(time.Until(deadline), time.Millisecond)
-		}
-		future := s.raft.Apply(data, wait)
-		if err := future.Error(); err != nil {
-			return translateRaftError(err)
-		}
-		applied, ok := future.Response().(applyResult)
-		if !ok {
-			return fmt.Errorf("%w: unexpected state machine response", domain.ErrOutcomeUnknown)
-		}
-		if applied.fatal {
-			// The entry is in the log but was not applied; it will be
-			// applied when the cause is gone and the node restarts.
-			return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, applied.err)
-		}
-		result = applied
-		return applied.err
+		return s.onLeader(ctx,
+			func() (err error) {
+				result, err = s.apply(ctx, data)
+				return err
+			},
+			func(leaderID string) error {
+				raw, err := s.leader.Propose(ctx, leaderID, data)
+				if err != nil {
+					return err
+				}
+				if result, err = decodeResult(raw); err != nil {
+					// The leader applied the entry; what it answered is lost.
+					return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, err)
+				}
+				return result.err
+			})
 	})
 	return result, err
+}
+
+// apply commits an encoded entry on this node, which must be the leader.
+func (s *Store) apply(ctx context.Context, data []byte) (applyResult, error) {
+	wait := defaultApplyWait
+	if deadline, ok := ctx.Deadline(); ok {
+		wait = max(time.Until(deadline), time.Millisecond)
+	}
+	future := s.raft.Apply(data, wait)
+	if err := future.Error(); err != nil {
+		return applyResult{}, translateRaftError(err)
+	}
+	applied, ok := future.Response().(applyResult)
+	if !ok {
+		return applyResult{}, fmt.Errorf("%w: unexpected state machine response", domain.ErrOutcomeUnknown)
+	}
+	if applied.fatal {
+		// The entry is in the log but was not applied; it will be
+		// applied when the cause is gone and the node restarts.
+		return applyResult{}, fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, applied.err)
+	}
+	return applied, applied.err
 }
 
 // translateRaftError maps a Raft error to a domain error. Only the errors
@@ -439,7 +612,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (bucket.Bucket, erro
 		return bucket.Bucket{}, fmt.Errorf("raftmeta.GetBucket: %w", err)
 	}
 	var record bucketRecord
-	err := s.view(func(tx *bbolt.Tx) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		raw := tx.Bucket(bucketsBucket()).Get([]byte(name))
 		if raw == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
@@ -461,7 +634,7 @@ func (s *Store) ListBuckets(ctx context.Context) ([]bucket.Bucket, error) {
 		return nil, fmt.Errorf("raftmeta.ListBuckets: %w", err)
 	}
 	var out []bucket.Bucket
-	err := s.view(func(tx *bbolt.Tx) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketsBucket()).ForEach(func(_, raw []byte) error {
 			var record bucketRecord
 			if err := json.Unmarshal(raw, &record); err != nil {
@@ -513,7 +686,7 @@ func (s *Store) GetObject(ctx context.Context, bucketName, key string) (object.V
 		return object.Version{}, fmt.Errorf("raftmeta.GetObject: %w", err)
 	}
 	var version object.Version
-	err := s.view(func(tx *bbolt.Tx) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		index := tx.Bucket(objectsBucket()).Bucket([]byte(bucketName))
 		if index == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
@@ -542,7 +715,7 @@ func (s *Store) GetObject(ctx context.Context, bucketName, key string) (object.V
 func (s *Store) ScanObjects(
 	ctx context.Context, bucketName, start string, visit func(object.Version) ports.ScanControl,
 ) error {
-	err := s.view(func(tx *bbolt.Tx) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		index := tx.Bucket(objectsBucket()).Bucket([]byte(bucketName))
 		if index == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
@@ -585,7 +758,7 @@ func (s *Store) GetRootCredential(ctx context.Context) (iam.RootCredential, erro
 		return iam.RootCredential{}, fmt.Errorf("raftmeta.GetRootCredential: %w", err)
 	}
 	var record rootRecord
-	err := s.view(func(tx *bbolt.Tx) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		raw := tx.Bucket(iamBucket()).Get(rootKey())
 		if raw == nil {
 			return domain.ErrNotBootstrapped
@@ -622,6 +795,11 @@ func (s *Store) IsDataReferenced(ctx context.Context, dataID object.ID) (bool, e
 		if err := s.fsm.health(); err != nil {
 			return err
 		}
+		// The answer must include every version committed before the
+		// question was asked, on whichever node committed it.
+		if err := s.consistent(ctx); err != nil {
+			return err
+		}
 		return s.fsm.view(func(tx *bbolt.Tx) error {
 			referenced = tx.Bucket(dataBucket()).Get(dataID[:]) != nil
 			return nil
@@ -638,21 +816,15 @@ func (s *Store) GetTopology(ctx context.Context) (cluster.Topology, error) {
 	if err := ctx.Err(); err != nil {
 		return cluster.Topology{}, fmt.Errorf("raftmeta.GetTopology: %w", err)
 	}
-	var record topologyRecord
-	err := s.view(func(tx *bbolt.Tx) error {
-		raw := tx.Bucket(clusterBucket()).Get(topologyKey())
-		if raw == nil {
-			return domain.ErrNoTopology
-		}
-		if err := json.Unmarshal(raw, &record); err != nil {
-			return fmt.Errorf("%w: stored topology: %w", domain.ErrIntegrity, err)
-		}
-		return nil
+	var topology cluster.Topology
+	err := s.view(ctx, func(tx *bbolt.Tx) (err error) {
+		topology, err = readTopology(tx)
+		return err
 	})
 	if err != nil {
 		return cluster.Topology{}, fmt.Errorf("raftmeta.GetTopology: %w", err)
 	}
-	return record.toDomain(), nil
+	return topology, nil
 }
 
 // SetTopology implements ports.TopologyStore.

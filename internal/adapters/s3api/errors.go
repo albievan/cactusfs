@@ -70,6 +70,10 @@ func errorMappings() []mapping {
 		{domain.ErrInsufficientDrives, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 		{domain.ErrNotLeader, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 		{domain.ErrShuttingDown, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
+		// A node or the metadata leader cannot be reached: nothing is wrong
+		// with the data, and the request can be repeated.
+		{domain.ErrUnavailable, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
+		{domain.ErrDriveOffline, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 	}
 }
 

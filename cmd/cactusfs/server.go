@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
 const (
@@ -110,14 +111,18 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		Observe: tel.ObserveS3,
 	}))
 
-	endpoints, err := listen(ctx, []endpoint{
-		{name: "admin", handler: admin, ioTimeout: adminIOTimeout},
-		{name: "s3", handler: s3},
-	}, []string{cfg.AdminAddr, cfg.S3Addr})
+	// Every node answers probes and serves metrics; the S3 API is the
+	// gateway's.
+	serving, addrs := []endpoint{{name: "admin", handler: admin, ioTimeout: adminIOTimeout}}, []string{cfg.AdminAddr}
+	if cfg.Roles.Has(cluster.RoleGateway) {
+		serving, addrs = append(serving, endpoint{name: "s3", handler: s3}), append(addrs, cfg.S3Addr)
+	}
+	endpoints, err := listen(ctx, serving, addrs)
 	if err != nil {
 		return err
 	}
-	logger.InfoContext(ctx, "node started", slog.String("drives", n.describe()), slog.String("metadata_node", n.meta.NodeID()))
+	logger.InfoContext(ctx, "node started", slog.String("drives", n.describe()), slog.String("metadata_node", n.meta.NodeID()),
+		slog.String("roles", cfg.Roles.String()), slog.Bool("cluster", cfg.clustered()))
 
 	return serve(ctx, endpoints, serveOptions{
 		tlsConfig:       tlsConfig,

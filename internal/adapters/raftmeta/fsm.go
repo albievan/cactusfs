@@ -1,6 +1,7 @@
 package raftmeta
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -8,12 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/raft"
 	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // Names inside the state database. The layout is part of the snapshot format.
@@ -24,6 +28,7 @@ import (
 //	objects  <bucket name> (nested bucket) -> <object key> -> versionRecord (JSON)
 //	iam      "root" -> rootRecord (JSON)
 //	cluster  "topology" -> topologyRecord (JSON)
+//	nodes    <node ID> -> nodeRecord (JSON)
 //	data     <data ID, 16 bytes> -> number of object versions that refer to it
 //	         (uint64, big endian). Derived from "objects": it is rebuilt when
 //	         missing, and exists so that the garbage collector can ask whether
@@ -43,6 +48,7 @@ func rootKey() []byte       { return []byte("root") }
 func clusterBucket() []byte { return []byte("cluster") }
 func topologyKey() []byte   { return []byte("topology") }
 func dataBucket() []byte    { return []byte("data") }
+func nodesBucket() []byte   { return []byte("nodes") }
 
 // applyResult is what the state machine returns for one entry. err is a
 // domain error for a command that was validly applied but refused (the state
@@ -50,6 +56,8 @@ func dataBucket() []byte    { return []byte("data") }
 type applyResult struct {
 	err      error
 	previous *versionRecord
+	// events describe what the entry changed; none when it was refused.
+	events []ports.Event
 	// fatal marks err as a failure to apply, as opposed to a refusal: the
 	// entry is in the log but its effect is not in the state.
 	fatal bool
@@ -64,9 +72,43 @@ type fsm struct {
 	root *os.Root
 	path string
 
+	// supported is the newest entry schema version this state machine can
+	// apply.
+	supported byte
+	// publish receives the events of every entry that took effect, after
+	// its transaction has committed. onFail is told when the state machine
+	// stops. Both may be nil.
+	publish func(ports.Event)
+	onFail  func(error)
+	// beforeApply, when set by a test (under mu), runs before every
+	// command is applied; it stands in for a slow disk.
+	beforeApply func()
+
+	// seen is the index of the last command entry whose effect is in the
+	// state. Reads on any node wait for it to reach the leader's.
+	seen atomic.Uint64
+
 	mu     sync.RWMutex
 	db     *bbolt.DB
 	failed error // set when the state machine can no longer make progress
+}
+
+// advance records that the state reflects the command entry at index.
+func (f *fsm) advance(index uint64) {
+	for {
+		seen := f.seen.Load()
+		if index <= seen || f.seen.CompareAndSwap(seen, index) {
+			return
+		}
+	}
+}
+
+// loadSeen sets seen from what the state database records.
+func (f *fsm) loadSeen() error {
+	return f.db.View(func(tx *bbolt.Tx) error {
+		f.seen.Store(readApplied(tx))
+		return nil
+	})
 }
 
 var _ raft.FSM = (*fsm)(nil)
@@ -77,7 +119,12 @@ func openFSM(root *os.Root) (*fsm, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fsm{root: root, path: path, db: db}, nil
+	f := &fsm{root: root, path: path, db: db, supported: entrySchemaVersion}
+	if err := f.loadSeen(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func openState(path string) (*bbolt.DB, error) {
@@ -86,7 +133,7 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket()} {
+		for _, name := range [][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket(), nodesBucket()} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -208,6 +255,9 @@ func (f *fsm) Apply(log *raft.Log) any {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.beforeApply != nil {
+		f.beforeApply()
+	}
 
 	if f.failed != nil {
 		return applyResult{err: f.failed, fatal: true}
@@ -222,7 +272,7 @@ func (f *fsm) Apply(log *raft.Log) any {
 			// Replayed after a restart: its effect is already in the state.
 			return nil
 		}
-		e, err := decodeEntry(log.Data)
+		e, err := decodeEntry(log.Data, f.supported)
 		if err != nil {
 			return err
 		}
@@ -236,7 +286,21 @@ func (f *fsm) Apply(log *raft.Log) any {
 		// The entry is committed in the log but cannot be applied here. Going
 		// on would make this replica diverge, so the state machine stops.
 		f.failed = fmt.Errorf("metadata state machine stopped at entry %d: %w", log.Index, err)
+		if f.onFail != nil {
+			f.onFail(f.failed)
+		}
 		return applyResult{err: f.failed, fatal: true}
+	}
+	f.advance(log.Index)
+	// The change is durable in the state; now it is a fact that can be told.
+	// An entry replayed after a restart produces no events: it changed
+	// nothing this time.
+	for i := range result.events {
+		result.events[i].ID = fmt.Sprintf("%016x-%d", log.Index, i)
+		result.events[i].Sequence = log.Index
+		if f.publish != nil {
+			f.publish(result.events[i])
+		}
 	}
 	return result
 }
@@ -257,6 +321,10 @@ func applyEntry(tx *bbolt.Tx, e entry) (applyResult, error) {
 		return applySetRoot(tx, *e.SetRoot)
 	case cmdSetTopology:
 		return applySetTopology(tx, *e.SetTopology)
+	case cmdSetNode:
+		return applySetNode(tx, *e.SetNode)
+	case cmdRemoveNode:
+		return applyRemoveNode(tx, e.RemoveNode.ID)
 	default:
 		return applyResult{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
 	}
@@ -281,7 +349,9 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord) (applyResult, error) {
 	if _, err := tx.Bucket(objectsBucket()).CreateBucketIfNotExists([]byte(b.Name)); err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{}, nil
+	return applyResult{events: []ports.Event{
+		{Type: ports.EventBucketCreated, Time: b.CreatedAt, Data: ports.BucketEvent{Bucket: b.Name}},
+	}}, nil
 }
 
 func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
@@ -301,7 +371,7 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	if err := buckets.Delete([]byte(name)); err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{}, nil
+	return applyResult{events: []ports.Event{{Type: ports.EventBucketDeleted, Data: ports.BucketEvent{Bucket: name}}}}, nil
 }
 
 func applyPutObject(tx *bbolt.Tx, v versionRecord) (applyResult, error) {
@@ -329,7 +399,13 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord) (applyResult, error) {
 			return applyResult{}, err
 		}
 	}
-	return applyResult{previous: previous}, nil
+	return applyResult{previous: previous, events: []ports.Event{
+		{Type: ports.EventObjectCreated, Time: v.ModifiedAt, Data: objectEvent(v)},
+	}}, nil
+}
+
+func objectEvent(v versionRecord) ports.ObjectEvent {
+	return ports.ObjectEvent{Bucket: v.Bucket, Key: v.Key, VersionID: v.VersionID, Size: v.Size, ETag: v.ETag}
 }
 
 func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd) (applyResult, error) {
@@ -347,7 +423,9 @@ func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd) (applyResult, error) {
 	if err := addDataReference(tx.Bucket(dataBucket()), previous.DataID, -1); err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{previous: previous}, nil
+	return applyResult{previous: previous, events: []ports.Event{
+		{Type: ports.EventObjectDeleted, Data: objectEvent(*previous)},
+	}}, nil
 }
 
 func applySetRoot(tx *bbolt.Tx, root rootRecord) (applyResult, error) {
@@ -359,7 +437,12 @@ func applySetRoot(tx *bbolt.Tx, root rootRecord) (applyResult, error) {
 	if err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{}, bucket.Put(rootKey(), data)
+	if err := bucket.Put(rootKey(), data); err != nil {
+		return applyResult{}, err
+	}
+	return applyResult{events: []ports.Event{
+		{Type: ports.EventRootKeySet, Time: root.CreatedAt, Data: ports.RootCredentialEvent{AccessKeyID: root.AccessKeyID}},
+	}}, nil
 }
 
 // applySetTopology replaces the topology when the change is based on the
@@ -383,7 +466,77 @@ func applySetTopology(tx *bbolt.Tx, next topologyRecord) (applyResult, error) {
 	if err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{}, bucket.Put(topologyKey(), data)
+	if err := bucket.Put(topologyKey(), data); err != nil {
+		return applyResult{}, err
+	}
+	topology := next.toDomain()
+	return applyResult{events: []ports.Event{{Type: ports.EventTopologyChanged, Data: ports.TopologyEvent{
+		DeploymentID: next.DeploymentID, Version: next.Version, ErasureSets: len(topology.Sets), DrivesPerSet: topology.SetSize(),
+	}}}}, nil
+}
+
+// applySetNode records a node. Recording what is recorded already changes
+// nothing and tells nobody.
+func applySetNode(tx *bbolt.Tx, n nodeRecord) (applyResult, error) {
+	// Only what every release decides alike is checked here: which roles
+	// exist is a property of the binary, and replicas of two releases must
+	// not disagree about an entry. The proposer validates the rest.
+	if err := cluster.ValidateNodeID(n.ID); err != nil {
+		return applyResult{err: err}, nil
+	}
+	data, err := json.Marshal(n)
+	if err != nil {
+		return applyResult{}, err
+	}
+	nodes := tx.Bucket(nodesBucket())
+	if bytes.Equal(nodes.Get([]byte(n.ID)), data) {
+		return applyResult{}, nil
+	}
+	if err := nodes.Put([]byte(n.ID), data); err != nil {
+		return applyResult{}, err
+	}
+	return applyResult{events: []ports.Event{
+		{Type: ports.EventNodeRegistered, Data: ports.NodeEvent{NodeID: n.ID, Roles: n.Roles}},
+	}}, nil
+}
+
+func applyRemoveNode(tx *bbolt.Tx, id string) (applyResult, error) {
+	nodes := tx.Bucket(nodesBucket())
+	if nodes.Get([]byte(id)) == nil {
+		return applyResult{}, nil
+	}
+	if err := nodes.Delete([]byte(id)); err != nil {
+		return applyResult{}, err
+	}
+	return applyResult{events: []ports.Event{{Type: ports.EventNodeRemoved, Data: ports.NodeEvent{NodeID: id}}}}, nil
+}
+
+// readNodes returns every recorded node, ordered by ID.
+func readNodes(tx *bbolt.Tx) ([]cluster.Node, error) {
+	var nodes []cluster.Node
+	err := tx.Bucket(nodesBucket()).ForEach(func(_, raw []byte) error {
+		var record nodeRecord
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return fmt.Errorf("%w: stored node: %w", domain.ErrIntegrity, err)
+		}
+		nodes = append(nodes, record.toDomain())
+		return nil
+	})
+	return nodes, err
+}
+
+// readTopology returns the stored topology. The error wraps
+// domain.ErrNoTopology when there is none.
+func readTopology(tx *bbolt.Tx) (cluster.Topology, error) {
+	raw := tx.Bucket(clusterBucket()).Get(topologyKey())
+	if raw == nil {
+		return cluster.Topology{}, domain.ErrNoTopology
+	}
+	var record topologyRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return cluster.Topology{}, fmt.Errorf("%w: stored topology: %w", domain.ErrIntegrity, err)
+	}
+	return record.toDomain(), nil
 }
 
 // readVersion returns the stored version of key, or nil when there is none.
@@ -476,7 +629,7 @@ func (f *fsm) Restore(source io.ReadCloser) error {
 	}
 	f.db = db
 	f.failed = nil
-	return nil
+	return f.loadSeen()
 }
 
 func (f *fsm) writeSnapshotFile(source io.Reader) error {

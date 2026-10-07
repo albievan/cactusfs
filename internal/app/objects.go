@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/albievan/cactusfs/internal/domain"
-	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -38,10 +37,8 @@ type ObjectService struct {
 type ObjectServiceConfig struct {
 	Index   ports.ObjectIndex
 	Buckets ports.BucketStore
-	// Topology assigns the drives to erasure sets; Drives are the attached
-	// drives, which must include every drive of the topology.
-	Topology cluster.Topology
-	Drives   []ports.ShardStore
+	// Drives finds the drive topology and the drives, wherever they are.
+	Drives ports.DriveSource
 	// Codec computes parity.
 	Codec ports.ErasureCodec
 	// OnHeal, when not nil, is called with the outcome of every heal.
@@ -56,7 +53,7 @@ type ObjectServiceConfig struct {
 
 // NewObjectService returns an ObjectService.
 func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
-	storage, err := newShardStorage(cfg.Topology, cfg.Drives, cfg.Codec, cfg.Logger)
+	storage, err := newShardStorage(cfg.Drives, cfg.Codec, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("app.NewObjectService: %w", err)
 	}

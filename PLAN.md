@@ -13,7 +13,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | 0 | Scaffold | done |
 | 1 | Standalone store | done |
 | 2 | Erasure coding and integrity on local drives | done |
-| 3 | Cluster | todo |
+| 3 | Cluster | done |
 | 4 | IAM | todo |
 | 5 | Admin API, Swagger UI, console | todo |
 | 6 | S3 depth | todo |
@@ -49,7 +49,7 @@ subject exists:
 | `make contracts` | regenerates and proves the tree is unchanged; **fails** if `api/openapi`, `api/asyncapi` or `api/proto` contains a contract whose checker is not wired | 3.2 (proto), 3.6 (AsyncAPI), 5.1 (OpenAPI) |
 | `make s3-compat` | runs `test/s3compat` and compares against `baseline.txt` (0 tests recorded); **fails** if `baseline.txt` is missing, if the suite does not build, or if the suite has tests but no recorded baseline | 1.10 |
 | `make helm-lint` | lints and renders `deploy/helm/cactusfs` when the chart exists; **fails** if `deploy/helm` holds any file without `cactusfs/Chart.yaml` | 7.1 |
-| `make test-int` | black-box test of the real binary; no testcontainers until there is something to contain | 3.7 (cluster), 4.x (Vault), 8.2 (NATS) |
+| `make test-int` | black-box tests of the real binary, and of a four-node cluster of product-image containers (testcontainers-go) | 4.x (Vault), 8.2 (NATS) |
 
 `make up`, `make down` and `make test-chaos` exist and exit non-zero with a pointer to the
 step that implements them (`up`/`down`: 3.8; `test-chaos`: 2.8 and 3.9). They are not part of
@@ -95,17 +95,29 @@ green.
 
 ## Milestone 3 — Cluster
 
+Design (ADR-0005): every node runs Raft — `meta` nodes as voters, the others as
+non-voters — so every node holds the metadata locally. Changes are forwarded to the
+leader over node RPC; reads wait for the leader's read index. Shards are reached through
+`ports.ShardStore` whether the drive is local or on another node. A cluster is formed
+once, from the complete list of its nodes (`--peers`); its erasure sets are planned
+across nodes, racks and zones at that moment.
+
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
-| 3.1 | todo | Cluster domain: nodes, roles, topology labels | `--roles` selects gateway/meta/storage/console; `region/zone/rack/host` labels | `internal/domain/cluster/`, `cmd/cactusfs/` |
-| 3.2 | todo | Node RPC over mTLS 1.3 | gRPC contract in `api/proto/`; generated code committed; `buf breaking` wired into `make contracts` | `api/proto/`, `internal/adapters/noderpc/`, `buf.yaml`, `scripts/contracts.sh` |
-| 3.3 | todo | Multi-node Raft (3 or 5 voters) over mTLS | join, leave, leader change; rolling upgrade N ↔ N+1 test | `internal/adapters/raftmeta/` |
-| 3.4 | todo | Distributed erasure sets | shards spread across nodes, then racks/zones | `internal/app/placement.go` |
-| 3.5 | todo | Quorum write and read paths | no acknowledgement before write quorum + Raft commit; read-after-write consistency | `internal/app/` |
-| 3.6 | todo | Events from applied Raft entries | contract first in `api/asyncapi/events.yaml`, AsyncAPI validation wired into `make contracts`; in-process bus; consumers dedupe by event ID | `api/asyncapi/events.yaml`, `scripts/contracts.sh`, `internal/adapters/events/inproc/` |
-| 3.7 | todo | Integration tests on a real cluster | testcontainers-go multi-node cluster | `test/integration/` |
-| 3.8 | todo | Compose deployment | 4-node cluster; unchanged on `docker compose` and rootless `podman compose`; `make up/down` | `deploy/compose/compose.yaml`, `Makefile` |
-| 3.9 | todo | Chaos: node kill, partition, heal verification | `make test-chaos` passes | `test/chaos/` |
+| 3.1 | done | Cluster domain: nodes, roles, topology labels | `--roles` selects gateway/meta/storage/console; `region/zone/rack/host` labels; topology planned across nodes, then racks/zones; a node answers for its own drives only | `internal/domain/cluster/`, `cmd/cactusfs/` |
+| 3.2 | done | Node RPC over mTLS 1.3 | gRPC contract in `api/proto/`; generated code committed; `buf lint` and `buf breaking` in `make contracts`; a remote drive passes the same `ShardStore` contract as a local one; every call passes the authorizer as a node principal | `api/proto/`, `internal/adapters/noderpc/`, `internal/adapters/nodetls/`, `buf.yaml`, `buf.gen.yaml`, `scripts/{gen,contracts}.sh`, `Dockerfile` |
+| 3.3 | done | Multi-node Raft (3 or 5 voters) over mTLS | formation from identical peer lists, join, leave, leader change, linearizable reads on every node; a node never logs an entry newer than the oldest node understands (rolling upgrade N ↔ N+1 test) | `internal/adapters/raftmeta/`, `docs/adr/0005-cluster.md` |
+| 3.4 | done | Distributed erasure sets | shards of one object on different nodes where the cluster allows; the tolerated number of node failures is computed and logged | `internal/domain/cluster/topology.go`, `internal/app/topology.go`, `internal/ports/drives.go` |
+| 3.5 | done | Quorum write and read paths | no acknowledgement before write quorum + Raft commit; reads and writes survive nodes that are down up to parity; an unreachable drive is neither damage nor a reason to delete; read-after-write on every node | `internal/app/`, `internal/domain/errors.go` |
+| 3.6 | done | Events from applied Raft entries | contract first in `api/asyncapi/events.yaml`, AsyncAPI validation in `make contracts`; in-process bus; consumers dedupe by event ID | `api/asyncapi/events.yaml`, `scripts/contracts.sh`, `internal/ports/events.go`, `internal/adapters/events/inproc/` |
+| 3.7 | done | Integration tests on a real cluster | testcontainers-go: four containers of the product image form a cluster over mTLS; S3 through every node | `test/integration/` |
+| 3.8 | done | Compose deployment | 4-node cluster; unchanged on `docker compose` and rootless `podman compose`; `make up/down`; `cactusfs dev-init` writes the throw-away CA, certificates and shared key file | `deploy/compose/compose.yaml`, `cmd/cactusfs/devinit.go`, `Makefile` |
+| 3.9 | done | Chaos: node kill, partition, heal verification | `make test-chaos` passes: cluster scenarios next to the single-node ones | `test/chaos/` |
+
+Out of scope for milestone 3, recorded so nobody assumes otherwise: adding storage nodes
+or drives to a formed cluster (new erasure sets), starting a node with one of its drives
+offline, the Vault KMS adapter (4.4 — a cluster shares a sealed key file until then, and
+says so at start), an operator surface for join/leave beyond the node RPC (5.x).
 
 ## Milestone 4 — IAM
 
@@ -147,7 +159,7 @@ green.
 
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
-| 7.1 | todo | Helm chart | StatefulSet + headless Service, PVC per drive, PDB, topology spread, probes, requests/limits, `restricted` PSS; manifest validation in `make helm-lint` | `deploy/helm/cactusfs/`, `scripts/helm-lint.sh` |
+| 7.1 | todo | Helm chart; listeners (probes) open before the node has joined its cluster | StatefulSet + headless Service, PVC per drive, PDB, topology spread, probes, requests/limits, `restricted` PSS; manifest validation in `make helm-lint` | `deploy/helm/cactusfs/`, `scripts/helm-lint.sh` |
 | 7.2 | todo | Default-deny NetworkPolicy | only S3, admin, node RPC and Raft ports allowed | `deploy/helm/cactusfs/templates/` |
 | 7.3 | todo | Signed multi-arch images and SBOM | manifest list pushed, signature and SBOM attached | `Makefile`, `.github/workflows/release.yml` |
 | 7.4 | todo | Observability pack | dashboards and alert rules for `cactusfs_*` | `deploy/` |
@@ -227,3 +239,18 @@ green.
 | 2026-10-07 | Healing rebuilds a shard only on definite damage (`ErrShardNotFound`, `ErrIntegrity`) and through `ShardStore.Rewrite`, which replaces the old content in one rename. One heal per object at a time. | Major: any open or read error was treated as damage and the shard deleted before a replacement existed. |
 | 2026-10-07 | Writes pin their data ID until the commit outcome is definite (unknown outcomes for the life of the process); the collector skips pinned data and does nothing while the metadata is not ready; `IsDataReferenced` fails on a stopped state machine. Minimum `--gc-grace` is 1 h. | Major: the grace period alone stood between a slow upload, or an unapplied log entry, and the collector. |
 | 2026-10-07 | The scrubber is throttled as it reads and counts only verified bytes. A shard is still given up for the rest of a read after one bad block (ADR-0004, consequences). | Minor review findings; the second is a recorded limitation, not fixed. |
+| 2026-10-07 | Milestone 3. Every node runs Raft: `meta` nodes vote, the others are non-voters with a local replica. Changes are forwarded to the leader; reads are linearizable on every node by read index. ADR-0005. | Local reads and listings on every node, one code path for a node alone and a cluster. Reads CLAUDE.md's "stateless gateway" as "holds nothing that cannot be rebuilt" — **open question for Albie**; the alternative is gateways that ask a voter for every metadata read. |
+| 2026-10-07 | The leader proves leadership by asking the voters for their Raft term (majority, itself included), not with `raft.VerifyLeader`; reads wait on the state machine's own applied command index, not `raft.AppliedIndex`. | Found by the multi-node tests: `VerifyLeader` counts answers of non-voters, so a leader cut off from the other voters but not from a storage node would pass and serve stale reads; `AppliedIndex` advances before the state machine has applied. |
+| 2026-10-07 | A node's identity is its certificate: the node ID is the first DNS name, clients verify it as `ServerName` whatever the address, Raft members are recorded as `<id>@<host:port>`. The node CA signs node certificates only. No plaintext node RPC or Raft, in development either. | Addresses and DNS are not trusted to say who is behind them; stricter reading of §3 mTLS. **Open question:** certificates are read at start (rotation = restart) and there is no revocation. |
+| 2026-10-07 | Every node RPC response carries an `Error`; a failed RPC means "not reached or no answer". Domain sentinels cross nodes as stable names (`domain.Codes`). | The write path must tell "definitely not committed" from "outcome unknown"; only an answer is definite. |
+| 2026-10-07 | A cluster forms once, from `--peers` (the complete node list): voters bootstrap with the identical member list when every node has answered and none knows a deployment; the leader then surveys all drives and records the topology. 3 or 5 voters and at least 4 storage nodes are enforced. Storage cannot be added to a formed cluster yet. | Identical bootstrap needs every node's self-description; a deployment ID anywhere means "join, never form". Expansion needs new erasure sets and rebalancing — its own milestone. |
+| 2026-10-07 | Topology slots carry their node; a node reconciles only its own drives at start; an unreachable drive is `ErrDriveOffline` — not damage, not a reason to rewrite or delete; requests that fail only for lack of reachable nodes answer 503. | A node that is down must not keep the others from starting, and must never be mistaken for lost data. |
+| 2026-10-07 | Scrubbing runs on the metadata leader only; garbage collection on every storage node for its own drives, asking every recorded node for writes in progress (unreachable = yes), and looking at the index again afterwards. | One scrubber for the cluster; the second look at the index closes the gap in which a write commits and unpins between the two questions (the order in milestone 2 had that gap behind the grace period). |
+| 2026-10-07 | `MetadataVersion` per node; nobody writes an entry format newer than the oldest member's; the leader re-checks. | CLAUDE.md §2: version N must run alongside N+1. Tested with a stand-in for release N+1. |
+| 2026-10-07 | Events: derived in the state machine after commit, IDs from the entry index; in-process publisher is bounded, never blocks, at most once per node. AsyncAPI validated with `@asyncapi/specs` + `ajv` (dev dependencies of `web/`), not `@asyncapi/parser`. | The state machine must never wait for a consumer. The parser pulls in ~160 packages and an install-time analytics package; the schema, `ajv` and a `$ref` check do the job in 9. |
+| 2026-10-07 | New dependencies: `google.golang.org/grpc` and `protobuf` (already linked through the OTLP exporter; now direct), `protoc-gen-go` and `protoc-gen-go-grpc` as `tool` directives, `buf` pinned by digest in the builder, `testcontainers-go` (tests only; not linked into the binary). | Node RPC contract and its breaking-change gate; real multi-node integration and chaos tests. |
+| 2026-10-07 | Until the Vault adapter (4.4), the nodes of a cluster share one sealed KMS key file; a cluster member never creates a key file. `cactusfs dev-init` writes it with throw-away certificates for development, and never overwrites. | Every node must unwrap every object's key. Creating a key per node would make objects unreadable through other nodes. |
+| 2026-10-07 | The image ships `/var/lib/cactusfs/{data1..4,meta,config}` owned by UID 65532. | A named volume takes the ownership of the directory it is first mounted on; without them the non-root process cannot write to its volumes. |
+| 2026-10-07 | In a cluster `CommitTimeout` is 10 ms; listeners (probes included) still open only after a node has joined its cluster. | Followers learn of commits with the leader's next message, and every read on a non-leader waits for that. Early probes are needed for Helm and moved to 7.1. |
+| 2026-10-07 | Review of milestone 3 (2 blocker, 3 major, 9 minor, 2 nit). Fixed: a topology recorded before slots named their node is migrated at first start (upgrade test, and proven with the previous commit's binary); PLAN statuses; the Raft port admits voters only and completes its handshake with a deadline; only a node may propose its own record; the leader decides who votes and the voters are fixed at formation; tests that pin leadership confirmation by voters and a new leader's catch-up (each kills the mutant the reviewer found alive); node certificates carry exactly one name; the state machine validates a node record only by rules every release shares; generated root credentials are shown even when their commit was uncertain; `noderpc` no longer imports `nodetls`; compose and README wording. | Recorded so the reasoning survives. |
+| 2026-10-07 | Deferred from that review, with reasons: any node certificate may still propose bucket, object and topology changes (narrowing by role belongs to IAM, milestone 4; stated in ADR-0005 and the threat model); the dev compose cluster shares one config volume, so nodes can read each other's keys (stated in the file); three tests assert "nothing happens" with short fixed sleeps; a certificate with two names is refused by code that no test exercises with such a certificate. | Honest list of what was not done. |

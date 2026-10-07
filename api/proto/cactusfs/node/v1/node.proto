@@ -1,0 +1,250 @@
+// Node RPC: what the nodes of a CactusFS cluster ask of each other. It is
+// spoken over mutual TLS 1.3 only, between nodes that hold a certificate of
+// the cluster's node CA; no client of the object store ever uses it.
+//
+// Every response carries an Error. A call that reached the other node and was
+// answered is a successful RPC, whatever the answer; a failed RPC means the
+// node could not be reached or did not answer. Callers rely on the
+// difference: only an answer says for certain what the other node did.
+//
+// Compatibility: this package is checked with `buf breaking`. Fields are only
+// ever added.
+syntax = "proto3";
+
+package cactusfs.node.v1;
+
+option go_package = "github.com/albievan/cactusfs/internal/adapters/noderpc/nodev1/cactusfs/node/v1;nodev1";
+
+// Error is a failure reported by the node that was asked.
+message Error {
+  // Stable names of the conditions the failure is an instance of, such as
+  // "shard_not_found" or "not_leader". A receiver ignores names it does not
+  // know.
+  repeated string codes = 1;
+  // Text for logs. It never contains secrets or object contents.
+  string message = 2;
+}
+
+// ShardId names one shard: the stored data it belongs to and its position.
+message ShardId {
+  // 16 bytes.
+  bytes data_id = 1;
+  uint32 index = 2;
+}
+
+// NodeService describes a node and answers questions about its work in
+// progress.
+service NodeService {
+  // Info describes the node: who it is, what it does, which drives it has.
+  rpc Info(InfoRequest) returns (InfoResponse);
+  // InFlight reports whether the node has a write under way, or one whose
+  // outcome it does not know, that uses the given stored data. The garbage
+  // collector of every storage node asks every node before it removes a
+  // shard.
+  rpc InFlight(InFlightRequest) returns (InFlightResponse);
+}
+
+message InfoRequest {}
+
+message InfoResponse {
+  Error error = 1;
+  string node_id = 2;
+  // Address of the node's Raft transport, as other nodes must dial it.
+  string raft_addr = 3;
+  repeated string roles = 4;
+  string region = 5;
+  string zone = 6;
+  string rack = 7;
+  string host = 8;
+  // Newest metadata entry format the node's binary can apply.
+  uint32 metadata_version = 9;
+  // Whether the node knows of a metadata group: it has bootstrapped one or
+  // been added to one.
+  bool formed = 10;
+  repeated Drive drives = 11;
+  // Address of the node's RPC listener, as other nodes must dial it.
+  string rpc_addr = 12;
+  // The deployment the node belongs to, as far as it knows: the ID in the
+  // drive topology it has a copy of. Empty on a node that has none, which is
+  // every node until a new cluster has recorded its topology.
+  string deployment_id = 13;
+}
+
+// Drive is a drive attached to a node.
+message Drive {
+  string id = 1;
+  // Whether the drive holds no shard.
+  bool empty = 2;
+  // The deployment the drive is claimed for; empty when unclaimed.
+  string deployment_id = 3;
+}
+
+message InFlightRequest {
+  // 16 bytes.
+  bytes data_id = 1;
+}
+
+message InFlightResponse {
+  Error error = 1;
+  bool in_flight = 2;
+}
+
+// MetaService is what a node asks of the members of the metadata Raft group.
+service MetaService {
+  // Propose has the leader commit one metadata entry. A node that does not
+  // lead answers with the error "not_leader" and has logged nothing.
+  rpc Propose(ProposeRequest) returns (ProposeResponse);
+  // ReadIndex returns, from the leader, an index such that a node whose
+  // state machine has applied it reflects every change acknowledged before
+  // the call.
+  rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse);
+  // Term returns the Raft term the node is in. A leader asks the voters to
+  // prove that it still leads.
+  rpc Term(TermRequest) returns (TermResponse);
+  // Join adds the calling node to the Raft group. Only the leader can.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // Leave removes a node from the Raft group and from the record of nodes.
+  // Only the leader can.
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+}
+
+message ProposeRequest {
+  // The entry in the metadata log format: one version byte, then the body.
+  bytes entry = 1;
+}
+
+message ProposeResponse {
+  Error error = 1;
+  // The state machine's answer, set when error is empty. An entry the state
+  // machine refused is reported in here, not in error.
+  bytes result = 2;
+}
+
+message ReadIndexRequest {}
+
+message ReadIndexResponse {
+  Error error = 1;
+  uint64 index = 2;
+}
+
+message TermRequest {}
+
+message TermResponse {
+  Error error = 1;
+  uint64 term = 2;
+}
+
+message JoinRequest {
+  // Must be the node the caller's certificate names.
+  string node_id = 1;
+  string raft_addr = 2;
+  // Whether the node votes: nodes with the meta role do.
+  bool voter = 3;
+}
+
+message JoinResponse {
+  Error error = 1;
+}
+
+message LeaveRequest {
+  string node_id = 1;
+}
+
+message LeaveResponse {
+  Error error = 1;
+}
+
+// StorageService reaches the shards on the drives of a node.
+service StorageService {
+  // WriteShard writes one shard. The caller sends a header, any number of
+  // chunks and a commit; the node answers the header as soon as it has
+  // accepted or refused the shard, and the commit once the shard is flushed
+  // to stable storage. A stream that ends without a commit leaves nothing
+  // behind - and, for a rewrite, leaves the old shard as it was.
+  rpc WriteShard(stream WriteShardRequest) returns (stream WriteShardResponse);
+  // StatShard reports the size of a committed shard.
+  rpc StatShard(StatShardRequest) returns (StatShardResponse);
+  // ReadShard returns a range of a committed shard. Every byte returned has
+  // passed checksum verification on the node that stores it.
+  rpc ReadShard(ReadShardRequest) returns (ReadShardResponse);
+  // DeleteShard removes a shard. Removing one that does not exist succeeds.
+  rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+  // ListShards lists the committed shards on a drive.
+  rpc ListShards(ListShardsRequest) returns (stream ListShardsResponse);
+}
+
+message WriteShardRequest {
+  oneof step {
+    WriteShardHeader header = 1;
+    bytes chunk = 2;
+    WriteShardCommit commit = 3;
+  }
+}
+
+message WriteShardHeader {
+  string drive_id = 1;
+  ShardId shard = 2;
+  // Replace the shard if it exists, in one step at commit. Without it an
+  // existing shard is an error: shards are immutable.
+  bool rewrite = 3;
+}
+
+message WriteShardCommit {}
+
+message WriteShardResponse {
+  Error error = 1;
+}
+
+message StatShardRequest {
+  string drive_id = 1;
+  ShardId shard = 2;
+}
+
+message StatShardResponse {
+  Error error = 1;
+  int64 size = 2;
+}
+
+message ReadShardRequest {
+  string drive_id = 1;
+  ShardId shard = 2;
+  int64 offset = 3;
+  // At most 2 MiB.
+  uint32 length = 4;
+}
+
+message ReadShardResponse {
+  Error error = 1;
+  bytes data = 2;
+  // The size of the whole shard.
+  int64 size = 3;
+}
+
+message DeleteShardRequest {
+  string drive_id = 1;
+  ShardId shard = 2;
+}
+
+message DeleteShardResponse {
+  Error error = 1;
+}
+
+message ListShardsRequest {
+  string drive_id = 1;
+}
+
+message ListShardsResponse {
+  Error error = 1;
+  repeated ShardInfo shards = 2;
+}
+
+message ShardInfo {
+  ShardId shard = 1;
+  // When the shard's content was last written, in nanoseconds since the Unix
+  // epoch, by the clock of the node that stores it.
+  int64 modified_unix_nano = 2;
+  // How long ago that was, in nanoseconds, by the same clock. A node that
+  // judges the age of a shard on another node uses this, so that the two
+  // clocks need not agree.
+  int64 age_nanos = 3;
+}

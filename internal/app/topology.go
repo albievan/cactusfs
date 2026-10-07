@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
@@ -33,6 +34,17 @@ type TopologyOptions struct {
 	// AllowReplacement confirms that one empty drive may take the place of
 	// one missing drive. It is a deliberate act of the operator.
 	AllowReplacement bool
+	// NodeID is the node the drives are attached to.
+	NodeID string
+	// Labels say where this node is; they steer where a new deployment
+	// puts its erasure sets.
+	Labels cluster.Labels
+	// Survey is set on a node of a cluster. It returns the drives of every
+	// other node, with where those nodes are, when this node is the one to
+	// record the topology of a new deployment; otherwise, or while some
+	// node cannot be asked, its error wraps domain.ErrUnavailable and the
+	// caller tries again later. Nil means the node is on its own.
+	Survey func(ctx context.Context) (drives []cluster.DriveState, labels map[string]cluster.Labels, err error)
 	// Entropy names a new deployment. It must be cryptographically secure.
 	Entropy io.Reader
 	Logger  *slog.Logger
@@ -43,8 +55,8 @@ type TopologyOptions struct {
 // deployment.
 //
 // A new deployment is created only from drives that are all empty and
-// unclaimed: they are assigned to erasure sets in the order given and the
-// assignment is recorded. From then on drives are known by their IDs, so the
+// unclaimed - on every node, in a cluster: they are assigned to erasure sets,
+// spread across nodes, racks and zones, and the assignment is recorded. From then on drives are known by their IDs, so the
 // order in which they are attached does not matter, and each carries the
 // deployment's ID, so drives and metadata that do not belong together are
 // never combined.
@@ -52,6 +64,10 @@ type TopologyOptions struct {
 // When one drive of the topology is gone and one empty drive has appeared,
 // the empty drive takes over the slot - if there is parity to rebuild from
 // and the operator has confirmed it. Any other difference stops the node.
+//
+// A node answers for its own drives only. Whether another node's drives are
+// there is that node's business when it starts, and a matter of reaching
+// them or not while it runs.
 func EnsureTopology(
 	ctx context.Context, store ports.TopologyStore, drives []AttachedDrive, opts TopologyOptions,
 ) (cluster.Topology, error) {
@@ -74,18 +90,29 @@ func ensureTopology(
 	ctx context.Context, store ports.TopologyStore, drives []AttachedDrive, opts TopologyOptions,
 ) (cluster.Topology, error) {
 	attached := make([]cluster.DriveState, len(drives))
-	ids := make([]string, len(drives))
 	for i, drive := range drives {
-		attached[i] = cluster.DriveState{ID: drive.DriveID(), Empty: drive.Empty(), DeploymentID: drive.DeploymentID()}
-		ids[i] = drive.DriveID()
+		attached[i] = cluster.DriveState{
+			ID: drive.DriveID(), NodeID: opts.NodeID, Empty: drive.Empty(), DeploymentID: drive.DeploymentID(),
+		}
 	}
 
 	stored, err := store.GetTopology(ctx)
 	if errors.Is(err, domain.ErrNoTopology) {
-		if err := cluster.CheckNewDeployment(attached); err != nil {
+		all, labels := attached, map[string]cluster.Labels{opts.NodeID: opts.Labels}
+		if opts.Survey != nil {
+			others, theirs, err := opts.Survey(ctx)
+			if err != nil {
+				return cluster.Topology{}, err
+			}
+			all = append(slices.Clone(attached), others...)
+			for node, where := range theirs {
+				labels[node] = where
+			}
+		}
+		if err := cluster.CheckNewDeployment(all); err != nil {
 			return cluster.Topology{}, err
 		}
-		created, err := cluster.NewTopology(ids)
+		created, err := cluster.PlanTopology(all, labels)
 		if err != nil {
 			return cluster.Topology{}, err
 		}
@@ -99,7 +126,8 @@ func ensureTopology(
 		}
 		opts.Logger.InfoContext(ctx, "new deployment: drive topology recorded",
 			slog.String("deployment_id", created.DeploymentID),
-			slog.Int("erasure_sets", len(created.Sets)), slog.Int("drives_per_set", created.SetSize()))
+			slog.Int("erasure_sets", len(created.Sets)), slog.Int("drives_per_set", created.SetSize()),
+			slog.Int("nodes", len(created.NodeIDs())), slog.Int("node_failures_tolerated", created.NodeFailuresTolerated()))
 		return store.GetTopology(ctx)
 	}
 	if err != nil {
@@ -109,7 +137,23 @@ func ensureTopology(
 		return cluster.Topology{}, fmt.Errorf("%w: stored topology has no deployment ID", domain.ErrUnsupportedFormat)
 	}
 
-	replacement, err := stored.Reconcile(attached, opts.AllowReplacement)
+	if stored.Unassigned() && opts.NodeID != "" {
+		// Recorded by a release in which a node was always alone and slots
+		// did not name their node. The drives are this node's.
+		if opts.Survey != nil {
+			return cluster.Topology{}, fmt.Errorf("%w: this deployment was created by a node on its own; "+
+				"a node on its own cannot be turned into a member of a cluster", domain.ErrInvalidArgument)
+		}
+		if err := store.SetTopology(ctx, stored.AssignedTo(opts.NodeID)); err != nil {
+			return cluster.Topology{}, err
+		}
+		opts.Logger.InfoContext(ctx, "drive topology migrated: its slots now name this node", slog.String("node_id", opts.NodeID))
+		if stored, err = store.GetTopology(ctx); err != nil {
+			return cluster.Topology{}, err
+		}
+	}
+
+	replacement, err := stored.Reconcile(opts.NodeID, attached, opts.AllowReplacement)
 	if err != nil {
 		return cluster.Topology{}, err
 	}

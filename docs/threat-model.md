@@ -57,7 +57,12 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Forged S3 requests | SigV4 verification (checked against AWS's documented examples); host and every `x-amz-*` header must be signed; constant-time comparison; 15-minute clock-skew window | **implemented** (header authentication; presigned URLs M6) |
 | Stolen API key used indefinitely | Expiry, last-used tracking, immediate revocation, scoped-down inline policy | M4 |
 | Password guessing against the console | Argon2id; short-lived `HttpOnly`, `Secure`, `SameSite=Strict` session cookies; CSRF protection | M4 |
-| Rogue node joining the cluster | mTLS 1.3 between nodes, Raft transport included | M3 |
+| Rogue node joining the cluster | Mutual TLS 1.3 for node RPC and Raft; only certificates of the cluster's node CA are accepted; a node's identity is the name in its certificate, never its address; every call passes the authorizer as that node; a node joins, leaves and records only itself; the Raft port admits voters only; no plaintext mode exists | **implemented**, with a limit: any node certificate may propose changes to buckets, objects and the topology, so a stolen one breaches the cluster's metadata, not just one node; the node CA must issue node certificates only — whatever it signs is a node. Certificates are read at start: rotation needs a restart, and there is no revocation list |
+| A node is impersonated at its address (DNS or routing) | The caller checks that the certificate names the node it meant, whatever answered | **implemented** |
+| A cut-off or deposed leader serves stale data | Reads on every node wait for a read index that the leader gives only after a majority of the *voters* confirm its term; a node without a majority answers nothing | **implemented**; tested with a network partition |
+| An acknowledged write is lost when nodes fail | Acknowledged only after a write quorum of shards is durable on their nodes and the version is committed by a majority of voters | **implemented**; tested by killing nodes during writes |
+| A node that is down is mistaken for lost data | An unreachable drive is neither read as damage nor a reason to rewrite or delete; the collector keeps anything a node it cannot ask might be writing | **implemented** |
+| Old and new binaries diverge during an upgrade | No node writes a metadata entry format newer than the oldest member understands; a node that meets one it cannot apply stops and leaves the group | **implemented** |
 
 ### Tampering
 
@@ -100,8 +105,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Slow or oversized requests exhaust a listener | Read-header and idle timeouts and a header size limit on both listeners; whole-request timeouts on the admin listener; object size and XML body limits | **implemented**; a slow *body* on the S3 listener is not bounded yet |
-| Loss of drives | Reed-Solomon parity (2–4 shards by set size); writes need a write quorum; healing refills a replaced drive | **implemented** on one node; all drives must be present to start |
-| Loss of a node | Distributed erasure sets and Raft voters | M3 |
+| Loss of drives | Reed-Solomon parity (2–4 shards by set size); writes need a write quorum; healing refills a replaced drive | **implemented**; a node needs all of its own drives to start |
+| Loss of a node | Erasure sets spread across nodes, racks and zones; 3 or 5 metadata voters; the number of node failures a cluster tolerates is computed and logged | **implemented**; storage cannot be added to a formed cluster yet |
 | A drive from another deployment, or a stale drive, is attached | Drives are known by ID in replicated metadata and claimed for the deployment's ID; a foreign, retired or non-empty unknown drive is refused | **implemented** |
 | The metadata directory is missing or the wrong one | A new deployment is created only from empty, unclaimed drives; drives with data and no matching metadata stop the node | **implemented** |
 | A missing mount is mistaken for a replaced drive | Replacement needs parity and the operator's confirmation for that start; without parity it is never made | **implemented**; a confirmed replacement cannot be undone |

@@ -23,7 +23,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The contract gate compares the node RPC contract with the commit
+          # this change is based on, so that commit must be present.
+          fetch-depth: 0
       - run: make check
+        env:
+          CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+  # Fault injection: the built binary, and a four-node cluster of containers
+  # with nodes killed, partitioned and corrupted.
+  chaos:
+    name: make test-chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make test-chaos
 
   # The Go-only path on every supported OS: no make, no container engine.
   unit:

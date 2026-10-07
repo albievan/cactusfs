@@ -42,6 +42,7 @@ type Scrubber struct {
 	// pause waits, or returns early when ctx ends.
 	pause  func(ctx context.Context, d time.Duration)
 	onPass func(ScrubStats)
+	active func() bool
 }
 
 // ScrubberConfig lists what a Scrubber depends on.
@@ -58,6 +59,10 @@ type ScrubberConfig struct {
 	// Pause waits for a duration or until the context ends. Nil uses the
 	// real clock; tests replace it.
 	Pause func(ctx context.Context, d time.Duration)
+	// Active, when not nil, says whether this node is the one that scrubs
+	// now. In a cluster one node scrubs at a time - the one that leads the
+	// metadata group - so that every object is not verified by every node.
+	Active func() bool
 }
 
 // NewScrubber returns a Scrubber.
@@ -68,7 +73,7 @@ func NewScrubber(cfg ScrubberConfig) *Scrubber {
 	}
 	return &Scrubber{
 		buckets: cfg.Buckets, index: cfg.Index, healer: cfg.Healer, logger: cfg.Logger,
-		bytesPerSecond: cfg.BytesPerSecond, pause: pause, onPass: cfg.OnPass,
+		bytesPerSecond: cfg.BytesPerSecond, pause: pause, onPass: cfg.OnPass, active: cfg.Active,
 	}
 }
 
@@ -86,10 +91,18 @@ func sleep(ctx context.Context, d time.Duration) {
 // is cancelled.
 func (s *Scrubber) Run(ctx context.Context, interval time.Duration) {
 	for ctx.Err() == nil {
+		if !s.isActive() {
+			// Another node scrubs. Look again soon: this node may be next.
+			s.pause(ctx, min(interval, standbyCheck))
+			continue
+		}
 		stats, err := s.RunOnce(ctx)
 		switch {
 		case ctx.Err() != nil:
 			return
+		case errors.Is(err, errStandby):
+			s.logger.InfoContext(ctx, "scrub pass handed over: this node no longer leads", slog.Int("objects", stats.Objects))
+			continue
 		case err != nil:
 			s.logger.ErrorContext(ctx, "scrub pass failed", slog.Any("error", err))
 		default:
@@ -103,6 +116,16 @@ func (s *Scrubber) Run(ctx context.Context, interval time.Duration) {
 		}
 		s.pause(ctx, interval)
 	}
+}
+
+// standbyCheck is how often a node that does not scrub looks whether it
+// should.
+const standbyCheck = 30 * time.Second
+
+var errStandby = errors.New("this node is not the one that scrubs")
+
+func (s *Scrubber) isActive() bool {
+	return s.active == nil || s.active()
 }
 
 // RunOnce checks every object once.
@@ -140,6 +163,9 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 		for _, version := range batch {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if !s.isActive() {
+				return errStandby
 			}
 			s.scrubObject(ctx, version, stats)
 		}

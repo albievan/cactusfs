@@ -1,0 +1,172 @@
+# CactusFS — a four-node DEVELOPMENT cluster on one machine.
+#
+#   export CACTUSFS_KMS_PASSPHRASE="$(openssl rand -hex 24)"   # keep it: it opens the cluster's key
+#   make up            # or: docker compose -f deploy/compose/compose.yaml up -d --build
+#   make down          # stop; the volumes, and so the data, are kept
+#
+# The same file works with `docker compose` and with rootless `podman compose`:
+# no privileged port, no host network, nothing privileged, named volumes only.
+#
+# What makes it a development cluster and not a production one:
+#   - `init` writes throw-away certificates and ONE sealed KMS key file that all
+#     four nodes share. Production brings node certificates from its own PKI
+#     and keeps keys in Vault.
+#   - all four nodes run on one machine: it survives a node process, not a
+#     machine;
+#   - all four mount the same config volume, so every node can read every
+#     other node's key. Nodes of a real cluster hold only their own.
+#
+# Three nodes vote in the metadata group; all four store shards and serve S3.
+# Eight drives form one erasure set of 4 data + 4 parity shards, two shards per
+# node. With any one node down the cluster reads and writes. With two down,
+# objects stay readable as long as two of the three voters (node1 to node3)
+# are among the survivors; writes wait for a node to return.
+#
+# S3 is served over TLS on https://localhost:9000 (node 1) to :9030 (node 4).
+# The CA to trust is /var/lib/cactusfs/config/s3-ca.pem in the config volume:
+#   docker compose -f deploy/compose/compose.yaml cp node1:/var/lib/cactusfs/config/s3-ca.pem .
+# Root credentials: set CACTUSFS_ROOT_ACCESS_KEY and CACTUSFS_ROOT_SECRET_KEY
+# before the first `up`. Otherwise one node generates a pair and prints it,
+# once, on its standard error - which here is the container log, so prefer
+# setting them. To find a generated pair:
+#   docker compose -f deploy/compose/compose.yaml logs | grep -A5 'generated root credentials'
+
+name: cactusfs
+
+x-node: &node
+  image: ${CACTUSFS_IMAGE:-cactusfs:dev}
+  build:
+    context: ../..
+  command: ["server"]
+  # A node that starts before the certificates exist, or before its peers,
+  # fails or waits; either way it is simply started again.
+  restart: on-failure
+  depends_on:
+    init:
+      condition: service_completed_successfully
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 40s
+
+x-environment: &environment
+  CACTUSFS_PEERS: node1=node1:9002,node2=node2:9002,node3=node3:9002,node4=node4:9002
+  CACTUSFS_DATA: /var/lib/cactusfs/data1,/var/lib/cactusfs/data2
+  CACTUSFS_META_DIR: /var/lib/cactusfs/meta
+  CACTUSFS_KMS: local
+  CACTUSFS_KMS_KEY_FILE: /var/lib/cactusfs/config/kms.json
+  CACTUSFS_KMS_PASSPHRASE: ${CACTUSFS_KMS_PASSPHRASE:?set CACTUSFS_KMS_PASSPHRASE to a passphrase of at least 12 characters}
+  CACTUSFS_ROOT_ACCESS_KEY: ${CACTUSFS_ROOT_ACCESS_KEY:-}
+  CACTUSFS_ROOT_SECRET_KEY: ${CACTUSFS_ROOT_SECRET_KEY:-}
+  CACTUSFS_NODE_TLS_CA: /var/lib/cactusfs/config/node-ca.pem
+  CACTUSFS_TLS_CERT: /var/lib/cactusfs/config/s3.pem
+  CACTUSFS_TLS_KEY: /var/lib/cactusfs/config/s3.key
+  CACTUSFS_DRAIN_DELAY: 2s
+
+services:
+  # Runs once: writes the certificates and the shared key file into the config
+  # volume. A volume that is complete is left alone, so the key survives.
+  init:
+    image: ${CACTUSFS_IMAGE:-cactusfs:dev}
+    build:
+      context: ../..
+    command: ["dev-init", "--dir", "/var/lib/cactusfs/config", "--nodes", "node1,node2,node3,node4"]
+    environment:
+      CACTUSFS_KMS_PASSPHRASE: ${CACTUSFS_KMS_PASSPHRASE:?set CACTUSFS_KMS_PASSPHRASE to a passphrase of at least 12 characters}
+    restart: "no"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - config:/var/lib/cactusfs/config
+
+  node1:
+    <<: *node
+    hostname: node1
+    environment:
+      <<: *environment
+      CACTUSFS_NODE_ID: node1
+      CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node1.pem
+      CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node1.key
+      CACTUSFS_TOPOLOGY_ZONE: zone-a
+    ports:
+      - "${CACTUSFS_PORT_BASE_1:-90}00:9000"
+      - "${CACTUSFS_PORT_BASE_1:-90}01:9001"
+    volumes:
+      - config:/var/lib/cactusfs/config:ro
+      - node1-meta:/var/lib/cactusfs/meta
+      - node1-data1:/var/lib/cactusfs/data1
+      - node1-data2:/var/lib/cactusfs/data2
+
+  node2:
+    <<: *node
+    hostname: node2
+    environment:
+      <<: *environment
+      CACTUSFS_NODE_ID: node2
+      CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node2.pem
+      CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node2.key
+      CACTUSFS_TOPOLOGY_ZONE: zone-b
+    ports:
+      - "${CACTUSFS_PORT_BASE_2:-90}10:9000"
+      - "${CACTUSFS_PORT_BASE_2:-90}11:9001"
+    volumes:
+      - config:/var/lib/cactusfs/config:ro
+      - node2-meta:/var/lib/cactusfs/meta
+      - node2-data1:/var/lib/cactusfs/data1
+      - node2-data2:/var/lib/cactusfs/data2
+
+  node3:
+    <<: *node
+    hostname: node3
+    environment:
+      <<: *environment
+      CACTUSFS_NODE_ID: node3
+      CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node3.pem
+      CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node3.key
+      CACTUSFS_TOPOLOGY_ZONE: zone-a
+    ports:
+      - "${CACTUSFS_PORT_BASE_3:-90}20:9000"
+      - "${CACTUSFS_PORT_BASE_3:-90}21:9001"
+    volumes:
+      - config:/var/lib/cactusfs/config:ro
+      - node3-meta:/var/lib/cactusfs/meta
+      - node3-data1:/var/lib/cactusfs/data1
+      - node3-data2:/var/lib/cactusfs/data2
+
+  # The fourth node stores and serves like the others but has no vote in the
+  # metadata group: a group of three voters tolerates the loss of one, a
+  # group of four would too, and need three to agree instead of two.
+  node4:
+    <<: *node
+    hostname: node4
+    environment:
+      <<: *environment
+      CACTUSFS_NODE_ID: node4
+      CACTUSFS_ROLES: gateway,storage,console
+      CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node4.pem
+      CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node4.key
+      CACTUSFS_TOPOLOGY_ZONE: zone-b
+    ports:
+      - "${CACTUSFS_PORT_BASE_4:-90}30:9000"
+      - "${CACTUSFS_PORT_BASE_4:-90}31:9001"
+    volumes:
+      - config:/var/lib/cactusfs/config:ro
+      - node4-meta:/var/lib/cactusfs/meta
+      - node4-data1:/var/lib/cactusfs/data1
+      - node4-data2:/var/lib/cactusfs/data2
+
+volumes:
+  config:
+  node1-meta:
+  node1-data1:
+  node1-data2:
+  node2-meta:
+  node2-data1:
+  node2-data2:
+  node3-meta:
+  node3-data1:
+  node3-data2:
+  node4-meta:
+  node4-data1:
+  node4-data2:

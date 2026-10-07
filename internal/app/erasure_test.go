@@ -410,7 +410,7 @@ func (s *switchingIndex) GetObject(ctx context.Context, bucketName, key string) 
 func (f *fixture) healerOver(t *testing.T, index ports.ObjectIndex) *app.Healer {
 	t.Helper()
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: index, Buckets: f.meta, Topology: f.topology, Drives: asStores(f.drives), Codec: porttest.NewCodec(),
+		Index: index, Buckets: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)), Codec: porttest.NewCodec(),
 		KMS: f.kms, Authz: f.authz, Clock: f.clock, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -805,7 +805,7 @@ func TestCollectorLeavesWritesInProgressAlone(t *testing.T) {
 	reached, proceed := make(chan struct{}), make(chan struct{})
 	blocking := &blockingIndex{ObjectIndex: f.meta, reached: reached, proceed: proceed}
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: blocking, Buckets: f.meta, Topology: f.topology, Drives: asStores(f.drives), Codec: porttest.NewCodec(),
+		Index: blocking, Buckets: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)), Codec: porttest.NewCodec(),
 		KMS: f.kms, Authz: f.authz, Clock: f.clock, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -813,7 +813,7 @@ func TestCollectorLeavesWritesInProgressAlone(t *testing.T) {
 	}
 	collector := app.NewCollector(app.CollectorConfig{
 		Drives: asStores(f.drives), Index: f.meta, Clock: f.clock, Grace: time.Hour, Logger: slog.New(slog.DiscardHandler),
-		InFlight: svc.InFlight,
+		InFlight: func(_ context.Context, id object.ID) (bool, error) { return svc.InFlight(id), nil },
 	})
 	data := randomBytes(t, 50_000)
 	done := make(chan error, 1)

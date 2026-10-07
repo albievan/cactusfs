@@ -601,16 +601,22 @@ func TestNewObjectServiceValidatesDrives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := map[string]app.ObjectServiceConfig{
-		"no topology":                     {Drives: []ports.ShardStore{porttest.NewMemShardStore("a")}},
-		"duplicate drive IDs":             {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("a")}},
-		"empty drive ID":                  {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("")}},
-		"a drive of the topology missing": {Topology: two, Drives: []ports.ShardStore{porttest.NewMemShardStore("a")}},
+	tests := map[string]struct {
+		topology cluster.Topology
+		drives   []ports.ShardStore
+	}{
+		"no topology":                     {drives: []ports.ShardStore{porttest.NewMemShardStore("a")}},
+		"duplicate drive IDs":             {two, []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("a")}},
+		"empty drive ID":                  {two, []ports.ShardStore{porttest.NewMemShardStore("a"), porttest.NewMemShardStore("")}},
+		"a drive of the topology missing": {two, []ports.ShardStore{porttest.NewMemShardStore("a")}},
 	}
-	for name, cfg := range tests {
-		if _, err := app.NewObjectService(cfg); !errors.Is(err, domain.ErrInvalidArgument) {
+	for name, tt := range tests {
+		if _, err := app.FixedDrives(tt.topology, tt.drives); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: error = %v, want %v", name, err, domain.ErrInvalidArgument)
 		}
+	}
+	if _, err := app.NewObjectService(app.ObjectServiceConfig{}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("NewObjectService without drives: error = %v, want %v", err, domain.ErrInvalidArgument)
 	}
 }
 
@@ -635,7 +641,7 @@ func TestPutWithoutEntropyFails(t *testing.T) {
 	f := newFixture(t)
 	f.createBucket(t, "b")
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: f.meta, Buckets: f.meta, Topology: f.topology, Drives: []ports.ShardStore{f.drives[0], f.drives[1]},
+		Index: f.meta, Buckets: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)),
 		Codec: porttest.NewCodec(), KMS: f.kms,
 		Authz: f.authz, Clock: f.clock, Entropy: iotest.ErrReader(errBoom),
 	})

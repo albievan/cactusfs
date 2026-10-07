@@ -24,10 +24,8 @@ import (
 // With fewer than four drives there is no parity: a version is one shard on
 // one drive.
 type shardStorage struct {
-	topology cluster.Topology
-	// drives holds the attached drives by their current ID.
-	drives map[string]ports.ShardStore
-	params erasure.Params
+	// drives finds the topology and the drives, on this node or another.
+	drives ports.DriveSource
 	codec  ports.ErasureCodec
 	logger *slog.Logger
 
@@ -36,6 +34,44 @@ type shardStorage struct {
 	// be collected, however long the write takes.
 	pinMu  sync.Mutex
 	pinned map[object.ID]struct{}
+}
+
+// fixedDrives is a DriveSource over a topology that does not change and
+// drives that are all attached to this node.
+type fixedDrives struct {
+	topology cluster.Topology
+	drives   map[string]ports.ShardStore
+}
+
+// FixedDrives returns a DriveSource for a topology whose drives are all
+// given: the arrangement of a node on its own, between two starts. The error
+// wraps domain.ErrInvalidArgument when a drive of the topology is missing.
+func FixedDrives(topology cluster.Topology, drives []ports.ShardStore) (ports.DriveSource, error) {
+	if err := topology.Validate(); err != nil {
+		return nil, err
+	}
+	byID := make(map[string]ports.ShardStore, len(drives))
+	for _, drive := range drives {
+		if _, dup := byID[drive.DriveID()]; dup || drive.DriveID() == "" {
+			return nil, fmt.Errorf("%w: drive ID %q is empty or used twice", domain.ErrInvalidArgument, drive.DriveID())
+		}
+		byID[drive.DriveID()] = drive
+	}
+	for _, id := range topology.DriveIDs() {
+		if _, ok := byID[id]; !ok {
+			return nil, fmt.Errorf("%w: drive %s of the topology is not attached", domain.ErrInvalidArgument, id)
+		}
+	}
+	return fixedDrives{topology: topology, drives: byID}, nil
+}
+
+// Topology implements ports.DriveSource.
+func (f fixedDrives) Topology(context.Context) (cluster.Topology, error) { return f.topology, nil }
+
+// Drive implements ports.DriveSource.
+func (f fixedDrives) Drive(slot cluster.Slot) (ports.ShardStore, bool) {
+	drive, ok := f.drives[slot.DriveID]
+	return drive, ok
 }
 
 // pin protects the shards of a write in progress from the collector.
@@ -60,43 +96,45 @@ func (s *shardStorage) isPinned(dataID object.ID) bool {
 	return ok
 }
 
-func newShardStorage(
-	topology cluster.Topology, drives []ports.ShardStore, codec ports.ErasureCodec, logger *slog.Logger,
-) (*shardStorage, error) {
-	if err := topology.Validate(); err != nil {
-		return nil, err
+func newShardStorage(drives ports.DriveSource, codec ports.ErasureCodec, logger *slog.Logger) (*shardStorage, error) {
+	if drives == nil {
+		return nil, fmt.Errorf("%w: no drives", domain.ErrInvalidArgument)
 	}
-	byID := make(map[string]ports.ShardStore, len(drives))
-	for _, drive := range drives {
-		if _, dup := byID[drive.DriveID()]; dup || drive.DriveID() == "" {
-			return nil, fmt.Errorf("%w: drive ID %q is empty or used twice", domain.ErrInvalidArgument, drive.DriveID())
-		}
-		byID[drive.DriveID()] = drive
-	}
-	for _, id := range topology.DriveIDs() {
-		if _, ok := byID[id]; !ok {
-			return nil, fmt.Errorf("%w: drive %s of the topology is not attached", domain.ErrInvalidArgument, id)
-		}
-	}
-	params, err := erasure.ParamsFor(topology.SetSize())
+	return &shardStorage{drives: drives, codec: codec, logger: logger, pinned: map[object.ID]struct{}{}}, nil
+}
+
+// located finds the drives that shards are recorded on, in the topology as
+// it is now.
+type located struct {
+	storage  *shardStorage
+	topology cluster.Topology
+}
+
+func (s *shardStorage) locate(ctx context.Context) (located, error) {
+	topology, err := s.drives.Topology(ctx)
 	if err != nil {
-		return nil, err
+		return located{}, err
 	}
-	return &shardStorage{
-		topology: topology, drives: byID, params: params, codec: codec, logger: logger,
-		pinned: map[object.ID]struct{}{},
-	}, nil
+	return located{storage: s, topology: topology}, nil
 }
 
 // drive returns the drive that now holds what was recorded under driveID:
 // the drive itself, or the one that replaced it in its slot.
-func (s *shardStorage) drive(driveID string) (ports.ShardStore, bool) {
-	current, ok := s.topology.Current(driveID)
+//
+// A drive the topology has never heard of holds nothing that can be found:
+// the error wraps domain.ErrShardNotFound. A drive that is part of the
+// topology and not attached is offline, which says nothing about the shards
+// on it: the error wraps domain.ErrDriveOffline.
+func (l located) drive(driveID string) (ports.ShardStore, error) {
+	position, ok := l.topology.Locate(driveID)
 	if !ok {
-		return nil, false
+		return nil, fmt.Errorf("%w: drive %s is not part of the topology", domain.ErrShardNotFound, driveID)
 	}
-	drive, ok := s.drives[current]
-	return drive, ok
+	drive, ok := l.storage.drives.Drive(l.topology.Sets[position.Set][position.Slot])
+	if !ok {
+		return nil, fmt.Errorf("%w: drive %s is not attached", domain.ErrDriveOffline, driveID)
+	}
+	return drive, nil
 }
 
 // geometryOf returns the stripe geometry recorded in a layout. The error
@@ -120,33 +158,48 @@ type streamWriter struct {
 	dataID   object.ID
 	// ctx is the context of the request that writes; io.Writer has none.
 	ctx context.Context
-	// drives and writers are indexed by shard. A nil writer is a shard that
-	// could not be written; the write goes on while a write quorum remains.
-	drives  []ports.ShardStore
-	writers []ports.ShardWriter
-	stripe  []byte
-	written int64
+	// driveIDs and writers are indexed by shard. A nil writer is a shard
+	// that could not be written; the write goes on while a write quorum
+	// remains.
+	driveIDs []string
+	writers  []ports.ShardWriter
+	stripe   []byte
+	written  int64
 }
 
 // create starts writing the stream of dataID. The erasure set and the drives
 // are chosen by the data ID, which is random, so objects spread evenly.
 func (s *shardStorage) create(ctx context.Context, dataID object.ID) (*streamWriter, error) {
-	set, positions, err := erasure.Placement(dataID, len(s.topology.Sets), s.topology.SetSize(), s.params.Total())
+	topology, err := s.drives.Topology(ctx)
+	if err != nil {
+		return nil, err
+	}
+	params, err := erasure.ParamsFor(topology.SetSize())
+	if err != nil {
+		return nil, err
+	}
+	set, positions, err := erasure.Placement(dataID, len(topology.Sets), topology.SetSize(), params.Total())
 	if err != nil {
 		return nil, err
 	}
 	w := &streamWriter{
 		storage:  s,
-		geometry: erasure.Geometry{Params: s.params, StripeSize: erasure.DefaultStripeSize},
+		geometry: erasure.Geometry{Params: params, StripeSize: erasure.DefaultStripeSize},
 		dataID:   dataID,
 		ctx:      ctx,
-		drives:   make([]ports.ShardStore, len(positions)),
+		driveIDs: make([]string, len(positions)),
 		writers:  make([]ports.ShardWriter, len(positions)),
 		stripe:   make([]byte, 0, erasure.DefaultStripeSize),
 	}
 	for i, position := range positions {
-		w.drives[i] = s.drives[s.topology.Sets[set][position].DriveID]
-		writer, err := w.drives[i].Create(ctx, object.ShardID{DataID: dataID, Index: i})
+		slot := topology.Sets[set][position]
+		w.driveIDs[i] = slot.DriveID
+		drive, ok := s.drives.Drive(slot)
+		if !ok {
+			w.lose(ctx, i, "create", fmt.Errorf("%w: drive %s is not attached", domain.ErrDriveOffline, slot.DriveID))
+			continue
+		}
+		writer, err := drive.Create(ctx, object.ShardID{DataID: dataID, Index: i})
 		if err != nil {
 			w.lose(ctx, i, "create", err)
 			continue
@@ -168,7 +221,7 @@ func (w *streamWriter) lose(ctx context.Context, index int, step string, err err
 	}
 	w.storage.logger.WarnContext(ctx, "shard write failed; the object will be stored degraded if a write quorum remains",
 		slog.String("shard", object.ShardID{DataID: w.dataID, Index: index}.String()),
-		slog.String("drive", w.drives[index].DriveID()), slog.String("step", step), slog.Any("error", err))
+		slog.String("drive", w.driveIDs[index]), slog.String("step", step), slog.Any("error", err))
 }
 
 func (w *streamWriter) alive() int {
@@ -252,11 +305,11 @@ func (w *streamWriter) commit(ctx context.Context) (layout object.Layout, degrad
 		ParityShards: w.geometry.Parity,
 		StripeSize:   w.geometry.StripeSize,
 		StoredSize:   w.written,
-		Shards:       make([]object.ShardLocation, len(w.drives)),
+		Shards:       make([]object.ShardLocation, len(w.driveIDs)),
 	}
 	shardSize := w.geometry.ShardSize(w.written)
-	for i, drive := range w.drives {
-		layout.Shards[i] = object.ShardLocation{DriveID: drive.DriveID(), Size: shardSize}
+	for i, driveID := range w.driveIDs {
+		layout.Shards[i] = object.ShardLocation{DriveID: driveID, Size: shardSize}
 	}
 	if err := w.quorum(); err != nil {
 		// Committed shards of a write that failed as a whole are removed.
@@ -291,6 +344,9 @@ type streamReader struct {
 	// readers is indexed by shard; nil is a shard that cannot be used.
 	readers  []ports.ShardReader
 	degraded bool
+	// offline counts the shards that could not be reached, as opposed to
+	// shards that are missing or bad.
+	offline int
 	// The stripe decoded last, for sequential reads.
 	cached int64
 	stripe []byte
@@ -300,10 +356,16 @@ type streamReader struct {
 //
 // When no shard can be found at all the error wraps domain.ErrShardNotFound,
 // which is what a version looks like just after it was replaced or deleted.
-// When shards exist but fewer than Data are usable it wraps
+// When too few are usable only because drives cannot be reached, it wraps
+// domain.ErrUnavailable: nothing is known to be wrong with the object. When
+// shards are missing or bad beyond what parity covers it wraps
 // domain.ErrIntegrity: the object cannot be read.
 func (s *shardStorage) open(ctx context.Context, v object.Version) (*streamReader, error) {
 	geometry, err := geometryOf(v.Layout)
+	if err != nil {
+		return nil, err
+	}
+	where, err := s.locate(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -315,9 +377,12 @@ func (s *shardStorage) open(ctx context.Context, v object.Version) (*streamReade
 	usable, found := 0, 0
 	var lastErr error
 	for i, location := range v.Layout.Shards {
-		reader, err := s.openShard(ctx, v.DataID, i, location, shardSize)
+		reader, err := where.openShard(ctx, v.DataID, i, location, shardSize)
 		if err != nil {
-			if !errors.Is(err, domain.ErrShardNotFound) {
+			switch {
+			case errors.Is(err, domain.ErrDriveOffline):
+				r.offline++
+			case !errors.Is(err, domain.ErrShardNotFound):
 				found++
 			}
 			lastErr = err
@@ -332,21 +397,26 @@ func (s *shardStorage) open(ctx context.Context, v object.Version) (*streamReade
 		return r, nil
 	}
 	_ = r.Close()
-	if found == 0 {
+	switch {
+	case usable+r.offline >= geometry.ReadQuorum():
+		return nil, fmt.Errorf("%w: %d of %d shards of %s are on drives that cannot be reached, %d are needed (last error: %w)",
+			domain.ErrUnavailable, r.offline, geometry.Total(), v.DataID, geometry.ReadQuorum(), lastErr)
+	case found == 0 && r.offline == 0:
 		return nil, fmt.Errorf("%w: no shard of %s is present", domain.ErrShardNotFound, v.DataID)
+	default:
+		return nil, fmt.Errorf("%w: %d of %d shards of %s are usable, %d are needed (last error: %w)",
+			domain.ErrIntegrity, usable, geometry.Total(), v.DataID, geometry.ReadQuorum(), lastErr)
 	}
-	return nil, fmt.Errorf("%w: %d of %d shards of %s are usable, %d are needed (last error: %w)",
-		domain.ErrIntegrity, usable, geometry.Total(), v.DataID, geometry.ReadQuorum(), lastErr)
 }
 
 // openShard opens one shard and checks that it has the size the layout
 // records.
-func (s *shardStorage) openShard(
+func (l located) openShard(
 	ctx context.Context, dataID object.ID, index int, location object.ShardLocation, shardSize int64,
 ) (ports.ShardReader, error) {
-	drive, ok := s.drive(location.DriveID)
-	if !ok {
-		return nil, fmt.Errorf("%w: drive %s is not attached", domain.ErrShardNotFound, location.DriveID)
+	drive, err := l.drive(location.DriveID)
+	if err != nil {
+		return nil, err
 	}
 	reader, err := drive.Open(ctx, object.ShardID{DataID: dataID, Index: index})
 	if err != nil {
@@ -448,6 +518,9 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 			_ = r.readers[i].Close()
 			r.readers[i] = nil
 			r.degraded = true
+			if errors.Is(err, domain.ErrDriveOffline) {
+				r.offline++
+			}
 			return false
 		}
 		chunks[i] = buf
@@ -470,6 +543,17 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 		}
 	}
 	if err := r.storage.codec.Reconstruct(g.Params, chunks, !all); err != nil {
+		usable := 0
+		for _, chunk := range chunks {
+			if chunk != nil {
+				usable++
+			}
+		}
+		if usable+r.offline >= g.ReadQuorum() {
+			// Enough shards would be there if their drives could be reached.
+			return nil, fmt.Errorf("%w: stripe %d of %s: %d shards are on drives that cannot be reached",
+				domain.ErrUnavailable, stripe, r.version.DataID, r.offline)
+		}
 		return nil, fmt.Errorf("%w: stripe %d of %s cannot be rebuilt: %w", domain.ErrIntegrity, stripe, r.version.DataID, err)
 	}
 	return chunks, nil
@@ -483,9 +567,14 @@ func (s *shardStorage) remove(ctx context.Context, dataID object.ID, layout obje
 	// The request that led here may already be cancelled; the cleanup is
 	// still owed.
 	ctx = context.WithoutCancel(ctx)
+	where, err := s.locate(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "shards left behind for garbage collection", slog.String("data_id", dataID.String()), slog.Any("error", err))
+		return
+	}
 	for index, location := range layout.Shards {
-		drive, ok := s.drive(location.DriveID)
-		if !ok {
+		drive, err := where.drive(location.DriveID)
+		if err != nil {
 			continue
 		}
 		id := object.ShardID{DataID: dataID, Index: index}
@@ -539,6 +628,9 @@ type repair struct {
 	shards int
 	// damaged is the number that were missing, truncated or corrupt.
 	damaged int
+	// offline is the number that could not be reached: their state is not
+	// known, and they were neither used nor rebuilt.
+	offline int
 	// rebuilt lists the shards that were written again.
 	rebuilt []int
 	// verified is the number of stored bytes that were read and verified.
@@ -550,14 +642,21 @@ type repair struct {
 //
 // It never makes an object worse. A shard is rebuilt only when it is
 // definitely damaged; an error that says nothing about the shard stops the
-// heal with nothing changed. A rebuilt shard is written in full beside the
+// heal with nothing changed. A shard on a drive that cannot be reached is
+// left out: it is not used, not rebuilt and not counted as damaged, and the
+// rest of the object is healed without it. A rebuilt shard is written in full beside the
 // damaged one and replaces it in one step, so a rebuild that fails leaves
 // every shard as it was.
 //
 // It returns an error wrapping domain.ErrIntegrity when too few shards are
-// left to rebuild from.
+// left to rebuild from, and one wrapping domain.ErrUnavailable when enough
+// might be left but cannot be reached now.
 func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle) (repair, error) {
 	geometry, err := geometryOf(v.Layout)
+	if err != nil {
+		return repair{}, err
+	}
+	where, err := s.locate(ctx)
 	if err != nil {
 		return repair{}, err
 	}
@@ -572,7 +671,7 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 
 	var damaged []int
 	for i, location := range v.Layout.Shards {
-		shard, err := s.openShard(ctx, v.DataID, i, location, shardSize)
+		shard, err := where.openShard(ctx, v.DataID, i, location, shardSize)
 		if err == nil {
 			var verified int64
 			verified, err = verifyShard(ctx, shard, slow)
@@ -586,6 +685,8 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 			reader.readers[i] = shard
 		case isDamage(err):
 			damaged = append(damaged, i)
+		case errors.Is(err, domain.ErrDriveOffline) && ctx.Err() == nil:
+			result.offline++
 		default:
 			return result, fmt.Errorf("shard %d of %s could not be checked: %w", i, v.DataID, err)
 		}
@@ -594,7 +695,11 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 	if len(damaged) == 0 {
 		return result, nil
 	}
-	if geometry.Total()-len(damaged) < geometry.ReadQuorum() {
+	if sources := geometry.Total() - len(damaged) - result.offline; sources < geometry.ReadQuorum() {
+		if sources+result.offline >= geometry.ReadQuorum() {
+			return result, fmt.Errorf("%w: %d shards of %s are damaged and %d are on drives that cannot be reached; "+
+				"too few are left to rebuild from for now", domain.ErrUnavailable, len(damaged), v.DataID, result.offline)
+		}
 		return result, fmt.Errorf("%w: %d of %d shards of %s are damaged, at most %d can be rebuilt",
 			domain.ErrIntegrity, len(damaged), geometry.Total(), v.DataID, geometry.Parity)
 	}
@@ -606,8 +711,8 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 		}
 	}()
 	for _, i := range damaged {
-		drive, ok := s.drive(v.Layout.Shards[i].DriveID)
-		if !ok {
+		drive, err := where.drive(v.Layout.Shards[i].DriveID)
+		if err != nil {
 			continue
 		}
 		id := object.ShardID{DataID: v.DataID, Index: i}
@@ -647,9 +752,13 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 // removeShards deletes the listed shards of a version, best effort.
 func (s *shardStorage) removeShards(ctx context.Context, dataID object.ID, layout object.Layout, indexes []int) {
 	ctx = context.WithoutCancel(ctx)
+	where, err := s.locate(ctx)
+	if err != nil {
+		return
+	}
 	for _, index := range indexes {
-		drive, ok := s.drive(layout.Shards[index].DriveID)
-		if !ok {
+		drive, err := where.drive(layout.Shards[index].DriveID)
+		if err != nil {
 			continue
 		}
 		id := object.ShardID{DataID: dataID, Index: index}

@@ -1,0 +1,10 @@
+# Node RPC contract: lint and breaking-change rules. Run through `make contracts`.
+version: v2
+modules:
+  - path: api/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

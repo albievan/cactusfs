@@ -26,10 +26,11 @@ Usage:
 
 Commands:
   server     run a CactusFS node
+  dev-init   write the certificates and key file of a development cluster
   version    print version information
   help       show this help
 
-Run "cactusfs server --help" for the flags and CACTUSFS_* variables of a command.
+Run "cactusfs <command> --help" for the flags and CACTUSFS_* variables of a command.
 `
 
 func main() {
@@ -57,6 +58,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return exitOK
 	case "server":
 		return runServerCommand(ctx, args[1:], stdout, stderr, getenv)
+	case "dev-init":
+		return runDevInit(args[1:], stdout, stderr, getenv)
 	default:
 		_, _ = fmt.Fprintf(stderr, "cactusfs: unknown command %q\n\n%s", args[0], usage)
 		return exitUsage

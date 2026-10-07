@@ -1,0 +1,283 @@
+# CactusFS events. Contract first: an event exists here before any code
+# publishes it, and internal/ports/events.go is held to this document by a
+# test (internal/ports/events_test.go). Validated by `make contracts`.
+#
+# Every event is a fact: a change of state that was committed through Raft.
+# Events are derived from applied Raft entries, never published by a request
+# handler, so every node derives the same events with the same IDs.
+#
+# Names: cactusfs.<aggregate>.<event>.v<major>. A change that an existing
+# consumer could not read gets a new name with the next major version; fields
+# are otherwise only ever added.
+#
+# Delivery. In this version events are delivered inside each node's process,
+# at most once per node: an event can be missed (the node stops between
+# committing the change and delivering the event, or catches up from a
+# snapshot), and is never invented. Consumers must be idempotent and can
+# recognise a repeated event by its id. External delivery - NATS JetStream and
+# webhooks, for bucket notifications and audit export - is added by the
+# adapters of a later milestone, under the channel addresses below.
+asyncapi: 3.0.0
+info:
+  title: CactusFS events
+  version: 1.0.0
+  description: State changes of a CactusFS deployment, derived from applied metadata entries.
+
+defaultContentType: application/json
+
+channels:
+  bucketCreated:
+    address: cactusfs.bucket.created.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketCreated'
+  bucketDeleted:
+    address: cactusfs.bucket.deleted.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketDeleted'
+  objectCreated:
+    address: cactusfs.object.created.v1
+    messages:
+      event:
+        $ref: '#/components/messages/ObjectCreated'
+  objectDeleted:
+    address: cactusfs.object.deleted.v1
+    messages:
+      event:
+        $ref: '#/components/messages/ObjectDeleted'
+  rootCredentialSet:
+    address: cactusfs.iam.root-credential-set.v1
+    messages:
+      event:
+        $ref: '#/components/messages/RootCredentialSet'
+  topologyChanged:
+    address: cactusfs.cluster.topology-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/TopologyChanged'
+  nodeRegistered:
+    address: cactusfs.cluster.node-registered.v1
+    messages:
+      event:
+        $ref: '#/components/messages/NodeRegistered'
+  nodeRemoved:
+    address: cactusfs.cluster.node-removed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/NodeRemoved'
+
+operations:
+  publishBucketCreated:
+    action: send
+    channel:
+      $ref: '#/channels/bucketCreated'
+  publishBucketDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/bucketDeleted'
+  publishObjectCreated:
+    action: send
+    channel:
+      $ref: '#/channels/objectCreated'
+  publishObjectDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/objectDeleted'
+  publishRootCredentialSet:
+    action: send
+    channel:
+      $ref: '#/channels/rootCredentialSet'
+  publishTopologyChanged:
+    action: send
+    channel:
+      $ref: '#/channels/topologyChanged'
+  publishNodeRegistered:
+    action: send
+    channel:
+      $ref: '#/channels/nodeRegistered'
+  publishNodeRemoved:
+    action: send
+    channel:
+      $ref: '#/channels/nodeRemoved'
+
+components:
+  messages:
+    BucketCreated:
+      name: cactusfs.bucket.created.v1
+      title: A bucket was created
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.created.v1
+              data:
+                $ref: '#/components/schemas/Bucket'
+    BucketDeleted:
+      name: cactusfs.bucket.deleted.v1
+      title: A bucket was deleted
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.deleted.v1
+              data:
+                $ref: '#/components/schemas/Bucket'
+    ObjectCreated:
+      name: cactusfs.object.created.v1
+      title: An object version became the current version of its key
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.object.created.v1
+              data:
+                $ref: '#/components/schemas/Object'
+    ObjectDeleted:
+      name: cactusfs.object.deleted.v1
+      title: An object was deleted; the payload describes the version that was current
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.object.deleted.v1
+              data:
+                $ref: '#/components/schemas/Object'
+    RootCredentialSet:
+      name: cactusfs.iam.root-credential-set.v1
+      title: The deployment was given its root credential
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.iam.root-credential-set.v1
+              data:
+                $ref: '#/components/schemas/RootCredential'
+    TopologyChanged:
+      name: cactusfs.cluster.topology-changed.v1
+      title: The assignment of drives to erasure sets was recorded or changed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.cluster.topology-changed.v1
+              data:
+                $ref: '#/components/schemas/Topology'
+    NodeRegistered:
+      name: cactusfs.cluster.node-registered.v1
+      title: A node was recorded as part of the cluster, or its record changed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.cluster.node-registered.v1
+              data:
+                $ref: '#/components/schemas/Node'
+    NodeRemoved:
+      name: cactusfs.cluster.node-removed.v1
+      title: A node was removed from the cluster
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.cluster.node-removed.v1
+              data:
+                $ref: '#/components/schemas/Node'
+
+  schemas:
+    Envelope:
+      type: object
+      required: [id, type, sequence, data]
+      properties:
+        id:
+          type: string
+          description: Unique within a deployment and the same on every node. Consumers deduplicate by it.
+        type:
+          type: string
+          description: The event name.
+        sequence:
+          type: integer
+          minimum: 1
+          description: Index of the metadata entry the event was derived from. Events are published in ascending order of it.
+        time:
+          type: string
+          format: date-time
+          description: When the change was made, as recorded in the change itself. Absent when the change carries no time.
+        data:
+          type: object
+    Bucket:
+      type: object
+      required: [bucket]
+      additionalProperties: false
+      properties:
+        bucket:
+          type: string
+    Object:
+      type: object
+      required: [bucket, key, version_id, size, etag]
+      additionalProperties: false
+      properties:
+        bucket:
+          type: string
+        key:
+          type: string
+        version_id:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+          description: Size of the object in bytes.
+        etag:
+          type: string
+    RootCredential:
+      type: object
+      required: [access_key_id]
+      additionalProperties: false
+      description: The secret is never part of an event.
+      properties:
+        access_key_id:
+          type: string
+    Topology:
+      type: object
+      required: [deployment_id, version, erasure_sets, drives_per_set]
+      additionalProperties: false
+      properties:
+        deployment_id:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        erasure_sets:
+          type: integer
+          minimum: 1
+        drives_per_set:
+          type: integer
+          minimum: 1
+    Node:
+      type: object
+      required: [node_id]
+      additionalProperties: false
+      properties:
+        node_id:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [gateway, meta, storage, console]

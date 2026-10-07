@@ -74,7 +74,25 @@ func (s *IdentityService) EnsureRoot(ctx context.Context, provided *Credentials)
 		return nil, fmt.Errorf("identity.EnsureRoot: %w", err)
 	}
 	root := iam.RootCredential{AccessKeyID: creds.AccessKeyID, Secret: sealed, CreatedAt: s.clock.Now().UTC()}
-	if err := s.roots.SetRootCredential(ctx, root); err != nil {
+	err = s.roots.SetRootCredential(ctx, root)
+	if errors.Is(err, domain.ErrOutcomeUnknown) {
+		// The credential may have been stored. If it was, it must be shown
+		// now: there is no second chance to show it.
+		if stored, readErr := s.roots.GetRootCredential(ctx); readErr == nil && stored.AccessKeyID == creds.AccessKeyID {
+			return generated, s.checkStoredRoot(ctx, stored, creds)
+		}
+	}
+	if errors.Is(err, domain.ErrAlreadyBootstrapped) {
+		// Another node of the cluster was first. Its credential is the
+		// deployment's; one generated here was never stored and is not
+		// shown to anybody.
+		stored, err := s.roots.GetRootCredential(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("identity.EnsureRoot: %w", err)
+		}
+		return nil, s.checkStoredRoot(ctx, stored, provided)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("identity.EnsureRoot: %w", err)
 	}
 	return generated, nil

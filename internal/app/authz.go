@@ -30,7 +30,7 @@ func (a *Authorizer) Authorize(ctx context.Context, req iam.Request) error {
 	err := iam.Decide(req)
 	if err != nil {
 		a.logger.WarnContext(ctx, "authorization denied",
-			slog.String("access_key_id", req.Principal.AccessKeyID),
+			slog.String("principal", req.Principal.Name()),
 			slog.String("action", string(req.Action)),
 			slog.String("resource", req.Resource.String()),
 		)

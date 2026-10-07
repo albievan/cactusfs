@@ -206,7 +206,7 @@ func TestAuthorizerLogsRefusalsWithoutSecrets(t *testing.T) {
 	if !errors.Is(err, domain.ErrAccessDenied) {
 		t.Fatalf("error = %v, want %v", err, domain.ErrAccessDenied)
 	}
-	for _, want := range []string{`"access_key_id":"SOMEONE"`, `"action":"s3:GetObject"`, `"resource":"arn:aws:s3:::photos/a.jpg"`} {
+	for _, want := range []string{`"principal":"SOMEONE"`, `"action":"s3:GetObject"`, `"resource":"arn:aws:s3:::photos/a.jpg"`} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("refusal log lacks %s: %s", want, logs.String())
 		}
