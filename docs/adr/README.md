@@ -36,4 +36,5 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 
 | ADR | Title | Status |
 |---|---|---|
+| [0001](0001-on-disk-format.md) | On-disk format of drives and shards | accepted |
 | [0002](0002-encryption.md) | Encryption at rest: streaming AEAD and envelope keys | accepted |
