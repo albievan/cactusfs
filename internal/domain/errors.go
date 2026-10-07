@@ -15,6 +15,11 @@ var (
 	// ErrNotLeader reports that this node cannot commit metadata changes
 	// because it is not the Raft leader.
 	ErrNotLeader = errors.New("node is not the metadata leader")
+	// ErrOutcomeUnknown reports that a metadata change may or may not have
+	// been committed: it reached the Raft log but its result was not
+	// observed, so it can still take effect, for example after a restart.
+	// Nothing that the change refers to may be cleaned up on this error.
+	ErrOutcomeUnknown = errors.New("outcome of the metadata change is unknown")
 	// ErrNotBootstrapped reports that the deployment has no root credentials
 	// yet.
 	ErrNotBootstrapped = errors.New("deployment is not bootstrapped")

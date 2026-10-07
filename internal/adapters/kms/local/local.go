@@ -18,9 +18,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/albievan/cactusfs/internal/adapters/fsutil"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -32,6 +34,7 @@ const (
 	keySize       = 32
 	saltSize      = 16
 	keyIDSize     = 8
+	keyIDPrefix   = "local:"
 	wrapVersion   = 1
 	fileMode      = 0o600
 
@@ -109,7 +112,7 @@ func Create(path string, passphrase []byte, params Params, entropy io.Reader) er
 	var file keyFile
 	file.Magic = fileMagic
 	file.FormatVersion = formatVersion
-	file.KeyID = "local:" + hex.EncodeToString(id)
+	file.KeyID = keyIDPrefix + hex.EncodeToString(id)
 	file.KDF.Algorithm = algorithm
 	file.KDF.Params = params
 	file.KDF.Salt = salt
@@ -156,6 +159,9 @@ func Open(path string, passphrase []byte) (*KMS, error) {
 		return nil, fmt.Errorf("kms/local.Open: %w: key file version %d (%s)",
 			domain.ErrUnsupportedFormat, file.FormatVersion, file.KDF.Algorithm)
 	}
+	if !validKeyID(file.KeyID) {
+		return nil, fmt.Errorf("kms/local.Open: %w: malformed key ID", domain.ErrKeyUnavailable)
+	}
 	if err := file.KDF.validate(); err != nil || len(file.KDF.Salt) != saltSize {
 		return nil, fmt.Errorf("kms/local.Open: %w: key file parameters are out of range", domain.ErrKeyUnavailable)
 	}
@@ -178,6 +184,18 @@ func Open(path string, passphrase []byte) (*KMS, error) {
 		return nil, fmt.Errorf("kms/local.Open: %w", err)
 	}
 	return &KMS{keyID: file.KeyID, aead: aead}, nil
+}
+
+// validKeyID reports whether id has the fixed form "local:" plus 16
+// hexadecimal characters. The fixed length is what makes the associated data
+// of a wrapped key, key ID followed by owner, unambiguous.
+func validKeyID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, keyIDPrefix)
+	if !ok || len(suffix) != hex.EncodedLen(keyIDSize) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 // Exists reports whether a key file is present at path.
@@ -218,8 +236,9 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// writeNew creates path, which must not exist, with data flushed to stable
-// storage.
+// writeNew creates path, which must not exist, with data and its directory
+// entry flushed to stable storage: everything stored afterwards depends on
+// this file surviving a power loss.
 func writeNew(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -229,20 +248,7 @@ func writeNew(path string, data []byte) error {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
-
-	f, err := dir.OpenFile(filepath.Base(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	return fsutil.WriteNewDurable(dir, filepath.Base(path), data, fileMode)
 }
 
 // KeyID implements ports.KMS.

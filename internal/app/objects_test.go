@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"slices"
@@ -637,5 +638,134 @@ func TestPutWithoutEntropyFails(t *testing.T) {
 	_, err = svc.Put(context.Background(), porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: strings.NewReader("x"), Size: 1})
 	if !errors.Is(err, errBoom) {
 		t.Errorf("error = %v, want %v", err, errBoom)
+	}
+}
+
+// TestTruncatedUploadIsNotStored: a transport reports a body that was cut
+// short with io.ErrUnexpectedEOF. With no declared length and no declared
+// digest nothing else would catch it, and the prefix would be sealed and
+// committed as if it were the whole object.
+func TestTruncatedUploadIsNotStored(t *testing.T) {
+	t.Parallel()
+
+	for _, received := range []int{0, 1000, segment, segment + 1000} {
+		f := newFixture(t)
+		f.createBucket(t, "b")
+		f.put(t, "b", "k", []byte("the existing object"))
+
+		cut := io.MultiReader(bytes.NewReader(randomBytes(t, received)), iotest.ErrReader(io.ErrUnexpectedEOF))
+		_, err := f.objects.Put(context.Background(), porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: cut, Size: -1})
+
+		if !errors.Is(err, domain.ErrIncompleteBody) {
+			t.Fatalf("%d bytes then a cut: error = %v, want %v", received, err, domain.ErrIncompleteBody)
+		}
+		if got, _, err := f.get("b", "k", nil); err != nil || string(got) != "the existing object" {
+			t.Errorf("%d bytes then a cut: the existing object is now %q (%v)", received, got, err)
+		}
+		if f.shardCount() != 1 {
+			t.Errorf("%d bytes then a cut: %d shards, want only the existing object's", received, f.shardCount())
+		}
+	}
+}
+
+// TestShardIsKeptWhenTheCommitOutcomeIsUnknown: an error from the metadata
+// store does not always mean "not committed". When the entry may still be
+// applied - after a restart, say - deleting its shard would leave the index
+// pointing at nothing, and for an overwrite the previous version would be
+// lost as well.
+func TestShardIsKeptWhenTheCommitOutcomeIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	f.createBucket(t, "b")
+	f.put(t, "b", "k", []byte("original"))
+
+	f.meta.FailWrites = fmt.Errorf("%w: raft is shutting down", domain.ErrOutcomeUnknown)
+	_, err := f.objects.Put(context.Background(), porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: strings.NewReader("new"), Size: 3})
+	if !errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Fatalf("error = %v, want %v", err, domain.ErrOutcomeUnknown)
+	}
+	if f.shardCount() != 2 {
+		t.Fatalf("%d shards on the drives, want 2: the original's and the one whose commit may still happen", f.shardCount())
+	}
+	if slices.Contains(f.events.list(), "shard.delete") {
+		t.Error("a shard was deleted although the outcome of the commit is unknown")
+	}
+
+	// The same for a delete: nothing is removed from the drives.
+	if err := f.objects.Delete(context.Background(), porttest.Root(), "b", "k"); !errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Fatalf("Delete error = %v, want %v", err, domain.ErrOutcomeUnknown)
+	}
+	if f.shardCount() != 2 {
+		t.Errorf("%d shards after a delete of unknown outcome, want 2", f.shardCount())
+	}
+}
+
+// TestGetDuringOverwriteAndDelete: a reader sees the old object or the new
+// one (or, after a delete, none), never an internal error because the shard
+// it was about to open has just been replaced.
+func TestGetDuringOverwriteAndDelete(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	f.createBucket(t, "b")
+	f.put(t, "b", "k", []byte("version 0"))
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			body := fmt.Sprintf("version %d", i)
+			_, err := f.objects.Put(context.Background(), porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: strings.NewReader(body), Size: int64(len(body))})
+			if err != nil {
+				t.Errorf("Put: %v", err)
+				return
+			}
+			if i%5 == 0 {
+				if err := f.objects.Delete(context.Background(), porttest.Root(), "b", "k"); err != nil {
+					t.Errorf("Delete: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	for range 3000 {
+		got, _, err := f.get("b", "k", nil)
+		switch {
+		case errors.Is(err, domain.ErrObjectNotFound):
+		case err != nil:
+			t.Fatalf("Get during concurrent writes: %v", err)
+		case !strings.HasPrefix(string(got), "version "):
+			t.Fatalf("Get returned %q", got)
+		}
+	}
+	close(stop)
+	<-writerDone
+}
+
+func TestGetReportsDataThatIsReallyMissing(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	f.createBucket(t, "b")
+	version := f.put(t, "b", "k", []byte("data"))
+	if err := f.driveOf(t, version).Delete(context.Background(), object.ShardID{DataID: version.DataID}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.authz.Requests())
+
+	// The same version is still current, so looking again does not help.
+	if _, _, err := f.get("b", "k", nil); !errors.Is(err, domain.ErrShardNotFound) {
+		t.Fatalf("error = %v, want %v", err, domain.ErrShardNotFound)
+	}
+	if looks := len(f.authz.Requests()) - before; looks != 2 {
+		t.Errorf("Get looked at the index %d times, want 2: once more to see whether the object changed", looks)
 	}
 }

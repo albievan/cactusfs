@@ -40,8 +40,17 @@ func (h *Handler) listBuckets(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) createBucket(ctx context.Context, req *request) error {
-	// The body is optional and names a region; a deployment has one.
-	if _, err := parseCreateBucketConfiguration(req.Body); err != nil {
+	// The body is optional and names a region; a deployment has one. Like
+	// every request body it is checked against what the client declared
+	// before the request has any effect.
+	body, err := newPayload(req.Request, req.payloadHash)
+	if err != nil {
+		return err
+	}
+	if _, err := parseCreateBucketConfiguration(body.body); err != nil {
+		return err
+	}
+	if _, err := body.verify(); err != nil {
 		return err
 	}
 	if err := h.cfg.Buckets.Create(ctx, req.principal, req.bucket); err != nil {

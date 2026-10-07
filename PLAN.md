@@ -11,7 +11,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | Milestone | Title | Status |
 |---|---|---|
 | 0 | Scaffold | done |
-| 1 | Standalone store | in_progress |
+| 1 | Standalone store | done |
 | 2 | Erasure coding and integrity on local drives | todo |
 | 3 | Cluster | todo |
 | 4 | IAM | todo |
@@ -72,7 +72,7 @@ subset with encryption on.
 | 1.6 | done | Single-node Raft metadata (bbolt) | bucket and object index committed through Raft; versioned, typed entries; each entry applied exactly once across restarts and snapshots; ADR | `internal/adapters/raftmeta/`, `docs/adr/0003-metadata.md` |
 | 1.7 | done | Use cases: bucket create/delete/list, object PUT/GET/HEAD/DELETE, ListObjectsV2 | write path order per §2; table-driven tests; coverage ≥ 80 % | `internal/app/` |
 | 1.8 | done | S3 API adapter with SigV4 (header auth) and XML errors | path-style and virtual-hosted-style; literal, `UNSIGNED-PAYLOAD` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (aws-chunked) payloads with checksum verification; fuzz tests for SigV4, XML and chunk decoding; constant-time comparison | `internal/adapters/s3api/` |
-| 1.9 | done | Root bootstrap, `--data`, `--meta-dir`, KMS flags and wiring | first start requires or generates root credentials, shown once; no default credentials | `cmd/cactusfs/`, `internal/app/bootstrap.go` |
+| 1.9 | done | Root bootstrap, `--data`, `--meta-dir`, KMS flags and wiring | first start requires or generates root credentials, shown once; no default credentials | `cmd/cactusfs/{config,node,server}.go`, `internal/app/identity.go` |
 | 1.10 | done | S3 compatibility suite, first baseline | aws-sdk-go-v2 with default options over TLS against the built binary; one top-level test per behaviour, recorded in `baseline.txt` | `test/s3compat/` |
 | 1.11 | done | Telemetry adapter | authenticated `/metrics` (`cactusfs_*`, own registry, no tenant labels) and OpenTelemetry traces as decorators on every port; no exporter unless an OTLP endpoint is configured | `internal/adapters/telemetry/` |
 
@@ -204,3 +204,12 @@ subset with encryption on.
 | 2026-10-07 | The compatibility suite builds and starts the real binary over TLS with a generated CA, and configures the SDK's default checksum behaviour explicitly instead of loading AWS configuration. | `cmd/cactusfs` is the only wiring point; the suite must not read the developer's AWS files; and a hand-built `aws.Config` otherwise silently turns the SDK's default checksums off (found when a test that should have exercised aws-chunked did not). |
 | 2026-10-07 | `--otlp-endpoint` must be `https`, or `http` to a loopback IP. | Encryption in transit also applies to what the node sends out. |
 | 2026-10-07 | Bucket names, object keys and object metadata are not encrypted in the metadata store. | §3 requires object encryption; encrypting the index is a product decision with a listing-performance cost. Open question for Albie. |
+| 2026-10-07 | Review of milestone 1 (2 blocker, 5 major, 6 minor) — all fixed, each with a regression test that fails when the fix is removed. | Recorded so the reasoning survives: see the next rows. |
+| 2026-10-07 | The stream encryptor ends the plaintext only on `io.EOF`; `io.ErrUnexpectedEOF` from the source is an error (`IncompleteBody`). | Blocker: a chunked or length-declared upload cut short by the client was sealed as final and committed, replacing the existing object. |
+| 2026-10-07 | `domain.ErrOutcomeUnknown`: an error from the metadata store is a definite "not committed" only for state-machine refusals and errors Raft returns before logging. Otherwise the entry may still be applied, and nothing it refers to is cleaned up. The state machine is fail-stop: once an entry cannot be applied, no further entry is logged. | Blocker: `Put` deleted the new shard on any commit error, although the entry could be applied at the next start — leaving the index pointing at no data and, for an overwrite, the previous version unreferenced. |
+| 2026-10-07 | S3 routing is an allow-list: a query parameter or `x-amz-*` header the routed operation does not know answers `501`; a query string that does not parse answers `400`; conditional headers (`If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`) answer `501` until implemented (6.x). | Major: the deny-list missed new sub-resources, `;` in a query dropped the pair, and `If-None-Match: *` or object-lock headers were silently ignored. |
+| 2026-10-07 | `Get` looks again when the shard of the version it read is gone and the object has since changed. | Major: a read racing an overwrite or delete failed with 500. |
+| 2026-10-07 | At start the metadata store restores the newest snapshot when the state database is older than it. | Major: with `NoSnapshotRestoreOnStart`, a lost or stale `state.db` came up healthy with only the post-snapshot log applied. |
+| 2026-10-07 | `serve` returns only when every request handler has returned; the metadata store refuses use after `Close` and `Close` waits for operations in flight. If handlers do not return within 60 s the process exits without closing the stores. | Major: after a shutdown timeout the stores were closed under running handlers. |
+| 2026-10-07 | The KMS key file and `node.json` are created with their directory entry flushed (`internal/adapters/fsutil`). | Major: a power loss after first start could lose the key file while acknowledged objects existed. |
+| 2026-10-07 | `Content-MD5` must be covered by the signature when present; the CreateBucket body is verified against its declared hash; a shard whose rename could not be made durable is removed again; the local KMS key ID format is validated. | Minor review findings. |

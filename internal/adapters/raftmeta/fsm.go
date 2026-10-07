@@ -41,6 +41,9 @@ func rootKey() []byte       { return []byte("root") }
 type applyResult struct {
 	err      error
 	previous *versionRecord
+	// fatal marks err as a failure to apply, as opposed to a refusal: the
+	// entry is in the log but its effect is not in the state.
+	fatal bool
 }
 
 // fsm is the Raft state machine. Its state lives in its own bbolt database,
@@ -150,10 +153,10 @@ func (f *fsm) Apply(log *raft.Log) any {
 	defer f.mu.Unlock()
 
 	if f.failed != nil {
-		return applyResult{err: f.failed}
+		return applyResult{err: f.failed, fatal: true}
 	}
 	if f.db == nil {
-		return applyResult{err: domain.ErrShuttingDown}
+		return applyResult{err: domain.ErrShuttingDown, fatal: true}
 	}
 
 	var result applyResult
@@ -176,7 +179,7 @@ func (f *fsm) Apply(log *raft.Log) any {
 		// The entry is committed in the log but cannot be applied here. Going
 		// on would make this replica diverge, so the state machine stops.
 		f.failed = fmt.Errorf("metadata state machine stopped at entry %d: %w", log.Index, err)
-		return applyResult{err: f.failed}
+		return applyResult{err: f.failed, fatal: true}
 	}
 	return result
 }

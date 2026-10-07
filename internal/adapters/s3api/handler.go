@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -273,25 +275,79 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 	return nil
 }
 
-// Query parameters that select an S3 feature this adapter does not implement
-// yet. A request that carries one is refused rather than treated as the plain
-// operation on the same resource.
-func unsupportedSubresources() []string {
+// queryClientInfo is a query parameter AWS SDKs add to name the operation
+// they are calling. It selects nothing.
+const queryClientInfo = "x-id"
+
+// allowQuery refuses a request that carries a query parameter the routed
+// operation does not implement. S3 selects whole features with query
+// parameters (?acl, ?uploadId, ?versionId, ...), and new ones keep being
+// added, so the rule is an allow-list: a parameter this adapter does not know
+// answers 501 and is never ignored. Ignoring one would serve a different
+// operation than the client asked for - a DELETE ?uploadId would delete the
+// object.
+func allowQuery(query url.Values, allowed ...string) error {
+	for name := range query {
+		if name != queryClientInfo && !slices.Contains(allowed, name) {
+			return errNotImplemented()
+		}
+	}
+	return nil
+}
+
+// Request headers that change what an operation means and that this adapter
+// does not implement yet.
+func unsupportedConditionals() []string {
+	return []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"}
+}
+
+// x-amz-* request headers that are understood. Every other x-amz-* header
+// asks for something that is not implemented.
+func knownAmzHeaders() []string {
 	return []string{
-		"acl", "accelerate", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory",
-		"legal-hold", "lifecycle", "logging", "metrics", "notification", "object-lock", "ownershipControls",
-		"partNumber", "policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "restore",
-		"retention", "select", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions",
-		"website", "attributes",
+		"x-amz-date", "x-amz-content-sha256", "x-amz-decoded-content-length", "x-amz-trailer",
+		"x-amz-user-agent", "x-amz-sdk-checksum-algorithm",
 	}
 }
 
-func (h *Handler) route(ctx context.Context, req *request) error {
-	query := req.URL.Query()
-	for _, name := range unsupportedSubresources() {
-		if query.Has(name) {
+// allowHeaders refuses a request with a header that would change its meaning
+// in a way this adapter does not implement: conditional requests, object
+// lock, customer-provided or KMS encryption, tagging, ACLs, copies and so on.
+// A client that sets "If-None-Match: *" to avoid overwriting, or an object
+// lock header to protect a version, must not be told that it worked.
+func allowHeaders(header http.Header) error {
+	for _, name := range unsupportedConditionals() {
+		if header.Get(name) != "" {
 			return errNotImplemented()
 		}
+	}
+	for name, values := range header {
+		lower := strings.ToLower(name)
+		if !strings.HasPrefix(lower, "x-amz-") {
+			continue
+		}
+		switch {
+		case slices.Contains(knownAmzHeaders(), lower):
+		case strings.HasPrefix(lower, "x-amz-meta-"), strings.HasPrefix(lower, checksumHeaderPrefix):
+		case lower == "x-amz-server-side-encryption" && len(values) == 1 && values[0] == "AES256":
+			// What every object gets anyway.
+		case lower == "x-amz-storage-class" && len(values) == 1 && values[0] == storageClass:
+		default:
+			return errNotImplemented()
+		}
+	}
+	return nil
+}
+
+func (h *Handler) route(ctx context.Context, req *request) error {
+	// A query string that does not parse is refused: a lenient parser
+	// would drop the malformed pair and with it the feature it selects.
+	query, err := url.ParseQuery(req.URL.RawQuery)
+	if err != nil {
+		return apiError{http.StatusBadRequest, "InvalidURI", "Couldn't parse the specified URI."}
+	}
+	if err := allowHeaders(req.Header); err != nil {
+		return err
 	}
 
 	switch {
@@ -299,49 +355,78 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 		if req.Method != http.MethodGet {
 			return errMethodNotAllowed()
 		}
+		if err := allowQuery(query); err != nil {
+			return err
+		}
 		req.operation = "ListBuckets"
 		return h.listBuckets(ctx, req)
 	case req.key == "":
-		return h.routeBucket(ctx, req, query.Has("location"), query.Get("list-type"))
+		return h.routeBucket(ctx, req, query)
 	default:
-		return h.routeObject(ctx, req)
+		return h.routeObject(ctx, req, query)
 	}
 }
 
-func (h *Handler) routeBucket(ctx context.Context, req *request, location bool, listType string) error {
+func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Values) error {
 	switch req.Method {
 	case http.MethodPut:
+		if err := allowQuery(query); err != nil {
+			return err
+		}
 		req.operation = "CreateBucket"
 		return h.createBucket(ctx, req)
 	case http.MethodDelete:
+		if err := allowQuery(query); err != nil {
+			return err
+		}
 		req.operation = "DeleteBucket"
 		return h.deleteBucket(ctx, req)
 	case http.MethodHead:
+		if err := allowQuery(query); err != nil {
+			return err
+		}
 		req.operation = "HeadBucket"
 		return h.headBucket(ctx, req)
 	case http.MethodGet:
 		switch {
-		case location:
+		case query.Has("location"):
+			if err := allowQuery(query, "location"); err != nil {
+				return err
+			}
 			req.operation = "GetBucketLocation"
 			return h.getBucketLocation(ctx, req)
-		case listType == "2":
+		case query.Get("list-type") == "2":
+			if err := allowQuery(query, listObjectsV2Parameters()...); err != nil {
+				return err
+			}
 			req.operation = "ListObjectsV2"
 			return h.listObjectsV2(ctx, req)
 		default:
-			// ListObjects version 1.
+			// ListObjects version 1, or a sub-resource.
 			return errNotImplemented()
 		}
 	default:
+		// POST ?delete and the like: a feature, not a wrong method.
+		if err := allowQuery(query); err != nil {
+			return err
+		}
 		return errMethodNotAllowed()
 	}
 }
 
-func (h *Handler) routeObject(ctx context.Context, req *request) error {
+func listObjectsV2Parameters() []string {
+	return []string{"list-type", "prefix", "delimiter", "max-keys", "start-after", "continuation-token", "encoding-type", "fetch-owner"}
+}
+
+func (h *Handler) routeObject(ctx context.Context, req *request, query url.Values) error {
+	// None of the object operations implemented so far takes a query
+	// parameter: versionId, partNumber, uploadId, tagging, the response-*
+	// overrides and the rest all select features that do not exist yet.
+	if err := allowQuery(query); err != nil {
+		return err
+	}
 	switch req.Method {
 	case http.MethodPut:
-		if req.Header.Get("X-Amz-Copy-Source") != "" {
-			return errNotImplemented()
-		}
 		req.operation = "PutObject"
 		return h.putObject(ctx, req)
 	case http.MethodGet:

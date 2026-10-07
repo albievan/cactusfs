@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -285,6 +287,59 @@ func TestServeCutsOffRequestsThatOutliveTheShutdownTimeout(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Error("stuck request is still open after the shutdown timeout")
+	}
+}
+
+// slowExitCheck is a readiness check that notices cancellation and then takes
+// a while to return, like a handler that is finishing a commit.
+type slowExitCheck struct {
+	entered  chan struct{}
+	returned atomic.Bool
+}
+
+func (c *slowExitCheck) Name() string { return "slow-exit" }
+
+func (c *slowExitCheck) Check(ctx context.Context) error {
+	c.entered <- struct{}{}
+	<-ctx.Done()
+	time.Sleep(400 * time.Millisecond)
+	c.returned.Store(true)
+	return ctx.Err()
+}
+
+// TestServeWaitsForHandlersBeforeReturning: when the shutdown timeout passes,
+// connections are closed, but a handler may still be running. The caller
+// closes the drives and the metadata store as soon as serve returns, so serve
+// must not return while a handler can still be using them.
+func TestServeWaitsForHandlersBeforeReturning(t *testing.T) {
+	t.Parallel()
+
+	check := &slowExitCheck{entered: make(chan struct{}, 1)}
+	srv := startServer(t, serveOptions{shutdownTimeout: 100 * time.Millisecond}, check)
+	getAsync(t, "http://"+srv.addr+"/readyz")
+	<-check.entered
+
+	srv.cancel()
+	err := srv.wait(t)
+	if !check.returned.Load() {
+		t.Fatal("serve returned while a request handler was still running")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errHandlersRunning) {
+		t.Errorf("serve returned %v, want the shutdown deadline error and no running handlers", err)
+	}
+}
+
+func TestWaitForGivesUp(t *testing.T) {
+	t.Parallel()
+
+	var running sync.WaitGroup
+	running.Add(1)
+	if waitFor(&running, 20*time.Millisecond) {
+		t.Error("waitFor reported completion while a handler was running")
+	}
+	running.Done()
+	if !waitFor(&running, time.Second) {
+		t.Error("waitFor did not notice that the handlers returned")
 	}
 }
 

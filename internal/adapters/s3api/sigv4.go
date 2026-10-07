@@ -151,8 +151,8 @@ func requestTime(r *http.Request) (time.Time, string, error) {
 }
 
 // checkSignedHeaders enforces what must be covered by the signature: the
-// host, the signing time when it is carried in X-Amz-Date, and every x-amz-*
-// header of the request. An unsigned x-amz-* header could otherwise be added
+// host, the signing time when it is carried in X-Amz-Date, every x-amz-*
+// header of the request and Content-MD5. An unsigned x-amz-* header could otherwise be added
 // or changed in transit.
 func checkSignedHeaders(r *http.Request, sig signature) error {
 	if !slices.Contains(sig.signedHeaders, "host") {
@@ -160,7 +160,8 @@ func checkSignedHeaders(r *http.Request, sig signature) error {
 	}
 	for name := range r.Header {
 		lower := strings.ToLower(name)
-		if strings.HasPrefix(lower, "x-amz-") && !slices.Contains(sig.signedHeaders, lower) {
+		mustSign := strings.HasPrefix(lower, "x-amz-") || lower == "content-md5"
+		if mustSign && !slices.Contains(sig.signedHeaders, lower) {
 			return fmt.Errorf("%w: header %s must be signed", errAuthMalformed, lower)
 		}
 	}

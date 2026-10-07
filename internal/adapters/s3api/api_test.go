@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -399,6 +401,44 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 	} {
 		s.expectError(s.do(c), http.StatusMethodNotAllowed, "MethodNotAllowed")
 	}
+	// Sub-resources and headers that are newer than this code, or spelled
+	// so that a lenient parser would drop them, are refused all the same:
+	// the rule is an allow-list.
+	s.createBucket("empty-bucket")
+	for _, c := range []call{
+		{method: http.MethodDelete, path: "/empty-bucket?metadataTable"},
+		{method: http.MethodDelete, path: "/empty-bucket?someFutureFeature=1"},
+		{method: http.MethodPut, path: "/bkt/k?renameObject"},
+		{method: http.MethodGet, path: "/bkt/k?response-content-type=text%2Fhtml"},
+		{method: http.MethodGet, path: "/?max-buckets=1"},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"If-None-Match": "*"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"If-Match": `"abc"`}},
+		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-None-Match": `"abc"`}},
+		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-Modified-Since": "Wed, 07 Oct 2026 12:00:00 GMT"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Object-Lock-Mode": "COMPLIANCE"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption": "aws:kms"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption-Customer-Algorithm": "AES256"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Tagging": "a=b"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Acl": "public-read"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Storage-Class": "GLACIER"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Some-Future-Header": "1"}},
+		{method: http.MethodPut, path: "/public-bucket", headers: map[string]string{"X-Amz-Acl": "public-read-write"}},
+	} {
+		s.expectError(s.do(c), http.StatusNotImplemented, "NotImplemented")
+	}
+	// A query string that does not parse is an error, not an empty query.
+	for _, path := range []string{"/bkt/k?uploadId=abc;x", "/bkt/k?%zz=1"} {
+		s.expectError(s.do(call{method: http.MethodDelete, path: path}), http.StatusBadRequest, "InvalidURI")
+	}
+	s.mustStatus(s.do(call{method: http.MethodHead, path: "/empty-bucket"}), http.StatusOK)
+	if r := s.do(call{method: http.MethodHead, path: "/public-bucket"}); r.status != http.StatusNotFound {
+		t.Errorf("a bucket was created with an ACL that is not implemented: HEAD = %d", r.status)
+	}
+	// What is implemented, said explicitly, is accepted.
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt/explicit", body: []byte("z"), headers: map[string]string{
+		"X-Amz-Server-Side-Encryption": "AES256", "X-Amz-Storage-Class": "STANDARD",
+	}}), http.StatusOK)
+
 	// The object and the bucket are as they were: "?acl" was not treated as
 	// a plain GET, nor the multipart DELETE as a delete of the object.
 	if r := s.do(call{method: http.MethodGet, path: "/bkt/k"}); string(r.body) != "x" {
@@ -406,6 +446,173 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 	}
 	// The SDK's x-id query parameter is not a subresource.
 	s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k?x-id=GetObject"}), http.StatusOK)
+}
+
+// rawRequest sends bytes over a plain connection and returns what comes back
+// once the server answers or closes. It lets a test cut a request short in
+// ways an HTTP client never would.
+func (s *testServer) rawRequest(head string, body []byte) string {
+	s.t.Helper()
+	conn, err := (&net.Dialer{}).DialContext(s.t.Context(), "tcp", s.Listener.Addr().String())
+	if err != nil {
+		s.t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		s.t.Fatal(err)
+	}
+	if _, err := conn.Write(append([]byte(head), body...)); err != nil {
+		s.t.Fatalf("write: %v", err)
+	}
+	// Half-close: the client is gone in the middle of its body.
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.CloseWrite()
+	}
+	reply, _ := io.ReadAll(conn)
+	return string(reply)
+}
+
+// signedHead builds the request line and headers of a signed PUT whose body
+// the test then sends by hand.
+func (s *testServer) signedHead(path string, headers map[string]string) string {
+	s.t.Helper()
+	r, err := http.NewRequestWithContext(s.t.Context(), http.MethodPut, s.URL+path, nil)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	r.Host = r.URL.Host
+	signRequest(r, s.keyID, s.key, serverNow, payloadUnsigned)
+	var b strings.Builder
+	fmt.Fprintf(&b, "PUT %s HTTP/1.1\r\nHost: %s\r\n", path, r.Host)
+	for name, values := range r.Header {
+		fmt.Fprintf(&b, "%s: %s\r\n", name, values[0])
+	}
+	for name, value := range headers {
+		fmt.Fprintf(&b, "%s: %s\r\n", name, value)
+	}
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// TestUploadCutShortIsNeverStored: a client that disappears in the middle of
+// its body has not uploaded an object. With an unsigned payload and no
+// declared length or digest, only the transport knows the body was cut - and
+// what it reports must not be read as the end of the object.
+func TestUploadCutShortIsNeverStored(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		headers map[string]string
+		body    string
+	}{
+		// A 65,536-byte chunk is announced; 1,000 bytes arrive.
+		"chunked transfer cut inside a chunk": {
+			headers: map[string]string{"Transfer-Encoding": "chunked"},
+			body:    "10000\r\n" + strings.Repeat("x", 1000),
+		},
+		"chunked transfer without its final chunk": {
+			headers: map[string]string{"Transfer-Encoding": "chunked"},
+			body:    "3e8\r\n" + strings.Repeat("x", 1000) + "\r\n",
+		},
+		"content length not reached": {
+			headers: map[string]string{"Content-Length": "65536"},
+			body:    strings.Repeat("x", 1000),
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestServer(t, "")
+			s.createBucket("bkt")
+			original := random(t, 300_000)
+			s.putObject("/bkt/k", original)
+
+			reply := s.rawRequest(s.signedHead("/bkt/k", tt.headers), []byte(tt.body))
+
+			if strings.HasPrefix(reply, "HTTP/1.1 200") {
+				t.Errorf("the truncated upload was acknowledged: %.80q", reply)
+			}
+			got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusOK)
+			if !bytes.Equal(got.body, original) {
+				t.Fatalf("the object was replaced by %d bytes of a truncated upload", len(got.body))
+			}
+			if n := len(s.drive.IDs()); n != 1 {
+				t.Errorf("%d shards on the drive, want only the original's", n)
+			}
+		})
+	}
+}
+
+func TestContentMD5MustBeSigned(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+
+	data := []byte("payload")
+	// Added after signing: an attacker on the path could otherwise swap it.
+	r := s.do(call{method: http.MethodPut, path: "/bkt/k", body: data, mutate: func(r *http.Request) {
+		r.Header.Set("Content-MD5", contentMD5(data))
+	}})
+	s.expectError(r, http.StatusBadRequest, "AuthorizationHeaderMalformed")
+}
+
+func TestCreateBucketBodyIsVerified(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+
+	body := []byte(`<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>`)
+	r := s.do(call{method: http.MethodPut, path: "/tampered", body: body, payloadHash: strings.Repeat("ab", 32)})
+	s.expectError(r, http.StatusBadRequest, "XAmzContentSHA256Mismatch")
+	if r := s.do(call{method: http.MethodHead, path: "/tampered"}); r.status != http.StatusNotFound {
+		t.Errorf("a bucket was created from a body that does not match its declared hash: HEAD = %d", r.status)
+	}
+}
+
+// TestDamagedObjectTransferFailsOverHTTP2: production is TLS, where Go speaks
+// HTTP/2. A response that has begun and then hits damaged data must end as a
+// failed transfer there too.
+func TestDamagedObjectTransferFailsOverHTTP2(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	data := random(t, 3_000_000)
+	s.putObject("/bkt/k", data)
+
+	version, err := s.objects.Head(t.Context(), s.principal(), "bkt", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := object.ShardID{DataID: version.DataID}
+	stored, _ := s.drive.Bytes(id)
+	stored[len(stored)-100] ^= 1
+	s.drive.Corrupt(id, stored)
+
+	tlsServer := httptest.NewUnstartedServer(s.Config.Handler)
+	tlsServer.EnableHTTP2 = true
+	tlsServer.StartTLS()
+	defer tlsServer.Close()
+
+	r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tlsServer.URL+"/bkt/k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Host = r.URL.Host
+	signRequest(r, s.keyID, s.key, serverNow, emptyPayloadSHA256)
+	resp, err := tlsServer.Client().Do(r)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("the test did not use HTTP/2: %s", resp.Proto)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("the transfer of a damaged object completed without an error: %d of %d bytes", len(got), len(data))
+	}
+	if len(got) >= len(data) || !bytes.HasPrefix(data, got) {
+		t.Errorf("received %d bytes, not a verified prefix of the %d-byte object", len(got), len(data))
+	}
 }
 
 func TestPayloadVerification(t *testing.T) {

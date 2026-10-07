@@ -23,20 +23,3 @@ func unlock(f *os.File) error {
 	}
 	return nil
 }
-
-// syncDir flushes a directory, which makes the creation, rename or removal of
-// an entry in it durable.
-func syncDir(root *os.Root, name string) error {
-	dir, err := root.Open(name)
-	if err != nil {
-		return fmt.Errorf("sync directory: %w", err)
-	}
-	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return fmt.Errorf("sync directory: %w", err)
-	}
-	if err := dir.Close(); err != nil {
-		return fmt.Errorf("sync directory: %w", err)
-	}
-	return nil
-}

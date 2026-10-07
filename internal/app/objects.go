@@ -136,6 +136,10 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 
 	body := &countingReader{reader: io.LimitReader(in.Body, object.MaxSize+1)}
 	if _, err := io.Copy(writer, stream.Encrypt(body)); err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			// The transport reports a body that was cut short.
+			return object.Version{}, fmt.Errorf("%w: %w", domain.ErrIncompleteBody, err)
+		}
 		return object.Version{}, err
 	}
 	switch {
@@ -163,7 +167,14 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	version.ModifiedAt = s.clock.Now().UTC()
 	replaced, err := s.index.PutVersion(ctx, version)
 	if err != nil {
-		s.storage.remove(ctx, version.DataID, version.Layout)
+		// Remove the shard only when the version was definitely not
+		// committed. When the outcome is unknown the entry may still be
+		// applied, after a restart for example, and would then point at
+		// data that is gone; the unreferenced shard of a version that
+		// never appears is left to the collector instead.
+		if !errors.Is(err, domain.ErrOutcomeUnknown) {
+			s.storage.remove(ctx, version.DataID, version.Layout)
+		}
 		return object.Version{}, err
 	}
 	if replaced != nil {
@@ -250,11 +261,34 @@ func (s *ObjectService) Get(ctx context.Context, principal iam.Principal, in Get
 	return out, nil
 }
 
+// getAttempts bounds how often Get starts over when the version it was about
+// to read is replaced or deleted underneath it.
+const getAttempts = 4
+
 func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in GetInput) (GetOutput, error) {
-	version, err := s.head(ctx, principal, in.Bucket, in.Key)
-	if err != nil {
-		return GetOutput{}, err
+	var lastData object.ID
+	for attempt := 1; ; attempt++ {
+		version, err := s.head(ctx, principal, in.Bucket, in.Key)
+		if err != nil {
+			return GetOutput{}, err
+		}
+		out, err := s.open(ctx, version, in)
+		// A concurrent overwrite or delete removes the replaced shards
+		// right after its commit. A reader that fetched the old version
+		// just before must then serve the new state, not an error: it
+		// looks again, and gives up only when the same version is still
+		// current and its data is really missing.
+		if errors.Is(err, domain.ErrShardNotFound) && attempt < getAttempts && version.DataID != lastData {
+			lastData = version.DataID
+			continue
+		}
+		return out, err
 	}
+}
+
+// open opens the stored data of one version for reading.
+func (s *ObjectService) open(ctx context.Context, version object.Version, in GetInput) (GetOutput, error) {
+	var err error
 	span := object.Range{Offset: 0, Length: version.Size}
 	if in.Range != nil {
 		if span, err = in.Range.Resolve(version.Size); err != nil {

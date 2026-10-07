@@ -27,10 +27,3 @@ func unlock(f *os.File) error {
 	}
 	return nil
 }
-
-// syncDir does nothing on Windows: a directory handle cannot be flushed, and
-// NTFS journals metadata changes such as renames. File contents are still
-// flushed with FlushFileBuffers before a rename (see ADR-0001).
-func syncDir(*os.Root, string) error {
-	return nil
-}

@@ -2,6 +2,8 @@ package raftmeta
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -357,5 +359,107 @@ func TestSlogBridge(t *testing.T) {
 	}
 	if got := newHCLogger(slog.New(slog.DiscardHandler)).GetLevel(); got != hclog.Error {
 		t.Errorf("GetLevel() of a discarding logger = %v, want error", got)
+	}
+}
+
+func openStore(t *testing.T, dir string) *Store {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	store, err := Open(ctx, Config{
+		Dir: dir, Logger: slog.New(slog.DiscardHandler), Entropy: rand.Reader,
+		Timing: Timing{Heartbeat: 50 * time.Millisecond, Election: 50 * time.Millisecond, LeaderLease: 50 * time.Millisecond, Commit: 5 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestStoppedStateMachineIsFailStop: once an entry could not be applied, no
+// further entry may be written to the log. Otherwise writes would be reported
+// as failed now and silently take effect at the next start - after the caller
+// has already cleaned up what they referred to.
+func TestStoppedStateMachineIsFailStop(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	store := openStore(t, dir)
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "bkt"}); err != nil {
+		t.Fatal(err)
+	}
+	first := porttest.SampleVersion("bkt", "k", 1)
+	if _, err := store.PutVersion(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+
+	boom := errors.New("disk full")
+	store.fsm.mu.Lock()
+	store.fsm.failed = boom
+	store.fsm.mu.Unlock()
+
+	if err := store.Check(ctx); !errors.Is(err, boom) {
+		t.Errorf("Check = %v, want the node to be unready", err)
+	}
+	_, err := store.PutVersion(ctx, porttest.SampleVersion("bkt", "k", 2))
+	if !errors.Is(err, boom) {
+		t.Fatalf("PutVersion on a stopped state machine = %v, want %v", err, boom)
+	}
+	// Refused before it was logged: a definite "not committed".
+	if errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Errorf("the refusal is reported as an unknown outcome: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After a restart the refused write has not appeared.
+	reopened := openStore(t, dir)
+	got, err := reopened.GetObject(ctx, "bkt", "k")
+	if err != nil || got.VersionID != first.VersionID {
+		t.Errorf("after restart the object is %s (%v), want the version from before the failure", got.VersionID, err)
+	}
+}
+
+// TestRaftErrorsThatMayHaveBeenLogged: only errors Raft returns before
+// writing to its log are definite. For the others the entry can still take
+// effect, so nothing it refers to may be cleaned up.
+func TestRaftErrorsThatMayHaveBeenLogged(t *testing.T) {
+	t.Parallel()
+
+	definite := []error{raft.ErrNotLeader, raft.ErrEnqueueTimeout, raft.ErrLeadershipTransferInProgress}
+	for _, err := range definite {
+		got := translateRaftError(err)
+		if errors.Is(got, domain.ErrOutcomeUnknown) || !errors.Is(got, domain.ErrNotLeader) {
+			t.Errorf("translateRaftError(%v) = %v, want a definite not-leader error", err, got)
+		}
+	}
+	unknown := []error{raft.ErrLeadershipLost, raft.ErrRaftShutdown, raft.ErrAbortedByRestore, errors.New("anything else")}
+	for _, err := range unknown {
+		if got := translateRaftError(err); !errors.Is(got, domain.ErrOutcomeUnknown) || !errors.Is(got, err) {
+			t.Errorf("translateRaftError(%v) = %v, want it to wrap %v", err, got, domain.ErrOutcomeUnknown)
+		}
+	}
+}
+
+func TestApplyResultsOfAStoppedStateMachineAreFatal(t *testing.T) {
+	t.Parallel()
+
+	f := newFSM(t)
+	bad := result(t, f.Apply(&raft.Log{Index: 1, Type: raft.LogCommand, Data: []byte{9}}))
+	if !bad.fatal || bad.err == nil {
+		t.Errorf("an entry that cannot be applied: %+v, want a fatal result", bad)
+	}
+	later := result(t, f.Apply(command(t, 2, createBucket("x"))))
+	if !later.fatal {
+		t.Errorf("an entry after the stop: %+v, want a fatal result", later)
+	}
+	// A refusal is not fatal: the entry was applied, with no effect.
+	g := newFSM(t)
+	_ = g.Apply(command(t, 1, createBucket("x")))
+	if refused := result(t, g.Apply(command(t, 2, createBucket("x")))); refused.fatal || refused.err == nil {
+		t.Errorf("a refusal: %+v, want an error that is not fatal", refused)
 	}
 }

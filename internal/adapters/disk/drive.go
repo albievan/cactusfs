@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/fsutil"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -167,7 +168,7 @@ func (d *Drive) format(entropy io.Reader, now time.Time) error {
 	if err := d.root.Rename(tmp, driveFile); err != nil {
 		return err
 	}
-	if err := syncDir(d.root, "."); err != nil {
+	if err := fsutil.SyncDir(d.root, "."); err != nil {
 		return err
 	}
 	d.info = info
@@ -300,7 +301,7 @@ func (d *Drive) Delete(ctx context.Context, id object.ShardID) error {
 	case err != nil:
 		return fmt.Errorf("disk.Delete: %w", err)
 	}
-	if err := syncDir(d.root, dir); err != nil {
+	if err := fsutil.SyncDir(d.root, dir); err != nil {
 		return fmt.Errorf("disk.Delete: %w", err)
 	}
 	return nil
@@ -322,7 +323,7 @@ func (d *Drive) publish(tmp string, id object.ShardID) error {
 	for _, step := range [][2]string{{level1, shardsDir}, {dir, level1}} {
 		switch err := d.root.Mkdir(step[0], dirMode); {
 		case err == nil:
-			if err := syncDir(d.root, step[1]); err != nil {
+			if err := fsutil.SyncDir(d.root, step[1]); err != nil {
 				return err
 			}
 		case !errors.Is(err, fs.ErrExist):
@@ -339,5 +340,11 @@ func (d *Drive) publish(tmp string, id object.ShardID) error {
 	if err := d.root.Rename(tmp, path); err != nil {
 		return err
 	}
-	return syncDir(d.root, dir)
+	if err := fsutil.SyncDir(d.root, dir); err != nil {
+		// The rename is not known to be durable, so the commit fails; the
+		// shard must then not stay visible under its final name.
+		_ = d.root.Remove(path)
+		return err
+	}
+	return nil
 }

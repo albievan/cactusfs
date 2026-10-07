@@ -26,7 +26,15 @@ const (
 	// adminIOTimeout bounds a whole request or response on the admin
 	// listener, whose messages are small.
 	adminIOTimeout = 15 * time.Second
+	// handlerExitWait bounds the wait for request handlers to return after
+	// their connections have been closed.
+	handlerExitWait = 60 * time.Second
 )
+
+// errHandlersRunning reports that request handlers were still running when
+// the node gave up waiting for them. The stores must then not be closed
+// underneath them; the process exits instead.
+var errHandlersRunning = errors.New("request handlers are still running")
 
 // endpoint is one listener and what it serves.
 type endpoint struct {
@@ -78,6 +86,12 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		return fmt.Errorf("server.Open: %w", err)
 	}
 	defer func() {
+		// The stores are closed only once no handler can still be using
+		// them: a write that is being committed must not find its drive or
+		// the metadata store torn down.
+		if errors.Is(err, errHandlersRunning) {
+			return
+		}
 		if closeErr := n.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("server.Close: %w", closeErr))
 		}
@@ -183,7 +197,9 @@ func newHTTPServer(e endpoint, tlsConfig *tls.Config, logger *slog.Logger) *http
 func serve(ctx context.Context, endpoints []endpoint, opts serveOptions, gate *health.Gate, logger *slog.Logger) error {
 	servers := make([]*http.Server, len(endpoints))
 	serveErr := make(chan error, len(endpoints))
+	var handlers sync.WaitGroup
 	for i, e := range endpoints {
+		e.handler = trackHandlers(&handlers, e.handler)
 		server := newHTTPServer(e, opts.tlsConfig, logger)
 		servers[i] = server
 		go func() {
@@ -230,8 +246,15 @@ func serve(ctx context.Context, endpoints []endpoint, opts serveOptions, gate *h
 
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opts.shutdownTimeout)
 	defer cancel()
-	if err := shutdownAll(shutdownCtx, servers); err != nil {
-		return errors.Join(failure, fmt.Errorf("server.Shutdown: %w", err))
+	shutdownErr := shutdownAll(shutdownCtx, servers)
+	// Shutdown waits for handlers; a forced Close only closes their
+	// connections. Either way the caller is about to close the stores, so
+	// every handler must have returned first.
+	if !waitFor(&handlers, handlerExitWait) {
+		return errors.Join(failure, shutdownErr, fmt.Errorf("server.Shutdown: %w", errHandlersRunning))
+	}
+	if shutdownErr != nil {
+		return errors.Join(failure, fmt.Errorf("server.Shutdown: %w", shutdownErr))
 	}
 	if failure != nil {
 		return failure
@@ -256,4 +279,31 @@ func shutdownAll(ctx context.Context, servers []*http.Server) error {
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// trackHandlers counts the requests a handler is serving.
+func trackHandlers(running *sync.WaitGroup, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		running.Add(1)
+		defer running.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// waitFor waits until running is done, for at most limit, and reports whether
+// it was.
+func waitFor(running *sync.WaitGroup, limit time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		running.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }

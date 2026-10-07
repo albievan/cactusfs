@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -243,4 +244,81 @@ func TestOpenFailures(t *testing.T) {
 			t.Errorf("error = %v, want a node ID failure", err)
 		}
 	})
+}
+
+// TestLostStateDatabaseIsRebuiltFromTheSnapshot: Raft does not restore
+// snapshots at start, because the state database is durable by itself. If
+// that database is gone or stale while a snapshot exists, starting on the log
+// alone would silently drop everything the snapshot covers.
+func TestLostStateDatabaseIsRebuiltFromTheSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	created := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+
+	dir := t.TempDir()
+	store := open(t, dir)
+	populate(t, store)
+	if err := store.Snapshot(); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "after-snapshot", CreatedAt: created}); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	want := dump(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Remove("state.db"); err != nil {
+		t.Fatalf("remove state.db: %v", err)
+	}
+	_ = root.Close()
+
+	reopened := open(t, dir)
+	if got := dump(t, reopened); !reflect.DeepEqual(got, want) {
+		t.Fatalf("state after losing state.db\n got %v\nwant %v", got, want)
+	}
+	// The root credential in particular must not have vanished: a node
+	// that believed itself new would generate another one.
+	if _, err := reopened.GetRootCredential(ctx); err != nil {
+		t.Errorf("root credential lost: %v", err)
+	}
+}
+
+func TestStoreRefusesUseAfterClose(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	store := open(t, t.TempDir())
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+
+	calls := map[string]func() error{
+		"CreateBucket": func() error { return store.CreateBucket(ctx, bucket.Bucket{Name: "late"}) },
+		"GetBucket":    func() error { _, err := store.GetBucket(ctx, "late"); return err },
+		"ListBuckets":  func() error { _, err := store.ListBuckets(ctx); return err },
+		"PutVersion":   func() error { _, err := store.PutVersion(ctx, porttest.SampleVersion("b", "k", 1)); return err },
+		"GetObject":    func() error { _, err := store.GetObject(ctx, "b", "k"); return err },
+		"DeleteObject": func() error { _, err := store.DeleteObject(ctx, "b", "k"); return err },
+		"ScanObjects": func() error {
+			return store.ScanObjects(ctx, "b", "", func(object.Version) ports.ScanControl { return ports.ScanControl{} })
+		},
+		"GetRootCredential": func() error { _, err := store.GetRootCredential(ctx); return err },
+		"Check":             func() error { return store.Check(ctx) },
+		"Snapshot":          store.Snapshot,
+		"AppliedIndex":      func() error { _, err := store.AppliedIndex(); return err },
+	}
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, domain.ErrShuttingDown) {
+			t.Errorf("%s after Close: error = %v, want %v", name, err, domain.ErrShuttingDown)
+		}
+	}
 }

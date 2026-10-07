@@ -235,14 +235,24 @@ func (r *encryptReader) sealNext() error {
 	return nil
 }
 
-// readSegment fills buf up to its capacity from src. Reaching the end of src
-// is not an error: the returned slice is simply shorter, possibly empty.
+// readSegment fills buf up to its capacity from src. Only io.EOF ends the
+// plaintext: the returned slice is then simply shorter, possibly empty. Any
+// other error is returned, in particular io.ErrUnexpectedEOF, which is how a
+// transport reports a body that was cut short. Treating that as the end would
+// seal a truncated object as if it were complete.
 func readSegment(src io.Reader, buf []byte) ([]byte, error) {
-	n, err := io.ReadFull(src, buf[:cap(buf)])
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return buf[:0], fmt.Errorf("object.Stream: read plaintext: %w", err)
+	buf = buf[:0]
+	for len(buf) < cap(buf) {
+		n, err := src.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if errors.Is(err, io.EOF) {
+			return buf, nil
+		}
+		if err != nil {
+			return buf[:0], fmt.Errorf("object.Stream: read plaintext: %w", err)
+		}
 	}
-	return buf[:n], nil
+	return buf, nil
 }
 
 // Decrypt returns a reader that yields the plaintext of a section of the

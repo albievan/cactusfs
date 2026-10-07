@@ -64,7 +64,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Traffic modified in transit | TLS 1.2+ for clients (1.3 preferred), ECDHE with AEAD suites only; a plaintext listener exists only behind `--dev-plaintext` and binds to a loopback IP | **implemented** (S3 and admin listeners) |
-| Upload corrupted in transit | Declared SHA-256, `Content-MD5` and CRC32/CRC32C/CRC64NVME/SHA-256 checksums are verified before anything becomes durable | **implemented** |
+| Upload corrupted or cut short in transit | Declared SHA-256, `Content-MD5` (which must be signed) and CRC32/CRC32C/CRC64NVME/SHA-256 checksums are verified before anything becomes durable; a body the transport reports as cut short is never stored | **implemented** |
+| A write reported as failed takes effect later | A commit whose outcome is unknown keeps its data; the state machine is fail-stop; a stale state database is rebuilt from the newest snapshot | **implemented** |
 | Bitrot or deliberate modification of shards on disk | Position-bound SHA-256 per block and AES-GCM per segment, both verified on every read; unverified bytes are never returned | **implemented** (detection); scrub and heal from parity M2 |
 | Reordered, truncated or spliced ciphertext | Streaming AEAD with a unique nonce per segment and the segment index and final flag bound into the AAD (ADR-0002) | **implemented** |
 | Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs, and all drive I/O is confined by `os.Root` | **implemented** |
@@ -108,7 +109,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | A handler forgets an authorization check | Every use case calls the single `ports.Authorizer`; no authorization logic in handlers; default deny | **implemented** (root only); policies and explicit deny M4 |
-| An unimplemented S3 feature is served as a different operation | A recognised sub-resource or copy header answers `501`, never the plain operation on the same path | **implemented** |
+| An unimplemented S3 feature is served as a different operation | Allow-list: any query parameter, `x-amz-*` header or conditional header the routed operation does not implement answers `501`; an unparseable query answers `400` | **implemented** |
 | An API key exceeds its owner | A key's effective policy is the intersection with its owner's | M4 |
 | Anonymous access | Only when a bucket policy explicitly grants it | M6 |
 | Ransomware with stolen admin credentials | Versioning and Object Lock; a compliance-locked version cannot be deleted by anyone, `cluster-admin` included | M6 |
@@ -165,3 +166,10 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 11. **gosec G204 in `test/`.** `.golangci.yml` excludes the "subprocess launched with a
    variable" finding for the black-box tests under `test/`, which exist to execute the
    binary they have just built. It is the only lint exclusion in the repository.
+12. **Local KMS wrap bound.** The local KMS wraps every data key under one master key
+    with a random 96-bit nonce, which is safe for about 2^32 wraps. There is no key
+    rotation yet; Vault Transit (milestone 4) does not have this bound.
+13. **Conditional requests** (`If-Match`, `If-None-Match`, `If-Modified-Since`,
+    `If-Unmodified-Since`) answer `501` rather than being ignored. Caching clients and
+    "create only if absent" uploads need them; they are not planned in a specific step
+    yet.

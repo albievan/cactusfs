@@ -19,12 +19,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"go.etcd.io/bbolt"
 
+	"github.com/albievan/cactusfs/internal/adapters/fsutil"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -80,11 +82,17 @@ type nodeInfo struct {
 // Store is the replicated metadata store. It implements ports.BucketStore,
 // ports.ObjectIndex, ports.RootCredentialStore and ports.ReadinessCheck.
 type Store struct {
+	nodeID string
+
+	// mu guards the fields below against Close: every operation holds it
+	// for reading, so Close waits for operations in flight and later ones
+	// are refused instead of meeting a store that is half torn down.
+	mu     sync.RWMutex
+	closed bool
 	root   *os.Root
 	fsm    *fsm
 	logs   *raftboltdb.BoltStore
 	raft   *raft.Raft
-	nodeID string
 }
 
 var (
@@ -166,8 +174,44 @@ func (s *Store) start(cfg Config) error {
 			return fmt.Errorf("bootstrap raft: %w", err)
 		}
 	}
+	if err := s.catchUpToSnapshot(snapshots); err != nil {
+		return err
+	}
 	if s.raft, err = raft.NewRaft(conf, s.fsm, s.logs, s.logs, snapshots, transport); err != nil {
 		return fmt.Errorf("start raft: %w", err)
+	}
+	return nil
+}
+
+// catchUpToSnapshot makes sure the state database is at least as new as the
+// newest Raft snapshot. Raft is configured not to restore a snapshot at
+// start, because the state database is durable on its own; but then Raft only
+// replays the log that follows the snapshot. A state database that is missing
+// or older than the snapshot - deleted, or restored from an old copy - would
+// come up looking healthy with part of the metadata gone. In that case the
+// snapshot is restored first.
+func (s *Store) catchUpToSnapshot(snapshots raft.SnapshotStore) error {
+	list, err := snapshots.List()
+	if err != nil {
+		return fmt.Errorf("list snapshots: %w", err)
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	newest := list[0]
+	applied, err := s.fsm.appliedIndex()
+	if err != nil {
+		return err
+	}
+	if applied >= newest.Index {
+		return nil
+	}
+	_, source, err := snapshots.Open(newest.ID)
+	if err != nil {
+		return fmt.Errorf("open snapshot %s: %w", newest.ID, err)
+	}
+	if err := s.fsm.Restore(source); err != nil {
+		return fmt.Errorf("state database is behind snapshot %s and could not be restored from it: %w", newest.ID, err)
 	}
 	return nil
 }
@@ -215,41 +259,47 @@ func loadOrCreateNodeID(root *os.Root, entropy io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	file, err := root.OpenFile(nodeFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, stateFileMode)
-	if err != nil {
+	if err := fsutil.WriteNewDurable(root, nodeFile, append(data, '\n'), stateFileMode); err != nil {
 		return "", err
 	}
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		_ = file.Close()
-		return "", err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return "", err
-	}
-	return info.NodeID, file.Close()
+	return info.NodeID, nil
 }
 
-// Close stops Raft and closes the databases.
+// Close stops Raft and closes the databases. It waits for operations in
+// flight; operations that start afterwards fail with domain.ErrShuttingDown.
 func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+
 	var errs []error
 	if s.raft != nil {
 		errs = append(errs, s.raft.Shutdown().Error())
-		s.raft = nil
 	}
 	if s.logs != nil {
 		errs = append(errs, s.logs.Close())
-		s.logs = nil
 	}
 	if s.fsm != nil {
 		errs = append(errs, s.fsm.close())
-		s.fsm = nil
 	}
 	if s.root != nil {
 		errs = append(errs, s.root.Close())
-		s.root = nil
 	}
 	return errors.Join(errs...)
+}
+
+// use runs fn while holding the store open. It fails with
+// domain.ErrShuttingDown once the store has been closed.
+func (s *Store) use(fn func() error) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return domain.ErrShuttingDown
+	}
+	return fn()
 }
 
 // NodeID returns the stable identity of this metadata node.
@@ -265,59 +315,103 @@ func (s *Store) Name() string {
 // Check implements ports.ReadinessCheck: the node is ready when it leads the
 // metadata group and its state machine is healthy.
 func (s *Store) Check(context.Context) error {
-	if state := s.raft.State(); state != raft.Leader {
-		return fmt.Errorf("%w: raft state is %s", domain.ErrNotLeader, state)
-	}
-	return s.fsm.health()
+	return s.use(func() error {
+		if state := s.raft.State(); state != raft.Leader {
+			return fmt.Errorf("%w: raft state is %s", domain.ErrNotLeader, state)
+		}
+		return s.fsm.health()
+	})
 }
 
 // Snapshot forces a Raft snapshot, which lets the log be truncated.
 func (s *Store) Snapshot() error {
-	if err := s.raft.Snapshot().Error(); err != nil {
-		return fmt.Errorf("raftmeta.Snapshot: %w", translateRaftError(err))
-	}
-	return nil
+	return s.use(func() error {
+		if err := s.raft.Snapshot().Error(); err != nil {
+			return fmt.Errorf("raftmeta.Snapshot: %w", translateRaftError(err))
+		}
+		return nil
+	})
 }
 
 // AppliedIndex returns the index of the last Raft entry reflected in the
 // state.
 func (s *Store) AppliedIndex() (uint64, error) {
-	return s.fsm.appliedIndex()
+	var index uint64
+	err := s.use(func() (err error) {
+		index, err = s.fsm.appliedIndex()
+		return err
+	})
+	return index, err
+}
+
+// view runs fn in a read transaction on the state.
+func (s *Store) view(fn func(tx *bbolt.Tx) error) error {
+	return s.use(func() error { return s.fsm.view(fn) })
 }
 
 // propose commits one entry through Raft and returns the state machine's
 // result for it.
+//
+// An error means one of two things, and callers must tell them apart. A plain
+// error is a definite "not committed": the entry was refused by the state
+// machine or never reached the log. An error wrapping domain.ErrOutcomeUnknown
+// means the entry may be in the log and may still take effect, now or after a
+// restart; nothing it refers to may be cleaned up.
 func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
-	if err := ctx.Err(); err != nil {
-		return applyResult{}, err
-	}
-	data, err := encodeEntry(e)
-	if err != nil {
-		return applyResult{}, err
-	}
-	wait := defaultApplyWait
-	if deadline, ok := ctx.Deadline(); ok {
-		wait = max(time.Until(deadline), time.Millisecond)
-	}
-	future := s.raft.Apply(data, wait)
-	if err := future.Error(); err != nil {
-		return applyResult{}, translateRaftError(err)
-	}
-	result, ok := future.Response().(applyResult)
-	if !ok {
-		return applyResult{}, fmt.Errorf("%w: unexpected state machine response", domain.ErrIntegrity)
-	}
-	return result, result.err
+	var result applyResult
+	err := s.use(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Fail-stop: once the state machine cannot apply an entry, no
+		// further entry is logged. Entries logged behind one that failed
+		// would be reported as errors now and silently applied at the next
+		// start.
+		if err := s.fsm.health(); err != nil {
+			return err
+		}
+		data, err := encodeEntry(e)
+		if err != nil {
+			return err
+		}
+		wait := defaultApplyWait
+		if deadline, ok := ctx.Deadline(); ok {
+			wait = max(time.Until(deadline), time.Millisecond)
+		}
+		future := s.raft.Apply(data, wait)
+		if err := future.Error(); err != nil {
+			return translateRaftError(err)
+		}
+		applied, ok := future.Response().(applyResult)
+		if !ok {
+			return fmt.Errorf("%w: unexpected state machine response", domain.ErrOutcomeUnknown)
+		}
+		if applied.fatal {
+			// The entry is in the log but was not applied; it will be
+			// applied when the cause is gone and the node restarts.
+			return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, applied.err)
+		}
+		result = applied
+		return applied.err
+	})
+	return result, err
 }
 
+// translateRaftError maps a Raft error to a domain error. Only the errors
+// Raft returns before an entry is written to the log are definite; for every
+// other error the entry may be logged, so the outcome is unknown.
 func translateRaftError(err error) error {
 	switch {
-	case errors.Is(err, raft.ErrNotLeader), errors.Is(err, raft.ErrLeadershipLost), errors.Is(err, raft.ErrLeadershipTransferInProgress):
+	case errors.Is(err, raft.ErrNotLeader), errors.Is(err, raft.ErrLeadershipTransferInProgress):
 		return fmt.Errorf("%w: %w", domain.ErrNotLeader, err)
+	case errors.Is(err, raft.ErrEnqueueTimeout):
+		return fmt.Errorf("%w: metadata group is overloaded: %w", domain.ErrNotLeader, err)
 	case errors.Is(err, raft.ErrRaftShutdown):
-		return fmt.Errorf("%w: %w", domain.ErrShuttingDown, err)
+		return fmt.Errorf("%w: %w: %w", domain.ErrOutcomeUnknown, domain.ErrShuttingDown, err)
+	case errors.Is(err, raft.ErrLeadershipLost):
+		return fmt.Errorf("%w: %w: %w", domain.ErrOutcomeUnknown, domain.ErrNotLeader, err)
 	default:
-		return err
+		return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, err)
 	}
 }
 
@@ -343,7 +437,7 @@ func (s *Store) GetBucket(ctx context.Context, name string) (bucket.Bucket, erro
 		return bucket.Bucket{}, fmt.Errorf("raftmeta.GetBucket: %w", err)
 	}
 	var record bucketRecord
-	err := s.fsm.view(func(tx *bbolt.Tx) error {
+	err := s.view(func(tx *bbolt.Tx) error {
 		raw := tx.Bucket(bucketsBucket()).Get([]byte(name))
 		if raw == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
@@ -365,7 +459,7 @@ func (s *Store) ListBuckets(ctx context.Context) ([]bucket.Bucket, error) {
 		return nil, fmt.Errorf("raftmeta.ListBuckets: %w", err)
 	}
 	var out []bucket.Bucket
-	err := s.fsm.view(func(tx *bbolt.Tx) error {
+	err := s.view(func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketsBucket()).ForEach(func(_, raw []byte) error {
 			var record bucketRecord
 			if err := json.Unmarshal(raw, &record); err != nil {
@@ -417,7 +511,7 @@ func (s *Store) GetObject(ctx context.Context, bucketName, key string) (object.V
 		return object.Version{}, fmt.Errorf("raftmeta.GetObject: %w", err)
 	}
 	var version object.Version
-	err := s.fsm.view(func(tx *bbolt.Tx) error {
+	err := s.view(func(tx *bbolt.Tx) error {
 		index := tx.Bucket(objectsBucket()).Bucket([]byte(bucketName))
 		if index == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
@@ -446,7 +540,7 @@ func (s *Store) GetObject(ctx context.Context, bucketName, key string) (object.V
 func (s *Store) ScanObjects(
 	ctx context.Context, bucketName, start string, visit func(object.Version) ports.ScanControl,
 ) error {
-	err := s.fsm.view(func(tx *bbolt.Tx) error {
+	err := s.view(func(tx *bbolt.Tx) error {
 		index := tx.Bucket(objectsBucket()).Bucket([]byte(bucketName))
 		if index == nil {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
@@ -489,7 +583,7 @@ func (s *Store) GetRootCredential(ctx context.Context) (iam.RootCredential, erro
 		return iam.RootCredential{}, fmt.Errorf("raftmeta.GetRootCredential: %w", err)
 	}
 	var record rootRecord
-	err := s.fsm.view(func(tx *bbolt.Tx) error {
+	err := s.view(func(tx *bbolt.Tx) error {
 		raw := tx.Bucket(iamBucket()).Get(rootKey())
 		if raw == nil {
 			return domain.ErrNotBootstrapped

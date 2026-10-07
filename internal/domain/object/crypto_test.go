@@ -138,6 +138,29 @@ func TestStreamEncryptReportsSourceErrors(t *testing.T) {
 	}
 }
 
+// TestStreamEncryptDoesNotSealATruncatedSource: io.ErrUnexpectedEOF is how a
+// transport says a body was cut short. It must surface as an error, not end
+// the plaintext, or the prefix would be sealed with the final flag and pass
+// for a complete object for ever after.
+func TestStreamEncryptDoesNotSealATruncatedSource(t *testing.T) {
+	t.Parallel()
+
+	for _, received := range []int{0, 1, testSegment - 1, testSegment, testSegment + 1, 3 * testSegment} {
+		s := defaultStream(t)
+		src := io.MultiReader(bytes.NewReader(randomBytes(t, received)), iotest.ErrReader(io.ErrUnexpectedEOF))
+		out, err := io.ReadAll(s.Encrypt(src))
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("%d bytes then a cut: error = %v, want %v", received, err, io.ErrUnexpectedEOF)
+		}
+		// Whatever was sealed before the cut cannot be read as an object.
+		for size := int64(0); size <= int64(received); size++ {
+			if _, err := decryptAll(s, out, size); err == nil {
+				t.Fatalf("%d bytes then a cut: the output decrypts as an object of %d bytes", received, size)
+			}
+		}
+	}
+}
+
 func TestStreamRangeReads(t *testing.T) {
 	t.Parallel()
 
