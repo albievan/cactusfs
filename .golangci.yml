@@ -36,6 +36,8 @@ linters:
       enable-all: true
       disable:
         - fieldalignment
+        # Not part of `go vet`; it flags the idiomatic `if x, err := f(); err != nil`.
+        - shadow
     revive:
       rules:
         - name: exported

@@ -11,7 +11,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | Milestone | Title | Status |
 |---|---|---|
 | 0 | Scaffold | done |
-| 1 | Standalone store | todo |
+| 1 | Standalone store | in_progress |
 | 2 | Erasure coding and integrity on local drives | todo |
 | 3 | Cluster | todo |
 | 4 | IAM | todo |
@@ -64,17 +64,17 @@ subset with encryption on.
 
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
-| 1.1 | todo | Domain model: bucket, object, version, IDs, typed errors | naming rules per the S3 reference; property tests; no external imports | `internal/domain/{bucket,object}/`, `internal/domain/errors.go` |
-| 1.2 | todo | Ports: `ObjectIndex`, `BucketStore`, `ShardStore`, `KMS`, `Clock`, `IDGenerator`, `EventPublisher` | interfaces documented; fakes in `internal/ports/porttest` | `internal/ports/` |
-| 1.3 | todo | Disk adapter | shards stored under generated IDs only; write + file fsync + directory fsync per OS; versioned on-disk header; ADR for the format | `internal/adapters/disk/`, `docs/adr/0001-on-disk-format.md` |
-| 1.4 | todo | Streaming AEAD and envelope encryption | AES-256-GCM segments, unique nonce, segment index in AAD; truncation/reorder detected; fuzz + property tests; ADR | `internal/domain/object/crypto*`, `internal/adapters/kms/local/`, `docs/adr/0002-encryption.md` |
+| 1.1 | done | Domain model: bucket, object, version, IDs, typed errors | naming rules per the S3 reference; property tests; no external imports | `internal/domain/{bucket,object}/`, `internal/domain/errors.go` |
+| 1.2 | done | Ports: `ObjectIndex`, `BucketStore`, `RootCredentialStore`, `ShardStore`, `KMS`, `Clock`, `Authorizer` | interfaces documented; fakes and contract tests in `internal/ports/porttest`, run against fakes and real adapters alike | `internal/ports/`, `internal/domain/iam/` |
+| 1.3 | todo | Disk adapter | shards stored under generated IDs only, all I/O through `os.Root`; exclusive drive lock; write + file fsync + directory fsync per OS; versioned header with checksum; position-bound SHA-256 per block verified on every read; ADR for the format | `internal/adapters/disk/`, `docs/adr/0001-on-disk-format.md` |
+| 1.4 | done | Streaming AEAD and envelope encryption | AES-256-GCM segments, unique nonce, segment index in AAD; truncation/reorder detected; fuzz + property tests; ADR | `internal/domain/object/crypto*`, `internal/domain/iam/secret.go`, `docs/adr/0002-encryption.md` |
 | 1.5 | todo | Sealed local key file KMS (explicit opt-in) | no unencrypted fallback; key file sealed with a passphrase-derived key (Argon2id) | `internal/adapters/kms/local/` |
-| 1.6 | todo | Single-node Raft metadata (bbolt) | bucket and object index committed through Raft; versioned entries; restart-safe; ADR | `internal/adapters/raftmeta/`, `docs/adr/0003-metadata.md` |
+| 1.6 | todo | Single-node Raft metadata (bbolt) | bucket and object index committed through Raft; versioned, typed entries; each entry applied exactly once across restarts and snapshots; ADR | `internal/adapters/raftmeta/`, `docs/adr/0003-metadata.md` |
 | 1.7 | todo | Use cases: bucket create/delete/list, object PUT/GET/HEAD/DELETE, ListObjectsV2 | write path order per §2; table-driven tests; coverage ≥ 80 % | `internal/app/` |
-| 1.8 | todo | S3 API adapter with SigV4 (header auth) and XML errors | path-style and virtual-hosted-style; fuzz tests for SigV4 and XML; constant-time comparison | `internal/adapters/s3api/` |
-| 1.9 | todo | Root bootstrap and `--data` flag | first start requires or generates root credentials, shown once; no default credentials | `cmd/cactusfs/`, `internal/app/bootstrap.go` |
-| 1.10 | todo | S3 compatibility suite, first baseline | aws-sdk-go-v2 tests for the milestone's operations recorded in `baseline.txt` | `test/s3compat/` |
-| 1.11 | todo | Telemetry adapter | `/metrics` (`cactusfs_*`) and OpenTelemetry traces on every adapter boundary | `internal/adapters/telemetry/` |
+| 1.8 | todo | S3 API adapter with SigV4 (header auth) and XML errors | path-style and virtual-hosted-style; literal, `UNSIGNED-PAYLOAD` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (aws-chunked) payloads with checksum verification; fuzz tests for SigV4, XML and chunk decoding; constant-time comparison | `internal/adapters/s3api/` |
+| 1.9 | todo | Root bootstrap, `--data`, `--meta-dir`, KMS flags and wiring | first start requires or generates root credentials, shown once; no default credentials | `cmd/cactusfs/`, `internal/app/bootstrap.go` |
+| 1.10 | todo | S3 compatibility suite, first baseline | aws-sdk-go-v2 with default options over TLS against the built binary; one top-level test per behaviour, recorded in `baseline.txt` | `test/s3compat/` |
+| 1.11 | todo | Telemetry adapter | authenticated `/metrics` (`cactusfs_*`, own registry, no tenant labels) and OpenTelemetry traces as decorators on every port; no exporter unless an OTLP endpoint is configured | `internal/adapters/telemetry/` |
 
 ## Milestone 2 — Erasure coding and integrity on local drives
 
@@ -108,7 +108,7 @@ subset with encryption on.
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
 | 4.1 | todo | IAM domain: users, groups, roles, policies | IAM-style JSON; default deny; explicit deny wins; fuzz + property tests for policy parsing | `internal/domain/iam/` |
-| 4.2 | todo | `ports.Authorizer` and enforcement on every inbound request | no authorization logic in handlers; key never exceeds its owner | `internal/ports/`, `internal/app/authz.go` |
+| 4.2 | todo | Policy-backed `ports.Authorizer` (the port and root-only default deny exist since 1.2) | no authorization logic in handlers; key never exceeds its owner | `internal/ports/`, `internal/app/authz.go` |
 | 4.3 | todo | API keys | secrets envelope-encrypted through the KMS, shown once; expiry, inline policy, last-used, revocation | `internal/app/apikeys.go` |
 | 4.4 | todo | Vault Transit KMS adapter | integration test against Vault via testcontainers | `internal/adapters/kms/vault/` |
 | 4.5 | todo | Built-in roles | `cluster-admin`, `bucket-admin`, `read-write`, `read-only`, `auditor` | `internal/domain/iam/` |
@@ -183,3 +183,15 @@ subset with encryption on.
 | 2026-10-07 | `make lint` runs `scripts/no-bypass.sh`, which rejects `//nolint`, `t.Skip*` and `testing.Short` in Go sources. | §10 as a gate rather than a convention. |
 | 2026-10-07 | The licence gate checks the Go dependencies of all six release platforms and walks the console's production and optional dependencies. | A build-tagged dependency for Windows or macOS would otherwise ship unchecked. |
 | 2026-10-07 | The console placeholder shows `cactusfs-logo.svg` and links `favicon.svg`; brand files are committed as supplied. | "Brand assets" rule added to `CLAUDE.md` §2 during this milestone. |
+| 2026-10-07 | M1 dependencies: `hashicorp/raft` v1.8.0 and `raft-boltdb/v2` v2.4.2 (MPL-2.0), `go.etcd.io/bbolt` v1.5.0 (MIT), `golang.org/x/crypto` (BSD-3, Argon2id), `golang.org/x/sys` (BSD-3, Windows file lock), `prometheus/client_golang` v1.24.1 and OpenTelemetry v1.47.0 (Apache-2.0); test-only `aws-sdk-go-v2` (Apache-2.0). | Raft, bbolt, Prometheus and OTel are named by `CLAUDE.md`; Argon2id and the Windows lock have no standard-library equivalent. Planner verified licences and six-platform `CGO_ENABLED=0` builds. |
+| 2026-10-07 | `ports.EventPublisher` is not introduced in M1; it arrives in 3.6 with its AsyncAPI contract. `IDGenerator` is replaced by an injected `io.Reader` entropy source. | Contract-first rule for events; fewer ports with one implementation. |
+| 2026-10-07 | Stored-object metadata is erasure-shaped from the start: `Layout{DataShards:1, ParityShards:0, StripeSize, StoredSize, Shards[{DriveID, Size}]}`. Shard files carry a checksummed header and a SHA-256 per block bound to data ID, shard index and block number. | So that milestone 2 (erasure coding, heal, scrub) changes values, not the on-disk format or the Raft entry schema. |
+| 2026-10-07 | Stream AAD is `index ‖ final ‖ caller AAD` (fixed-width fields first); caller AAD and the KMS context are the data ID. | Unambiguous layout; ciphertext and wrapped key cannot be moved to another object. |
+| 2026-10-07 | Raft runs with `NoSnapshotRestoreOnStart`; the FSM keeps its state in its own bbolt file and stores the last applied index in the same transaction as each change. | The state DB is already durable: restoring an older snapshot over it on every start would be wrong, and replay must be idempotent. |
+| 2026-10-07 | `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (aws-chunked with trailing checksum) is implemented in 1.8, not 6.3. Signed streaming and presigned URLs stay in 6.3. | It is what current AWS SDKs send by default over TLS, and the server is TLS-only. |
+| 2026-10-07 | ETag is the MD5 of the object, computed in one file of the S3 adapter (`internal/adapters/s3api/md5.go`); `.golangci.yml` excludes gosec G401/G501 for that file only. | S3 clients compare ETag and `Content-MD5` with MD5; it is a protocol checksum here, not a security primitive (integrity is AES-GCM plus SHA-256). A silenced finding: open question for Albie. |
+| 2026-10-07 | `/metrics` requires `Authorization: Bearer <access-key-id>:<secret>` and passes `ports.Authorizer` (`admin:GetMetrics`). | §3 stricter reading: every inbound request is authenticated. Prometheus can send a bearer credential. The token format is provisional until the admin API contract (5.1). |
+| 2026-10-07 | Generated root credentials are printed once to stderr, never to the JSON log and never to a file. | "Shown once"; a file would be a secret stored unencrypted. Container log drivers capture stderr, so production should supply the credentials: open question for Albie. |
+| 2026-10-07 | Authentication failures and denials are logged (without secrets) until the hash-chained audit log exists (4.6). | Audit trail is milestone 4. |
+| 2026-10-07 | In M1, shards of failed, replaced and deleted objects are deleted best-effort after the fact; a crash can leave orphans until the collector of 2.7. | Orphans waste space but are never visible: the Raft commit is the only visibility switch. |
+| 2026-10-07 | govet's optional `shadow` analyzer is disabled in `.golangci.yml` (all other optional analyzers stay on, except `fieldalignment`). | It is not part of `go vet` and rejects the idiomatic `if v, err := f(); err != nil` scoped error. It flagged exactly that idiom twice in test code the first time `enable-all` met real code. |

@@ -1,0 +1,136 @@
+package object
+
+import (
+	"fmt"
+	"time"
+	"unicode/utf8"
+
+	"github.com/albievan/cactusfs/internal/domain"
+)
+
+// MaxKeyLength is the longest object key, in bytes of its UTF-8 encoding.
+const MaxKeyLength = 1024
+
+// MaxSize is the largest object that can be stored in a single PUT.
+const MaxSize = 5 << 30
+
+// MaxUserMetadataSize is the limit on the total size of user-defined metadata:
+// the sum of the bytes of every key and value.
+const MaxUserMetadataSize = 2 << 10
+
+// ValidateKey reports whether key is a valid object key: 1 to 1024 bytes of
+// valid UTF-8. Keys are opaque names in the index and never become filesystem
+// paths, so no character is forbidden.
+//
+// The returned error wraps domain.ErrInvalidObjectKey.
+func ValidateKey(key string) error {
+	switch {
+	case key == "":
+		return fmt.Errorf("%w: key is empty", domain.ErrInvalidObjectKey)
+	case len(key) > MaxKeyLength:
+		return fmt.Errorf("%w: key is %d bytes, the maximum is %d", domain.ErrInvalidObjectKey, len(key), MaxKeyLength)
+	case !utf8.ValidString(key):
+		return fmt.Errorf("%w: key is not valid UTF-8", domain.ErrInvalidObjectKey)
+	}
+	return nil
+}
+
+// ValidateUserMetadata reports whether the user-defined metadata fits the size
+// limit. The returned error wraps domain.ErrInvalidArgument.
+func ValidateUserMetadata(metadata map[string]string) error {
+	total := 0
+	for key, value := range metadata {
+		total += len(key) + len(value)
+	}
+	if total > MaxUserMetadataSize {
+		return fmt.Errorf("%w: user metadata is %d bytes, the maximum is %d",
+			domain.ErrInvalidArgument, total, MaxUserMetadataSize)
+	}
+	return nil
+}
+
+// Version is one immutable version of an object: what a client stored and
+// where and how its bytes are kept.
+type Version struct {
+	// Bucket and Key name the object.
+	Bucket string
+	Key    string
+	// VersionID identifies this version.
+	VersionID ID
+	// DataID addresses the stored bytes. It is generated per write.
+	DataID ID
+	// Size is the length of the object as the client sees it, in bytes.
+	Size int64
+	// ETag is the entity tag returned to clients, without quotes.
+	ETag string
+	// ModifiedAt is when the version was committed.
+	ModifiedAt time.Time
+
+	// Standard HTTP representation metadata supplied by the client.
+	ContentType        string
+	ContentEncoding    string
+	ContentDisposition string
+	ContentLanguage    string
+	CacheControl       string
+	// UserMetadata holds the client's own metadata, keyed by lowercase name
+	// without the x-amz-meta- prefix.
+	UserMetadata map[string]string
+
+	// Encryption describes how the stored bytes are encrypted.
+	Encryption Encryption
+	// Layout describes how the encrypted bytes are spread over drives.
+	Layout Layout
+}
+
+// Encryption describes the envelope encryption of one object version.
+type Encryption struct {
+	// Scheme names the streaming AEAD format, see StreamSchemeV1.
+	Scheme string
+	// KMSKeyID identifies the KMS key that wraps the data key.
+	KMSKeyID string
+	// WrappedKey is the object's data key, wrapped by the KMS key.
+	WrappedKey []byte
+	// NoncePrefix is the random part of every segment nonce.
+	NoncePrefix []byte
+	// SegmentSize is the plaintext size of every segment but the last.
+	SegmentSize int
+}
+
+// Layout describes how the encrypted bytes of one object version are stored.
+// The stream is cut into stripes of StripeSize bytes; every stripe is split
+// into DataShards equal parts and extended with ParityShards parity parts.
+// Shard i of every stripe is appended to the shard at Shards[i].
+type Layout struct {
+	// DataShards and ParityShards are the erasure coding parameters. With
+	// one data shard and no parity the single shard is the stream itself.
+	DataShards   int
+	ParityShards int
+	// StripeSize is the number of stream bytes per stripe.
+	StripeSize int
+	// StoredSize is the length of the encrypted stream in bytes.
+	StoredSize int64
+	// Shards locates each shard, by shard index.
+	Shards []ShardLocation
+}
+
+// ShardLocation says where one shard of an object version lives.
+type ShardLocation struct {
+	// DriveID is the generated identifier of the drive.
+	DriveID string
+	// Size is the number of bytes written to the shard. A shard of any other
+	// length is damaged, which lets healing tell which shard to rebuild.
+	Size int64
+}
+
+// ShardID addresses one shard of stored data.
+type ShardID struct {
+	// DataID is the object version's data identifier.
+	DataID ID
+	// Index is the position of the shard in the layout.
+	Index int
+}
+
+// String returns a log-friendly form of the shard identifier.
+func (s ShardID) String() string {
+	return fmt.Sprintf("%s.%d", s.DataID, s.Index)
+}

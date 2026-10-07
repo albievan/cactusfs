@@ -34,5 +34,6 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 
 ## Index
 
-None yet. The first ADRs are planned with steps 1.3 (on-disk format), 1.4 (encryption)
-and 1.6 (metadata).
+| ADR | Title | Status |
+|---|---|---|
+| [0002](0002-encryption.md) | Encryption at rest: streaming AEAD and envelope keys | accepted |
