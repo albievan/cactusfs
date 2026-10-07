@@ -66,14 +66,23 @@ Conventions that follow from it:
 
 | Package | Purpose |
 |---|---|
-| `internal/domain` | `ErrShuttingDown` |
-| `internal/domain/cluster` | `CheckResult`, `Readiness` |
-| `internal/ports` | `ReadinessCheck` |
-| `internal/app` | `HealthService` |
-| `internal/adapters/health` | `GET /healthz`, `GET /readyz`; the shutdown `Gate` |
-| `cmd/cactusfs` | `version` and `server` commands, configuration, graceful shutdown |
+| `internal/domain` | typed sentinel errors |
+| `internal/domain/bucket` | bucket naming rules |
+| `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, the streaming AEAD (ADR-0002) |
+| `internal/domain/iam` | principals, actions, the default-deny decision, credential rules, sealed secrets |
+| `internal/domain/cluster` | readiness |
+| `internal/ports` | `KMS`, `ShardStore`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `Authorizer`, `Clock`, `ReadinessCheck` |
+| `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
+| `internal/app` | bucket, object and identity use cases; the authorizer; health |
+| `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
+| `internal/adapters/health` | in: `GET /healthz`, `GET /readyz`; the shutdown gate |
+| `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port |
+| `internal/adapters/disk` | out: shards on a local drive (ADR-0001) |
+| `internal/adapters/raftmeta` | out: Raft + bbolt metadata (ADR-0003) |
+| `internal/adapters/kms/local` | out: sealed local key file |
+| `cmd/cactusfs` | composition root: configuration, node wiring, listeners, shutdown |
 
-## 3. The binary **(implemented: `version`, `server`; roles are target, milestone 3)**
+## 3. The binary **(implemented: `version`, `server` standalone; roles are target, milestone 3)**
 
 ```
 cactusfs version
@@ -85,13 +94,26 @@ matching flag, and the flag wins.
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | admin listener (probes today; admin API, Swagger UI and console later) |
+| `--data` | `CACTUSFS_DATA` | — (required) | drive directory; repeat or comma-separate |
+| `--meta-dir` | `CACTUSFS_META_DIR` | `<first drive>/meta` | metadata directory |
+| `--kms` | `CACTUSFS_KMS` | — (required) | `local`: sealed local key file. No default and no unencrypted mode |
+| `--kms-key-file` | `CACTUSFS_KMS_KEY_FILE` | `<meta dir>/kms-local.json` | local KMS key file |
+| `--kms-passphrase-file` | `CACTUSFS_KMS_PASSPHRASE_FILE` | — | file holding the KMS passphrase |
+| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` | S3 API listener |
+| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — | enables virtual-hosted style, `<bucket>.<domain>` |
+| `--region` | `CACTUSFS_REGION` | `us-east-1` | region reported to clients |
+| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | admin listener: probes and `/metrics` |
 | `--tls-cert` | `CACTUSFS_TLS_CERT` | — | PEM certificate chain |
 | `--tls-key` | `CACTUSFS_TLS_KEY` | — | PEM private key |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
+| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | OTLP/HTTP trace collector; nothing is exported when empty |
 | `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listener closes |
-| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` | time for in-flight requests to finish once the listener has closed |
+| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listeners close |
+| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` | time for in-flight requests to finish once the listeners have closed |
+
+Secrets have no flag, because a command line is visible to every user of the machine:
+`CACTUSFS_KMS_PASSPHRASE` (or the passphrase file), and optionally
+`CACTUSFS_ROOT_ACCESS_KEY` with `CACTUSFS_ROOT_SECRET_KEY`.
 
 Behaviour:
 
@@ -108,6 +130,16 @@ Behaviour:
   in-flight requests the shutdown timeout to finish, and exits 0. Requests that outlive
   the timeout are cut off and the exit code is 1. With the default drain delay of zero
   the listener closes immediately, so the 503 is only observable when a delay is set.
+- **Root credentials.** There is no built-in login. A new deployment stores the root
+  credentials supplied in the environment, or generates a pair and prints it once on
+  standard error — never in the log. The secret is stored sealed through the KMS. On
+  later starts, supplied credentials that differ from the stored ones stop the node.
+- **KMS.** The local key file is created on the first start of a new deployment. On an
+  existing deployment a missing key file, a wrong passphrase or another deployment's key
+  stops the node: nothing is ever stored or served without the right key.
+- **Metrics.** `GET /metrics` on the admin listener requires
+  `Authorization: Bearer <access key ID>:<secret>` and passes the authorizer
+  (`admin:GetMetrics`). Metrics carry no bucket, key or access-key labels.
 - **Logs** are JSON on stdout (`log/slog`). Secrets, keys, tokens and object contents are
   never logged.
 
@@ -128,21 +160,29 @@ API, authentication, erasure encode/decode, stateless), `meta` (Raft voter), `st
 
 Standalone is a cluster of one, not a second implementation.
 
-## 4. Storage engine **(target, milestones 1–3)**
+## 4. Storage engine **(milestone 1 implemented; erasure coding, heal and scrub are milestone 2; cluster is milestone 3)**
 
-- **Erasure coding.** Objects are split into Reed-Solomon data and parity shards over
+**Today:** every object is encrypted (ADR-0002) and stored as one checksummed shard on one
+drive (ADR-0001), with the layout recorded in erasure-coded form (`1` data shard, `0`
+parity) so that milestone 2 changes values, not formats. With several `--data`
+directories objects are spread across them; there is no parity yet, and the node says so
+at start. Shards of failed, replaced and deleted objects are removed best-effort; a crash
+can leave unreferenced shards until the collector of PLAN 2.7.
+
+- **Erasure coding (milestone 2).** Objects are split into Reed-Solomon data and parity shards over
   erasure sets of 4–16 drives. Default parity is 2 for 4–5 drives, 3 for 6–7 and 4 for 8
   or more, configurable per storage class. Shards of one object never share a drive and
   are spread across nodes, then racks and zones when nodes are labelled.
-- **Quorum.** Write quorum is the number of data shards, plus one when data equals
+- **Quorum (milestones 2–3).** Write quorum is the number of data shards, plus one when data equals
   parity. Read quorum is the number of data shards.
 - **Write path.** Encrypt → erasure-code → write shards under a new immutable ID and
   fsync on a write quorum → commit the object version through Raft → acknowledge. The
   Raft commit is the only visibility switch. Shards without a committed version are
   garbage-collected.
 - **Consistency.** Reads and listings are strongly consistent (read-after-write).
-- **Integrity.** Every shard carries a SHA-256 checksum that is verified on every read.
-  A background scrubber finds bitrot and heals from parity. Bytes that fail verification
+- **Integrity.** Every shard block carries a SHA-256 checksum, bound to its position,
+  that is verified on every read, and every segment is authenticated by AES-GCM. A
+  background scrubber that finds bitrot and heals from parity is milestone 2. Bytes that fail verification
   are never returned.
 - **Keys are not paths.** Object keys and bucket names never become filesystem paths.
   Data lives under generated IDs, so case-insensitive filesystems, Windows reserved
@@ -150,7 +190,7 @@ Standalone is a cluster of one, not a second implementation.
 - **Portability.** OS differences (directory fsync, file locking, service control) live
   in `adapters/disk` and `cmd/cactusfs` behind build tags.
 
-## 5. Metadata **(target, milestones 1 and 3)**
+## 5. Metadata **(implemented for a single voter, ADR-0003; multi-node is milestone 3)**
 
 IAM, API keys, policies, bucket configuration, cluster topology and the object index are
 replicated with Raft and stored in bbolt. The object index sits behind
@@ -158,11 +198,18 @@ replicated with Raft and stored in bbolt. The object index sits behind
 On-disk formats and Raft entries carry a version from the first release, and version N
 must run alongside N+1 for rolling upgrades.
 
-## 6. APIs **(target, milestones 1, 5 and 6)**
+## 6. APIs **(S3 subset implemented; the rest is target, milestones 3, 5 and 6)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
   is the compatibility suite in `test/s3compat`, guarded by a recorded baseline.
+  **Implemented:** ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
+  GetBucketLocation, PutObject, GetObject (single range), HeadObject, DeleteObject,
+  ListObjectsV2; SigV4 header authentication; literal, `UNSIGNED-PAYLOAD` and
+  `STREAMING-UNSIGNED-PAYLOAD-TRAILER` payloads with CRC32, CRC32C, CRC64NVME and SHA-256
+  checksums and `Content-MD5`. Everything else answers `501 NotImplemented` after
+  authentication. The suite runs the AWS SDK for Go with its default options over TLS
+  against the built binary.
 - **Admin API.** REST/JSON under `/api/v1`, designed first in `api/openapi/admin.yaml`,
   with handlers generated by `oapi-codegen`. Errors are `application/problem+json`;
   every mutation accepts `Idempotency-Key`. The spec is served at
@@ -174,18 +221,19 @@ must run alongside N+1 for rolling upgrades.
   Consumers dedupe by event ID.
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/`.
 
-## 7. Security **(target unless marked)**
+## 7. Security **(see the threat model for what is implemented)**
 
 The full analysis is in `docs/threat-model.md`. In brief:
 
-- Encryption at rest is always on: AES-256-GCM streaming AEAD with a per-object data key
-  wrapped by a KMS key. KMS adapters: Vault Transit for clusters, a sealed local key file
-  for standalone. There is no unencrypted fallback.
+- Encryption at rest is always on **(implemented)**: AES-256-GCM streaming AEAD with a
+  per-object data key wrapped by a KMS key. KMS adapters: a sealed local key file for
+  standalone **(implemented)**, Vault Transit for clusters (milestone 4). There is no
+  unencrypted fallback.
 - Encryption in transit: TLS 1.2+ for clients **(implemented for the admin listener)**,
   mTLS 1.3 between nodes including the Raft transport.
 - Every inbound request is authenticated and passes through the single
-  `ports.Authorizer`. Default deny; explicit deny wins. The probe endpoints are the one
-  exception and disclose nothing.
+  `ports.Authorizer` **(implemented: root only, default deny; policies are milestone 4)**.
+  The probe endpoints are the one exception and disclose nothing.
 - No default credentials. API key secrets are envelope-encrypted, shown once, compared
   in constant time.
 - Hash-chained, append-only audit trail. Versioning and Object Lock for ransomware

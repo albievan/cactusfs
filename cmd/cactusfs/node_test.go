@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -33,6 +34,15 @@ func nodeConfig(dir string) serverConfig {
 	}
 }
 
+func newTelemetry(t *testing.T) *telemetry.Telemetry {
+	t.Helper()
+	tel, err := telemetry.New(t.Context(), telemetry.Config{Version: version})
+	if err != nil {
+		t.Fatalf("telemetry.New: %v", err)
+	}
+	return tel
+}
+
 type started struct {
 	node   *node
 	notice string
@@ -42,7 +52,7 @@ type started struct {
 func startNode(t *testing.T, cfg serverConfig) (started, error) {
 	t.Helper()
 	var notice, logs bytes.Buffer
-	n, err := openNode(t.Context(), cfg, slog.New(slog.NewJSONHandler(&logs, nil)), &notice)
+	n, err := openNode(t.Context(), cfg, newTelemetry(t), slog.New(slog.NewJSONHandler(&logs, nil)), &notice)
 	if err != nil {
 		return started{notice: notice.String(), logs: logs.String()}, err
 	}
@@ -271,7 +281,8 @@ func TestOpenNodeHonoursCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := openNode(ctx, nodeConfig(t.TempDir()), slog.New(slog.DiscardHandler), &bytes.Buffer{}); !errors.Is(err, context.Canceled) {
+	_, err := openNode(ctx, nodeConfig(t.TempDir()), newTelemetry(t), slog.New(slog.DiscardHandler), &bytes.Buffer{})
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want %v", err, context.Canceled)
 	}
 }

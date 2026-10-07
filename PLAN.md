@@ -73,8 +73,8 @@ subset with encryption on.
 | 1.7 | done | Use cases: bucket create/delete/list, object PUT/GET/HEAD/DELETE, ListObjectsV2 | write path order per §2; table-driven tests; coverage ≥ 80 % | `internal/app/` |
 | 1.8 | done | S3 API adapter with SigV4 (header auth) and XML errors | path-style and virtual-hosted-style; literal, `UNSIGNED-PAYLOAD` and `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (aws-chunked) payloads with checksum verification; fuzz tests for SigV4, XML and chunk decoding; constant-time comparison | `internal/adapters/s3api/` |
 | 1.9 | done | Root bootstrap, `--data`, `--meta-dir`, KMS flags and wiring | first start requires or generates root credentials, shown once; no default credentials | `cmd/cactusfs/`, `internal/app/bootstrap.go` |
-| 1.10 | todo | S3 compatibility suite, first baseline | aws-sdk-go-v2 with default options over TLS against the built binary; one top-level test per behaviour, recorded in `baseline.txt` | `test/s3compat/` |
-| 1.11 | todo | Telemetry adapter | authenticated `/metrics` (`cactusfs_*`, own registry, no tenant labels) and OpenTelemetry traces as decorators on every port; no exporter unless an OTLP endpoint is configured | `internal/adapters/telemetry/` |
+| 1.10 | done | S3 compatibility suite, first baseline | aws-sdk-go-v2 with default options over TLS against the built binary; one top-level test per behaviour, recorded in `baseline.txt` | `test/s3compat/` |
+| 1.11 | done | Telemetry adapter | authenticated `/metrics` (`cactusfs_*`, own registry, no tenant labels) and OpenTelemetry traces as decorators on every port; no exporter unless an OTLP endpoint is configured | `internal/adapters/telemetry/` |
 
 ## Milestone 2 — Erasure coding and integrity on local drives
 
@@ -201,3 +201,6 @@ subset with encryption on.
 | 2026-10-07 | S3 operations not implemented yet answer `501 NotImplemented` after authentication (ACLs, versioning, multipart, tagging, copy, multi-delete, ListObjects v1, presigned and signed-streaming requests); a recognised sub-resource is never treated as the plain operation on the same path. | A `DELETE /key?uploadId=…` served as DeleteObject would destroy data. |
 | 2026-10-07 | SHA-1 trailing or header checksums are refused (`InvalidRequest`); CRC32, CRC32C, CRC64NVME and SHA-256 are verified. | gosec rejects SHA-1, and adding a second weak-hash exclusion is not justified while SDK defaults are CRC-based. |
 | 2026-10-07 | SigV4 test vectors from the AWS documentation live in `internal/adapters/s3api/testdata/sigv4-examples.json`. | They contain AWS's public example key pair, which secret scanners flag when written in source. |
+| 2026-10-07 | The compatibility suite builds and starts the real binary over TLS with a generated CA, and configures the SDK's default checksum behaviour explicitly instead of loading AWS configuration. | `cmd/cactusfs` is the only wiring point; the suite must not read the developer's AWS files; and a hand-built `aws.Config` otherwise silently turns the SDK's default checksums off (found when a test that should have exercised aws-chunked did not). |
+| 2026-10-07 | `--otlp-endpoint` must be `https`, or `http` to a loopback IP. | Encryption in transit also applies to what the node sends out. |
+| 2026-10-07 | Bucket names, object keys and object metadata are not encrypted in the metadata store. | §3 requires object encryption; encrypting the index is a product decision with a listing-performance cost. Open question for Albie. |

@@ -53,8 +53,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| Use of a built-in or default account | No default credentials; first start requires or generates root credentials | M1 |
-| Forged S3 requests | SigV4 verification; secrets compared in constant time; clock-skew window | M1 |
+| Use of a built-in or default account | No default credentials; first start requires or generates root credentials, shown once on standard error and stored sealed | **implemented** |
+| Forged S3 requests | SigV4 verification (checked against AWS's documented examples); host and every `x-amz-*` header must be signed; constant-time comparison; 15-minute clock-skew window | **implemented** (header authentication; presigned URLs M6) |
 | Stolen API key used indefinitely | Expiry, last-used tracking, immediate revocation, scoped-down inline policy | M4 |
 | Password guessing against the console | Argon2id; short-lived `HttpOnly`, `Secure`, `SameSite=Strict` session cookies; CSRF protection | M4 |
 | Rogue node joining the cluster | mTLS 1.3 between nodes, Raft transport included | M3 |
@@ -63,26 +63,33 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| Traffic modified in transit | TLS 1.2+ for clients (1.3 preferred), ECDHE with AEAD suites only; a plaintext listener exists only behind `--dev-plaintext` and binds to a loopback IP | **implemented** (admin listener) |
-| Bitrot or deliberate modification of shards on disk | SHA-256 per shard verified on every read; scrubber heals from parity; unverified bytes are never returned | M2 |
-| Reordered, truncated or spliced ciphertext | Streaming AEAD with a unique nonce per segment and the segment index bound into the AAD | M1 |
-| Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs | M1 |
-| Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order | M1, M3 |
+| Traffic modified in transit | TLS 1.2+ for clients (1.3 preferred), ECDHE with AEAD suites only; a plaintext listener exists only behind `--dev-plaintext` and binds to a loopback IP | **implemented** (S3 and admin listeners) |
+| Upload corrupted in transit | Declared SHA-256, `Content-MD5` and CRC32/CRC32C/CRC64NVME/SHA-256 checksums are verified before anything becomes durable | **implemented** |
+| Bitrot or deliberate modification of shards on disk | Position-bound SHA-256 per block and AES-GCM per segment, both verified on every read; unverified bytes are never returned | **implemented** (detection); scrub and heal from parity M2 |
+| Reordered, truncated or spliced ciphertext | Streaming AEAD with a unique nonce per segment and the segment index and final flag bound into the AAD (ADR-0002) | **implemented** |
+| Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs, and all drive I/O is confined by `os.Root` | **implemented** |
+| Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order and exactly once; an entry this binary cannot interpret stops the node rather than being skipped | **implemented** (single voter); mTLS between voters M3 |
 | Policy tampering | Policies live in Raft; every mutation is authorized and audited | M4 |
 
 ### Repudiation
 
 | Threat | Control | Status |
 |---|---|---|
-| An administrator denies an action or erases the evidence | Append-only, hash-chained audit events for every admin mutation, authentication failure and authorization denial; audit records are never deleted | M4 |
+| An administrator denies an action or erases the evidence | Append-only, hash-chained audit events for every admin mutation, authentication failure and authorization denial; audit records are never deleted | M4. Until then authentication failures and denials are written to the log, which is not tamper-evident |
 
 ### Information disclosure
 
 | Threat | Control | Status |
 |---|---|---|
-| Theft of drives, backups or decommissioned disks | Encryption at rest is always on: AES-256-GCM, a data key per object, wrapped by a KMS key; no unencrypted fallback | M1 |
-| Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once | M4 |
-| Secrets in logs | Secrets, keys, tokens and object contents are never logged | **implemented** (rule; nothing secret exists yet) |
+| Theft of drives, backups or decommissioned disks | Encryption at rest is always on: AES-256-GCM, a data key per object, wrapped by a KMS key; no unencrypted fallback | **implemented** |
+| Theft of the local KMS key file | The master key is sealed with AES-256-GCM under an Argon2id-derived key; the passphrase is never stored | **implemented** (strength is the passphrase's; Vault Transit M4) |
+| A node started with the wrong key | A missing key file on an existing deployment, a wrong passphrase or another deployment's key stops the node | **implemented** |
+| Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once | **implemented** for the root key; user keys M4 |
+| Bucket names, keys or object metadata read from the metadata store | Not encrypted: `state.db` and the Raft log hold names, sizes and user metadata in the clear | **not mitigated** — see open question 6 |
+| Secrets in logs | Secrets, keys, tokens and object contents are never logged; secrets have no command-line flag | **implemented**, tested for the root secret and the KMS passphrase |
+| Internal state disclosed through errors | Integrity, key and storage failures all answer `InternalError`; the cause is logged, not returned | **implemented** |
+| Metrics disclose tenants | `/metrics` is authenticated and authorized (`admin:GetMetrics`); no label holds a bucket, key or access key | **implemented** |
+| Existence of buckets or keys probed anonymously | Authentication precedes routing: an unsigned request is refused the same way whether or not its target exists | **implemented** |
 | Probe endpoints reveal internals | `/healthz` and `/readyz` return only `ok` or `unavailable`; the reason is logged, not returned | **implemented** |
 | Eavesdropping | See TLS above | **implemented** (admin listener) |
 | Data leaves an air-gapped site | No runtime call to the internet, no telemetry, no CDN asset | **implemented** |
@@ -91,7 +98,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| Slow or oversized requests exhaust a listener | Read-header, read, write and idle timeouts; header size limit | **implemented** (admin listener) |
+| Slow or oversized requests exhaust a listener | Read-header and idle timeouts and a header size limit on both listeners; whole-request timeouts on the admin listener; object size and XML body limits | **implemented**; a slow *body* on the S3 listener is not bounded yet |
 | Loss of drives or nodes | Reed-Solomon parity; quorum writes; self-healing | M2, M3 |
 | Requests routed to a node that is going away | `/readyz` answers 503 for `--drain-delay` before the listener closes; in-flight requests then finish within `--shutdown-timeout` | **implemented**; the delay defaults to `0s` (off) and must be set per deployment (chart default: M7) |
 | One tenant fills the cluster | Per-bucket quotas | M8 |
@@ -100,7 +107,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| A handler forgets an authorization check | Every inbound request passes through the single `ports.Authorizer`; no authorization logic in handlers; default deny; explicit deny wins | M4 |
+| A handler forgets an authorization check | Every use case calls the single `ports.Authorizer`; no authorization logic in handlers; default deny | **implemented** (root only); policies and explicit deny M4 |
+| An unimplemented S3 feature is served as a different operation | A recognised sub-resource or copy header answers `501`, never the plain operation on the same path | **implemented** |
 | An API key exceeds its owner | A key's effective policy is the intersection with its owner's | M4 |
 | Anonymous access | Only when a bucket policy explicitly grants it | M6 |
 | Ransomware with stolen admin credentials | Versioning and Object Lock; a compliance-locked version cannot be deleted by anyone, `cluster-admin` included | M6 |
@@ -135,6 +143,25 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 4. **Console dependency audit.** `govulncheck` covers Go only. Should `make check` gain a
    `pnpm audit` gate? It needs registry access at check time and can fail on advisories
    in build-only tools.
-5. **gosec G204 in `test/`.** `.golangci.yml` excludes the "subprocess launched with a
+5. **Lint exclusions.** Two gosec findings are silenced by path in `.golangci.yml`, and
+   nowhere else: G204 under `test/` (see below) and G401/G501 for
+   `internal/adapters/s3api/md5.go`, the one file that computes the MD5 the S3 protocol
+   prescribes for ETag and `Content-MD5`.
+6. **Metadata at rest.** Object data is encrypted, but bucket names, object keys, sizes,
+   content types and user metadata are stored in the clear in `state.db` and the Raft
+   log. `CLAUDE.md` §3 says "every object is encrypted"; whether names and metadata must
+   be too is a product decision (it costs listing performance or needs encrypted bbolt
+   pages).
+7. **Root credentials on standard error.** Generated credentials are printed once to
+   stderr, which container log drivers capture. Production deployments should supply
+   them; should generation be refused when stderr is not a terminal?
+8. **Bearer format for `/metrics`.** `Bearer <access key ID>:<secret>` is provisional
+   until the admin API contract (PLAN 5.1), and until scoped keys exist it is the root
+   key that a scraper must hold.
+9. **Slow uploads.** The S3 listener has no body deadline; a client can hold a
+   connection open by sending slowly.
+10. **SHA-1 checksums** (`x-amz-checksum-sha1`) are refused rather than verified,
+    because the linter rejects SHA-1.
+11. **gosec G204 in `test/`.** `.golangci.yml` excludes the "subprocess launched with a
    variable" finding for the black-box tests under `test/`, which exist to execute the
    binary they have just built. It is the only lint exclusion in the repository.

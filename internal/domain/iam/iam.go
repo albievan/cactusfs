@@ -25,6 +25,12 @@ const (
 	ActionDeleteObject      Action = "s3:DeleteObject"
 )
 
+// The admin actions implemented so far.
+const (
+	// ActionGetMetrics allows reading the node's metrics.
+	ActionGetMetrics Action = "admin:GetMetrics"
+)
+
 // Resource names what an action applies to.
 type Resource struct {
 	// Bucket is the bucket name, or empty for account-level actions.

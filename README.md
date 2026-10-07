@@ -4,8 +4,10 @@ An S3-compatible, erasure-coded, multi-node object store in a single Go binary, 
 data security first: encryption at rest and in transit, checksums on every read,
 self-healing, RBAC and an audit trail.
 
-> **Status: milestone 0 (scaffold).** The binary has two commands, `version` and
-> `server`, and `server` serves only the health probes. It does not store objects yet.
+> **Status: milestone 1 (standalone store).** One node stores objects encrypted and
+> checksummed, behind an S3-compatible API with SigV4. There is **no erasure coding and
+> no parity yet** (milestone 2), no cluster (milestone 3) and no users or policies
+> beyond the root key (milestone 4): do not keep data here that you cannot lose.
 > `PLAN.md` lists what comes next.
 
 ## Build from source
@@ -44,48 +46,78 @@ build embeds or serves it yet (PLAN 5.4).
 
 ## Run
 
-`server` refuses to start without TLS:
+A node needs a drive, a key management service and TLS. For local development,
+`--dev-plaintext` replaces TLS with HTTP on a loopback address only:
 
 ```sh
-./cactusfs server --tls-cert server.crt --tls-key server.key
-curl --cacert ca.crt https://localhost:9001/healthz     # {"status":"ok"}
+export CACTUSFS_KMS_PASSPHRASE='choose a long passphrase'
+./cactusfs server --dev-plaintext --data ./.data --kms local
+```
+
+On its first start a deployment has no login. It prints generated root credentials
+**once** on standard error — store them — or uses the ones you supply in
+`CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY`.
+
+```sh
+export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…  AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://photos
+aws --endpoint-url http://127.0.0.1:9000 s3 cp cactus.jpg s3://photos/
+aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://photos/
+```
+
+In production, give it a certificate; it refuses to start without one:
+
+```sh
+./cactusfs server --data /mnt/drive1 --data /mnt/drive2 --kms local \
+  --tls-cert server.crt --tls-key server.key
 curl --cacert ca.crt https://localhost:9001/readyz      # {"status":"ok"}
 ```
 
-For local development only, `--dev-plaintext` serves HTTP on a loopback address
-(`127.0.0.1` or `::1`) and nowhere else:
+**Back up the KMS key file (`<first drive>/meta/kms-local.json` by default) and its
+passphrase.** Without both, nothing stored can be decrypted.
 
-```sh
-./cactusfs server --dev-plaintext
-curl http://127.0.0.1:9001/healthz
-```
-
-Every flag has a matching environment variable; the flag wins.
+Every setting is a flag with a matching `CACTUSFS_*` variable; the flag wins. Secrets are
+the exception: they are read from the environment or a file, never from the command line.
+`./cactusfs server --help` lists everything; the main ones:
 
 | Flag | Variable | Default |
 |---|---|---|
+| `--data` | `CACTUSFS_DATA` | — (required; repeat for several drives) |
+| `--kms` | `CACTUSFS_KMS` | — (required: `local`) |
+| — | `CACTUSFS_KMS_PASSPHRASE` | — (required, or `--kms-passphrase-file`) |
+| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` |
 | `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` |
-| `--tls-cert` | `CACTUSFS_TLS_CERT` | — |
-| `--tls-key` | `CACTUSFS_TLS_KEY` | — |
+| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — (enables `<bucket>.<domain>`) |
+| `--tls-cert`, `--tls-key` | `CACTUSFS_TLS_CERT`, `CACTUSFS_TLS_KEY` | — |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` |
-| `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` |
 | `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` |
-| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` |
+| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — (no traces exported) |
 
-Logs are JSON on stdout. On SIGTERM the server makes `/readyz` answer 503 and keeps
-serving for the drain delay, so a load balancer can stop routing to it. Then it closes
-the listener, lets in-flight requests finish within the shutdown timeout and exits 0.
-With the default drain delay of `0s` the listener closes at once and the 503 is never
-seen; set a delay wherever something polls `/readyz`.
+Operations:
 
-In a container, mount the certificate and key and run hardened:
+- `GET /healthz` and `GET /readyz` on the admin listener are unauthenticated and say only
+  `ok` or `unavailable`.
+- `GET /metrics` needs `Authorization: Bearer <access key ID>:<secret>`.
+- Logs are JSON on stdout. On SIGTERM the node makes `/readyz` answer 503, keeps serving
+  for the drain delay, closes its listeners, lets in-flight requests finish and exits 0.
+
+Supported S3 operations: ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
+GetBucketLocation, PutObject, GetObject (with a byte range), HeadObject, DeleteObject and
+ListObjectsV2, by path or (with `--s3-domain`) by virtual host. Multipart uploads,
+versioning, presigned URLs, copies, multi-object delete and the rest answer
+`501 NotImplemented` for now.
+
+In a container, mount the drives and the certificate and run hardened:
 
 ```sh
-docker run --rm --read-only --cap-drop ALL -p 9001:9001 \
-  -v "$PWD/certs:/certs:ro" \
+docker run --rm --read-only --cap-drop ALL -p 9000:9000 -p 9001:9001 \
+  -v cactus-data:/data -v "$PWD/certs:/certs:ro" \
+  -e CACTUSFS_DATA=/data -e CACTUSFS_KMS=local -e CACTUSFS_KMS_PASSPHRASE \
   -e CACTUSFS_TLS_CERT=/certs/server.crt -e CACTUSFS_TLS_KEY=/certs/server.key \
   cactusfs
 ```
+
+The volume must be writable by UID 65532.
 
 ## Develop
 
@@ -109,7 +141,7 @@ make help                  # all targets
 | `make build-all` | six OS/arch binaries in `dist/` |
 | `make image` | `cactusfs:<version>-amd64` and `-arm64` |
 | `make verify-clone` | proves both build paths above from a clean export |
-| `make run` | build and run with `--dev-plaintext` |
+| `make run` | build and run a development node on `./.data` (set `CACTUSFS_KMS_PASSPHRASE`) |
 
 Notes:
 
@@ -129,6 +161,7 @@ internal/ports/      interfaces to the outside world
 internal/adapters/   implementations and inbound transports
 web/                 console (React + TypeScript + Vite)
 test/                integration and S3 compatibility suites
+api/                 (later) OpenAPI, AsyncAPI and protobuf contracts
 scripts/             the gate scripts behind the make targets
 docs/                architecture, threat model, decision records
 ```

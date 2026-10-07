@@ -31,6 +31,7 @@ const (
 	envTLSKey          = "CACTUSFS_TLS_KEY"
 	envDevPlaintext    = "CACTUSFS_DEV_PLAINTEXT"
 	envLogLevel        = "CACTUSFS_LOG_LEVEL"
+	envOTLPEndpoint    = "CACTUSFS_OTLP_ENDPOINT"
 	envDrainDelay      = "CACTUSFS_DRAIN_DELAY"
 	envShutdownTimeout = "CACTUSFS_SHUTDOWN_TIMEOUT"
 )
@@ -86,6 +87,9 @@ type serverConfig struct {
 	DevPlaintext bool
 	// LogLevel is the minimum level written to the log.
 	LogLevel slog.Level
+	// OTLPEndpoint is the URL of an OTLP/HTTP trace collector. Empty, the
+	// default, exports nothing.
+	OTLPEndpoint string
 	// DrainDelay is how long the node keeps serving after a shutdown signal,
 	// with /readyz answering 503, before it closes its listeners. Zero closes
 	// them at once.
@@ -178,6 +182,8 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"on shutdown, keep serving this long with /readyz answering 503 before closing the listeners ($"+envDrainDelay+")")
 	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", shutdownTimeout,
 		"time allowed for in-flight requests to finish once the listeners have closed ($"+envShutdownTimeout+")")
+	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", getenv(envOTLPEndpoint),
+		"`URL` of an OTLP/HTTP trace collector; traces are not exported when empty ($"+envOTLPEndpoint+")")
 	logLevel := fs.String("log-level", envString(getenv, envLogLevel, defaultLogLevel),
 		"minimum log `level`: debug, info, warn or error ($"+envLogLevel+")")
 

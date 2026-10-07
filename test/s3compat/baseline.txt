@@ -5,3 +5,33 @@
 # one is a compatibility regression and needs a decision in PLAN.md.
 #
 # Record new passes with: make s3-compat-record
+github.com/albievan/cactusfs/test/s3compat TestAnonymousIsRejected
+github.com/albievan/cactusfs/test/s3compat TestCreateBucket
+github.com/albievan/cactusfs/test/s3compat TestCreateBucketInvalidName
+github.com/albievan/cactusfs/test/s3compat TestCreateBucketTwice
+github.com/albievan/cactusfs/test/s3compat TestCreateBucketWithLocationConstraint
+github.com/albievan/cactusfs/test/s3compat TestDeleteBucket
+github.com/albievan/cactusfs/test/s3compat TestDeleteBucketNotEmpty
+github.com/albievan/cactusfs/test/s3compat TestDeleteObject
+github.com/albievan/cactusfs/test/s3compat TestETagIsTheMD5OfTheObject
+github.com/albievan/cactusfs/test/s3compat TestGetBucketLocation
+github.com/albievan/cactusfs/test/s3compat TestGetObjectMissing
+github.com/albievan/cactusfs/test/s3compat TestGetObjectRange
+github.com/albievan/cactusfs/test/s3compat TestHeadBucketMissing
+github.com/albievan/cactusfs/test/s3compat TestHeadObjectMissing
+github.com/albievan/cactusfs/test/s3compat TestKeysWithSpecialCharacters
+github.com/albievan/cactusfs/test/s3compat TestListBuckets
+github.com/albievan/cactusfs/test/s3compat TestListObjectsV2
+github.com/albievan/cactusfs/test/s3compat TestListObjectsV2Delimiter
+github.com/albievan/cactusfs/test/s3compat TestListObjectsV2Pagination
+github.com/albievan/cactusfs/test/s3compat TestObjectMetadataRoundTrip
+github.com/albievan/cactusfs/test/s3compat TestOverwriteObject
+github.com/albievan/cactusfs/test/s3compat TestPutObjectContentMD5
+github.com/albievan/cactusfs/test/s3compat TestPutObjectDefaults
+github.com/albievan/cactusfs/test/s3compat TestPutObjectEmpty
+github.com/albievan/cactusfs/test/s3compat TestPutObjectLarge
+github.com/albievan/cactusfs/test/s3compat TestPutObjectMissingBucket
+github.com/albievan/cactusfs/test/s3compat TestPutObjectSHA256Checksum
+github.com/albievan/cactusfs/test/s3compat TestPutObjectUnseekableBody
+github.com/albievan/cactusfs/test/s3compat TestVirtualHostedStyle
+github.com/albievan/cactusfs/test/s3compat TestWrongSecretIsRejected

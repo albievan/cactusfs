@@ -63,6 +63,13 @@ func TestRun(t *testing.T) {
 			wantCode: exitError, wantStderr: "server.LoadTLS",
 		},
 		{
+			name: "server with a plaintext trace collector refuses to start",
+			args: func(t *testing.T) []string {
+				return append([]string{"server"}, storeArgs(t, "--dev-plaintext", "--otlp-endpoint", "http://collector.example:4318")...)
+			},
+			wantCode: exitError, wantStderr: "must use https",
+		},
+		{
 			name: "server with unusable address fails",
 			args: func(t *testing.T) []string {
 				return append([]string{"server"}, storeArgs(t, "--dev-plaintext", "--admin-addr", "127.0.0.1:99999")...)
@@ -211,13 +218,14 @@ func TestParseServerConfig(t *testing.T) {
 				envAdminAddr: "127.0.0.1:19001", envS3Addr: "127.0.0.1:19000", envDevPlaintext: "true", envLogLevel: "debug",
 				envShutdownTimeout: "5s", envDrainDelay: "3s", envData: dataDir + ", " + otherDir, envKMS: "local",
 				envMetaDir: "m", envKMSKeyFile: "k.json", envS3Domain: "s3.test", envRegion: "eu-1",
-				envRootKeyID: "ROOTKEY", envRootKeyValue: "root-secret-value",
+				envRootKeyID: "ROOTKEY", envRootKeyValue: "root-secret-value", envOTLPEndpoint: "https://otel.test:4318",
 			}),
 			want: base(func(c *serverConfig) {
 				c.AdminAddr, c.S3Addr, c.LogLevel = "127.0.0.1:19001", "127.0.0.1:19000", slog.LevelDebug
 				c.DrainDelay, c.ShutdownTimeout = 3*time.Second, 5*time.Second
 				c.Data, c.MetaDir, c.KMSKeyFile, c.S3Domain, c.Region = []string{dataDir, otherDir}, "m", "k.json", "s3.test", "eu-1"
 				c.secrets.rootAccessKey, c.secrets.rootSecretKey = "ROOTKEY", "root-secret-value"
+				c.OTLPEndpoint = "https://otel.test:4318"
 			}),
 		},
 		{

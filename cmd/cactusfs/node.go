@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/disk"
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -42,14 +43,17 @@ type node struct {
 	identities *app.IdentityService
 	authorizer *app.Authorizer
 	clock      ports.Clock
+	telemetry  *telemetry.Telemetry
 }
 
 // openNode opens the drives, the KMS and the metadata store, wires the use
 // cases and makes sure the deployment has a root credential. Credentials
 // generated for a new deployment are shown once on notice, which is the
 // operator's terminal and never the log.
-func openNode(ctx context.Context, cfg serverConfig, logger *slog.Logger, notice io.Writer) (*node, error) {
-	n := &node{clock: systemClock{}}
+func openNode(
+	ctx context.Context, cfg serverConfig, tel *telemetry.Telemetry, logger *slog.Logger, notice io.Writer,
+) (*node, error) {
+	n := &node{clock: systemClock{}, telemetry: tel}
 	if err := n.open(ctx, cfg, logger, notice); err != nil {
 		return nil, errors.Join(err, n.Close())
 	}
@@ -64,16 +68,17 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 			return err
 		}
 		n.drives = append(n.drives, drive)
-		stores = append(stores, drive)
+		stores = append(stores, n.telemetry.InstrumentShardStore(drive))
 		logger.InfoContext(ctx, "drive opened", slog.String("drive_id", drive.DriveID()), slog.String("dir", dir))
 	}
 	logger.WarnContext(ctx, "objects are stored encrypted and checksummed on one drive each, without parity: "+
 		"erasure coding is not available in this version", slog.Int("drives", len(stores)))
 
-	kms, err := openKMS(ctx, cfg, logger)
+	localKMS, err := openKMS(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
+	kms := n.telemetry.InstrumentKMS(localKMS)
 
 	startCtx, cancel := context.WithTimeout(ctx, metadataStartTimeout)
 	defer cancel()
@@ -84,16 +89,19 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 
+	// Every outbound port is reached through a decorator that traces and
+	// counts the call.
+	meta := n.telemetry.InstrumentMetadata(n.meta)
 	n.authorizer = app.NewAuthorizer(logger)
-	n.buckets = app.NewBucketService(n.meta, n.authorizer, n.clock)
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: n.meta, Buckets: n.meta, Drives: stores, KMS: kms,
+		Index: meta, Buckets: meta, Drives: stores, KMS: kms,
 		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {
 		return err
 	}
-	n.identities = app.NewIdentityService(n.meta, kms, n.clock, rand.Reader)
+	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader)
 
 	var provided *app.Credentials
 	if cfg.secrets.rootAccessKey != "" {

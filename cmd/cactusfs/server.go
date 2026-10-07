@@ -14,6 +14,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/health"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
+	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 )
 
@@ -59,7 +60,20 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	if err != nil {
 		return err
 	}
-	n, err := openNode(ctx, cfg, logger, notice)
+	tel, err := telemetry.New(ctx, telemetry.Config{Version: version, OTLPEndpoint: cfg.OTLPEndpoint})
+	if err != nil {
+		return fmt.Errorf("server.Open: %w", err)
+	}
+	defer func() {
+		if stopErr := tel.Shutdown(ctx); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("server.Close: %w", stopErr))
+		}
+	}()
+	if !tel.Exporting() {
+		logger.InfoContext(ctx, "traces are not exported: no OTLP endpoint is configured")
+	}
+
+	n, err := openNode(ctx, cfg, tel, logger, notice)
 	if err != nil {
 		return fmt.Errorf("server.Open: %w", err)
 	}
@@ -72,11 +86,13 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	gate := health.NewGate()
 	admin := http.NewServeMux()
 	health.NewHandler(app.NewHealthService(gate, n.meta), logger, readinessTimeout).Register(admin)
+	admin.Handle("GET /metrics", tel.MetricsHandler(n.identities, n.authorizer, logger))
 
-	s3 := s3api.NewHandler(s3api.Config{
+	s3 := tel.TraceS3(s3api.NewHandler(s3api.Config{
 		Buckets: n.buckets, Objects: n.objects, Identities: n.identities,
 		Clock: n.clock, Logger: logger, Region: cfg.Region, Domain: cfg.S3Domain,
-	})
+		Observe: tel.ObserveS3,
+	}))
 
 	endpoints, err := listen(ctx, []endpoint{
 		{name: "admin", handler: admin, ioTimeout: adminIOTimeout},

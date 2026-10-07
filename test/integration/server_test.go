@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -140,6 +141,10 @@ func TestServerProbesAndGracefulShutdown(t *testing.T) {
 			t.Errorf("GET %s: status = %d, want %d", path, got, want)
 		}
 	}
+	// Metrics are served only to an authenticated caller.
+	if got := status(ctx, t, client, "http://"+addrs["admin"]+"/metrics"); got != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /metrics: status = %d, want 401", got)
+	}
 	// The S3 listener answers, and refuses a request that is not signed.
 	if got := status(ctx, t, client, "http://"+addrs["s3"]+"/"); got != http.StatusForbidden {
 		t.Errorf("unsigned S3 request: status = %d, want 403", got)
@@ -148,11 +153,30 @@ func TestServerProbesAndGracefulShutdown(t *testing.T) {
 
 	// A new deployment shows generated root credentials once, on standard
 	// error; a restart shows nothing.
-	if !strings.Contains(first.stderr.String(), "Access key ID:") {
-		t.Errorf("first start did not show root credentials: %q", first.stderr.String())
+	shown := regexp.MustCompile(`Access key ID: (\S+)\s+Secret key: +(\S+)`).FindStringSubmatch(first.stderr.String())
+	if shown == nil {
+		t.Fatalf("first start did not show root credentials: %q", first.stderr.String())
 	}
 	second := startServer(ctx, t, bin, dir)
-	waitForListening(t, second.logs)
+	addrs = waitForListening(t, second.logs)
+
+	// The credentials shown at the first start open the metrics endpoint
+	// after a restart, and the metrics are the node's own.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addrs["admin"]+"/metrics", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+shown[1]+":"+shown[2])
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK ||
+		!strings.Contains(string(body), "cactusfs_build_info") || !strings.Contains(string(body), `cactusfs_port_calls_total{method="GetRootCredential"`) {
+		t.Errorf("authenticated GET /metrics: status %d, %v, body %.300q", resp.StatusCode, err, body)
+	}
 	second.stop(t)
 	if second.stderr.Len() != 0 {
 		t.Errorf("a restart wrote to standard error: %q", second.stderr.String())

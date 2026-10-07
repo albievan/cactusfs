@@ -516,9 +516,21 @@ func TestAWSChunkedUploads(t *testing.T) {
 		{name: "cut inside a chunk", call: chunkedCall(awsChunked(data, 8192, good)[:5000], len(data), "x-amz-checksum-crc32"), status: 400, code: "IncompleteBody"},
 		{name: "no final chunk", call: chunkedCall(bytes.TrimSuffix(awsChunked(data, len(data), ""), []byte("0\r\n\r\n")), len(data), "x-amz-checksum-crc32"), status: 400, code: "IncompleteBody"},
 		{name: "not chunked at all", call: chunkedCall(data, len(data), "x-amz-checksum-crc32"), status: 400, code: "IncompleteBody"},
+		// A client streaming a body of unknown length sends no decoded
+		// length; the trailing checksum still has to match.
 		{name: "no decoded length", call: func() call {
 			c := chunkedCall(awsChunked(data, 8192, good), len(data), "x-amz-checksum-crc32")
 			delete(c.headers, "X-Amz-Decoded-Content-Length")
+			return c
+		}(), status: 200},
+		{name: "no decoded length and a wrong checksum", call: func() call {
+			c := chunkedCall(awsChunked(data, 8192, "x-amz-checksum-crc32:"+crc32Of([]byte("x"))+"\r\n"), len(data), "x-amz-checksum-crc32")
+			delete(c.headers, "X-Amz-Decoded-Content-Length")
+			return c
+		}(), status: 400, code: "BadDigest"},
+		{name: "malformed decoded length", call: func() call {
+			c := chunkedCall(awsChunked(data, 8192, good), len(data), "x-amz-checksum-crc32")
+			c.headers["X-Amz-Decoded-Content-Length"] = "lots"
 			return c
 		}(), status: 400, code: "InvalidArgument"},
 		{name: "no trailer declared", call: chunkedCall(awsChunked(data, 8192, good), len(data), ""), status: 400, code: "InvalidArgument"},

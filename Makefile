@@ -100,8 +100,10 @@ $(BUILDER_TARGETS): builder
 shell: builder
 	$(BUILDER_RUN) -it $(BUILDER_IMAGE) bash
 
+# A development node on ./.data. The KMS passphrase comes from the environment:
+#   CACTUSFS_KMS_PASSPHRASE='...' make run
 run: build
-	./bin/cactusfs$(EXE) server --dev-plaintext
+	./bin/cactusfs$(EXE) server --dev-plaintext --data ./.data --kms local
 
 up down:
 	@echo "make $@: the 4-node compose cluster is PLAN step 3.8 and does not exist yet." >&2; exit 1

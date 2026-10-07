@@ -129,11 +129,17 @@ func newPayload(r *http.Request, payloadHash string) (*payload, error) {
 // useChunked sets the payload up for an aws-chunked body with a trailing
 // checksum.
 func (p *payload) useChunked(r *http.Request) error {
-	decoded, err := strconv.ParseInt(r.Header.Get(headerDecodedLen), 10, 64)
-	if err != nil || decoded < 0 {
-		return fmt.Errorf("%w: %s is required with aws-chunked", errBadPayloadHeader, headerDecodedLen)
+	// The decoded length is absent when the client streams a body whose
+	// length it does not know; the framing and the trailing checksum then
+	// protect the payload on their own.
+	p.size = -1
+	if raw := r.Header.Get(headerDecodedLen); raw != "" {
+		decoded, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || decoded < 0 {
+			return fmt.Errorf("%w: %s is not a length", errBadPayloadHeader, headerDecodedLen)
+		}
+		p.size = decoded
 	}
-	p.size = decoded
 	p.chunked = newChunkedReader(r.Body)
 
 	// aws-chunked is transfer framing, not part of the object.
