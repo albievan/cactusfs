@@ -152,6 +152,13 @@ test/{integration,s3compat,chaos}/
   API through the generated client (`openapi-typescript` + `openapi-fetch`). No business
   or authorization logic in the frontend. Screens: buckets, object browser, users,
   groups, roles and policies, API keys, cluster/drive/heal status, audit log.
+- **Brand assets.** The logo files already exist — use them; never redraw or regenerate
+  them. Masters live in `docs/brand/`. The console imports from `web/src/assets/brand/`
+  (`cactusfs-logo.svg` on light backgrounds, `cactusfs-logo-reversed.svg` on dark,
+  `cactusfs-logo-tagline*.svg` for the login screen, `cactusfs-mark.svg` where space is
+  tight) and serves `web/public/favicon.svg` as the tab icon, linked from
+  `web/index.html`. Do not use the tagline versions below 64 px high. Colours: Saguaro
+  `#2E6B4E`, Night Green `#163B2C`, Sand `#F4ECDD`, Dune `#D9C39A`.
 
 ## 3. Data-security rules (storage product)
 
