@@ -12,8 +12,12 @@ type ListOptions struct {
 	// Delimiter groups keys: the part of a key up to and including the
 	// first delimiter after the prefix is rolled up into a common prefix.
 	Delimiter string
-	// StartAfter lists only keys strictly greater than it.
+	// StartAfter lists only keys strictly greater than it. It is ignored
+	// when Continuation is set.
 	StartAfter string
+	// Continuation continues a truncated listing. It is the NextContinuation of the
+	// previous page and must be used with the same Prefix and Delimiter.
+	Continuation string
 	// MaxKeys bounds the number of objects plus common prefixes returned.
 	MaxKeys int
 }
@@ -26,9 +30,35 @@ type ListPage struct {
 	CommonPrefixes []string
 	// Truncated reports that more entries follow this page.
 	Truncated bool
-	// NextStartAfter is the StartAfter value that continues the listing. It
-	// is set only when Truncated is true.
-	NextStartAfter string
+	// NextContinuation continues the listing. It is set only when Truncated is
+	// true and holds the last entry of this page: a key or a common prefix.
+	NextContinuation string
+}
+
+// StartKey returns where a scan for these options begins: the first key to
+// visit, and a key to skip if it is met (the entry the listing resumes after).
+// The boolean is false when nothing can follow the resume point.
+func (o ListOptions) StartKey() (seek, skip string, ok bool) {
+	switch {
+	case o.Continuation != "":
+		// A token that is a common prefix stands for every key inside it,
+		// all of which the previous page already accounted for.
+		if group, isGroup := CommonPrefix(o.Continuation, o.Prefix, o.Delimiter); isGroup && group == o.Continuation {
+			end, more := PrefixEnd(group)
+			if !more {
+				return "", "", false
+			}
+			seek = end
+		} else {
+			seek, skip = o.Continuation, o.Continuation
+		}
+	case o.StartAfter != "":
+		seek, skip = o.StartAfter, o.StartAfter
+	}
+	if seek < o.Prefix {
+		return o.Prefix, "", true
+	}
+	return seek, skip, true
 }
 
 // CommonPrefix returns the common prefix that key rolls up into for the given
