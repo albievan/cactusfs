@@ -12,6 +12,10 @@ PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windo
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# The checker is built once for this machine. Running it through `go tool`
+# inside the loop would cross-compile the checker itself for each platform.
+go build -o "$work/go-licenses" github.com/google/go-licenses/v2
+
 for platform in $PLATFORMS; do
 	os=${platform%/*}
 	arch=${platform#*/}
@@ -37,7 +41,11 @@ for platform in $PLATFORMS; do
 	fi
 	echo "licences: go $platform - checking $(wc -l <"$work/modules" | tr -d ' ') modules"
 	CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
-		go tool go-licenses check --allowed_licenses="$ALLOWED" --ignore "$MODULE" ./cmd/...
+		"$work/go-licenses" check --allowed_licenses="$ALLOWED" --ignore "$MODULE" ./cmd/... 2>"$work/log" || {
+		cat "$work/log" >&2
+		echo "licences: FAIL - go $platform" >&2
+		exit 1
+	}
 done
 
 node scripts/web-licences.mjs "$ALLOWED"

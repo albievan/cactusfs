@@ -1,0 +1,407 @@
+// Package s3api is the inbound adapter for the S3-compatible data API. It is
+// implemented from AWS's public S3 API reference.
+//
+// The adapter speaks the protocol and nothing more: it authenticates a
+// request (AWS Signature Version 4), translates it into a call on a use
+// case, and translates the result or the domain error back into an S3
+// response. It decides nothing about who may do what — every use case passes
+// the authorizer — and holds no storage logic.
+package s3api
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/xml"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
+)
+
+// DefaultRegion is the region reported when none is configured.
+const DefaultRegion = "us-east-1"
+
+const (
+	requestIDSize = 8
+	serverName    = "CactusFS"
+	xmlHeader     = `<?xml version="1.0" encoding="UTF-8"?>` + "\n"
+)
+
+// Buckets is the bucket use cases the adapter calls. *app.BucketService
+// implements it.
+type Buckets interface {
+	Create(ctx context.Context, principal iam.Principal, name string) error
+	Delete(ctx context.Context, principal iam.Principal, name string) error
+	Get(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error)
+	Location(ctx context.Context, principal iam.Principal, name string) error
+	List(ctx context.Context, principal iam.Principal) ([]bucket.Bucket, error)
+}
+
+// Objects is the object use cases the adapter calls. *app.ObjectService
+// implements it.
+type Objects interface {
+	Put(ctx context.Context, principal iam.Principal, in app.PutInput) (object.Version, error)
+	Get(ctx context.Context, principal iam.Principal, in app.GetInput) (app.GetOutput, error)
+	Head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error)
+	Delete(ctx context.Context, principal iam.Principal, bucketName, key string) error
+	List(ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions) (object.ListPage, error)
+}
+
+// Identities resolves an access key to its secret and principal.
+// *app.IdentityService implements it.
+type Identities interface {
+	SecretFor(ctx context.Context, accessKeyID string) ([]byte, iam.Principal, error)
+}
+
+// Observation describes one finished request, for metrics and traces.
+type Observation struct {
+	// Operation is the S3 operation name, such as "PutObject", or
+	// "Unknown" when the request matched none.
+	Operation string
+	Status    int
+	Duration  time.Duration
+	BytesIn   int64
+	BytesOut  int64
+}
+
+// Config configures a Handler.
+type Config struct {
+	Buckets    Buckets
+	Objects    Objects
+	Identities Identities
+	Clock      ports.Clock
+	Logger     *slog.Logger
+	// Region is the region name reported to clients; DefaultRegion when
+	// empty.
+	Region string
+	// Domain enables virtual-hosted-style requests: a request for host
+	// "<bucket>.<Domain>" addresses that bucket. Empty disables it.
+	Domain string
+	// Observe, when not nil, is called after every request.
+	Observe func(ctx context.Context, o Observation)
+}
+
+// Handler serves the S3 API.
+type Handler struct {
+	cfg Config
+}
+
+var _ http.Handler = (*Handler)(nil)
+
+// NewHandler returns a Handler.
+func NewHandler(cfg Config) *Handler {
+	if cfg.Region == "" {
+		cfg.Region = DefaultRegion
+	}
+	cfg.Domain = strings.ToLower(strings.Trim(cfg.Domain, "."))
+	return &Handler{cfg: cfg}
+}
+
+// request is the state of one request as it moves through the handler.
+type request struct {
+	*http.Request
+	w         *responseWriter
+	id        string
+	bucket    string
+	key       string
+	operation string
+	principal iam.Principal
+	// payloadHash is the x-amz-content-sha256 value the signature covers.
+	payloadHash string
+}
+
+// responseWriter records what was sent.
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+// WriteHeader implements http.ResponseWriter.
+func (w *responseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+// Write implements http.ResponseWriter.
+func (w *responseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
+type countingBody struct {
+	io.ReadCloser
+	bytes int64
+}
+
+// Read implements io.Reader.
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.bytes += int64(n)
+	return n, err
+}
+
+// ServeHTTP implements http.Handler.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := h.cfg.Clock.Now()
+	body := &countingBody{ReadCloser: r.Body}
+	r.Body = body
+	req := &request{Request: r, w: &responseWriter{ResponseWriter: w}, id: newRequestID(), operation: "Unknown"}
+
+	header := w.Header()
+	header.Set("Server", serverName)
+	header.Set("X-Amz-Request-Id", req.id)
+	header.Set("X-Content-Type-Options", "nosniff")
+
+	ctx := r.Context()
+	if err := h.serve(ctx, req); err != nil {
+		h.writeError(ctx, req, err)
+	}
+
+	duration := h.cfg.Clock.Now().Sub(started)
+	h.cfg.Logger.InfoContext(ctx, "s3 request",
+		slog.String("request_id", req.id),
+		slog.String("operation", req.operation),
+		slog.String("method", r.Method),
+		slog.String("bucket", req.bucket),
+		slog.Int("status", req.w.status),
+		slog.String("access_key_id", req.principal.AccessKeyID),
+		slog.Int64("bytes_in", body.bytes),
+		slog.Int64("bytes_out", req.w.bytes),
+		slog.Duration("duration", duration),
+	)
+	if h.cfg.Observe != nil {
+		h.cfg.Observe(ctx, Observation{
+			Operation: req.operation, Status: req.w.status, Duration: duration, BytesIn: body.bytes, BytesOut: req.w.bytes,
+		})
+	}
+}
+
+func newRequestID() string {
+	var id [requestIDSize]byte
+	// crypto/rand.Read does not fail on supported platforms.
+	_, _ = rand.Read(id[:])
+	return strings.ToUpper(hex.EncodeToString(id[:]))
+}
+
+// serve authenticates the request, then routes it. Nothing about a bucket or
+// an object is revealed, and no body is read, before authentication.
+func (h *Handler) serve(ctx context.Context, req *request) error {
+	h.address(req)
+	if err := h.authenticate(ctx, req); err != nil {
+		h.cfg.Logger.WarnContext(ctx, "authentication failed",
+			slog.String("request_id", req.id),
+			slog.String("remote", remoteHost(req.RemoteAddr)),
+			slog.String("reason", toAPIError(err).code),
+		)
+		return err
+	}
+	return h.route(ctx, req)
+}
+
+func remoteHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
+// address works out which bucket and key the request names, from the Host
+// header (virtual-hosted style) or the path (path style).
+func (h *Handler) address(req *request) {
+	path := strings.TrimPrefix(req.URL.Path, "/")
+	if name, ok := h.virtualHostBucket(req.Host); ok {
+		req.bucket, req.key = name, path
+		return
+	}
+	req.bucket, req.key, _ = strings.Cut(path, "/")
+}
+
+func (h *Handler) virtualHostBucket(host string) (string, bool) {
+	if h.cfg.Domain == "" {
+		return "", false
+	}
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	name, ok := strings.CutSuffix(strings.ToLower(host), "."+h.cfg.Domain)
+	return name, ok && name != ""
+}
+
+// authenticate verifies the request's signature and sets the principal.
+func (h *Handler) authenticate(ctx context.Context, req *request) error {
+	query := req.URL.Query()
+	if query.Has("X-Amz-Algorithm") || query.Has("X-Amz-Signature") || query.Has("Signature") {
+		// Presigned URLs are PLAN 6.3.
+		return errNotImplemented()
+	}
+	header := req.Header.Get("Authorization")
+	if header == "" {
+		return errAuthMissing
+	}
+	sig, err := parseAuthorization(header)
+	if err != nil {
+		return err
+	}
+	secret, principal, err := h.cfg.Identities.SecretFor(ctx, sig.accessKeyID)
+	if err != nil {
+		return err
+	}
+	defer clear(secret)
+	payloadHash, err := verifySignature(req.Request, sig, secret, h.cfg.Clock.Now())
+	if err != nil {
+		return err
+	}
+	req.principal, req.payloadHash = principal, payloadHash
+	return nil
+}
+
+// Query parameters that select an S3 feature this adapter does not implement
+// yet. A request that carries one is refused rather than treated as the plain
+// operation on the same resource.
+func unsupportedSubresources() []string {
+	return []string{
+		"acl", "accelerate", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory",
+		"legal-hold", "lifecycle", "logging", "metrics", "notification", "object-lock", "ownershipControls",
+		"partNumber", "policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "restore",
+		"retention", "select", "tagging", "torrent", "uploadId", "uploads", "versionId", "versioning", "versions",
+		"website", "attributes",
+	}
+}
+
+func (h *Handler) route(ctx context.Context, req *request) error {
+	query := req.URL.Query()
+	for _, name := range unsupportedSubresources() {
+		if query.Has(name) {
+			return errNotImplemented()
+		}
+	}
+
+	switch {
+	case req.bucket == "":
+		if req.Method != http.MethodGet {
+			return errMethodNotAllowed()
+		}
+		req.operation = "ListBuckets"
+		return h.listBuckets(ctx, req)
+	case req.key == "":
+		return h.routeBucket(ctx, req, query.Has("location"), query.Get("list-type"))
+	default:
+		return h.routeObject(ctx, req)
+	}
+}
+
+func (h *Handler) routeBucket(ctx context.Context, req *request, location bool, listType string) error {
+	switch req.Method {
+	case http.MethodPut:
+		req.operation = "CreateBucket"
+		return h.createBucket(ctx, req)
+	case http.MethodDelete:
+		req.operation = "DeleteBucket"
+		return h.deleteBucket(ctx, req)
+	case http.MethodHead:
+		req.operation = "HeadBucket"
+		return h.headBucket(ctx, req)
+	case http.MethodGet:
+		switch {
+		case location:
+			req.operation = "GetBucketLocation"
+			return h.getBucketLocation(ctx, req)
+		case listType == "2":
+			req.operation = "ListObjectsV2"
+			return h.listObjectsV2(ctx, req)
+		default:
+			// ListObjects version 1.
+			return errNotImplemented()
+		}
+	default:
+		return errMethodNotAllowed()
+	}
+}
+
+func (h *Handler) routeObject(ctx context.Context, req *request) error {
+	switch req.Method {
+	case http.MethodPut:
+		if req.Header.Get("X-Amz-Copy-Source") != "" {
+			return errNotImplemented()
+		}
+		req.operation = "PutObject"
+		return h.putObject(ctx, req)
+	case http.MethodGet:
+		req.operation = "GetObject"
+		return h.getObject(ctx, req)
+	case http.MethodHead:
+		req.operation = "HeadObject"
+		return h.headObject(ctx, req)
+	case http.MethodDelete:
+		req.operation = "DeleteObject"
+		return h.deleteObject(ctx, req)
+	default:
+		return errMethodNotAllowed()
+	}
+}
+
+// writeError sends an S3 error response. Causes that the client must not
+// learn about are logged here and reported as InternalError.
+func (h *Handler) writeError(ctx context.Context, req *request, err error) {
+	api := toAPIError(err)
+	if api.status >= http.StatusInternalServerError && api.status != http.StatusNotImplemented {
+		h.cfg.Logger.ErrorContext(ctx, "s3 request failed",
+			slog.String("request_id", req.id), slog.String("operation", req.operation), slog.Any("error", err))
+	}
+	if req.w.status != 0 {
+		// The response has begun; all that is left is to cut it short so
+		// that the client sees a failed transfer, not a complete object.
+		abortResponse(req)
+		return
+	}
+	if req.Method == http.MethodHead {
+		req.w.WriteHeader(api.status)
+		return
+	}
+	h.writeXML(ctx, req, api.status, errorResponse{
+		Code: api.code, Message: api.message, Resource: req.URL.Path, RequestID: req.id,
+	})
+}
+
+// abortResponse ends a response that has already started. With the write
+// deadline in the past nothing more can be sent, and net/http closes the
+// connection instead of completing the response: the client receives fewer
+// bytes than the Content-Length announced and reports a failed transfer.
+func abortResponse(req *request) {
+	_ = http.NewResponseController(req.w.ResponseWriter).SetWriteDeadline(time.Unix(1, 0))
+}
+
+func (h *Handler) writeXML(ctx context.Context, req *request, status int, body any) {
+	data, err := xml.Marshal(body)
+	if err != nil {
+		h.cfg.Logger.ErrorContext(ctx, "encode response", slog.String("request_id", req.id), slog.Any("error", err))
+		req.w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	req.w.Header().Set("Content-Type", "application/xml")
+	req.w.WriteHeader(status)
+	if _, err := io.WriteString(req.w, xmlHeader); err == nil {
+		_, err = req.w.Write(data)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			h.cfg.Logger.DebugContext(ctx, "response not delivered", slog.String("request_id", req.id), slog.Any("error", err))
+		}
+	}
+}

@@ -106,6 +106,13 @@ linters:
         linters:
           - gosec
         text: "G204:"
+      # MD5 is the checksum the S3 protocol prescribes for ETag and
+      # Content-MD5. It is confined to this one file and is not used as a
+      # security primitive anywhere.
+      - path: ^internal/adapters/s3api/md5\.go$
+        linters:
+          - gosec
+        text: "G401:|G501:"
 
 formatters:
   enable:

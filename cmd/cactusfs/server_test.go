@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/health"
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -47,8 +49,9 @@ func (r running) wait(t *testing.T) error {
 	}
 }
 
-// startServer runs serve on an ephemeral loopback port.
-func startServer(t *testing.T, opts serveOptions) running {
+// startServer runs serve with the probe endpoints on an ephemeral loopback
+// port. checks are evaluated by /readyz after the shutdown gate.
+func startServer(t *testing.T, opts serveOptions, checks ...ports.ReadinessCheck) running {
 	t.Helper()
 
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -58,6 +61,11 @@ func startServer(t *testing.T, opts serveOptions) running {
 	if opts.shutdownTimeout == 0 {
 		opts.shutdownTimeout = 5 * time.Second
 	}
+	logger := slog.New(slog.DiscardHandler)
+	gate := health.NewGate()
+	mux := http.NewServeMux()
+	health.NewHandler(app.NewHealthService(append([]ports.ReadinessCheck{gate}, checks...)...), logger, readinessTimeout).Register(mux)
+	endpoints := []endpoint{{name: "admin", listener: listener, handler: mux, ioTimeout: adminIOTimeout}}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	srv := running{
@@ -69,7 +77,7 @@ func startServer(t *testing.T, opts serveOptions) running {
 	}
 	go func() {
 		defer close(srv.done)
-		*srv.err = serve(ctx, listener, opts, slog.New(slog.DiscardHandler))
+		*srv.err = serve(ctx, endpoints, opts, gate, logger)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -232,7 +240,7 @@ func TestServeLetsInFlightRequestsFinish(t *testing.T) {
 	t.Parallel()
 
 	check := newBlockingCheck()
-	srv := startServer(t, serveOptions{readinessChecks: []ports.ReadinessCheck{check}})
+	srv := startServer(t, serveOptions{}, check)
 
 	status := getAsync(t, "http://"+srv.addr+"/readyz")
 	<-check.entered
@@ -257,10 +265,7 @@ func TestServeCutsOffRequestsThatOutliveTheShutdownTimeout(t *testing.T) {
 	t.Parallel()
 
 	check := newBlockingCheck()
-	srv := startServer(t, serveOptions{
-		readinessChecks: []ports.ReadinessCheck{check},
-		shutdownTimeout: 200 * time.Millisecond,
-	})
+	srv := startServer(t, serveOptions{shutdownTimeout: 200 * time.Millisecond}, check)
 
 	status := getAsync(t, "http://"+srv.addr+"/readyz")
 	<-check.entered
@@ -285,24 +290,36 @@ func TestServeCutsOffRequestsThatOutliveTheShutdownTimeout(t *testing.T) {
 
 func TestNewHTTPServerLimits(t *testing.T) {
 	t.Parallel()
+	logger := slog.New(slog.DiscardHandler)
 
-	server := newHTTPServer(http.NewServeMux(), nil, slog.New(slog.DiscardHandler))
+	admin := newHTTPServer(endpoint{name: "admin", handler: http.NewServeMux(), ioTimeout: adminIOTimeout}, nil, logger)
+	data := newHTTPServer(endpoint{name: "s3", handler: http.NewServeMux()}, nil, logger)
 
-	for name, got := range map[string]time.Duration{
-		"ReadHeaderTimeout": server.ReadHeaderTimeout,
-		"ReadTimeout":       server.ReadTimeout,
-		"WriteTimeout":      server.WriteTimeout,
-		"IdleTimeout":       server.IdleTimeout,
-	} {
-		if got <= 0 || got > 2*time.Minute {
-			t.Errorf("%s = %s, want a positive bound of at most 2m", name, got)
+	for _, server := range []*http.Server{admin, data} {
+		// Every listener bounds what a client can do before it has sent a
+		// complete request head, and how long an idle connection lives.
+		for name, got := range map[string]time.Duration{
+			"ReadHeaderTimeout": server.ReadHeaderTimeout,
+			"IdleTimeout":       server.IdleTimeout,
+		} {
+			if got <= 0 || got > 2*time.Minute {
+				t.Errorf("%s = %s, want a positive bound of at most 2m", name, got)
+			}
+		}
+		if server.MaxHeaderBytes <= 0 || server.MaxHeaderBytes > 64<<10 {
+			t.Errorf("MaxHeaderBytes = %d, want a positive bound of at most 64 KiB", server.MaxHeaderBytes)
+		}
+		if server.ErrorLog == nil {
+			t.Error("ErrorLog is nil: server errors would bypass the JSON log")
 		}
 	}
-	if server.MaxHeaderBytes <= 0 || server.MaxHeaderBytes > 64<<10 {
-		t.Errorf("MaxHeaderBytes = %d, want a positive bound of at most 64 KiB", server.MaxHeaderBytes)
+	// The admin listener carries small messages and bounds them whole.
+	if admin.ReadTimeout <= 0 || admin.WriteTimeout <= 0 || admin.ReadTimeout > 2*time.Minute || admin.WriteTimeout > 2*time.Minute {
+		t.Errorf("admin ReadTimeout = %s, WriteTimeout = %s; want positive bounds", admin.ReadTimeout, admin.WriteTimeout)
 	}
-	if server.ErrorLog == nil {
-		t.Error("ErrorLog is nil: server errors would bypass the JSON log")
+	// An object transfer may take hours: the S3 listener must not cut it.
+	if data.ReadTimeout != 0 || data.WriteTimeout != 0 {
+		t.Errorf("S3 ReadTimeout = %s, WriteTimeout = %s; want none", data.ReadTimeout, data.WriteTimeout)
 	}
 }
 

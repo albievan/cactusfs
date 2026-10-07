@@ -76,7 +76,7 @@ func runServerCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 		return exitUsage
 	}
 
-	if err := runServer(ctx, cfg, stdout); err != nil {
+	if err := runServer(ctx, cfg, stdout, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "cactusfs server: %v\n", err)
 		return exitError
 	}
