@@ -1,0 +1,8 @@
+# pnpm settings for the console. There is one package; this file exists for the
+# settings below, not to define a workspace.
+packages:
+  - .
+
+# Dependency lifecycle scripts never run: nothing the console needs has one,
+# and an install must not execute code from the registry.
+ignoreScripts: true

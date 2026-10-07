@@ -1,0 +1,115 @@
+# golangci-lint v2 configuration. The gate is `make lint`: zero findings.
+# Findings are fixed, never silenced with //nolint (CLAUDE.md section 10).
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint the code behind every build tag the repository uses.
+  build-tags:
+    - integration
+    - s3compat
+    - chaos
+    - console
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - depguard
+    - errcheck
+    - errorlint
+    - gochecknoinits
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - noctx
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers, sayRepetitiveInsteadOfStutters]
+        - name: package-comments
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: var-naming
+        - name: unused-parameter
+        - name: deep-exit
+    depguard:
+      rules:
+        # The dependency rule: imports only point inward.
+        domain:
+          list-mode: strict
+          files:
+            - "**/internal/domain/**"
+          allow:
+            - $gostd
+            - github.com/albievan/cactusfs/internal/domain
+          deny:
+            - pkg: net/http
+              desc: the domain model knows nothing about transports
+            - pkg: database/sql
+              desc: the domain model knows nothing about storage engines
+            - pkg: os
+              desc: the domain model does no I/O
+        app:
+          list-mode: strict
+          files:
+            - "**/internal/app/**"
+          allow:
+            - $gostd
+            - github.com/albievan/cactusfs/internal/domain
+            - github.com/albievan/cactusfs/internal/ports
+            - github.com/albievan/cactusfs/internal/app
+          deny:
+            - pkg: net/http
+              desc: transports belong in inbound adapters
+            - pkg: os
+              desc: use cases reach the outside world through ports
+        ports:
+          list-mode: lax
+          files:
+            - "**/internal/ports/**"
+          deny:
+            - pkg: github.com/albievan/cactusfs/internal/adapters
+              desc: ports are implemented by adapters and never import them
+            - pkg: github.com/albievan/cactusfs/internal/app
+              desc: ports do not depend on use cases
+            - pkg: github.com/albievan/cactusfs/cmd
+              desc: ports do not depend on the composition root
+        adapters:
+          list-mode: lax
+          files:
+            - "**/internal/adapters/**"
+          deny:
+            - pkg: github.com/albievan/cactusfs/cmd
+              desc: only cmd/cactusfs wires adapters together
+  exclusions:
+    rules:
+      # Black-box tests exist to start the binary they have just built.
+      - path: ^test/
+        linters:
+          - gosec
+        text: "G204:"
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/albievan/cactusfs

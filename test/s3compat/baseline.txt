@@ -1,0 +1,7 @@
+# S3 compatibility baseline.
+#
+# One passing test per line, as "<package> <TestName>". "make s3-compat" fails
+# when any test listed here does not pass. Lines are only ever added; removing
+# one is a compatibility regression and needs a decision in PLAN.md.
+#
+# Record new passes with: make s3-compat-record

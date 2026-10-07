@@ -1,0 +1,26 @@
+# build output
+/bin/
+/dist/
+/cactusfs
+/cactusfs.exe
+*.test
+*.out
+
+# local state
+/.cache/
+/.data/
+
+# console
+/web/node_modules/
+/web/dist/
+/web/coverage/
+*.tsbuildinfo
+
+# editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# local Claude Code settings (agent definitions in .claude/agents are tracked)
+.claude/settings.local.json
