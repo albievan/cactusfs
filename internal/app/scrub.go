@@ -151,9 +151,10 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 }
 
 func (s *Scrubber) scrubObject(ctx context.Context, version object.Version, stats *ScrubStats) {
-	result, err := s.healer.HealObject(ctx, version.Bucket, version.Key)
+	result, err := s.healer.heal(ctx, version.Bucket, version.Key, s.throttle)
 	stats.Objects++
 	stats.ShardsRebuilt += result.Rebuilt
+	stats.Bytes += result.Verified
 	if result.Damaged > 0 {
 		stats.Damaged++
 	}
@@ -163,13 +164,12 @@ func (s *Scrubber) scrubObject(ctx context.Context, version object.Version, stat
 	if err != nil && !result.Unrecoverable && ctx.Err() == nil {
 		s.logger.ErrorContext(ctx, "scrub could not check an object", slog.String("bucket", version.Bucket), slog.Any("error", err))
 	}
+}
 
-	stored := int64(0)
-	for _, shard := range version.Layout.Shards {
-		stored += shard.Size
-	}
-	stats.Bytes += stored
-	if s.bytesPerSecond > 0 {
-		s.pause(ctx, time.Duration(float64(stored)/float64(s.bytesPerSecond)*float64(time.Second)))
+// throttle keeps the scrubber to its byte rate. It is called after every
+// piece read, so that a large object is slowed down as it is read, not after.
+func (s *Scrubber) throttle(ctx context.Context, bytes int64) {
+	if s.bytesPerSecond > 0 && bytes > 0 {
+		s.pause(ctx, time.Duration(float64(bytes)/float64(s.bytesPerSecond)*float64(time.Second)))
 	}
 }

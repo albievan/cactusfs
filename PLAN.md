@@ -12,7 +12,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 |---|---|---|
 | 0 | Scaffold | done |
 | 1 | Standalone store | done |
-| 2 | Erasure coding and integrity on local drives | in_progress |
+| 2 | Erasure coding and integrity on local drives | done |
 | 3 | Cluster | todo |
 | 4 | IAM | todo |
 | 5 | Admin API, Swagger UI, console | todo |
@@ -91,7 +91,7 @@ green.
 | 2.5 | done | Background scrubber | walks every object, verifies every shard block, heals what it finds; rate-limited; `--scrub-interval`; metrics | `internal/app/scrub.go`, `cmd/cactusfs/` |
 | 2.6 | done | Fewer than four drives | 1+0 on one drive each, encrypted and checksummed; logs that there is no parity | `internal/domain/erasure/`, `cmd/cactusfs/` |
 | 2.7 | done | Garbage collection of unreferenced shards | `ShardStore.List`; a data-ID index in the state machine; shards older than `--gc-grace` that no version refers to are removed | `internal/ports/shards.go`, `internal/adapters/disk/`, `internal/adapters/raftmeta/`, `internal/app/gc.go` |
-| 2.8 | done | Chaos suite | against the built binary with six drives: corrupt shards, delete shards, wipe up to *parity* drives → every read is correct and the drives are repaired; one more than parity → reads fail, never wrong data; `make test-chaos` | `test/chaos/`, `Makefile`, `scripts/` |
+| 2.8 | done | Chaos suite | against the built binary with six drives: corrupt shards, delete shards, wipe up to *parity* drives → every read is correct and the drives are repaired; one more than parity → reads fail, never wrong data; `make test-chaos` | `test/chaos/`, `Makefile` |
 
 ## Milestone 3 — Cluster
 
@@ -219,4 +219,11 @@ green.
 | 2026-10-07 | `Content-MD5` must be covered by the signature when present; the CreateBucket body is verified against its declared hash; a shard whose rename could not be made durable is removed again; the local KMS key ID format is validated. | Minor review findings. |
 | 2026-10-07 | M2 dependency: `github.com/klauspost/reedsolomon` v1.14.2 (MIT; brings `klauspost/cpuid/v2`, MIT). Pure Go, builds for all six targets. | Named by `CLAUDE.md` §2. |
 | 2026-10-07 | Erasure sets must be of equal size: the number of drives is divided into the fewest sets of at most 16; a count that does not divide evenly (17, 19, …) is refused at start. | Unequal sets would have different durability; refusing is explicit. |
-| 2026-10-07 | Drives are bound to slots (set, position) in Raft metadata by drive ID at first start. An object's layout names drive IDs. A drive whose directory comes back empty is adopted into the slot of the one missing drive; more than one unknown or missing drive at a time needs the operator. All drives must open at start. | Addressing by ID makes `--data` order irrelevant; replacement must be unambiguous to be automatic. Starting with a drive offline is deferred (risk: a dead drive needs replacing before restart). |
+| 2026-10-07 | Drives are bound to slots (set, position) in Raft metadata by drive ID at first start. An object's layout names drive IDs. All drives must open at start. (Automatic adoption of an empty drive, decided here first, was withdrawn after review: see below.) | Addressing by ID makes `--data` order irrelevant. Starting with a drive offline is deferred (risk: a dead drive needs replacing before restart). |
+| 2026-10-07 | Review of milestone 2 (3 blocker, 5 major, 4 minor) — all fixed, each with a regression test that fails when the fix is removed; three of the blockers are also reproduced as chaos scenarios. ADR-0004 was revised in place before the milestone closed. | Recorded so the reasoning survives: see the next rows. |
+| 2026-10-07 | After healing, shards are removed only when a lookup succeeds and shows the version replaced or gone, and only the shards that heal rebuilt. A failed lookup removes nothing. | Blocker: a lookup cancelled by shutdown was read as "replaced" and every shard of a healthy object was deleted. |
+| 2026-10-07 | A deployment has a random ID; every drive is claimed for it in `cactusfs-drive.json` (`cluster_id`, reserved by ADR-0001). A new deployment needs drives that are all empty and unclaimed. | Blocker: with an empty metadata directory, drives full of data were adopted as a new deployment and the collector deleted every shard. |
+| 2026-10-07 | Replacing a drive needs parity and the operator's confirmation for that start (`--allow-drive-replacement`); without parity it is never done. "Empty" is read from the drive (no shard file), not from having formatted it. | Blocker: an unmounted mount point looked like a new drive, took the slot and retired the real drive for good, even on a one-drive node. Major: a start interrupted after formatting left a deployment that could not start. |
+| 2026-10-07 | Healing rebuilds a shard only on definite damage (`ErrShardNotFound`, `ErrIntegrity`) and through `ShardStore.Rewrite`, which replaces the old content in one rename. One heal per object at a time. | Major: any open or read error was treated as damage and the shard deleted before a replacement existed. |
+| 2026-10-07 | Writes pin their data ID until the commit outcome is definite (unknown outcomes for the life of the process); the collector skips pinned data and does nothing while the metadata is not ready; `IsDataReferenced` fails on a stopped state machine. Minimum `--gc-grace` is 1 h. | Major: the grace period alone stood between a slow upload, or an unapplied log entry, and the collector. |
+| 2026-10-07 | The scrubber is throttled as it reads and counts only verified bytes. A shard is still given up for the rest of a read after one bad block (ADR-0004, consequences). | Minor review findings; the second is a recorded limitation, not fixed. |

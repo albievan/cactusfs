@@ -407,6 +407,12 @@ func TestStoppedStateMachineIsFailStop(t *testing.T) {
 	if err := store.Check(ctx); !errors.Is(err, boom) {
 		t.Errorf("Check = %v, want the node to be unready", err)
 	}
+	// A stopped state machine has entries it has not applied; whether
+	// their data is referenced cannot be answered, and the collector must
+	// not be told "no".
+	if referenced, err := store.IsDataReferenced(ctx, first.DataID); !errors.Is(err, boom) || referenced {
+		t.Errorf("IsDataReferenced on a stopped state machine = %v, %v; want an error", referenced, err)
+	}
 	_, err := store.PutVersion(ctx, porttest.SampleVersion("bkt", "k", 2))
 	if !errors.Is(err, boom) {
 		t.Fatalf("PutVersion on a stopped state machine = %v, want %v", err, boom)

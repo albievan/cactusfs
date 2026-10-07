@@ -19,6 +19,9 @@ type GCStats struct {
 	// Young is the number of unreferenced shards left alone because they are
 	// not older than the grace period.
 	Young int
+	// InFlight is the number left alone because they belong to a write that
+	// has not been resolved yet.
+	InFlight int
 }
 
 // Collector removes shards that no object version refers to: what a failed or
@@ -26,17 +29,26 @@ type GCStats struct {
 // cleanup did not happen.
 //
 // A shard is written and made durable before the version that refers to it is
-// committed, so for a moment every new shard is unreferenced. The grace
-// period protects that window: only shards older than it are removed. It must
-// be much longer than any write can take between making its shards durable
-// and committing.
+// committed, so for a while every new shard is unreferenced. Three things keep
+// the collector away from it:
+//
+//   - a write in this process pins its data ID until its version is committed
+//     or definitely refused, however long that takes; a write whose outcome is
+//     unknown stays pinned until the process ends;
+//   - the collector does nothing while the metadata is not ready, because a
+//     state machine that has stopped has entries it has not applied, and
+//     their data looks unreferenced;
+//   - only shards older than the grace period are removed, which covers
+//     everything else, such as a clock that is slightly off.
 type Collector struct {
-	drives []ports.ShardStore
-	index  ports.ObjectIndex
-	clock  ports.Clock
-	grace  time.Duration
-	logger *slog.Logger
-	onPass func(GCStats)
+	drives   []ports.ShardStore
+	index    ports.ObjectIndex
+	clock    ports.Clock
+	grace    time.Duration
+	logger   *slog.Logger
+	onPass   func(GCStats)
+	ready    func(ctx context.Context) error
+	inFlight func(object.ID) bool
 }
 
 // CollectorConfig lists what a Collector depends on.
@@ -49,13 +61,27 @@ type CollectorConfig struct {
 	Logger *slog.Logger
 	// OnPass, when not nil, is called after every completed pass.
 	OnPass func(GCStats)
+	// Ready reports whether the metadata can be trusted to answer which data
+	// is referenced. A pass is skipped while it returns an error.
+	Ready func(ctx context.Context) error
+	// InFlight reports whether a data ID belongs to a write that is not
+	// resolved yet.
+	InFlight func(object.ID) bool
 }
 
 // NewCollector returns a Collector.
 func NewCollector(cfg CollectorConfig) *Collector {
-	return &Collector{
+	c := &Collector{
 		drives: cfg.Drives, index: cfg.Index, clock: cfg.Clock, grace: cfg.Grace, logger: cfg.Logger, onPass: cfg.OnPass,
+		ready: cfg.Ready, inFlight: cfg.InFlight,
 	}
+	if c.ready == nil {
+		c.ready = func(context.Context) error { return nil }
+	}
+	if c.inFlight == nil {
+		c.inFlight = func(object.ID) bool { return false }
+	}
+	return c
 }
 
 // Run collects, waits for the interval and starts again, until ctx is
@@ -84,6 +110,9 @@ func (c *Collector) Run(ctx context.Context, interval time.Duration) {
 // RunOnce looks at every shard on every drive once.
 func (c *Collector) RunOnce(ctx context.Context) (GCStats, error) {
 	var stats GCStats
+	if err := c.ready(ctx); err != nil {
+		return stats, fmt.Errorf("gc.RunOnce: metadata is not ready, nothing is collected: %w", err)
+	}
 	cutoff := c.clock.Now().Add(-c.grace)
 	for _, drive := range c.drives {
 		// Shards of one object sit on several drives; remember the answer
@@ -102,7 +131,9 @@ func (c *Collector) RunOnce(ctx context.Context) (GCStats, error) {
 			}
 			switch {
 			case lastReferenced:
-			case info.CommittedAt.After(cutoff):
+			case c.inFlight(info.ID.DataID):
+				stats.InFlight++
+			case info.ModifiedAt.After(cutoff):
 				stats.Young++
 			default:
 				if err := drive.Delete(ctx, info.ID); err != nil {

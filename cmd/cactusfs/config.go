@@ -36,6 +36,7 @@ const (
 	envScrubRate       = "CACTUSFS_SCRUB_RATE_MIB"
 	envGCInterval      = "CACTUSFS_GC_INTERVAL"
 	envGCGrace         = "CACTUSFS_GC_GRACE"
+	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envDrainDelay      = "CACTUSFS_DRAIN_DELAY"
 	envShutdownTimeout = "CACTUSFS_SHUTDOWN_TIMEOUT"
 )
@@ -57,10 +58,10 @@ const (
 	defaultScrubRateMiB    = 64
 	defaultGCInterval      = time.Hour
 	defaultGCGrace         = 24 * time.Hour
-	// minGCGrace is the shortest grace period accepted: a shard younger
-	// than the grace period may belong to a write that has not committed
-	// yet, and removing it would lose that write.
-	minGCGrace     = time.Minute
+	// minGCGrace is the shortest grace period accepted. Writes in progress
+	// are protected from the collector by other means; the grace period is
+	// what remains when those do not apply, so it is kept generous.
+	minGCGrace     = time.Hour
 	loopbackHost   = "127.0.0.1"
 	metaDirName    = "meta"
 	kmsKeyFileName = "kms-local.json"
@@ -109,6 +110,9 @@ type serverConfig struct {
 	// before it is removed.
 	GCInterval time.Duration
 	GCGrace    time.Duration
+	// AllowDriveReplacement confirms that one empty drive may take the place
+	// of one missing drive at this start.
+	AllowDriveReplacement bool
 	// OTLPEndpoint is the URL of an OTLP/HTTP trace collector. Empty, the
 	// default, exports nothing.
 	OTLPEndpoint string
@@ -191,6 +195,11 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		return cfg, err
 	}
 
+	allowReplace, err := envBool(getenv, envAllowReplace, false)
+	if err != nil {
+		return cfg, err
+	}
+
 	fs := flag.NewFlagSet("cactusfs server", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var data stringList
@@ -229,6 +238,9 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"pause between two passes of the garbage collector for unreferenced shards; 0 disables it ($"+envGCInterval+")")
 	fs.DurationVar(&cfg.GCGrace, "gc-grace", gcGrace,
 		"minimum age of an unreferenced shard before it is removed ($"+envGCGrace+")")
+	fs.BoolVar(&cfg.AllowDriveReplacement, "allow-drive-replacement", allowReplace,
+		"confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is "+
+			"refused afterwards ($"+envAllowReplace+")")
 	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", getenv(envOTLPEndpoint),
 		"`URL` of an OTLP/HTTP trace collector; traces are not exported when empty ($"+envOTLPEndpoint+")")
 	logLevel := fs.String("log-level", envString(getenv, envLogLevel, defaultLogLevel),
@@ -272,8 +284,7 @@ func (c *serverConfig) validate() error {
 		return errors.New("scrub interval, scrub rate and garbage collection interval must not be negative")
 	}
 	if c.GCGrace < minGCGrace {
-		return fmt.Errorf("garbage collection grace period %s: must be at least %s, and much longer than any upload takes to commit",
-			c.GCGrace, minGCGrace)
+		return fmt.Errorf("garbage collection grace period %s: must be at least %s", c.GCGrace, minGCGrace)
 	}
 	if err := c.validateTransport(); err != nil {
 		return err

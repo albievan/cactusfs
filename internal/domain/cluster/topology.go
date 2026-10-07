@@ -24,6 +24,10 @@ type Slot struct {
 // metadata: which drive belongs where is decided once and recorded, never
 // derived from the order of command-line flags.
 type Topology struct {
+	// DeploymentID identifies the deployment. Every drive is claimed for it,
+	// which is how a drive and the metadata that describes it are known to
+	// belong together.
+	DeploymentID string
 	// Version counts the changes; it guards updates against races.
 	Version uint64
 	// Sets lists the slots of each erasure set. Every set has the same size.
@@ -40,8 +44,32 @@ type Position struct {
 type DriveState struct {
 	// ID is the drive's generated identifier.
 	ID string
-	// Fresh reports that the drive was empty and has just been formatted.
-	Fresh bool
+	// Empty reports that the drive holds no shard.
+	Empty bool
+	// DeploymentID is the deployment the drive has been claimed for, or ""
+	// when it belongs to none.
+	DeploymentID string
+}
+
+// CheckNewDeployment reports whether the attached drives may form a new
+// deployment: every one must be empty and unclaimed. Drives that hold data
+// while the metadata knows of no deployment mean that the wrong metadata
+// directory is in use - adopting them would make every shard on them look
+// unreferenced, and the collector would then remove it. The error wraps
+// domain.ErrInvalidArgument.
+func CheckNewDeployment(attached []DriveState) error {
+	for _, drive := range attached {
+		switch {
+		case drive.DeploymentID != "":
+			return fmt.Errorf("%w: drive %s belongs to deployment %s, but the metadata directory has no record of any "+
+				"deployment; check that --meta-dir points at this deployment's metadata",
+				domain.ErrInvalidArgument, drive.ID, drive.DeploymentID)
+		case !drive.Empty:
+			return fmt.Errorf("%w: drive %s holds data, but the metadata directory has no record of any deployment; "+
+				"check that --meta-dir points at this deployment's metadata", domain.ErrInvalidArgument, drive.ID)
+		}
+	}
+	return nil
 }
 
 // NewTopology assigns drives to erasure sets in the order given. The error
@@ -147,17 +175,27 @@ type Replacement struct {
 
 // Reconcile compares the topology with the drives that are attached now.
 //
-// When they match it returns no replacement. When exactly one drive of the
-// topology is absent and exactly one attached drive is unknown and fresh, the
-// fresh drive replaces the absent one. Anything else is refused: a missing
-// drive, an unknown drive that already holds data, or more than one change at
-// a time needs a person to decide. The error wraps
-// domain.ErrInvalidArgument.
-func (t Topology) Reconcile(attached []DriveState) (*Replacement, error) {
+// When they match it returns no replacement. A drive that is claimed for
+// another deployment, a drive that was retired earlier, and an unknown drive
+// that holds data are always refused.
+//
+// When exactly one drive of the topology is absent and exactly one attached
+// drive is unknown and empty, the empty drive may take over the slot - but
+// only where there is parity to rebuild its contents from, and only when the
+// operator has confirmed it with allowReplacement. A missing mount looks
+// exactly like a new empty drive, and a replacement retires the old drive for
+// good, so it is never assumed.
+//
+// Every refusal wraps domain.ErrInvalidArgument.
+func (t Topology) Reconcile(attached []DriveState, allowReplacement bool) (*Replacement, error) {
 	present := map[string]DriveState{}
 	for _, drive := range attached {
 		if _, dup := present[drive.ID]; dup {
 			return nil, fmt.Errorf("%w: drive %s is attached twice", domain.ErrInvalidArgument, drive.ID)
+		}
+		if drive.DeploymentID != "" && drive.DeploymentID != t.DeploymentID {
+			return nil, fmt.Errorf("%w: drive %s belongs to deployment %s, not to this one (%s)",
+				domain.ErrInvalidArgument, drive.ID, drive.DeploymentID, t.DeploymentID)
 		}
 		present[drive.ID] = drive
 	}
@@ -171,6 +209,9 @@ func (t Topology) Reconcile(attached []DriveState) (*Replacement, error) {
 	for _, drive := range attached {
 		current, known := t.Current(drive.ID)
 		switch {
+		case !known && !drive.Empty:
+			return nil, fmt.Errorf("%w: drive %s is not part of this deployment and holds data; "+
+				"only an empty drive can be added", domain.ErrInvalidArgument, drive.ID)
 		case !known:
 			unknown = append(unknown, drive.ID)
 		case current != drive.ID:
@@ -184,22 +225,34 @@ func (t Topology) Reconcile(attached []DriveState) (*Replacement, error) {
 			domain.ErrInvalidArgument, strings.Join(stale, ", "))
 	case len(missing) == 0 && len(unknown) == 0:
 		return nil, nil
-	case len(missing) == 1 && len(unknown) == 1 && present[unknown[0]].Fresh:
-		pos, _ := t.Locate(missing[0])
-		return &Replacement{Position: pos, Old: missing[0], New: unknown[0]}, nil
-	case len(missing) == 1 && len(unknown) == 1:
-		return nil, fmt.Errorf("%w: drive %s is missing and drive %s is not part of this deployment and is not empty; "+
-			"only an empty drive can replace a missing one", domain.ErrInvalidArgument, missing[0], unknown[0])
-	default:
+	case len(missing) != 1 || len(unknown) != 1:
 		return nil, fmt.Errorf("%w: attached drives do not match the deployment: missing [%s], unknown [%s]; "+
 			"one empty drive may replace one missing drive at a time",
 			domain.ErrInvalidArgument, strings.Join(missing, ", "), strings.Join(unknown, ", "))
 	}
+
+	params, err := erasure.ParamsFor(t.SetSize())
+	if err != nil {
+		return nil, err
+	}
+	if params.Parity == 0 {
+		return nil, fmt.Errorf("%w: drive %s is missing and an empty drive is attached in its place, but this deployment "+
+			"has no parity: what was on the missing drive cannot be rebuilt; attach the original drive",
+			domain.ErrInvalidArgument, missing[0])
+	}
+	if !allowReplacement {
+		return nil, fmt.Errorf("%w: drive %s is missing and empty drive %s is attached in its place; if the original "+
+			"drive is gone for good, confirm the replacement (it is permanent: the original drive will be refused "+
+			"afterwards, and its contents are rebuilt on the new drive); if it is only not mounted, mount it",
+			domain.ErrInvalidArgument, missing[0], unknown[0])
+	}
+	pos, _ := t.Locate(missing[0])
+	return &Replacement{Position: pos, Old: missing[0], New: unknown[0]}, nil
 }
 
 // Clone returns a deep copy of the topology.
 func (t Topology) Clone() Topology {
-	next := Topology{Version: t.Version, Sets: make([][]Slot, len(t.Sets))}
+	next := Topology{DeploymentID: t.DeploymentID, Version: t.Version, Sets: make([][]Slot, len(t.Sets))}
 	for s, set := range t.Sets {
 		next.Sets[s] = make([]Slot, len(set))
 		for i, slot := range set {

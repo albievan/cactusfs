@@ -56,8 +56,8 @@ type Drive struct {
 	root *os.Root
 	lock *os.File
 	info driveInfo
-	// fresh reports that this Open formatted the drive.
-	fresh bool
+	// empty reports that the drive held no shard when it was opened.
+	empty bool
 
 	// commit serialises the existence check and rename that make a shard
 	// visible, which keeps shards immutable within this process; the drive
@@ -115,12 +115,38 @@ func (d *Drive) init(entropy io.Reader, now time.Time) error {
 
 	switch data, err := d.root.ReadFile(driveFile); {
 	case err == nil:
-		return d.loadInfo(data)
+		if err := d.loadInfo(data); err != nil {
+			return err
+		}
 	case errors.Is(err, fs.ErrNotExist):
-		return d.format(entropy, now)
+		if err := d.format(entropy, now); err != nil {
+			return err
+		}
 	default:
 		return err
 	}
+	holdsShards, err := d.holdsShards()
+	if err != nil {
+		return err
+	}
+	d.empty = !holdsShards
+	return nil
+}
+
+// holdsShards reports whether any file is stored under the shards directory.
+func (d *Drive) holdsShards() (bool, error) {
+	found := false
+	err := fs.WalkDir(d.root.FS(), shardsDir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found, err
 }
 
 func (d *Drive) loadInfo(data []byte) error {
@@ -174,7 +200,6 @@ func (d *Drive) format(entropy io.Reader, now time.Time) error {
 		return err
 	}
 	d.info = info
-	d.fresh = true
 	return nil
 }
 
@@ -221,10 +246,57 @@ func (d *Drive) Close() error {
 	return errors.Join(errs...)
 }
 
-// Fresh reports whether the drive was empty and has just been formatted. Only
-// a fresh drive may take the place of a missing one.
-func (d *Drive) Fresh() bool {
-	return d.fresh
+// Empty reports whether the drive held no shard when it was opened. It is a
+// property of what is on the drive, not of who formatted it, so a start that
+// was interrupted after formatting sees the same answer again.
+func (d *Drive) Empty() bool {
+	return d.empty
+}
+
+// DeploymentID returns the deployment the drive has been claimed for, or ""
+// for a drive that belongs to none yet.
+func (d *Drive) DeploymentID() string {
+	if d.info.ClusterID == nil {
+		return ""
+	}
+	return *d.info.ClusterID
+}
+
+// Claim records, durably, that the drive belongs to a deployment. A drive
+// claimed for one deployment is never used by another: that is what stops a
+// node started against the wrong metadata from treating a full drive as its
+// own. Claiming a drive again for the same deployment does nothing; for
+// another one it fails with an error wrapping domain.ErrInvalidArgument.
+func (d *Drive) Claim(ctx context.Context, deploymentID string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("disk.Claim: %w", err)
+	}
+	switch current := d.DeploymentID(); {
+	case deploymentID == "":
+		return fmt.Errorf("disk.Claim: %w: empty deployment ID", domain.ErrInvalidArgument)
+	case current == deploymentID:
+		return nil
+	case current != "":
+		return fmt.Errorf("disk.Claim: %w: drive %s belongs to deployment %s", domain.ErrInvalidArgument, d.info.DriveID, current)
+	}
+	info := d.info
+	info.ClusterID = &deploymentID
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return fmt.Errorf("disk.Claim: %w", err)
+	}
+	tmp := tmpDir + "/" + driveFile
+	if err := d.writeDurable(tmp, append(data, '\n')); err != nil {
+		return fmt.Errorf("disk.Claim: %w", err)
+	}
+	if err := d.root.Rename(tmp, driveFile); err != nil {
+		return fmt.Errorf("disk.Claim: %w", err)
+	}
+	if err := fsutil.SyncDir(d.root, "."); err != nil {
+		return fmt.Errorf("disk.Claim: %w", err)
+	}
+	d.info = info
+	return nil
 }
 
 // List implements ports.ShardStore. It reads one directory at a time, so the
@@ -278,7 +350,7 @@ func (d *Drive) listDir(ctx context.Context, dir string, visit func(ports.ShardI
 		if err != nil {
 			return fmt.Errorf("disk.List: %w", err)
 		}
-		if err := visit(ports.ShardInfo{ID: id, CommittedAt: info.ModTime()}); err != nil {
+		if err := visit(ports.ShardInfo{ID: id, ModifiedAt: info.ModTime()}); err != nil {
 			return err
 		}
 	}
@@ -292,6 +364,16 @@ func (d *Drive) DriveID() string {
 
 // Create implements ports.ShardStore.
 func (d *Drive) Create(ctx context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	return d.newWriter(ctx, id, false)
+}
+
+// Rewrite implements ports.ShardStore. The new content is written beside the
+// old and takes its place with one rename.
+func (d *Drive) Rewrite(ctx context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	return d.newWriter(ctx, id, true)
+}
+
+func (d *Drive) newWriter(ctx context.Context, id object.ShardID, replace bool) (ports.ShardWriter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("disk.Create: %w", err)
 	}
@@ -299,11 +381,13 @@ func (d *Drive) Create(ctx context.Context, id object.ShardID) (ports.ShardWrite
 	if err != nil {
 		return nil, fmt.Errorf("disk.Create: %w", err)
 	}
-	switch _, err := d.root.Lstat(path); {
-	case err == nil:
-		return nil, fmt.Errorf("disk.Create: %w: shard %s already exists", domain.ErrInvalidArgument, id)
-	case !errors.Is(err, fs.ErrNotExist):
-		return nil, fmt.Errorf("disk.Create: %w", err)
+	if !replace {
+		switch _, err := d.root.Lstat(path); {
+		case err == nil:
+			return nil, fmt.Errorf("disk.Create: %w: shard %s already exists", domain.ErrInvalidArgument, id)
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("disk.Create: %w", err)
+		}
 	}
 
 	head, err := encodeHeader(header{blockSize: defaultBlock, id: id})
@@ -321,7 +405,7 @@ func (d *Drive) Create(ctx context.Context, id object.ShardID) (ports.ShardWrite
 	if err != nil {
 		return nil, fmt.Errorf("disk.Create: %w", err)
 	}
-	w := &shardWriter{drive: d, id: id, index: index, file: f, tmp: tmp, block: make([]byte, 0, defaultBlock)}
+	w := &shardWriter{drive: d, id: id, index: index, file: f, tmp: tmp, replace: replace, block: make([]byte, 0, defaultBlock)}
 	if _, err := f.Write(head); err != nil {
 		_ = w.Abort()
 		return nil, fmt.Errorf("disk.Create: %w", err)
@@ -376,7 +460,7 @@ func (d *Drive) Delete(ctx context.Context, id object.ShardID) error {
 
 // publish moves a finished temporary file to its shard path and makes the
 // rename durable.
-func (d *Drive) publish(tmp string, id object.ShardID) error {
+func (d *Drive) publish(tmp string, id object.ShardID, replace bool) error {
 	dir, path, err := shardPath(id)
 	if err != nil {
 		return err
@@ -398,19 +482,25 @@ func (d *Drive) publish(tmp string, id object.ShardID) error {
 		}
 	}
 
-	switch _, err := d.root.Lstat(path); {
-	case err == nil:
-		return fmt.Errorf("%w: shard %s already exists", domain.ErrInvalidArgument, id)
-	case !errors.Is(err, fs.ErrNotExist):
-		return err
+	if !replace {
+		switch _, err := d.root.Lstat(path); {
+		case err == nil:
+			return fmt.Errorf("%w: shard %s already exists", domain.ErrInvalidArgument, id)
+		case !errors.Is(err, fs.ErrNotExist):
+			return err
+		}
 	}
 	if err := d.root.Rename(tmp, path); err != nil {
 		return err
 	}
 	if err := fsutil.SyncDir(d.root, dir); err != nil {
-		// The rename is not known to be durable, so the commit fails; the
-		// shard must then not stay visible under its final name.
-		_ = d.root.Remove(path)
+		// The rename is not known to be durable, so the commit fails. A
+		// new shard must then not stay visible under its final name; a
+		// rewritten one stays, because the content it replaced is gone and
+		// what is there now is complete and verified.
+		if !replace {
+			_ = d.root.Remove(path)
+		}
 		return err
 	}
 	return nil

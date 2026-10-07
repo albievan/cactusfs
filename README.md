@@ -68,9 +68,19 @@ aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://photos/
 
 Give it four or more drives and objects are erasure coded: six drives store every object
 as three data and three parity shards and survive the loss of any three. With fewer than
-four drives there is no parity, and the node says so. A drive that died can be replaced
-by an empty one, one at a time, while the node is stopped; it is refilled in the
-background. All drives must be present for the node to start.
+four drives there is no parity, and the node says so. All drives must be present for the
+node to start.
+
+To replace a drive that died, stop the node, put an empty drive in its place and start
+once with `--allow-drive-replacement`. The node will not do this on its own, because an
+empty directory is also what a missing mount looks like, and a replacement is permanent:
+the old drive is refused afterwards. The new drive is refilled in the background. One
+drive at a time, and only with four or more drives — without parity nothing can be
+rebuilt.
+
+Keep `--meta-dir` (default `<first drive>/meta`) with the drives it describes. A node
+started with drives that hold data and a metadata directory that knows nothing of them
+refuses to start rather than treat the data as garbage.
 
 In production, give it a certificate; it refuses to start without one:
 

@@ -119,8 +119,9 @@ type rootRecord struct {
 // topology.set command, Version is the version the change is based on; in
 // the state it is the version of what is stored.
 type topologyRecord struct {
-	Version uint64         `json:"version"`
-	Sets    [][]slotRecord `json:"sets"`
+	DeploymentID string         `json:"deployment_id"`
+	Version      uint64         `json:"version"`
+	Sets         [][]slotRecord `json:"sets"`
 }
 
 type slotRecord struct {
@@ -129,7 +130,7 @@ type slotRecord struct {
 }
 
 func topologyToRecord(t cluster.Topology) *topologyRecord {
-	record := &topologyRecord{Version: t.Version, Sets: make([][]slotRecord, len(t.Sets))}
+	record := &topologyRecord{DeploymentID: t.DeploymentID, Version: t.Version, Sets: make([][]slotRecord, len(t.Sets))}
 	for s, set := range t.Sets {
 		record.Sets[s] = make([]slotRecord, len(set))
 		for i, slot := range set {
@@ -140,7 +141,7 @@ func topologyToRecord(t cluster.Topology) *topologyRecord {
 }
 
 func (r topologyRecord) toDomain() cluster.Topology {
-	t := cluster.Topology{Version: r.Version, Sets: make([][]cluster.Slot, len(r.Sets))}
+	t := cluster.Topology{DeploymentID: r.DeploymentID, Version: r.Version, Sets: make([][]cluster.Slot, len(r.Sets))}
 	for s, set := range r.Sets {
 		t.Sets[s] = make([]cluster.Slot, len(set))
 		for i, slot := range set {

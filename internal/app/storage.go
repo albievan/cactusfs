@@ -30,6 +30,34 @@ type shardStorage struct {
 	params erasure.Params
 	codec  ports.ErasureCodec
 	logger *slog.Logger
+
+	// pinned holds the data IDs of writes whose version is not known to be
+	// committed or refused yet. Their shards are unreferenced and must not
+	// be collected, however long the write takes.
+	pinMu  sync.Mutex
+	pinned map[object.ID]struct{}
+}
+
+// pin protects the shards of a write in progress from the collector.
+func (s *shardStorage) pin(dataID object.ID) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	s.pinned[dataID] = struct{}{}
+}
+
+// unpin ends the protection, once the write is committed or definitely not.
+func (s *shardStorage) unpin(dataID object.ID) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	delete(s.pinned, dataID)
+}
+
+// isPinned reports whether a write that uses the data ID is unresolved.
+func (s *shardStorage) isPinned(dataID object.ID) bool {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	_, ok := s.pinned[dataID]
+	return ok
 }
 
 func newShardStorage(
@@ -54,7 +82,10 @@ func newShardStorage(
 	if err != nil {
 		return nil, err
 	}
-	return &shardStorage{topology: topology, drives: byID, params: params, codec: codec, logger: logger}, nil
+	return &shardStorage{
+		topology: topology, drives: byID, params: params, codec: codec, logger: logger,
+		pinned: map[object.ID]struct{}{},
+	}, nil
 }
 
 // drive returns the drive that now holds what was recorded under driveID:
@@ -470,21 +501,36 @@ var (
 	_ io.ReaderAt = (*streamReader)(nil)
 )
 
+// throttle is told how many stored bytes were just read, and may wait.
+type throttle func(ctx context.Context, bytes int64)
+
 // verifyShard reads a shard from beginning to end, which makes the drive
-// verify every block of it.
-func verifyShard(ctx context.Context, reader ports.ShardReader) error {
+// verify every block of it. It returns the number of bytes verified.
+func verifyShard(ctx context.Context, reader ports.ShardReader, slow throttle) (int64, error) {
 	buf := make([]byte, 1<<20)
-	for off := int64(0); off < reader.Size(); {
+	off := int64(0)
+	for off < reader.Size() {
 		if err := ctx.Err(); err != nil {
-			return err
+			return off, err
 		}
 		n, err := reader.ReadAt(buf[:min(int64(len(buf)), reader.Size()-off)], off)
 		off += int64(n)
 		if err != nil && (!errors.Is(err, io.EOF) || off != reader.Size()) {
-			return err
+			return off, err
+		}
+		if slow != nil {
+			slow(ctx, int64(n))
 		}
 	}
-	return nil
+	return off, nil
+}
+
+// isDamage reports whether an error from opening or reading a shard means
+// that the shard itself is missing or bad. Anything else - too many open
+// files, an I/O error, a permission problem - says nothing about the shard,
+// and a shard is never rewritten on such an error.
+func isDamage(err error) bool {
+	return errors.Is(err, domain.ErrShardNotFound) || errors.Is(err, domain.ErrIntegrity)
 }
 
 // repair is the outcome of healing one version.
@@ -493,14 +539,24 @@ type repair struct {
 	shards int
 	// damaged is the number that were missing, truncated or corrupt.
 	damaged int
-	// rebuilt is the number of those that were written again.
-	rebuilt int
+	// rebuilt lists the shards that were written again.
+	rebuilt []int
+	// verified is the number of stored bytes that were read and verified.
+	verified int64
 }
 
 // heal verifies every shard of a version and rebuilds the ones that are
-// missing, truncated or corrupt from the others. It returns an error wrapping
-// domain.ErrIntegrity when too few shards are left to rebuild from.
-func (s *shardStorage) heal(ctx context.Context, v object.Version) (repair, error) {
+// missing, truncated or corrupt from the others.
+//
+// It never makes an object worse. A shard is rebuilt only when it is
+// definitely damaged; an error that says nothing about the shard stops the
+// heal with nothing changed. A rebuilt shard is written in full beside the
+// damaged one and replaces it in one step, so a rebuild that fails leaves
+// every shard as it was.
+//
+// It returns an error wrapping domain.ErrIntegrity when too few shards are
+// left to rebuild from.
+func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle) (repair, error) {
 	geometry, err := geometryOf(v.Layout)
 	if err != nil {
 		return repair{}, err
@@ -518,18 +574,21 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version) (repair, erro
 	for i, location := range v.Layout.Shards {
 		shard, err := s.openShard(ctx, v.DataID, i, location, shardSize)
 		if err == nil {
-			if err = verifyShard(ctx, shard); err != nil {
+			var verified int64
+			verified, err = verifyShard(ctx, shard, slow)
+			result.verified += verified
+			if err != nil {
 				_ = shard.Close()
 			}
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, ctxErr
-		}
-		if err != nil {
+		switch {
+		case err == nil:
+			reader.readers[i] = shard
+		case isDamage(err):
 			damaged = append(damaged, i)
-			continue
+		default:
+			return result, fmt.Errorf("shard %d of %s could not be checked: %w", i, v.DataID, err)
 		}
-		reader.readers[i] = shard
 	}
 	result.damaged = len(damaged)
 	if len(damaged) == 0 {
@@ -540,8 +599,6 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version) (repair, erro
 			domain.ErrIntegrity, len(damaged), geometry.Total(), v.DataID, geometry.Parity)
 	}
 
-	// Replace the damaged shards. A shard is immutable, so what is left of
-	// a damaged one is deleted before it is written again.
 	writers := map[int]ports.ShardWriter{}
 	defer func() {
 		for _, writer := range writers {
@@ -554,11 +611,7 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version) (repair, erro
 			continue
 		}
 		id := object.ShardID{DataID: v.DataID, Index: i}
-		if err := drive.Delete(ctx, id); err != nil {
-			s.logger.WarnContext(ctx, "damaged shard cannot be removed", slog.String("shard", id.String()), slog.Any("error", err))
-			continue
-		}
-		writer, err := drive.Create(ctx, id)
+		writer, err := drive.Rewrite(ctx, id)
 		if err != nil {
 			s.logger.WarnContext(ctx, "shard cannot be rebuilt", slog.String("shard", id.String()), slog.Any("error", err))
 			continue
@@ -586,7 +639,23 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version) (repair, erro
 				slog.String("shard", object.ShardID{DataID: v.DataID, Index: i}.String()), slog.Any("error", err))
 			continue
 		}
-		result.rebuilt++
+		result.rebuilt = append(result.rebuilt, i)
 	}
 	return result, nil
+}
+
+// removeShards deletes the listed shards of a version, best effort.
+func (s *shardStorage) removeShards(ctx context.Context, dataID object.ID, layout object.Layout, indexes []int) {
+	ctx = context.WithoutCancel(ctx)
+	for _, index := range indexes {
+		drive, ok := s.drive(layout.Shards[index].DriveID)
+		if !ok {
+			continue
+		}
+		id := object.ShardID{DataID: dataID, Index: index}
+		if err := drive.Delete(ctx, id); err != nil {
+			s.logger.WarnContext(ctx, "shard left behind for garbage collection",
+				slog.String("shard", id.String()), slog.Any("error", err))
+		}
+	}
 }

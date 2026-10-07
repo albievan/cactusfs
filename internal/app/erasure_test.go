@@ -8,12 +8,12 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
-	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -287,7 +287,10 @@ func TestHealRebuildsDamagedShards(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%d damaged: HealObject: %v", damaged, err)
 		}
-		want := app.HealResult{Bucket: "b", Key: "k", Shards: sixDrives, Damaged: damaged, Rebuilt: damaged}
+		if result.Verified <= 0 {
+			t.Errorf("%d damaged: no stored bytes were verified", damaged)
+		}
+		want := app.HealResult{Bucket: "b", Key: "k", Shards: sixDrives, Damaged: damaged, Rebuilt: damaged, Verified: result.Verified}
 		if result != want {
 			t.Errorf("%d damaged: result = %+v, want %+v", damaged, result, want)
 		}
@@ -382,56 +385,234 @@ func TestDegradedReadQueuesHealing(t *testing.T) {
 	}
 }
 
-func TestHealOfAnObjectDeletedMeanwhile(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
+// switchingIndex answers GetObject from a script: the n-th lookup gets the
+// n-th answer, later ones the real state. It lets a test change what healing
+// sees between its first look at an object and its last.
+type switchingIndex struct {
+	ports.ObjectIndex
+	mu      sync.Mutex
+	answers []func() (object.Version, error)
+}
 
-	f := erasureFixture(t)
-	version := f.put(t, "b", "k", randomBytes(t, 5000))
-	drives := f.shardsOf(t, version)
-	_ = drives[0].Delete(ctx, shardID(version, 0))
+func (s *switchingIndex) GetObject(ctx context.Context, bucketName, key string) (object.Version, error) {
+	s.mu.Lock()
+	if len(s.answers) > 0 {
+		answer := s.answers[0]
+		s.answers = s.answers[1:]
+		s.mu.Unlock()
+		return answer()
+	}
+	s.mu.Unlock()
+	return s.ObjectIndex.GetObject(ctx, bucketName, key)
+}
 
-	// The object is deleted between the moment healing reads its metadata
-	// and the moment it finishes: simulated by healing a stale version
-	// through an index that still returns it once.
-	stale := &staleIndex{ObjectIndex: f.meta, version: version}
+// healerOver returns a healer that looks objects up through index.
+func (f *fixture) healerOver(t *testing.T, index ports.ObjectIndex) *app.Healer {
+	t.Helper()
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: stale, Buckets: f.meta, Topology: f.topology, Drives: asStores(f.drives), Codec: porttest.NewCodec(),
+		Index: index, Buckets: f.meta, Topology: f.topology, Drives: asStores(f.drives), Codec: porttest.NewCodec(),
 		KMS: f.kms, Authz: f.authz, Clock: f.clock, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.objects.Delete(ctx, porttest.Root(), "b", "k"); err != nil {
-		t.Fatal(err)
-	}
-	if f.shardCount() != 0 {
-		t.Fatalf("%d shards after delete", f.shardCount())
-	}
+	return svc.Healer()
+}
 
-	result, err := svc.Healer().HealObject(ctx, "b", "k")
-	if err != nil || result.Rebuilt != 0 {
-		t.Errorf("HealObject of a deleted object = %+v, %v", result, err)
-	}
-	if n := f.shardCount(); n != 0 {
-		t.Errorf("healing a deleted object left %d shards behind", n)
+// TestHealKeepsEverythingWhenItCannotTellWhetherTheObjectChanged: after
+// rebuilding, healing asks whether the version is still current. When that
+// lookup fails - the node is shutting down, the store is busy - it has no
+// evidence that the version is gone, and must not remove a single shard.
+// Removing them would destroy a healthy object.
+func TestHealKeepsEverythingWhenItCannotTellWhetherTheObjectChanged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for name, lookupErr := range map[string]error{
+		"cancelled":     context.Canceled,
+		"shutting down": domain.ErrShuttingDown,
+		"other":         errBoom,
+	} {
+		f := erasureFixture(t)
+		data := randomBytes(t, 50_000)
+		version := f.put(t, "b", "k", data)
+		drives := f.shardsOf(t, version)
+		_ = drives[0].Delete(ctx, shardID(version, 0))
+
+		index := &switchingIndex{ObjectIndex: f.meta, answers: []func() (object.Version, error){
+			func() (object.Version, error) { return version, nil },
+			func() (object.Version, error) { return object.Version{}, lookupErr },
+		}}
+		result, err := f.healerOver(t, index).HealObject(ctx, "b", "k")
+		if err != nil || result.Rebuilt != 1 {
+			t.Errorf("%s: HealObject = %+v, %v; want the shard rebuilt", name, result, err)
+		}
+		if n := f.shardCount(); n != sixDrives {
+			t.Fatalf("%s: %d shards after a heal whose last lookup failed, want all %d", name, n, sixDrives)
+		}
+		if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("%s: the object is damaged: %v", name, err)
+		}
 	}
 }
 
-// staleIndex returns one fixed version for the first lookup and the real
-// state afterwards.
-type staleIndex struct {
-	ports.ObjectIndex
-	version object.Version
-	served  bool
+// TestHealRemovesOnlyWhatItRebuiltWhenTheObjectWasReplaced: when the version
+// really was replaced or deleted while it was being healed, the shards just
+// rebuilt belong to nothing and are removed - those, and no others.
+func TestHealRemovesOnlyWhatItRebuiltWhenTheObjectWasReplaced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	outcomes := map[string]func(v object.Version) (object.Version, error){
+		"replaced": func(v object.Version) (object.Version, error) { v.DataID[0] ^= 0xFF; return v, nil },
+		"deleted":  func(object.Version) (object.Version, error) { return object.Version{}, domain.ErrObjectNotFound },
+		"bucket deleted": func(object.Version) (object.Version, error) {
+			return object.Version{}, domain.ErrBucketNotFound
+		},
+	}
+	for name, later := range outcomes {
+		f := erasureFixture(t)
+		version := f.put(t, "b", "k", randomBytes(t, 50_000))
+		drives := f.shardsOf(t, version)
+		_ = drives[1].Delete(ctx, shardID(version, 1))
+		drives[4].Damage(shardID(version, 4))
+
+		index := &switchingIndex{ObjectIndex: f.meta, answers: []func() (object.Version, error){
+			func() (object.Version, error) { return version, nil },
+			func() (object.Version, error) { return later(version) },
+		}}
+		result, err := f.healerOver(t, index).HealObject(ctx, "b", "k")
+		if err != nil || result.Rebuilt != 0 || result.Damaged != 0 {
+			t.Errorf("%s: HealObject = %+v, %v; want nothing reported for a version that is gone", name, result, err)
+		}
+		// The two rebuilt shards are gone again; the four that were there
+		// before are untouched (their owner, here, still exists in truth).
+		for i, d := range drives {
+			_, present := d.Bytes(shardID(version, i))
+			if want := i != 1 && i != 4; present != want {
+				t.Errorf("%s: shard %d present = %v, want %v", name, i, present, want)
+			}
+		}
+	}
 }
 
-func (s *staleIndex) GetObject(ctx context.Context, bucketName, key string) (object.Version, error) {
-	if !s.served {
-		s.served = true
-		return s.version, nil
+// TestHealDoesNotTouchShardsItCouldNotCheck: an error that says nothing about
+// a shard - too many open files, an I/O error - is not damage. Healing stops
+// with every shard as it was, instead of rewriting good data on a guess.
+func TestHealDoesNotTouchShardsItCouldNotCheck(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := erasureFixture(t)
+	data := randomBytes(t, 50_000)
+	version := f.put(t, "b", "k", data)
+	before := f.snapshot(t, version)
+	drives := f.shardsOf(t, version)
+	for _, d := range drives[:3] {
+		d.FailOpen = errors.New("too many open files")
+		d.FailCreate = errors.New("too many open files")
 	}
-	return s.ObjectIndex.GetObject(ctx, bucketName, key)
+
+	result, err := f.objects.Healer().HealObject(ctx, "b", "k")
+	if err == nil || errors.Is(err, domain.ErrIntegrity) || result.Unrecoverable || result.Rebuilt != 0 {
+		t.Fatalf("HealObject = %+v, %v; want an error that is not damage", result, err)
+	}
+	for _, d := range f.drives {
+		d.FailOpen, d.FailCreate = nil, nil
+	}
+	after := f.snapshot(t, version)
+	for i := range before {
+		if !bytes.Equal(after[i], before[i]) {
+			t.Errorf("shard %d was changed by a heal that could not check it", i)
+		}
+	}
+	if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("Get after the failed heal: %v", err)
+	}
+}
+
+// TestFailedRebuildLeavesTheObjectNoWorse: when a damaged shard cannot be
+// written again, what was there stays there. Healing never trades a shard it
+// has for one it hopes to write.
+func TestFailedRebuildLeavesTheObjectNoWorse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for name, fail := range map[string]func(d *porttest.MemShardStore){
+		"rewrite refused": func(d *porttest.MemShardStore) { d.FailCreate = errBoom },
+		"write fails":     func(d *porttest.MemShardStore) { d.FailWrite = errBoom },
+		"commit fails":    func(d *porttest.MemShardStore) { d.FailCommit = errBoom },
+	} {
+		f := erasureFixture(t)
+		data := randomBytes(t, 50_000)
+		version := f.put(t, "b", "k", data)
+		drives := f.shardsOf(t, version)
+		// Shard 2 is truncated but present; shard 5 is missing.
+		stored, _ := drives[2].Bytes(shardID(version, 2))
+		drives[2].Corrupt(shardID(version, 2), stored[:len(stored)/2])
+		_ = drives[5].Delete(ctx, shardID(version, 5))
+		fail(drives[2])
+		fail(drives[5])
+
+		result, err := f.objects.Healer().HealObject(ctx, "b", "k")
+		if err != nil || result.Damaged != 2 || result.Rebuilt != 0 {
+			t.Errorf("%s: HealObject = %+v, %v; want two damaged shards and none rebuilt", name, result, err)
+		}
+		// The truncated shard is still there, exactly as it was.
+		if now, ok := drives[2].Bytes(shardID(version, 2)); !ok || len(now) != len(stored)/2 {
+			t.Errorf("%s: the damaged shard was removed or changed although it could not be rebuilt", name)
+		}
+		if n := f.shardCount(); n != sixDrives-1 {
+			t.Errorf("%s: %d shards, want the %d that were there before the heal", name, n, sixDrives-1)
+		}
+		if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("%s: Get after the failed rebuild: %v", name, err)
+		}
+		// Once the drives work again the same heal succeeds.
+		for _, d := range f.drives {
+			d.FailCreate, d.FailWrite, d.FailCommit = nil, nil, nil
+		}
+		if result, err := f.objects.Healer().HealObject(ctx, "b", "k"); err != nil || result.Rebuilt != 2 {
+			t.Errorf("%s: second HealObject = %+v, %v; want both shards rebuilt", name, result, err)
+		}
+	}
+}
+
+// TestOneHealPerObjectAtATime: the queue and the scrubber can ask for the same
+// object at once. The second request stands back rather than rewrite the
+// shards the first is writing.
+func TestOneHealPerObjectAtATime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := erasureFixture(t)
+	version := f.put(t, "b", "k", randomBytes(t, 50_000))
+	_ = f.shardsOf(t, version)[0].Delete(ctx, shardID(version, 0))
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	index := &switchingIndex{ObjectIndex: f.meta, answers: []func() (object.Version, error){
+		func() (object.Version, error) {
+			close(entered)
+			<-release
+			return version, nil
+		},
+	}}
+	healer := f.healerOver(t, index)
+	first := make(chan app.HealResult, 1)
+	go func() {
+		result, _ := healer.HealObject(ctx, "b", "k")
+		first <- result
+	}()
+	<-entered
+
+	second, err := healer.HealObject(ctx, "b", "k")
+	if err != nil || second.Shards != 0 || second.Rebuilt != 0 {
+		t.Errorf("a heal of an object already being healed = %+v, %v; want it to stand back", second, err)
+	}
+	close(release)
+	if result := <-first; result.Rebuilt != 1 {
+		t.Errorf("the first heal = %+v, want one shard rebuilt", result)
+	}
 }
 
 func asStores(drives []*porttest.MemShardStore) []ports.ShardStore {
@@ -608,6 +789,123 @@ func TestCollector(t *testing.T) {
 	}
 }
 
+// TestCollectorLeavesWritesInProgressAlone: between making its shards durable
+// and committing its version a write has unreferenced shards on the drives.
+// However long that takes - longer than the grace period, with a slow drive
+// or a big object - the collector must not take them.
+func TestCollectorLeavesWritesInProgressAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := erasureFixture(t)
+	for _, d := range f.drives {
+		d.Now = func() time.Time { return testNow.Add(-48 * time.Hour) } // every shard looks old
+	}
+	// The write stops just before its commit, with its shards on disk.
+	reached, proceed := make(chan struct{}), make(chan struct{})
+	blocking := &blockingIndex{ObjectIndex: f.meta, reached: reached, proceed: proceed}
+	svc, err := app.NewObjectService(app.ObjectServiceConfig{
+		Index: blocking, Buckets: f.meta, Topology: f.topology, Drives: asStores(f.drives), Codec: porttest.NewCodec(),
+		KMS: f.kms, Authz: f.authz, Clock: f.clock, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := app.NewCollector(app.CollectorConfig{
+		Drives: asStores(f.drives), Index: f.meta, Clock: f.clock, Grace: time.Hour, Logger: slog.New(slog.DiscardHandler),
+		InFlight: svc.InFlight,
+	})
+	data := randomBytes(t, 50_000)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "slow", Body: bytes.NewReader(data), Size: int64(len(data))})
+		done <- err
+	}()
+	<-reached
+
+	stats, err := collector.RunOnce(ctx)
+	if err != nil || stats.Removed != 0 || stats.InFlight != sixDrives {
+		t.Fatalf("collection during a write = %+v, %v; want its %d shards left alone", stats, err, sixDrives)
+	}
+	close(proceed)
+	if err := <-done; err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if got, _, err := f.get("b", "slow", nil); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("the object written across a collection: %v", err)
+	}
+	// Committed: no longer in flight, and referenced.
+	if stats, _ := collector.RunOnce(ctx); stats.InFlight != 0 || stats.Removed != 0 {
+		t.Errorf("after the commit = %+v, want nothing in flight and nothing removed", stats)
+	}
+
+	// A write whose commit outcome is unknown may still take effect after a
+	// restart: its shards stay protected for as long as this process lives.
+	blocking.fail = fmt.Errorf("%w: raft is shutting down", domain.ErrOutcomeUnknown)
+	if _, err := svc.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "unknown", Body: bytes.NewReader(data), Size: int64(len(data))}); !errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Fatalf("Put = %v, want %v", err, domain.ErrOutcomeUnknown)
+	}
+	f.clock.Advance(1000 * time.Hour)
+	if stats, _ := collector.RunOnce(ctx); stats.Removed != 0 || stats.InFlight != sixDrives {
+		t.Errorf("after a commit of unknown outcome = %+v, want its %d shards kept", stats, sixDrives)
+	}
+	// A write that definitely failed is cleaned up and no longer protected.
+	blocking.fail = errBoom
+	if _, err := svc.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "failed", Body: bytes.NewReader(data), Size: int64(len(data))}); !errors.Is(err, errBoom) {
+		t.Fatalf("Put = %v, want %v", err, errBoom)
+	}
+	if n := f.shardCount(); n != 2*sixDrives {
+		t.Errorf("%d shards, want those of the committed and the unknown write only", n)
+	}
+}
+
+// blockingIndex stops PutVersion until it is told to proceed, or fails it.
+type blockingIndex struct {
+	ports.ObjectIndex
+	reached chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+	fail    error
+}
+
+func (b *blockingIndex) PutVersion(ctx context.Context, v object.Version) (*object.Version, error) {
+	if b.fail != nil {
+		return nil, b.fail
+	}
+	b.once.Do(func() {
+		close(b.reached)
+		<-b.proceed
+	})
+	return b.ObjectIndex.PutVersion(ctx, v)
+}
+
+// TestCollectorDoesNothingWhileMetadataIsNotReady: a metadata store that has
+// stopped applying entries answers from a frozen state. Data that an
+// unapplied entry refers to looks unreferenced; collecting on that answer
+// would delete objects that reappear at the next start.
+func TestCollectorDoesNothingWhileMetadataIsNotReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := erasureFixture(t)
+	f.drives[0].Put(object.ShardID{DataID: object.ID{9}}, []byte("looks like an orphan"), testNow.Add(-1000*time.Hour))
+	notReady := errors.New("metadata state machine stopped")
+	ready := notReady
+	collector := app.NewCollector(app.CollectorConfig{
+		Drives: asStores(f.drives), Index: f.meta, Clock: f.clock, Grace: time.Hour, Logger: slog.New(slog.DiscardHandler),
+		Ready: func(context.Context) error { return ready },
+	})
+
+	stats, err := collector.RunOnce(ctx)
+	if !errors.Is(err, notReady) || stats.Shards != 0 || f.shardCount() != 1 {
+		t.Fatalf("collection while not ready = %+v, %v; want nothing looked at and nothing removed", stats, err)
+	}
+	ready = nil
+	if stats, err := collector.RunOnce(ctx); err != nil || stats.Removed != 1 {
+		t.Errorf("collection once ready = %+v, %v; want the orphan removed", stats, err)
+	}
+}
+
 func TestCollectorFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -648,47 +946,86 @@ func TestCollectorFailures(t *testing.T) {
 	}
 }
 
+func topologyOptions(allow bool) app.TopologyOptions {
+	return app.TopologyOptions{AllowReplacement: allow, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler)}
+}
+
+func attachedDrives(drives ...*porttest.MemShardStore) []app.AttachedDrive {
+	out := make([]app.AttachedDrive, len(drives))
+	for i, d := range drives {
+		out[i] = d
+	}
+	return out
+}
+
+func newDrives(ids ...string) []*porttest.MemShardStore {
+	out := make([]*porttest.MemShardStore, len(ids))
+	for i, id := range ids {
+		out[i] = porttest.NewMemShardStore(id)
+	}
+	return out
+}
+
 func TestEnsureTopology(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	logger := slog.New(slog.DiscardHandler)
-	states := func(ids ...string) []cluster.DriveState {
-		out := make([]cluster.DriveState, len(ids))
-		for i, id := range ids {
-			out[i] = cluster.DriveState{ID: id}
-		}
-		return out
-	}
 
 	meta := porttest.NewMemMetadata()
-	created, err := app.EnsureTopology(ctx, meta, states("d0", "d1", "d2", "d3"), logger)
+	drives := newDrives("d0", "d1", "d2", "d3")
+	created, err := app.EnsureTopology(ctx, meta, attachedDrives(drives...), topologyOptions(false))
 	if err != nil || created.Version != 1 || !slices.Equal(created.DriveIDs(), []string{"d0", "d1", "d2", "d3"}) {
 		t.Fatalf("first start: %+v, %v", created, err)
 	}
+	if len(created.DeploymentID) != 32 {
+		t.Errorf("deployment ID = %q, want 32 hexadecimal characters", created.DeploymentID)
+	}
+	// Every drive now carries the deployment's ID.
+	for _, d := range drives {
+		if d.DeploymentID() != created.DeploymentID {
+			t.Errorf("drive %s is claimed for %q, want %q", d.DriveID(), d.DeploymentID(), created.DeploymentID)
+		}
+	}
 
 	// Later starts find the drives whatever order they are given in.
-	again, err := app.EnsureTopology(ctx, meta, states("d3", "d1", "d0", "d2"), logger)
+	again, err := app.EnsureTopology(ctx, meta, attachedDrives(drives[3], drives[1], drives[0], drives[2]), topologyOptions(false))
 	if err != nil || again.Version != 1 || !slices.Equal(again.DriveIDs(), created.DriveIDs()) {
 		t.Errorf("restart with drives reordered: %+v, %v", again, err)
 	}
 
-	// One empty drive takes over the slot of the one missing drive.
-	withNew := append(states("d0", "d1", "d3"), cluster.DriveState{ID: "new", Fresh: true})
-	replaced, err := app.EnsureTopology(ctx, meta, withNew, logger)
+	// An empty drive in place of a missing one is refused until confirmed.
+	replacement := porttest.NewMemShardStore("new")
+	withNew := attachedDrives(drives[0], drives[1], replacement, drives[3])
+	if _, err := app.EnsureTopology(ctx, meta, withNew, topologyOptions(false)); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("unconfirmed replacement: error = %v, want %v", err, domain.ErrInvalidArgument)
+	}
+	if replacement.DeploymentID() != "" {
+		t.Error("a drive was claimed although its replacement was refused")
+	}
+	replaced, err := app.EnsureTopology(ctx, meta, withNew, topologyOptions(true))
 	if err != nil || replaced.Version != 2 {
-		t.Fatalf("replacement: %+v, %v", replaced, err)
+		t.Fatalf("confirmed replacement: %+v, %v", replaced, err)
 	}
 	if current, ok := replaced.Current("d2"); !ok || current != "new" {
 		t.Errorf("Current(d2) = %q, %v; want the new drive", current, ok)
 	}
+	if replacement.DeploymentID() != created.DeploymentID {
+		t.Error("the new drive was not claimed for the deployment")
+	}
+	// The confirmation is not needed again, and changes nothing more.
+	if settled, err := app.EnsureTopology(ctx, meta, withNew, topologyOptions(false)); err != nil || settled.Version != 2 {
+		t.Errorf("start after the replacement: %+v, %v", settled, err)
+	}
 
-	for name, attached := range map[string][]cluster.DriveState{
-		"a drive missing":            states("d0", "d1", "d3"),
-		"the replaced drive is back": states("d0", "d1", "d2", "d3"),
-		"an unknown drive with data": states("d0", "d1", "d3", "foreign"),
-		"an extra drive":             append(states("d0", "d1", "new", "d3"), cluster.DriveState{ID: "extra", Fresh: true}),
-	} {
-		if _, err := app.EnsureTopology(ctx, meta, attached, logger); !errors.Is(err, domain.ErrInvalidArgument) {
+	foreign := porttest.NewMemShardStore("foreign")
+	foreign.Put(object.ShardID{DataID: object.ID{1}}, []byte("someone's data"), testNow)
+	refused := map[string][]app.AttachedDrive{
+		"a drive missing":            attachedDrives(drives[0], drives[1], drives[3]),
+		"the replaced drive is back": attachedDrives(drives[0], drives[1], drives[2], drives[3]),
+		"an unknown drive with data": attachedDrives(drives[0], drives[1], drives[3], foreign),
+		"an extra drive":             attachedDrives(drives[0], drives[1], replacement, drives[3], porttest.NewMemShardStore("extra")),
+	}
+	for name, attached := range refused {
+		if _, err := app.EnsureTopology(ctx, meta, attached, topologyOptions(true)); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: error = %v, want %v", name, err, domain.ErrInvalidArgument)
 		}
 	}
@@ -701,13 +1038,112 @@ func TestEnsureTopology(t *testing.T) {
 	for i := range seventeen {
 		seventeen[i] = fmt.Sprintf("d%02d", i)
 	}
-	if _, err := app.EnsureTopology(ctx, porttest.NewMemMetadata(), states(seventeen...), logger); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := app.EnsureTopology(ctx, porttest.NewMemMetadata(), attachedDrives(newDrives(seventeen...)...), topologyOptions(false)); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("17 drives: error = %v, want %v", err, domain.ErrInvalidArgument)
 	}
 	failing := porttest.NewMemMetadata()
 	failing.FailWrites = errBoom
-	if _, err := app.EnsureTopology(ctx, failing, states("d0"), logger); !errors.Is(err, errBoom) {
+	if _, err := app.EnsureTopology(ctx, failing, attachedDrives(newDrives("d0")...), topologyOptions(false)); !errors.Is(err, errBoom) {
 		t.Errorf("store failure: error = %v", err)
+	}
+	unclaimable := newDrives("d0")
+	unclaimable[0].FailClaim = errBoom
+	if _, err := app.EnsureTopology(ctx, porttest.NewMemMetadata(), attachedDrives(unclaimable...), topologyOptions(false)); !errors.Is(err, errBoom) {
+		t.Errorf("claim failure: error = %v", err)
+	}
+}
+
+// TestDrivesWithDataAreNeverAdoptedByEmptyMetadata: the metadata directory
+// comes up empty - a mount that is missing, a wrong --meta-dir - while the
+// drives hold a deployment's objects. Starting a "new deployment" on them
+// would leave every shard unreferenced, and the collector would then delete
+// all of it. The node must refuse to start instead.
+func TestDrivesWithDataAreNeverAdoptedByEmptyMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := erasureFixture(t)
+	if _, err := app.EnsureTopology(ctx, f.meta, attachedDrives(f.drives...), topologyOptions(false)); err != nil {
+		t.Fatalf("EnsureTopology: %v", err)
+	}
+	f.put(t, "b", "k", randomBytes(t, 5000))
+	before := f.shardCount()
+
+	emptyMetadata := porttest.NewMemMetadata()
+	_, err := app.EnsureTopology(ctx, emptyMetadata, attachedDrives(f.drives...), topologyOptions(true))
+	if !errors.Is(err, domain.ErrInvalidArgument) || !strings.Contains(err.Error(), "--meta-dir") {
+		t.Fatalf("start with empty metadata: error = %v, want a refusal that points at --meta-dir", err)
+	}
+	if _, err := emptyMetadata.GetTopology(ctx); !errors.Is(err, domain.ErrNoTopology) {
+		t.Error("a topology was recorded for drives that hold another deployment's data")
+	}
+	if f.shardCount() != before {
+		t.Error("shards were removed")
+	}
+
+	// Emptied drives that still carry another deployment's claim are
+	// refused as well.
+	claimed := newDrives("x0")
+	if err := claimed[0].Claim(ctx, "some-other-deployment"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.EnsureTopology(ctx, porttest.NewMemMetadata(), attachedDrives(claimed...), topologyOptions(true)); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("claimed empty drive on empty metadata: error = %v, want %v", err, domain.ErrInvalidArgument)
+	}
+}
+
+// TestInterruptedStartsCanBeRepeated: a start can die at any point between
+// formatting a drive, recording the topology and claiming the drives. The
+// next start must carry on, not leave a deployment that cannot start.
+func TestInterruptedStartsCanBeRepeated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// New deployment: the topology is committed, then the process dies
+	// before any drive is claimed.
+	meta := porttest.NewMemMetadata()
+	drives := newDrives("d0", "d1", "d2", "d3")
+	drives[2].FailClaim = errBoom
+	if _, err := app.EnsureTopology(ctx, meta, attachedDrives(drives...), topologyOptions(false)); !errors.Is(err, errBoom) {
+		t.Fatalf("interrupted first start: error = %v", err)
+	}
+	drives[2].FailClaim = nil
+	topology, err := app.EnsureTopology(ctx, meta, attachedDrives(drives...), topologyOptions(false))
+	if err != nil || topology.Version != 1 {
+		t.Fatalf("repeated first start: %+v, %v", topology, err)
+	}
+	for _, d := range drives {
+		if d.DeploymentID() != topology.DeploymentID {
+			t.Errorf("drive %s was not claimed on the repeated start", d.DriveID())
+		}
+	}
+
+	// Replacement: the new drive was formatted - it is no longer "new" in
+	// any sense but that it is empty - and the process died before the
+	// replacement was recorded.
+	replacement := porttest.NewMemShardStore("new")
+	withNew := attachedDrives(drives[0], replacement, drives[2], drives[3])
+	meta.FailWrites = errBoom
+	if _, err := app.EnsureTopology(ctx, meta, withNew, topologyOptions(true)); !errors.Is(err, errBoom) {
+		t.Fatalf("interrupted replacement: error = %v", err)
+	}
+	meta.FailWrites = nil
+	replaced, err := app.EnsureTopology(ctx, meta, withNew, topologyOptions(true))
+	if err != nil || replaced.Version != 2 {
+		t.Fatalf("repeated replacement: %+v, %v", replaced, err)
+	}
+
+	// Replacement recorded, process died before the new drive was claimed.
+	second := porttest.NewMemShardStore("newer")
+	second.FailClaim = errBoom
+	withSecond := attachedDrives(drives[0], replacement, second, drives[3])
+	if _, err := app.EnsureTopology(ctx, meta, withSecond, topologyOptions(true)); !errors.Is(err, errBoom) {
+		t.Fatalf("replacement interrupted before the claim: error = %v", err)
+	}
+	second.FailClaim = nil
+	settled, err := app.EnsureTopology(ctx, meta, withSecond, topologyOptions(false))
+	if err != nil || settled.Version != 3 || second.DeploymentID() != settled.DeploymentID {
+		t.Errorf("start after a replacement interrupted before the claim: %+v, %v", settled, err)
 	}
 }
 
@@ -719,7 +1155,7 @@ func TestReplacedDriveIsRefilled(t *testing.T) {
 	ctx := context.Background()
 
 	f := erasureFixture(t)
-	if err := f.meta.SetTopology(ctx, f.topology); err != nil {
+	if _, err := app.EnsureTopology(ctx, f.meta, attachedDrives(f.drives...), topologyOptions(false)); err != nil {
 		t.Fatal(err)
 	}
 	payloads := map[string][]byte{}
@@ -732,15 +1168,9 @@ func TestReplacedDriveIsRefilled(t *testing.T) {
 	// drive-c is replaced by an empty drive.
 	const lost = 2
 	replacement := porttest.NewMemShardStore("drive-new")
-	attached := make([]cluster.DriveState, 0, sixDrives)
-	for i, d := range f.drives {
-		if i == lost {
-			attached = append(attached, cluster.DriveState{ID: replacement.DriveID(), Fresh: true})
-			continue
-		}
-		attached = append(attached, cluster.DriveState{ID: d.DriveID()})
-	}
-	topology, err := app.EnsureTopology(ctx, f.meta, attached, slog.New(slog.DiscardHandler))
+	attached := attachedDrives(f.drives...)
+	attached[lost] = replacement
+	topology, err := app.EnsureTopology(ctx, f.meta, attached, topologyOptions(true))
 	if err != nil {
 		t.Fatalf("EnsureTopology: %v", err)
 	}

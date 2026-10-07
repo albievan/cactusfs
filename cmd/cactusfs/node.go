@@ -20,7 +20,6 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
-	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -73,7 +72,7 @@ func openNode(
 
 func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, notice io.Writer) error {
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
-	attached := make([]cluster.DriveState, 0, len(cfg.Data))
+	attached := make([]app.AttachedDrive, 0, len(cfg.Data))
 	for _, dir := range cfg.Data {
 		drive, err := disk.Open(ctx, dir, rand.Reader, n.clock.Now())
 		if err != nil {
@@ -81,9 +80,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		}
 		n.drives = append(n.drives, drive)
 		stores = append(stores, n.telemetry.InstrumentShardStore(drive))
-		attached = append(attached, cluster.DriveState{ID: drive.DriveID(), Fresh: drive.Fresh()})
+		attached = append(attached, drive)
 		logger.InfoContext(ctx, "drive opened",
-			slog.String("drive_id", drive.DriveID()), slog.String("dir", dir), slog.Bool("fresh", drive.Fresh()))
+			slog.String("drive_id", drive.DriveID()), slog.String("dir", dir), slog.Bool("empty", drive.Empty()))
 	}
 
 	localKMS, err := openKMS(ctx, cfg, logger)
@@ -105,7 +104,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// counts the call.
 	meta := n.telemetry.InstrumentMetadata(n.meta)
 
-	topology, err := app.EnsureTopology(ctx, meta, attached, logger)
+	topology, err := app.EnsureTopology(ctx, meta, attached, app.TopologyOptions{
+		AllowReplacement: cfg.AllowDriveReplacement, Entropy: rand.Reader, Logger: logger,
+	})
 	if err != nil {
 		return err
 	}
@@ -138,6 +139,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	})
 	n.collector = app.NewCollector(app.CollectorConfig{
 		Drives: stores, Index: meta, Clock: n.clock, Grace: cfg.GCGrace, Logger: logger, OnPass: n.telemetry.ObserveGC,
+		// Nothing is collected while the metadata cannot be trusted, nor
+		// what a write in progress has put on the drives.
+		Ready: n.meta.Check, InFlight: n.objects.InFlight,
 	})
 
 	var provided *app.Credentials

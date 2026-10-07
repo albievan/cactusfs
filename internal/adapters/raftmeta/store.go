@@ -615,9 +615,17 @@ func (s *Store) IsDataReferenced(ctx context.Context, dataID object.ID) (bool, e
 		return false, fmt.Errorf("raftmeta.IsDataReferenced: %w", err)
 	}
 	var referenced bool
-	err := s.view(func(tx *bbolt.Tx) error {
-		referenced = tx.Bucket(dataBucket()).Get(dataID[:]) != nil
-		return nil
+	err := s.use(func() error {
+		// A stopped state machine has entries in the log that it has not
+		// applied. Their data looks unreferenced now and will be referenced
+		// after a restart, so no answer is given at all.
+		if err := s.fsm.health(); err != nil {
+			return err
+		}
+		return s.fsm.view(func(tx *bbolt.Tx) error {
+			referenced = tx.Bucket(dataBucket()).Get(dataID[:]) != nil
+			return nil
+		})
 	})
 	if err != nil {
 		return false, fmt.Errorf("raftmeta.IsDataReferenced: %w", err)

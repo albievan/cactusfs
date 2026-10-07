@@ -102,8 +102,11 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Slow or oversized requests exhaust a listener | Read-header and idle timeouts and a header size limit on both listeners; whole-request timeouts on the admin listener; object size and XML body limits | **implemented**; a slow *body* on the S3 listener is not bounded yet |
 | Loss of drives | Reed-Solomon parity (2–4 shards by set size); writes need a write quorum; healing refills a replaced drive | **implemented** on one node; all drives must be present to start |
 | Loss of a node | Distributed erasure sets and Raft voters | M3 |
-| A drive from another deployment, or a stale drive, is attached | Drives are known by ID in replicated metadata; only an empty drive may replace a missing one, one at a time; a retired drive is refused | **implemented** |
-| Unreferenced data accumulates, or is removed while still needed | Garbage collection by data-ID reference count, only for shards older than a grace period (at least 1 minute, default 24 hours) | **implemented**; the grace period is the only protection of an upload between durability and commit |
+| A drive from another deployment, or a stale drive, is attached | Drives are known by ID in replicated metadata and claimed for the deployment's ID; a foreign, retired or non-empty unknown drive is refused | **implemented** |
+| The metadata directory is missing or the wrong one | A new deployment is created only from empty, unclaimed drives; drives with data and no matching metadata stop the node | **implemented** |
+| A missing mount is mistaken for a replaced drive | Replacement needs parity and the operator's confirmation for that start; without parity it is never made | **implemented**; a confirmed replacement cannot be undone |
+| Repair makes things worse | Healing rebuilds only definite damage, replaces a shard in one step, removes nothing when it cannot tell whether an object changed, and runs once per object at a time | **implemented** |
+| Unreferenced data accumulates, or is removed while still needed | Garbage collection by data-ID reference count; writes in progress and commits of unknown outcome are pinned; nothing is collected while the metadata is not ready; a grace period of at least 1 hour (default 24) covers the rest | **implemented** |
 | Requests routed to a node that is going away | `/readyz` answers 503 for `--drain-delay` before the listener closes; in-flight requests then finish within `--shutdown-timeout` | **implemented**; the delay defaults to `0s` (off) and must be set per deployment (chart default: M7) |
 | One tenant fills the cluster | Per-bucket quotas | M8 |
 

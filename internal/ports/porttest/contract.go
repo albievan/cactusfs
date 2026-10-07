@@ -326,11 +326,12 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		if err := store.SetTopology(ctx, cluster.Topology{}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("SetTopology(empty) error = %v, want %v", err, domain.ErrInvalidArgument)
 		}
+		first.DeploymentID = "deployment-1"
 		if err := store.SetTopology(ctx, first); err != nil {
 			t.Fatalf("SetTopology: %v", err)
 		}
 		stored, err := store.GetTopology(ctx)
-		if err != nil || stored.Version != 1 || !reflect.DeepEqual(stored.DriveIDs(), first.DriveIDs()) {
+		if err != nil || stored.Version != 1 || stored.DeploymentID != "deployment-1" || !reflect.DeepEqual(stored.DriveIDs(), first.DriveIDs()) {
 			t.Fatalf("GetTopology = %+v, %v", stored, err)
 		}
 		// A change based on the state before the first one is refused.
@@ -591,6 +592,61 @@ func ShardStoreContract(t *testing.T, open func(t *testing.T) ports.ShardStore) 
 		}
 	})
 
+	t.Run("rewrite replaces in one step", func(t *testing.T) {
+		store := open(t)
+		id := shard(1, 0)
+		write(t, store, id, []byte("damaged content"))
+
+		w, err := store.Rewrite(ctx, id)
+		if err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		if _, err := w.Write([]byte("rebuilt")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		// Until the commit the old content is what readers get.
+		if got := read(t, store, id); string(got) != "damaged content" {
+			t.Errorf("before Commit the shard reads %q", got)
+		}
+		if err := w.Commit(ctx); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if got := read(t, store, id); string(got) != "rebuilt" {
+			t.Errorf("after Commit the shard reads %q", got)
+		}
+
+		// An aborted rewrite leaves the shard as it was.
+		w, err = store.Rewrite(ctx, id)
+		if err != nil {
+			t.Fatalf("Rewrite: %v", err)
+		}
+		if _, err := w.Write([]byte("never committed")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := w.Abort(); err != nil {
+			t.Fatalf("Abort: %v", err)
+		}
+		if got := read(t, store, id); string(got) != "rebuilt" {
+			t.Errorf("after an aborted rewrite the shard reads %q", got)
+		}
+
+		// Rewriting a shard that does not exist creates it.
+		missing := shard(2, 0)
+		w, err = store.Rewrite(ctx, missing)
+		if err != nil {
+			t.Fatalf("Rewrite(missing): %v", err)
+		}
+		if _, err := w.Write([]byte("created")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := w.Commit(ctx); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		if got := read(t, store, missing); string(got) != "created" {
+			t.Errorf("a rewritten missing shard reads %q", got)
+		}
+	})
+
 	t.Run("list", func(t *testing.T) {
 		store := open(t)
 		listed := func() map[object.ShardID]ports.ShardInfo {
@@ -634,8 +690,8 @@ func ShardStoreContract(t *testing.T, open func(t *testing.T) ports.ShardStore) 
 				t.Errorf("shard %s is not listed", id)
 				continue
 			}
-			if info.CommittedAt.Before(before) || info.CommittedAt.After(time.Now().Add(time.Minute)) {
-				t.Errorf("shard %s: CommittedAt = %v, want about now", id, info.CommittedAt)
+			if info.ModifiedAt.Before(before) || info.ModifiedAt.After(time.Now().Add(time.Minute)) {
+				t.Errorf("shard %s: ModifiedAt = %v, want about now", id, info.ModifiedAt)
 			}
 		}
 

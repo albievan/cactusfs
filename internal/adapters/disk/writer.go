@@ -21,6 +21,8 @@ type shardWriter struct {
 	index  uint32 // shard index as the checksum covers it
 	blocks uint64 // blocks already written
 	done   bool
+	// replace allows the shard to exist: the commit replaces it.
+	replace bool
 }
 
 // Write implements ports.ShardWriter.
@@ -88,7 +90,7 @@ func (w *shardWriter) finish(ctx context.Context) error {
 	if err := w.file.Close(); err != nil {
 		return err
 	}
-	return w.drive.publish(w.tmp, w.id)
+	return w.drive.publish(w.tmp, w.id, w.replace)
 }
 
 // Abort implements ports.ShardWriter.

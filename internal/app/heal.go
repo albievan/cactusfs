@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -28,6 +29,8 @@ type HealResult struct {
 	// Unrecoverable reports that more shards were damaged than parity can
 	// rebuild: the object is lost.
 	Unrecoverable bool
+	// Verified is the number of stored bytes that were read and verified.
+	Verified int64
 }
 
 type healTarget struct {
@@ -49,6 +52,9 @@ type Healer struct {
 	// queued holds the targets in the queue, so that an object read a
 	// thousand times while degraded is healed once.
 	queued map[healTarget]bool
+	// active holds the targets being healed, so that the queue and the
+	// scrubber never rewrite the same shards at the same time.
+	active map[healTarget]bool
 }
 
 func newHealer(index ports.ObjectIndex, storage *shardStorage, logger *slog.Logger, observe func(HealResult)) *Healer {
@@ -57,7 +63,7 @@ func newHealer(index ports.ObjectIndex, storage *shardStorage, logger *slog.Logg
 	}
 	return &Healer{
 		index: index, storage: storage, logger: logger, observe: observe,
-		queue: make(chan healTarget, healQueueSize), queued: map[healTarget]bool{},
+		queue: make(chan healTarget, healQueueSize), queued: map[healTarget]bool{}, active: map[healTarget]bool{},
 	}
 }
 
@@ -94,11 +100,30 @@ func (h *Healer) Run(ctx context.Context) {
 }
 
 // HealObject verifies every shard of the current version of an object and
-// rebuilds the damaged ones. An object that does not exist any more is not an
-// error. The error wraps domain.ErrIntegrity when the object cannot be
-// rebuilt.
+// rebuilds the damaged ones. An object that does not exist any more, or that
+// is being healed already, is not an error. The error wraps
+// domain.ErrIntegrity when the object cannot be rebuilt.
 func (h *Healer) HealObject(ctx context.Context, bucketName, key string) (HealResult, error) {
+	return h.heal(ctx, bucketName, key, nil)
+}
+
+func (h *Healer) heal(ctx context.Context, bucketName, key string, slow throttle) (HealResult, error) {
+	target := healTarget{bucket: bucketName, key: key}
 	result := HealResult{Bucket: bucketName, Key: key}
+
+	h.mu.Lock()
+	if h.active[target] {
+		h.mu.Unlock()
+		return result, nil
+	}
+	h.active[target] = true
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.active, target)
+		h.mu.Unlock()
+	}()
+
 	version, err := h.index.GetObject(ctx, bucketName, key)
 	if errors.Is(err, domain.ErrObjectNotFound) || errors.Is(err, domain.ErrBucketNotFound) {
 		return result, nil
@@ -107,37 +132,54 @@ func (h *Healer) HealObject(ctx context.Context, bucketName, key string) (HealRe
 		return result, fmt.Errorf("heal.Object: %w", err)
 	}
 
-	outcome, err := h.storage.heal(ctx, version)
-	result.Shards, result.Damaged, result.Rebuilt = outcome.shards, outcome.damaged, outcome.rebuilt
-	if err != nil {
-		// The version may have been replaced or deleted while it was being
-		// checked; its shards disappearing is then not damage.
-		if current, getErr := h.index.GetObject(ctx, bucketName, key); getErr != nil || current.DataID != version.DataID {
-			return HealResult{Bucket: bucketName, Key: key}, nil
-		}
-		if errors.Is(err, domain.ErrIntegrity) {
+	outcome, healErr := h.storage.heal(ctx, version, slow)
+	result.Shards, result.Damaged, result.Rebuilt, result.Verified = outcome.shards, outcome.damaged, len(outcome.rebuilt), outcome.verified
+	if healErr == nil && result.Damaged == 0 {
+		h.observe(result)
+		return result, nil
+	}
+
+	// Something was found or done. Before acting on it, see whether the
+	// version is still the object's current one: it may have been replaced
+	// or deleted while it was being checked, and its shards disappearing is
+	// then not damage.
+	if h.replaced(ctx, version) {
+		// What was rebuilt belongs to nothing any more. Only that is
+		// removed; a shard this heal did not write is never touched.
+		h.storage.removeShards(ctx, version.DataID, version.Layout, outcome.rebuilt)
+		return HealResult{Bucket: bucketName, Key: key}, nil
+	}
+	if healErr != nil {
+		if errors.Is(healErr, domain.ErrIntegrity) {
 			result.Unrecoverable = true
 			h.logger.ErrorContext(ctx, "object is damaged beyond repair",
 				slog.String("bucket", bucketName), slog.String("data_id", version.DataID.String()),
 				slog.Int("damaged_shards", result.Damaged), slog.Int("shards", result.Shards))
 			h.observe(result)
 		}
-		return result, fmt.Errorf("heal.Object: %w", err)
-	}
-	if result.Damaged == 0 {
-		h.observe(result)
-		return result, nil
-	}
-
-	// If the version was replaced or deleted meanwhile, the shards just
-	// rebuilt belong to nothing and are removed again.
-	if current, err := h.index.GetObject(ctx, bucketName, key); err != nil || current.DataID != version.DataID {
-		h.storage.remove(ctx, version.DataID, version.Layout)
-		return HealResult{Bucket: bucketName, Key: key}, nil
+		return result, fmt.Errorf("heal.Object: %w", healErr)
 	}
 	h.logger.WarnContext(ctx, "object healed",
 		slog.String("bucket", bucketName), slog.String("data_id", version.DataID.String()),
 		slog.Int("damaged_shards", result.Damaged), slog.Int("rebuilt_shards", result.Rebuilt))
 	h.observe(result)
 	return result, nil
+}
+
+// replaced reports whether the object definitely has another current version
+// than v, or none. It answers false whenever it cannot tell: a lookup that
+// fails - because the node is shutting down, for one - is no evidence that
+// the version is gone, and nothing may be removed on the strength of it.
+func (h *Healer) replaced(ctx context.Context, v object.Version) bool {
+	// Shutdown cancels ctx; the answer is still needed to decide whether
+	// rebuilt shards are kept.
+	current, err := h.index.GetObject(context.WithoutCancel(ctx), v.Bucket, v.Key)
+	switch {
+	case err == nil:
+		return current.DataID != v.DataID
+	case errors.Is(err, domain.ErrObjectNotFound), errors.Is(err, domain.ErrBucketNotFound):
+		return true
+	default:
+		return false
+	}
 }

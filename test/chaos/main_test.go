@@ -66,6 +66,10 @@ type node struct {
 	dir    string
 	access string
 	secret string
+	// driveCount is the number of drives; extra is appended to the server's
+	// arguments on the next start.
+	driveCount int
+	extra      []string
 
 	cmd    *exec.Cmd
 	s3     *s3.Client
@@ -82,7 +86,7 @@ func newNode(t *testing.T) *node {
 		t.Fatal(err)
 	}
 	return &node{
-		t: t, dir: t.TempDir(),
+		t: t, dir: t.TempDir(), driveCount: drives,
 		access: "CHAOS" + strings.ToUpper(hex.EncodeToString(raw[:6])), secret: hex.EncodeToString(raw[6:]),
 	}
 }
@@ -100,12 +104,12 @@ func (n *node) args() []string {
 		"--admin-addr", "127.0.0.1:0", "--s3-addr", "127.0.0.1:0",
 		// Scrub continuously and collect garbage every second, so that the
 		// tests see repairs within seconds.
-		"--scrub-interval", "1s", "--scrub-rate-mib", "0", "--gc-interval", "1s", "--gc-grace", "1m",
+		"--scrub-interval", "1s", "--scrub-rate-mib", "0", "--gc-interval", "1s", "--gc-grace", "1h",
 	}
-	for i := range drives {
+	for i := range n.driveCount {
 		args = append(args, "--data", n.drive(i))
 	}
-	return args
+	return append(args, n.extra...)
 }
 
 // start runs the node and waits until it serves S3. It returns an error

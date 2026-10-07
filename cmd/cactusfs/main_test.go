@@ -250,7 +250,16 @@ func TestParseServerConfig(t *testing.T) {
 		},
 		{name: "negative scrub interval", args: dev("--scrub-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
 		{name: "negative scrub rate", args: dev("--scrub-rate-mib", "-1"), env: passphrase, wantErr: "must not be negative"},
-		{name: "grace period too short to be safe", args: dev("--gc-grace", "5s"), env: passphrase, wantErr: "grace period"},
+		{name: "grace period too short to be safe", args: dev("--gc-grace", "59m"), env: passphrase, wantErr: "grace period"},
+		{
+			name: "drive replacement confirmed", args: dev("--allow-drive-replacement"), env: passphrase,
+			want: base(func(c *serverConfig) { c.AllowDriveReplacement = true }),
+		},
+		{
+			name: "drive replacement confirmed in the environment", args: dev(), env: withPassphrase(map[string]string{envAllowReplace: "true"}),
+			want: base(func(c *serverConfig) { c.AllowDriveReplacement = true }),
+		},
+		{name: "bad replacement variable", env: withPassphrase(map[string]string{envAllowReplace: "perhaps"}), wantErr: envAllowReplace},
 		{name: "bad scrub rate variable", env: withPassphrase(map[string]string{envScrubRate: "fast"}), wantErr: envScrubRate},
 		{name: "bad scrub interval variable", env: withPassphrase(map[string]string{envScrubInterval: "often"}), wantErr: envScrubInterval},
 		{name: "bad collection interval variable", env: withPassphrase(map[string]string{envGCInterval: "often"}), wantErr: envGCInterval},

@@ -22,9 +22,13 @@ type MemShardStore struct {
 	committed map[object.ShardID]time.Time
 	damaged   map[object.ShardID]bool
 
+	deployment string
+
 	// Now tells the store what time it is when a shard is committed; the
 	// real time when nil.
 	Now func() time.Time
+	// FailClaim, when set, is returned by Claim.
+	FailClaim error
 
 	// FailCreate, FailWrite, FailCommit and FailOpen, when set, are returned
 	// by the corresponding operation.
@@ -55,6 +59,44 @@ func (m *MemShardStore) Create(_ context.Context, id object.ShardID) (ports.Shar
 		return nil, fmt.Errorf("%w: shard %s already exists", domain.ErrInvalidArgument, id)
 	}
 	return &memShardWriter{store: m, id: id}, nil
+}
+
+// Empty reports whether the store holds no shard.
+func (m *MemShardStore) Empty() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.shards) == 0
+}
+
+// DeploymentID returns the deployment the store was claimed for.
+func (m *MemShardStore) DeploymentID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deployment
+}
+
+// Claim records that the store belongs to a deployment.
+func (m *MemShardStore) Claim(_ context.Context, deploymentID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailClaim != nil {
+		return m.FailClaim
+	}
+	if m.deployment != "" && m.deployment != deploymentID {
+		return fmt.Errorf("%w: drive %s belongs to deployment %s", domain.ErrInvalidArgument, m.id, m.deployment)
+	}
+	m.deployment = deploymentID
+	return nil
+}
+
+// Rewrite implements ports.ShardStore.
+func (m *MemShardStore) Rewrite(_ context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailCreate != nil {
+		return nil, m.FailCreate
+	}
+	return &memShardWriter{store: m, id: id, replace: true}, nil
 }
 
 // Open implements ports.ShardStore.
@@ -89,7 +131,7 @@ func (m *MemShardStore) List(ctx context.Context, visit func(ports.ShardInfo) er
 	m.mu.Lock()
 	infos := make([]ports.ShardInfo, 0, len(m.shards))
 	for id := range m.shards {
-		infos = append(infos, ports.ShardInfo{ID: id, CommittedAt: m.committed[id]})
+		infos = append(infos, ports.ShardInfo{ID: id, ModifiedAt: m.committed[id]})
 	}
 	m.mu.Unlock()
 	for _, info := range infos {
@@ -144,6 +186,8 @@ type memShardWriter struct {
 	id    object.ShardID
 	buf   bytes.Buffer
 	done  bool
+	// replace allows the shard to exist: the commit replaces it.
+	replace bool
 }
 
 // Write implements ports.ShardWriter.
@@ -170,10 +214,11 @@ func (w *memShardWriter) Commit(context.Context) error {
 	if w.store.FailCommit != nil {
 		return w.store.FailCommit
 	}
-	if _, ok := w.store.shards[w.id]; ok {
+	if _, ok := w.store.shards[w.id]; ok && !w.replace {
 		return fmt.Errorf("%w: shard %s already exists", domain.ErrInvalidArgument, w.id)
 	}
 	w.done = true
+	delete(w.store.damaged, w.id)
 	w.store.shards[w.id] = bytes.Clone(w.buf.Bytes())
 	now := time.Now()
 	if w.store.Now != nil {

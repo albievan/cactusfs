@@ -18,6 +18,12 @@ type ShardStore interface {
 	// domain.ErrInvalidArgument when the shard already exists: shards are
 	// immutable.
 	Create(ctx context.Context, id object.ShardID) (ShardWriter, error)
+	// Rewrite starts writing a shard that may already exist. When the
+	// writer's Commit returns, the new content has replaced the old in one
+	// step; until then, and if the writer is aborted, the old content stays
+	// as it was. Healing uses it to replace a damaged shard without ever
+	// leaving the object with fewer shards than before.
+	Rewrite(ctx context.Context, id object.ShardID) (ShardWriter, error)
 	// Open opens a committed shard for reading. The error wraps
 	// domain.ErrShardNotFound when it does not exist.
 	Open(ctx context.Context, id object.ShardID) (ShardReader, error)
@@ -33,8 +39,9 @@ type ShardStore interface {
 // ShardInfo describes a committed shard without opening it.
 type ShardInfo struct {
 	ID object.ShardID
-	// CommittedAt is when the shard was made durable.
-	CommittedAt time.Time
+	// ModifiedAt is when the shard's content was last written, which is at
+	// or shortly before the moment it was made durable.
+	ModifiedAt time.Time
 }
 
 // ShardWriter writes one shard. Exactly one of Commit or Abort must be

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -78,52 +79,118 @@ func TestValidateRejectsMalformedTopologies(t *testing.T) {
 	}
 }
 
+func TestCheckNewDeployment(t *testing.T) {
+	t.Parallel()
+
+	empty := []cluster.DriveState{{ID: "a", Empty: true}, {ID: "b", Empty: true}}
+	if err := cluster.CheckNewDeployment(empty); err != nil {
+		t.Errorf("empty, unclaimed drives: %v", err)
+	}
+	// Drives with data and no record of a deployment: the metadata
+	// directory is the wrong one. Adopting them would let the collector
+	// remove everything on them.
+	for name, drives := range map[string][]cluster.DriveState{
+		"a drive holds data":                {{ID: "a", Empty: true}, {ID: "b"}},
+		"a drive is claimed":                {{ID: "a", Empty: true}, {ID: "b", Empty: true, DeploymentID: "other"}},
+		"a drive holds data and is claimed": {{ID: "a", DeploymentID: "other"}},
+	} {
+		if err := cluster.CheckNewDeployment(drives); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%s: error = %v, want %v", name, err, domain.ErrInvalidArgument)
+		}
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	t.Parallel()
 	topology, err := cluster.NewTopology(ids(6))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := cluster.DriveState{ID: "new-drive", Fresh: true}
+	topology.DeploymentID = "this-deployment"
+	empty := cluster.DriveState{ID: "new-drive", Empty: true}
 	without := func(skip ...string) []cluster.DriveState {
 		var out []cluster.DriveState
 		for _, id := range ids(6) {
 			if !slices.Contains(skip, id) {
-				out = append(out, cluster.DriveState{ID: id})
+				out = append(out, cluster.DriveState{ID: id, DeploymentID: "this-deployment"})
 			}
 		}
 		return out
 	}
+	replaces := &cluster.Replacement{Position: cluster.Position{Set: 0, Slot: 2}, Old: "drive-02", New: "new-drive"}
 
 	tests := []struct {
 		name     string
 		attached []cluster.DriveState
+		allow    bool
 		want     *cluster.Replacement
-		wantErr  bool
+		wantErr  string
 	}{
-		{name: "all present", attached: attached(ids(6)...)},
+		{name: "all present", attached: without()},
 		{name: "order does not matter", attached: attached("drive-05", "drive-00", "drive-03", "drive-01", "drive-04", "drive-02")},
+		{name: "drives not claimed yet", attached: attached(ids(6)...)},
+		{name: "a confirmed replacement", attached: append(without("drive-02"), empty), allow: true, want: replaces},
 		{
-			name: "one empty drive replaces one missing drive", attached: append(without("drive-02"), fresh),
-			want: &cluster.Replacement{Position: cluster.Position{Set: 0, Slot: 2}, Old: "drive-02", New: "new-drive"},
+			name:     "an empty drive claimed for this deployment, as after an interrupted start",
+			attached: append(without("drive-02"), cluster.DriveState{ID: "new-drive", Empty: true, DeploymentID: "this-deployment"}),
+			allow:    true, want: replaces,
 		},
-		{name: "a drive is missing", attached: without("drive-02"), wantErr: true},
-		{name: "an extra drive", attached: append(attached(ids(6)...), fresh), wantErr: true},
-		{name: "the unknown drive already holds data", attached: append(without("drive-02"), cluster.DriveState{ID: "foreign"}), wantErr: true},
-		{name: "two drives replaced at once", attached: append(without("drive-02", "drive-03"), fresh, cluster.DriveState{ID: "new-2", Fresh: true}), wantErr: true},
-		{name: "the same drive twice", attached: append(attached(ids(6)...), cluster.DriveState{ID: "drive-00"}), wantErr: true},
-		{name: "nothing attached", wantErr: true},
+		// A mount that is missing looks exactly like this.
+		{name: "a replacement that was not confirmed", attached: append(without("drive-02"), empty), wantErr: "confirm the replacement"},
+		{name: "a drive is missing", attached: without("drive-02"), allow: true, wantErr: "do not match the deployment"},
+		{name: "an extra drive", attached: append(without(), empty), allow: true, wantErr: "do not match the deployment"},
+		{name: "the unknown drive holds data", attached: append(without("drive-02"), cluster.DriveState{ID: "foreign"}), allow: true, wantErr: "holds data"},
+		{
+			name:     "a drive of another deployment",
+			attached: append(without("drive-02"), cluster.DriveState{ID: "foreign", Empty: true, DeploymentID: "other"}),
+			allow:    true, wantErr: "belongs to deployment other",
+		},
+		{
+			name:     "a known drive ID claimed for another deployment",
+			attached: append(without("drive-02"), cluster.DriveState{ID: "drive-02", DeploymentID: "other"}),
+			wantErr:  "belongs to deployment other",
+		},
+		{
+			name:     "two drives replaced at once",
+			attached: append(without("drive-02", "drive-03"), empty, cluster.DriveState{ID: "new-2", Empty: true}),
+			allow:    true, wantErr: "at a time",
+		},
+		{name: "the same drive twice", attached: append(without(), cluster.DriveState{ID: "drive-00"}), wantErr: "attached twice"},
+		{name: "nothing attached", allow: true, wantErr: "do not match the deployment"},
 	}
 	for _, tt := range tests {
-		got, err := topology.Reconcile(tt.attached)
-		if tt.wantErr {
-			if !errors.Is(err, domain.ErrInvalidArgument) || got != nil {
-				t.Errorf("%s: Reconcile = %+v, %v; want %v", tt.name, got, err, domain.ErrInvalidArgument)
+		got, err := topology.Reconcile(tt.attached, tt.allow)
+		if tt.wantErr != "" {
+			if !errors.Is(err, domain.ErrInvalidArgument) || got != nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("%s: Reconcile = %+v, %v; want an error containing %q", tt.name, got, err, tt.wantErr)
 			}
 			continue
 		}
 		if err != nil || (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
 			t.Errorf("%s: Reconcile = %+v, %v; want %+v", tt.name, got, err, tt.want)
+		}
+	}
+}
+
+// TestNoReplacementWithoutParity: with fewer than four drives nothing can be
+// rebuilt. An empty directory where a drive should be - a mount that is
+// missing - must never take the drive's place, confirmed or not: the drive
+// would be retired for good with the only copy of its objects on it.
+func TestNoReplacementWithoutParity(t *testing.T) {
+	t.Parallel()
+
+	for _, n := range []int{1, 2, 3} {
+		topology, err := cluster.NewTopology(ids(n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		present := attached(ids(n)[1:]...)
+		present = append(present, cluster.DriveState{ID: "empty-mount-point", Empty: true})
+		for _, allow := range []bool{false, true} {
+			got, err := topology.Reconcile(present, allow)
+			if !errors.Is(err, domain.ErrInvalidArgument) || got != nil || !strings.Contains(err.Error(), "no parity") {
+				t.Errorf("%d drives, confirmed=%v: Reconcile = %+v, %v; want a refusal naming the missing parity", n, allow, got, err)
+			}
 		}
 	}
 }
@@ -134,7 +201,12 @@ func TestReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replacement, err := original.Reconcile(append(attached("drive-00", "drive-01", "drive-03", "drive-04", "drive-05"), cluster.DriveState{ID: "new-a", Fresh: true}))
+	original.DeploymentID = "this-deployment"
+	newDrive := func(id string) cluster.DriveState { return cluster.DriveState{ID: id, Empty: true} }
+	rest := func() []cluster.DriveState {
+		return attached("drive-00", "drive-01", "drive-03", "drive-04", "drive-05")
+	}
+	replacement, err := original.Reconcile(append(rest(), newDrive("new-a")), true)
 	if err != nil || replacement == nil {
 		t.Fatalf("Reconcile: %+v, %v", replacement, err)
 	}
@@ -142,6 +214,9 @@ func TestReplace(t *testing.T) {
 	replaced := original.Replace(*replacement)
 	if err := replaced.Validate(); err != nil {
 		t.Fatalf("Validate after Replace: %v", err)
+	}
+	if replaced.DeploymentID != "this-deployment" {
+		t.Errorf("Replace lost the deployment ID: %q", replaced.DeploymentID)
 	}
 	// The receiver is untouched.
 	if current, _ := original.Current("drive-02"); current != "drive-02" {
@@ -162,11 +237,10 @@ func TestReplace(t *testing.T) {
 
 	// The retired drive must not come back, and the slot can be replaced
 	// again.
-	back := append(attached("drive-00", "drive-01", "drive-03", "drive-04", "drive-05"), cluster.DriveState{ID: "drive-02"})
-	if _, err := replaced.Reconcile(back); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := replaced.Reconcile(append(rest(), cluster.DriveState{ID: "drive-02"}), true); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("re-attaching a replaced drive: error = %v, want %v", err, domain.ErrInvalidArgument)
 	}
-	second, err := replaced.Reconcile(append(attached("drive-00", "drive-01", "drive-03", "drive-04", "drive-05"), cluster.DriveState{ID: "new-b", Fresh: true}))
+	second, err := replaced.Reconcile(append(rest(), newDrive("new-b")), true)
 	if err != nil || second == nil || second.Old != "new-a" {
 		t.Fatalf("second replacement: %+v, %v", second, err)
 	}

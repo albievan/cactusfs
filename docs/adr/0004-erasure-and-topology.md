@@ -56,56 +56,101 @@ drive.
   is as trustworthy as an intact one. Fewer than `Data` usable shards is an error; no
   bytes are returned. A degraded read queues the object for healing.
 
-### Topology
+### Topology and drive identity
 
 Which drive is in which slot of which erasure set is replicated metadata
-(`topology.set`, compare-and-set on a version), written once at the first start from the
-attached drives. Object layouts name drive IDs, never directories or positions, so the
-order of `--data` flags is irrelevant.
+(`topology.set`, compare-and-set on a version). Object layouts name drive IDs, never
+directories or positions, so the order of `--data` flags is irrelevant.
 
-A slot outlives its drive. When exactly one drive of the topology is absent and exactly
-one attached drive is unknown **and was empty when opened**, that drive takes over the
-slot; the old ID is kept in the slot's `retired` list, and layouts that name it resolve
-to the new drive. Anything else — a missing drive, an unknown drive that holds data, two
-changes at once, a retired drive coming back — stops the node with a message.
+A deployment has a random **deployment ID**, created with its topology. Every drive is
+*claimed* for it: the ID is written, durably, into the `cluster_id` field that ADR-0001
+reserved in `cactusfs-drive.json`. Drives and metadata that do not belong together are
+therefore never combined:
+
+- **A new deployment** is created only from drives that are all empty and unclaimed.
+  Drives that hold data while the metadata directory knows no deployment mean the wrong
+  metadata is in use (a missing mount, a wrong `--meta-dir`); the node refuses to start.
+  Adopting them would make every shard look unreferenced, and the collector would then
+  delete it.
+- **An existing deployment** refuses a drive claimed for another deployment, a drive it
+  retired earlier, and an unknown drive that holds data.
+- **Replacement.** When exactly one drive of the topology is absent and exactly one
+  attached drive is unknown and empty, the empty drive may take over the slot — only
+  where the set has parity to rebuild from, and only when the operator confirms it for
+  that start with `--allow-drive-replacement`. An empty directory is also what a missing
+  mount looks like, and a replacement is permanent: the old ID moves to the slot's
+  `retired` list, layouts that name it resolve to the new drive, and the old drive is
+  refused from then on. Without parity (fewer than four drives) a replacement is never
+  made: nothing could be rebuilt.
+- **Emptiness is a property of the drive** (no shard file on it), not of who formatted
+  it, and the claim is written after the topology is committed. A start interrupted at
+  any point — after formatting, after the commit, before the claim — is simply repeated.
 
 ### Healing, scrubbing, collecting
 
-- **Heal** verifies every block of every shard of a version and rewrites the shards that
-  are missing, truncated or corrupt from the others (delete, then create: shards are
-  immutable). Reed-Solomon is deterministic, so a rebuilt shard is byte-identical. If the
-  version was replaced or deleted meanwhile, what was rebuilt is removed again.
-- **Scrub** heals every object in turn (`--scrub-interval`, default 24 h;
-  `--scrub-rate-mib`, default 64 MiB/s). It is what finds bitrot in data nobody reads and
-  what refills a replaced drive.
-- **Collect** removes shards that no object version refers to and that are older than
-  `--gc-grace` (default 24 h, at least 1 min). The state machine keeps a derived index
-  from data ID to reference count (`data` bucket), so the collector asks one question per
-  shard instead of scanning every object. The index is rebuilt when a state lacks it.
+- **Heal** verifies every block of every shard of a version and rewrites the ones that
+  are missing, truncated or corrupt from the others. It is built so that it can never
+  make an object worse:
+  - only a shard that is *definitely* damaged (not found, wrong size, checksum mismatch)
+    is rebuilt; any other error — too many open files, an I/O error — stops the heal of
+    that object with nothing changed;
+  - a rebuilt shard is written in full beside the damaged one and replaces it with one
+    rename (`ShardStore.Rewrite`); a rebuild that fails leaves every shard as it was;
+  - afterwards it checks that the version is still the object's current one. Only when a
+    lookup *succeeds* and shows another version, or none, are the shards it just rebuilt
+    removed — those and no others. A lookup that fails, as during shutdown, removes
+    nothing;
+  - one heal per object at a time.
+
+  Reed-Solomon is deterministic, so a rebuilt shard is byte-identical to the lost one.
+- **Scrub** heals every object in turn (`--scrub-interval`, default 24 h), throttled as
+  it reads (`--scrub-rate-mib`, default 64 MiB/s). It is what finds bitrot in data nobody
+  reads and what refills a replaced drive.
+- **Collect** removes shards that no object version refers to. The state machine keeps a
+  derived index from data ID to reference count (`data` bucket), rebuilt when a state
+  lacks it, so the collector asks one question per shard. A new shard is unreferenced
+  until its version commits; three things keep the collector away from it:
+  - a write pins its data ID in memory from the moment its shards are created until its
+    version is committed or definitely refused; a commit whose outcome is unknown
+    (ADR-0003) stays pinned for the life of the process;
+  - nothing is collected, and no reference question is answered, while the metadata is
+    not ready — a state machine that has stopped has entries it has not applied;
+  - only shards older than `--gc-grace` (default 24 h, at least 1 h) are removed.
 
 ### Formats
 
 - Shard files and the drive file: unchanged (ADR-0001, version 1).
 - `object.put`: unchanged; `data_shards`, `parity_shards`, `stripe_size` and `shards` now
   take values other than 1/0.
-- New under entry schema version 1: `topology.set`. New state buckets: `cluster`, `data`.
-  No release has shipped schema version 1, so no older binary can meet these.
+- The drive file: unchanged in form; `cluster_id` now holds the deployment ID.
+- New under entry schema version 1: `topology.set` (with `deployment_id`). New state
+  buckets: `cluster`, `data`. No release has shipped schema version 1, so no older binary
+  can meet these.
+- `ports.ShardStore` gains `List` and `Rewrite`.
 
 ## Consequences
 
 - An object survives the loss or corruption of any `Parity` of its shards, and stays
   writable while a write quorum of its drives works.
 - **All drives must open for the node to start.** A dead drive has to be replaced by an
-  empty one (one at a time) before a restart. Starting degraded is not implemented.
-- Objects written by milestone 1 (one shard, no parity) remain readable; they are not
-  re-encoded. A deployment that had four or more drives under milestone 1 keeps those
-  objects without parity until they are rewritten.
+  empty one, one at a time and confirmed, before a restart. Starting degraded is not
+  implemented.
+- **A replacement cannot be undone.** If the wrong drive was confirmed as gone, its
+  contents are rebuilt on the new one from parity, and the old drive is not accepted
+  back.
+- **A shard is given up for the rest of a read or heal after one bad block.** An object
+  whose bad blocks sit in different stripes of more than *parity* shards could in
+  principle be recovered stripe by stripe; today it is reported as unrecoverable.
+  Nothing is deleted in that case.
+- A layout of one shard without parity stays readable next to erasure-coded ones; the
+  reader goes by what each version records. Drives that hold data but no deployment
+  claim, as a pre-release milestone 1 build left them, are not adopted.
 - Changing the number of drives of an existing deployment is not supported; the
   topology is fixed at first start apart from one-for-one replacement.
 - A rebuilt shard needs `Data` full shards to be read: healing a large drive is
   proportional to the data on the whole set.
-- The grace period is the only thing between an in-flight upload's shards and the
-  collector. It must stay far above the longest time an upload can take between making
-  its shards durable and committing.
+- The pins that protect a write in progress live in memory. After a crash they are not
+  needed: an upload that was not acknowledged is dead, and entries that reached the log
+  are applied before the node serves or collects anything.
 - Writes encode and write shards sequentially. Parallel shard I/O is a later
   optimisation that does not touch any format.

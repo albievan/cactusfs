@@ -78,6 +78,17 @@ func (s *shardStore) Create(ctx context.Context, id object.ShardID) (ports.Shard
 	return &shardWriter{ShardWriter: writer, t: s.t}, nil
 }
 
+// Rewrite implements ports.ShardStore.
+func (s *shardStore) Rewrite(ctx context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	ctx, done := s.t.call(ctx, portShards, "Rewrite")
+	writer, err := s.next.Rewrite(ctx, id)
+	done(err)
+	if err != nil {
+		return nil, err
+	}
+	return &shardWriter{ShardWriter: writer, t: s.t}, nil
+}
+
 // Open implements ports.ShardStore.
 func (s *shardStore) Open(ctx context.Context, id object.ShardID) (ports.ShardReader, error) {
 	ctx, done := s.t.call(ctx, portShards, "Open")

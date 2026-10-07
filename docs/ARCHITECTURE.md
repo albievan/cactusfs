@@ -112,7 +112,8 @@ matching flag, and the flag wins.
 | `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
 | `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | scrub read limit in MiB/s; `0` is no limit |
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
-| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1m`) |
+| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`) |
+| `--allow-drive-replacement` | `CACTUSFS_ALLOW_DRIVE_REPLACEMENT` | `false` | confirm, for this start, that one empty drive replaces one missing drive; permanent |
 | `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | OTLP/HTTP trace collector; nothing is exported when empty |
 | `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listeners close |
@@ -189,12 +190,19 @@ Standalone is a cluster of one, not a second implementation.
   that meets a missing or damaged shard rebuilds the stripe from parity and queues the
   object for healing. Bytes that fail verification are never returned.
 - **Self-healing.** Healing rewrites missing, truncated and corrupt shards from the
-  others. A scrubber verifies every block of every object in the background and heals
-  what it finds; it is also what refills a replaced drive.
+  others, and is built never to make an object worse: only definite damage is rebuilt,
+  and a rebuilt shard replaces the old one in one step. A scrubber verifies every block
+  of every object in the background and heals what it finds; it is also what refills a
+  replaced drive. A collector removes shards no object refers to, never those of a write
+  in progress and never while the metadata is not ready.
 - **Topology.** Which drive is in which slot of which erasure set is recorded in Raft
   metadata at the first start and addressed by drive ID, so the order of `--data` does
-  not matter. One empty drive may take the place of one missing drive; anything else
-  stops the node. All drives must open for a node to start.
+  not matter. Every drive is claimed for the deployment's ID, so drives and metadata
+  that do not belong together are refused: a node started against empty metadata with
+  drives full of data does not start. One empty drive may take the place of one missing
+  drive when the set has parity and the operator confirms it
+  (`--allow-drive-replacement`); anything else stops the node. All drives must open for
+  a node to start.
 - **Keys are not paths.** Object keys and bucket names never become filesystem paths.
   Data lives under generated IDs, so case-insensitive filesystems, Windows reserved
   names, path length limits and `../` cannot affect it.

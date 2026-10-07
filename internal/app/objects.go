@@ -67,6 +67,13 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	}, nil
 }
 
+// InFlight reports whether a write that uses the data ID has not been
+// resolved yet: its shards exist but its version is neither committed nor
+// definitely refused. The garbage collector must leave such shards alone.
+func (s *ObjectService) InFlight(dataID object.ID) bool {
+	return s.storage.isPinned(dataID)
+}
+
 // Healer returns the service that repairs damaged objects. Its Run method
 // must be running for degraded reads and writes to be repaired.
 func (s *ObjectService) Healer() *Healer {
@@ -142,7 +149,16 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if err != nil {
 		return object.Version{}, err
 	}
-	defer writer.abort()
+	// From here until the version is committed or definitely refused, the
+	// shards are unreferenced and must be kept from the collector.
+	s.storage.pin(version.DataID)
+	resolved := true
+	defer func() {
+		writer.abort()
+		if resolved {
+			s.storage.unpin(version.DataID)
+		}
+	}()
 
 	body := &countingReader{reader: io.LimitReader(in.Body, object.MaxSize+1)}
 	if _, err := io.Copy(writer, stream.Encrypt(body)); err != nil {
@@ -182,7 +198,10 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		// applied, after a restart for example, and would then point at
 		// data that is gone; the unreferenced shard of a version that
 		// never appears is left to the collector instead.
-		if !errors.Is(err, domain.ErrOutcomeUnknown) {
+		if errors.Is(err, domain.ErrOutcomeUnknown) {
+			// Stays pinned for as long as this process lives.
+			resolved = false
+		} else {
 			s.storage.remove(ctx, version.DataID, version.Layout)
 		}
 		return object.Version{}, err

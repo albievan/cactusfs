@@ -497,21 +497,80 @@ func TestAbortIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestFreshIsTrueOnlyForADriveJustFormatted(t *testing.T) {
+func TestEmptyDescribesWhatIsOnTheDrive(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	first := openDrive(t, dir)
-	if !first.Fresh() {
-		t.Error("a drive that was just formatted does not report itself fresh")
+	if !first.Empty() {
+		t.Error("a new drive does not report itself empty")
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Only an empty drive may replace a missing one; a drive that has been
-	// used before must never be mistaken for one.
-	if again := openDrive(t, dir); again.Fresh() {
-		t.Error("a drive that was formatted earlier reports itself fresh")
+	// A start that was interrupted right after formatting must find the
+	// drive just as usable the next time: empty is what the drive holds,
+	// not who formatted it.
+	second := openDrive(t, dir)
+	if !second.Empty() {
+		t.Error("a formatted drive without shards does not report itself empty")
+	}
+	writeShard(t, second, shardID(1, 0), []byte("data"))
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A drive that holds data is never mistaken for a replacement.
+	third := openDrive(t, dir)
+	if third.Empty() {
+		t.Error("a drive that holds a shard reports itself empty")
+	}
+	if err := third.Delete(context.Background(), shardID(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if again := openDrive(t, dir); !again.Empty() {
+		t.Error("a drive whose shards were all deleted does not report itself empty")
+	}
+}
+
+func TestClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	d := openDrive(t, dir)
+	id := d.DriveID()
+	if d.DeploymentID() != "" {
+		t.Errorf("a new drive is claimed for %q", d.DeploymentID())
+	}
+	if err := d.Claim(ctx, ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("Claim(empty) error = %v", err)
+	}
+	if err := d.Claim(ctx, "deployment-a"); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := d.Claim(ctx, "deployment-a"); err != nil {
+		t.Errorf("claiming again for the same deployment: %v", err)
+	}
+	// A drive of one deployment is never taken over by another.
+	if err := d.Claim(ctx, "deployment-b"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("Claim for another deployment: error = %v, want %v", err, domain.ErrInvalidArgument)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The claim is durable and does not change the drive's identity.
+	reopened := openDrive(t, dir)
+	if reopened.DeploymentID() != "deployment-a" || reopened.DriveID() != id {
+		t.Errorf("after reopen: deployment %q, drive %q; want deployment-a, %q", reopened.DeploymentID(), reopened.DriveID(), id)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := openDrive(t, t.TempDir()).Claim(cancelled, "x"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Claim with a cancelled context: %v", err)
 	}
 }
 
