@@ -77,7 +77,16 @@ type Config struct {
 	Cluster *Cluster
 	// Events, when not nil, receives the events of every applied entry.
 	Events ports.EventPublisher
+	// Clock gives the time the leader stamps entries with; nil is the
+	// system clock.
+	Clock ports.Clock
 }
+
+// wallClock is the system clock.
+type wallClock struct{}
+
+// Now implements ports.Clock.
+func (wallClock) Now() time.Time { return time.Now().UTC() }
 
 // Timing holds the Raft timeouts a caller may override.
 type Timing struct {
@@ -135,6 +144,13 @@ type Store struct {
 	// the binary of a later release.
 	supported byte
 	versionOf func(entry) byte
+	// clock gives the time the leader stamps entries with; clustered says
+	// whether other nodes can hold the entry schema back. stamped is the
+	// newest time this node has given an entry.
+	clock     ports.Clock
+	clustered bool
+	stampMu   sync.Mutex
+	stamped   time.Time
 	// stopped is closed when the state machine has stopped.
 	stopped  chan struct{}
 	stopOnce sync.Once
@@ -165,7 +181,11 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	}
 	s := &Store{
 		root: root, logger: cfg.Logger, leaderWait: cfg.Timing.LeaderWait,
-		supported: entrySchemaVersion, versionOf: versionOf, stopped: make(chan struct{}),
+		supported: MetadataVersion, versionOf: versionOf, stopped: make(chan struct{}),
+		clock: cfg.Clock, clustered: cfg.Cluster != nil,
+	}
+	if s.clock == nil {
+		s.clock = wallClock{}
 	}
 	if s.leaderWait <= 0 {
 		s.leaderWait = defaultLeaderWait
@@ -554,8 +574,39 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 	return result, err
 }
 
+// stamp gives an entry the leader's time, once every member applies the
+// schema that carries it. The time never goes back on this node, and the
+// state machine holds it to the time of the entries before it: a leader with
+// a slow clock cannot turn time back.
+func (s *Store) stamp(data []byte) ([]byte, error) {
+	level, err := s.entryVersion()
+	if err != nil {
+		return nil, err
+	}
+	if level < entrySchemaTimed {
+		return data, nil
+	}
+	e, err := decodeEntry(data, s.supported)
+	if err != nil {
+		return nil, err
+	}
+	s.stampMu.Lock()
+	now := s.clock.Now().UTC()
+	if now.Before(s.stamped) {
+		now = s.stamped
+	}
+	s.stamped = now
+	s.stampMu.Unlock()
+	e.At = now
+	return encodeEntry(e, max(data[0], entrySchemaTimed))
+}
+
 // apply commits an encoded entry on this node, which must be the leader.
 func (s *Store) apply(ctx context.Context, data []byte) (applyResult, error) {
+	data, err := s.stamp(data)
+	if err != nil {
+		return applyResult{}, err
+	}
 	wait := defaultApplyWait
 	if deadline, ok := ctx.Deadline(); ok {
 		wait = max(time.Until(deadline), time.Millisecond)

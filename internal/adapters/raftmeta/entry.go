@@ -12,9 +12,9 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
-// Raft entry schema, version 1. See docs/adr/0003-metadata.md; any change
-// that an older binary could not apply needs a new version, an ADR, a
-// migration and an upgrade test.
+// Raft entry schema. Version 1 is docs/adr/0003-metadata.md; version 2 is
+// docs/adr/0008-object-versions.md. Any change that an older binary could not
+// apply needs a new version, an ADR, a migration and an upgrade test.
 //
 // An entry is one version byte followed by a JSON document:
 //
@@ -23,11 +23,22 @@ import (
 // Everything the state machine needs is in the entry: timestamps, identifiers
 // and wrapped keys are produced by the proposer, never while applying, so
 // that every replica computes the same state.
-const entrySchemaVersion = 1
+//
+// Version 2 adds "at": the time the metadata leader gave the entry when it
+// logged it. The state machine never reads a clock; what must be decided on
+// time - whether a retention period has passed - is decided on this.
+const (
+	// entrySchemaVersion is the oldest entry schema, which every binary
+	// applies.
+	entrySchemaVersion = 1
+	// entrySchemaTimed is the schema whose entries carry the leader's time
+	// and the commands of milestone 6.
+	entrySchemaTimed = 2
+)
 
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
-const MetadataVersion = entrySchemaVersion
+const MetadataVersion = entrySchemaTimed
 
 // Command types.
 const (
@@ -44,7 +55,9 @@ const (
 // entry is the decoded form of a Raft log entry. Exactly one of the command
 // fields is set, the one that Type names.
 type entry struct {
-	Type         string           `json:"type"`
+	Type string `json:"type"`
+	// At is the time the metadata leader gave the entry (schema 2).
+	At           time.Time        `json:"at,omitzero"`
 	CreateBucket *bucketRecord    `json:"create_bucket,omitempty"`
 	DeleteBucket *deleteBucketCmd `json:"delete_bucket,omitempty"`
 	PutObject    *versionRecord   `json:"put_object,omitempty"`
@@ -214,8 +227,10 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 }
 
 // versionOf returns the oldest schema version that can express an entry.
-// Every command that exists today is part of version 1.
-func versionOf(entry) byte {
+func versionOf(e entry) byte {
+	if !e.At.IsZero() {
+		return entrySchemaTimed
+	}
 	return entrySchemaVersion
 }
 

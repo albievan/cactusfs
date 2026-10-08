@@ -1,0 +1,106 @@
+# ADR-0008: Entry schema 2, the leader's time, and object versions in the metadata state
+
+- **Status:** accepted; the schema and the time are implemented (PLAN 6.0), the version
+  history is PLAN 6.2
+- **Date:** 2026-10-08
+- **Milestone:** 6
+- **Supersedes:** the single-version object index of ADR-0003, in part
+
+## Context
+
+Milestone 6 adds versioning, Object Lock, multipart uploads and bucket configuration.
+Until now every release only *added* Raft command types to entry schema 1. An older
+binary stops on a command it does not know, which is safe. Milestone 6 changes what
+existing commands mean and carry: a put into a versioned bucket keeps the version it
+replaces, a delete adds a marker, a bucket is created with Object Lock. Entries are
+decoded leniently, so an older binary would not stop on such an entry - it would drop
+the field it does not know and apply something else. That is silent divergence.
+
+Object Lock also needs a time that every replica agrees on. A retention period has
+passed or it has not; replicas that each asked their own clock could disagree, and the
+state machine must be deterministic.
+
+## Decisions
+
+### Entry schema 2
+
+- An entry is still one version byte and a JSON document. Schema 2 adds the field `at`
+  and the commands of milestone 6. `MetadataVersion` is 2.
+- Schema 1 stays the floor: a binary of this release applies entries of both, and
+  writes schema 1 for everything schema 1 can express while any member of the cluster
+  has not registered as applying schema 2. This is the rule of ADR-0005, now used for
+  the first time: the level of a cluster is the lowest version its members registered,
+  and a member that has not registered counts as 1.
+- A node on its own has no other members, so it writes schema 2 from the start.
+- A command of milestone 6 proposed while the cluster is at level 1 is refused as
+  unavailable ("the cluster is being upgraded"), definitely and before anything is
+  logged. Nothing of milestone 6 works until every member runs this release.
+
+### State schema 2
+
+- The state database records its schema. It stays 1 until the first entry of schema 2
+  is applied, which sets it to 2 in the same transaction.
+- So a cluster that is being upgraded, or was upgraded and has not used anything new
+  yet, has a state and snapshots the previous release still reads: a rollback is
+  possible until then. After the first schema 2 entry the previous release refuses the
+  state (it accepts schema 1 only) instead of misreading it. There is no way back from
+  there, as there cannot be: the state holds what the previous release cannot express.
+- Existing data needs no rewrite. A state of schema 1 opens unchanged.
+
+### The time of an entry
+
+- The **metadata leader** stamps every entry with its clock when it logs it, whoever
+  proposed it. A proposer's clock, a gateway's clock and a follower's clock decide
+  nothing.
+- The state machine keeps the time of the newest entry it applied (`meta/time`) and
+  gives every entry the later of its stamp and that time. **Time never goes back**: a
+  leader with a slow clock, or a new leader whose clock is behind the old one's, cannot
+  move it. Every replica computes the same time for the same entry from the log alone.
+- The state machine never reads a clock.
+- What this does not prevent: a voter whose clock is **ahead** becomes leader and moves
+  time forward, ending retention periods early. Voters need synchronised clocks; this is
+  in the threat model. A stricter rule - taking, for a decision that depends on time
+  having passed, the earliest clock among a majority of voters - is not built. See open
+  questions in PLAN.md.
+
+### Object versions (PLAN 6.2)
+
+- `objects/<bucket>/<key>` keeps its key and its value. It holds the current version of
+  a key whenever the newest version is not a delete marker. Listing and reading the
+  current version are exactly as fast as before, and never see delete markers.
+- A new nested bucket `versions/<bucket>` holds everything else: versions that are no
+  longer current, and delete markers. Its keys are
+  `enc(key) ‖ ^sequence (8 bytes) ‖ version ID (16 bytes)`, where `enc` is an
+  order-preserving, prefix-free encoding of the object key (an object key may contain a
+  zero byte, so a plain separator would be ambiguous), the sequence is the Raft index of
+  the entry that committed the version, inverted so that the newest sorts first, and the
+  version ID is sixteen zero bytes for the null version.
+- A version record gains `versioned`, `seq` and `delete_marker`. A record without
+  `versioned` is the null version: **every object written before this release is
+  already a correct null version**, with sequence 0, which sorts oldest.
+- What a put or a delete does is decided by the state machine from the versioning state
+  of the bucket at the moment the entry is applied, not by the proposer: a put that
+  races a change of the versioning state lands on one side or the other, on every
+  replica alike.
+- The shard reference index (`data`) counts every version that refers to stored data,
+  current or not. When it is rebuilt it walks `versions` (and, from PLAN 6.1, the parts
+  of uploads) as well as `objects`. A rebuild that forgot them would let the collector
+  delete the shards of every noncurrent version; this has a test of its own.
+- Finding a version by its ID walks the versions of that one key. An index by version
+  ID can be added later without changing anything stored.
+
+## Upgrade
+
+- Rolling upgrade from the previous release: nodes are replaced one by one; schema 2 is
+  not written until the last has registered. Tested with nodes of both levels side by
+  side (`TestRollingUpgrade`, `TestTheLeaderStampsEntries`).
+- A state written by the previous release opens, and its objects are null versions
+  (tested from a metadata directory written by the previous release's binary, PLAN 6.2).
+
+## Consequences
+
+- Every entry is decoded and encoded once more on the leader, to stamp it.
+- A deployment cannot be rolled back to the previous release once it has applied an
+  entry of schema 2.
+- The "extend schema 1" decisions of milestones 4 and 5 stand for what they covered:
+  commands that only add. This ADR is the rule for commands that change.

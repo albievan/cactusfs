@@ -256,6 +256,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 func (n *node) openMetadata(ctx context.Context, cfg serverConfig, logger *slog.Logger) (err error) {
 	config := raftmeta.Config{
 		Dir: cfg.MetaDir, Logger: logger, Entropy: rand.Reader, Timing: cfg.raftTiming, NodeID: cfg.NodeID, Events: n.events,
+		Clock: n.clock,
 	}
 	if cfg.clustered() {
 		if config.Cluster, err = n.openCluster(ctx, cfg, logger); err != nil {

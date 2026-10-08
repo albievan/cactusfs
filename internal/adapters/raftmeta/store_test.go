@@ -328,3 +328,17 @@ func TestIAMContract(t *testing.T) {
 	porttest.IAMContract(t, func(t *testing.T) porttest.IAM { return open(t, t.TempDir()) })
 	porttest.IdempotencyContract(t, func(t *testing.T) ports.IdempotencyStore { return open(t, t.TempDir()) })
 }
+
+// TestANodeOnItsOwnUsesTheNewestSchema: nothing can hold a single node back,
+// so its entries carry the time from the start.
+func TestANodeOnItsOwnUsesTheNewestSchema(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store := open(t, dir)
+	if err := store.CreateBucket(context.Background(), bucket.Bucket{Name: "timed", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := raftmeta.StateSchemaForTest(t, store); got != 2 {
+		t.Errorf("state schema of a node on its own = %d, want 2", got)
+	}
+}

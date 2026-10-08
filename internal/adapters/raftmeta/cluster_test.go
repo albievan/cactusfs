@@ -3,6 +3,7 @@ package raftmeta
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
@@ -183,9 +186,10 @@ func (c *testCluster) start(id string, voter bool) *Store {
 }
 
 // asNextRelease makes a store behave like the binary of a release that has
-// metadata version 2, in which creating a bucket is written differently.
+// a metadata version this binary does not have, in which creating a bucket
+// is written differently.
 func asNextRelease(s *Store) {
-	const next = entrySchemaVersion + 1
+	const next = MetadataVersion + 1
 	s.supported = next
 	s.fsm.supported = next
 	s.versionOf = func(e entry) byte {
@@ -658,7 +662,7 @@ func TestRollingUpgrade(t *testing.T) {
 	if err := c.store("s4").RemoveNode(ctx, "m2"); err != nil {
 		t.Fatal(err)
 	}
-	data, err := encodeEntry(entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "smuggled"}}, entrySchemaVersion+1)
+	data, err := encodeEntry(entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "smuggled"}}, MetadataVersion+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +693,7 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 
 	// Force the situation the rules exist to prevent: s4 claims a version
 	// it does not have.
-	lying := cluster.Node{ID: "s4", RPCAddr: "s4:9002", Roles: cluster.AllRoles(), MetadataVersion: entrySchemaVersion + 1}
+	lying := cluster.Node{ID: "s4", RPCAddr: "s4:9002", Roles: cluster.AllRoles(), MetadataVersion: MetadataVersion + 1}
 	if err := c.store("m1").SetNode(ctx, lying); err != nil {
 		t.Fatal(err)
 	}
@@ -1040,4 +1044,78 @@ func TestIAMOnEveryNodeOfACluster(t *testing.T) {
 		c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 		return c.store("s4")
 	})
+}
+
+// steppedClock is a clock a test moves by hand.
+type steppedClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *steppedClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *steppedClock) set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
+// TestTheLeaderStampsEntries: the time of an entry is the leader's, whoever
+// proposed it; a member that has not said it applies schema 2 holds the
+// cluster at schema 1, where entries carry no time.
+func TestTheLeaderStampsEntries(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+	stateOf := func(id string) (uint64, time.Time) {
+		var schema uint64
+		var at time.Time
+		if err := c.store(id).fsm.view(func(tx *bbolt.Tx) error {
+			schema, at = binary.BigEndian.Uint64(tx.Bucket(metaBucket()).Get(schemaKey())), readTime(tx)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return schema, at
+	}
+	// Nobody has registered: every entry is of schema 1.
+	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "before"}); err != nil {
+		t.Fatal(err)
+	}
+	if schema, at := stateOf(c.leader()); schema != stateSchemaVersion || !at.IsZero() {
+		t.Fatalf("with unregistered members: state schema %d, time %v", schema, at)
+	}
+	c.register("m1", "m2", "m3", "s4")
+
+	noon := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	clocks := map[string]*steppedClock{}
+	for _, id := range []string{"m1", "m2", "m3", "s4"} {
+		clocks[id] = &steppedClock{now: noon.Add(-1000 * time.Hour)} // nobody's clock but the leader's counts
+		c.store(id).clock = clocks[id]
+	}
+	leader := c.leader()
+	clocks[leader].set(noon)
+	eventually(t, "entries to be stamped", func() bool {
+		if err := c.store("s4").SetNode(ctx, cluster.Node{ID: "s4", RPCAddr: "s4:9002", Roles: cluster.AllRoles(), MetadataVersion: MetadataVersion}); err != nil {
+			return false
+		}
+		_, at := stateOf(leader)
+		return at.Equal(noon)
+	})
+	// The leader's clock jumps back; time in the state does not.
+	clocks[leader].set(noon.Add(-time.Hour))
+	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "after-the-jump"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"m1", "m2", "m3", "s4"} {
+		eventually(t, "node "+id+" to have the leader's time", func() bool {
+			schema, at := stateOf(id)
+			return schema == stateSchemaTimed && at.Equal(noon)
+		})
+	}
 }

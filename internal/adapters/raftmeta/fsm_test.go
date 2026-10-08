@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -101,7 +102,7 @@ func TestUnknownEntryStopsTheStateMachine(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string][]byte{
-		"newer schema version":         append([]byte{2}, `{"type":"bucket.create","create_bucket":{"name":"x"}}`...),
+		"newer schema version":         append([]byte{MetadataVersion + 1}, `{"type":"bucket.create","create_bucket":{"name":"x"}}`...),
 		"unknown command":              append([]byte{1}, `{"type":"bucket.rename"}`...),
 		"command without its payload":  append([]byte{1}, `{"type":"bucket.create"}`...),
 		"command with another payload": append([]byte{1}, `{"type":"bucket.create","delete_bucket":{"name":"x"}}`...),
@@ -547,5 +548,103 @@ func TestTopologyCommandsAreValidatedByTheStateMachine(t *testing.T) {
 	next.Version = 1
 	if r := set(5, next); r.err != nil {
 		t.Errorf("change based on the stored version: %v", r.err)
+	}
+}
+
+// stateSchema reads the schema the state database says it has.
+func stateSchema(t *testing.T, f *fsm) uint64 {
+	t.Helper()
+	var schema uint64
+	if err := f.view(func(tx *bbolt.Tx) error {
+		schema = binary.BigEndian.Uint64(tx.Bucket(metaBucket()).Get(schemaKey()))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return schema
+}
+
+// TestTimedEntries: an entry of schema 2 carries the leader's time. The
+// state machine takes its time from there and from nowhere else, never lets
+// it go back, and marks the state as one the previous release must not open.
+func TestTimedEntries(t *testing.T) {
+	t.Parallel()
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	f, err := openFSM(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateTime := func() time.Time {
+		var at time.Time
+		if err := f.view(func(tx *bbolt.Tx) error { at = readTime(tx); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	apply := func(index uint64, name string, at time.Time, version byte) applyResult {
+		data, err := encodeEntry(entry{Type: cmdCreateBucket, At: at, CreateBucket: &bucketRecord{Name: name, CreatedAt: at}}, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+	}
+	noon := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+
+	// Entries of schema 1 leave the state as the previous release wrote it.
+	if r := apply(1, "plain", time.Time{}, entrySchemaVersion); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if stateSchema(t, f) != stateSchemaVersion || !stateTime().IsZero() {
+		t.Fatalf("after a schema 1 entry: state schema %d, time %v", stateSchema(t, f), stateTime())
+	}
+	if r := apply(2, "timed", noon, entrySchemaTimed); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if stateSchema(t, f) != stateSchemaTimed || !stateTime().Equal(noon) {
+		t.Fatalf("after a schema 2 entry: state schema %d, time %v", stateSchema(t, f), stateTime())
+	}
+	// A leader whose clock is behind does not turn time back.
+	if r := apply(3, "from-a-slow-clock", noon.Add(-time.Hour), entrySchemaTimed); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if !stateTime().Equal(noon) {
+		t.Errorf("time went back to %v", stateTime())
+	}
+	if r := apply(4, "later", noon.Add(time.Minute), entrySchemaTimed); r.err != nil {
+		t.Fatal(r.err)
+	}
+	// A replayed entry changes nothing, the time included.
+	if r := apply(2, "timed", noon.Add(24*time.Hour), entrySchemaTimed); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if !stateTime().Equal(noon.Add(time.Minute)) {
+		t.Errorf("time after a replay = %v", stateTime())
+	}
+	// The state reopens with its schema and its time.
+	if err := f.close(); err != nil {
+		t.Fatal(err)
+	}
+	if f, err = openFSM(root); err != nil {
+		t.Fatalf("reopening a schema 2 state: %v", err)
+	}
+	if stateSchema(t, f) != stateSchemaTimed || !stateTime().Equal(noon.Add(time.Minute)) {
+		t.Errorf("after reopening: state schema %d, time %v", stateSchema(t, f), stateTime())
+	}
+	// A state of a schema this binary does not know is refused, as the
+	// previous release refuses this one.
+	if err := f.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaTimed+1))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
+		t.Errorf("opening a state of a newer schema = %v, want %v", err, domain.ErrUnsupportedFormat)
 	}
 }

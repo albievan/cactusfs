@@ -298,6 +298,10 @@ func (s *Store) entryVersion() (byte, error) {
 		// Nothing older exists, so nothing can hold the cluster back.
 		return entrySchemaVersion, nil
 	}
+	if !s.clustered {
+		// A node on its own is every member there is.
+		return s.supported, nil
+	}
 	future := s.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
 		return 0, translateRaftError(err)

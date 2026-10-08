@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/raft"
 	"go.etcd.io/bbolt"
@@ -33,10 +35,59 @@ import (
 //	         (uint64, big endian). Derived from "objects": it is rebuilt when
 //	         missing, and exists so that the garbage collector can ask whether
 //	         stored data is still in use without scanning every object.
+//
+// State schema 1 is what entries of schema 1 produce. The first entry of
+// schema 2 that is applied marks the state as schema 2, in its own
+// transaction: until a cluster actually uses the newer entries, its state and
+// its snapshots stay readable by the previous release, and afterwards the
+// previous release refuses them instead of misreading them.
 const (
 	stateSchemaVersion = 1
+	stateSchemaTimed   = 2
 	stateFileMode      = 0o600
 )
+
+func timeKey() []byte { return []byte("time") }
+
+// applied is what the state machine knows about the entry it is applying.
+type applied struct {
+	// index is the entry's position in the Raft log.
+	index uint64
+	// at is the time of the entry: what the leader stamped, never earlier
+	// than the time of any entry before it. Zero for an entry of schema 1.
+	at time.Time
+}
+
+// readTime returns the time of the newest timed entry in the state.
+func readTime(tx *bbolt.Tx) time.Time {
+	raw := tx.Bucket(metaBucket()).Get(timeKey())
+	if len(raw) != 8 {
+		return time.Time{}
+	}
+	nanos := binary.BigEndian.Uint64(raw)
+	if nanos > math.MaxInt64 {
+		return time.Time{}
+	}
+	return time.Unix(0, int64(nanos)).UTC()
+}
+
+// stampState records the time of a timed entry and that the state now holds
+// what only schema 2 can express. Time never goes back: an entry stamped
+// earlier than one before it takes that one's time.
+func stampState(tx *bbolt.Tx, at time.Time) (time.Time, error) {
+	meta := tx.Bucket(metaBucket())
+	if known := readTime(tx); at.Before(known) {
+		at = known
+	}
+	nanos := at.UnixNano()
+	if nanos < 0 {
+		return time.Time{}, fmt.Errorf("%w: entry time before 1970", domain.ErrUnsupportedFormat)
+	}
+	if err := meta.Put(timeKey(), binary.BigEndian.AppendUint64(nil, uint64(nanos))); err != nil {
+		return time.Time{}, err
+	}
+	return at.UTC(), meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaTimed))
+}
 
 func metaBucket() []byte    { return []byte("meta") }
 func bucketsBucket() []byte { return []byte("buckets") }
@@ -119,7 +170,7 @@ func openFSM(root *os.Root) (*fsm, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &fsm{root: root, path: path, db: db, supported: entrySchemaVersion}
+	f := &fsm{root: root, path: path, db: db, supported: MetadataVersion}
 	if err := f.loadSeen(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -145,7 +196,7 @@ func openState(path string) (*bbolt.DB, error) {
 		switch raw := meta.Get(schemaKey()); {
 		case raw == nil:
 			return meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaVersion))
-		case len(raw) != 8 || binary.BigEndian.Uint64(raw) != stateSchemaVersion:
+		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchemaTimed:
 			return fmt.Errorf("%w: metadata state schema", domain.ErrUnsupportedFormat)
 		}
 		return nil
@@ -276,7 +327,13 @@ func (f *fsm) Apply(log *raft.Log) any {
 		if err != nil {
 			return err
 		}
-		result, err = applyEntry(tx, e)
+		now := applied{index: log.Index}
+		if !e.At.IsZero() {
+			if now.at, err = stampState(tx, e.At); err != nil {
+				return err
+			}
+		}
+		result, err = applyEntry(tx, e, now)
 		if err != nil {
 			return err
 		}
@@ -307,7 +364,7 @@ func (f *fsm) Apply(log *raft.Log) any {
 
 // applyEntry performs one command inside tx. A returned error is fatal and
 // rolls the transaction back; a refusal is reported in the result.
-func applyEntry(tx *bbolt.Tx, e entry) (applyResult, error) {
+func applyEntry(tx *bbolt.Tx, e entry, _ applied) (applyResult, error) {
 	switch e.Type {
 	case cmdCreateBucket:
 		return applyCreateBucket(tx, *e.CreateBucket)
