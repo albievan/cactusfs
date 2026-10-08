@@ -82,7 +82,7 @@ type payload struct {
 
 // newPayload interprets the payload headers of a signed upload. payloadHash
 // is the x-amz-content-sha256 value the signature covers.
-func newPayload(r *http.Request, payloadHash string) (*payload, error) {
+func newPayload(r *http.Request, payloadHash string, chunks *chunkSigner) (*payload, error) {
 	p := &payload{
 		size:            r.ContentLength,
 		contentEncoding: r.Header.Get("Content-Encoding"),
@@ -94,12 +94,20 @@ func newPayload(r *http.Request, payloadHash string) (*payload, error) {
 	switch {
 	case payloadHash == payloadUnsigned:
 	case payloadHash == payloadStreamingTrailer:
-		if err := p.useChunked(r); err != nil {
+		if err := p.useChunked(r, nil, true); err != nil {
+			return nil, err
+		}
+		source = p.chunked
+	case payloadHash == payloadStreamingSigned, payloadHash == payloadSignedTrailer:
+		if chunks == nil {
+			return nil, fmt.Errorf("%w: %s", errUnsupportedPayload, payloadHash)
+		}
+		if err := p.useChunked(r, chunks, payloadHash == payloadSignedTrailer); err != nil {
 			return nil, err
 		}
 		source = p.chunked
 	case strings.HasPrefix(payloadHash, payloadStreamingPrefix):
-		// Signed chunks arrive with presigned URLs in PLAN 6.3.
+		// ECDSA-signed chunks (SigV4A) and whatever comes next.
 		return nil, fmt.Errorf("%w: %s", errUnsupportedPayload, payloadHash)
 	default:
 		want, err := hex.DecodeString(payloadHash)
@@ -126,9 +134,9 @@ func newPayload(r *http.Request, payloadHash string) (*payload, error) {
 	return p, nil
 }
 
-// useChunked sets the payload up for an aws-chunked body with a trailing
-// checksum.
-func (p *payload) useChunked(r *http.Request) error {
+// useChunked sets the payload up for an aws-chunked body: with signed chunks
+// when signer is not nil, and with a trailing checksum when trailing is set.
+func (p *payload) useChunked(r *http.Request, signer *chunkSigner, trailing bool) error {
 	// The decoded length is absent when the client streams a body whose
 	// length it does not know; the framing and the trailing checksum then
 	// protect the payload on their own.
@@ -140,7 +148,12 @@ func (p *payload) useChunked(r *http.Request) error {
 		}
 		p.size = decoded
 	}
+	if signer != nil && p.size < 0 {
+		// A signed stream says how long its content is.
+		return fmt.Errorf("%w: %s is required", errBadPayloadHeader, headerDecodedLen)
+	}
 	p.chunked = newChunkedReader(r.Body)
+	p.chunked.signer, p.chunked.trailing = signer, trailing
 
 	// aws-chunked is transfer framing, not part of the object.
 	var kept []string
@@ -151,6 +164,9 @@ func (p *payload) useChunked(r *http.Request) error {
 	}
 	p.contentEncoding = strings.Join(kept, ",")
 
+	if !trailing {
+		return nil
+	}
 	trailer := strings.ToLower(strings.TrimSpace(r.Header.Get(headerTrailer)))
 	algorithm, isChecksum := strings.CutPrefix(trailer, checksumHeaderPrefix)
 	if !isChecksum || strings.Contains(trailer, ",") {

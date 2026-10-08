@@ -40,6 +40,8 @@ func errorMappings() []mapping {
 		{errAuthMissing, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},
 		{errAuthUnsupported, apiError{http.StatusBadRequest, "InvalidRequest", "Only AWS Signature Version 4 with the Authorization header is supported."}},
 		{errAuthMissingContent, apiError{http.StatusBadRequest, "InvalidRequest", "Missing required header for this request: x-amz-content-sha256."}},
+		{errAuthExpired, apiError{http.StatusForbidden, "AccessDenied", "Request has expired."}},
+		{errAuthQuery, apiError{http.StatusBadRequest, "AuthorizationQueryParametersError", "The query-string authentication parameters that you provided are not valid."}},
 		{errAuthMalformed, apiError{http.StatusBadRequest, "AuthorizationHeaderMalformed", "The authorization header that you provided is not valid."}},
 		{errAuthSkew, apiError{http.StatusForbidden, "RequestTimeTooSkewed", "The difference between the request time and the server's time is too large."}},
 		{errAuthSignature, apiError{http.StatusForbidden, "SignatureDoesNotMatch", "The request signature that the server calculated does not match the signature that you provided."}},

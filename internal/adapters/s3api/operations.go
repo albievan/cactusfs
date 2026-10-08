@@ -43,7 +43,7 @@ func (h *Handler) createBucket(ctx context.Context, req *request) error {
 	// The body is optional and names a region; a deployment has one. Like
 	// every request body it is checked against what the client declared
 	// before the request has any effect.
-	body, err := newPayload(req.Request, req.payloadHash)
+	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func quote(etag string) string {
 }
 
 func (h *Handler) putObject(ctx context.Context, req *request) error {
-	body, err := newPayload(req.Request, req.payloadHash)
+	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
 	}

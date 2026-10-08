@@ -3,6 +3,7 @@ package s3api
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,7 +15,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -362,11 +365,180 @@ func TestBodyOfAnUnauthenticatedUploadIsNotRead(t *testing.T) {
 	}
 }
 
-func TestPresignedRequestsAreNotImplementedYet(t *testing.T) {
+// presign returns path with a presigned query for the server's root key.
+func (s *testServer) presign(method, path string, signedAt time.Time, expires int, headers map[string]string) string {
+	s.t.Helper()
+	signed := []string{"host"}
+	for name := range headers {
+		signed = append(signed, strings.ToLower(name))
+	}
+	slices.Sort(signed)
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	scopeDate := signedAt.UTC().Format(scopeDateFormat)
+	target := path + separator + "X-Amz-Algorithm=" + sigV4Algorithm +
+		"&X-Amz-Credential=" + url.QueryEscape(s.keyID+"/"+scopeDate+"/"+DefaultRegion+"/s3/aws4_request") +
+		"&X-Amz-Date=" + signedAt.UTC().Format(amzDateFormat) + "&X-Amz-Expires=" + strconv.Itoa(expires) +
+		"&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";"))
+	r, err := http.NewRequestWithContext(s.t.Context(), method, s.URL+target, nil)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	r.Host = r.URL.Host
+	for name, value := range headers {
+		r.Header.Set(name, value)
+	}
+	sig := signature{
+		accessKeyID: s.keyID, scopeDate: scopeDate, region: DefaultRegion,
+		signedHeaders: signed, signedHeadersRaw: strings.Join(signed, ";"),
+	}
+	return target + "&X-Amz-Signature=" + expectedSignature(s.key, sig, signedAt.UTC().Format(amzDateFormat), canonicalRequest(r, sig, payloadUnsigned))
+}
+
+// TestPresignedURLs: a URL signed by the holder of a key lets whoever has it
+// do exactly what was signed, until it expires.
+func TestPresignedURLs(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, "")
-	for _, query := range []string{"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=00", "?AWSAccessKeyId=x&Signature=y&Expires=1"} {
-		s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k" + query, unsigned: true}), http.StatusNotImplemented, "NotImplemented")
+	s.createBucket("bkt")
+	content := []byte("shared by link")
+
+	// Upload and download with nothing but the URLs.
+	put := s.presign(http.MethodPut, "/bkt/shared.txt", serverNow, 600, nil)
+	s.mustStatus(s.do(call{method: http.MethodPut, path: put, body: content, unsigned: true}), http.StatusOK)
+	get := s.presign(http.MethodGet, "/bkt/shared.txt", serverNow, 600, nil)
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: get, unsigned: true}), http.StatusOK); !bytes.Equal(got.body, content) {
+		t.Fatalf("presigned GET returned %q", got.body)
+	}
+	if obs := s.seen.last(); obs.Operation != "GetObject" {
+		t.Errorf("operation of a presigned GET = %q", obs.Operation)
+	}
+	// With a signed header, and a query parameter of the operation.
+	ranged := s.presign(http.MethodGet, "/bkt/shared.txt", serverNow, 600, map[string]string{"Range": "bytes=0-5"})
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: ranged, unsigned: true, headers: map[string]string{"Range": "bytes=0-5"}}), http.StatusPartialContent); string(got.body) != "shared" {
+		t.Errorf("presigned ranged GET returned %q", got.body)
+	}
+	listing := s.presign(http.MethodGet, "/bkt?list-type=2&prefix=sh", serverNow, 600, nil)
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: listing, unsigned: true}), http.StatusOK); !strings.Contains(string(got.body), "shared.txt") {
+		t.Errorf("presigned listing = %s", got.body)
+	}
+
+	// An x-amz-* header carried in the signed query string means what the
+	// header means: one that asks for something unimplemented is refused,
+	// not ignored.
+	hoisted := s.presign(http.MethodGet, "/bkt/shared.txt?x-amz-checksum-mode=ENABLED", serverNow, 600, nil)
+	s.mustStatus(s.do(call{method: http.MethodGet, path: hoisted, unsigned: true}), http.StatusOK)
+	locked := s.presign(http.MethodPut, "/bkt/locked.txt?x-amz-object-lock-mode=COMPLIANCE", serverNow, 600, nil)
+	s.expectError(s.do(call{method: http.MethodPut, path: locked, body: content, unsigned: true}), http.StatusNotImplemented, "NotImplemented")
+	twice := s.presign(http.MethodGet, "/bkt/shared.txt?x-amz-checksum-mode=ENABLED", serverNow, 600, map[string]string{"X-Amz-Checksum-Mode": "ENABLED"})
+	s.expectError(s.do(call{method: http.MethodGet, path: twice, unsigned: true, headers: map[string]string{"X-Amz-Checksum-Mode": "ENABLED"}}),
+		http.StatusBadRequest, "AuthorizationQueryParametersError")
+
+	refused := []struct {
+		name   string
+		c      call
+		status int
+		code   string
+	}{
+		{"for another method", call{method: http.MethodDelete, path: get}, http.StatusForbidden, "SignatureDoesNotMatch"},
+		{"for another object", call{method: http.MethodGet, path: strings.Replace(get, "shared.txt", "other.txt", 1)}, http.StatusForbidden, "SignatureDoesNotMatch"},
+		{"with a parameter added", call{method: http.MethodGet, path: get + "&versionId=x"}, http.StatusForbidden, "SignatureDoesNotMatch"},
+		{"with a longer life", call{method: http.MethodGet, path: strings.Replace(get, "Expires=600", "Expires=6000", 1)}, http.StatusForbidden, "SignatureDoesNotMatch"},
+		{"expired", call{method: http.MethodGet, path: s.presign(http.MethodGet, "/bkt/shared.txt", serverNow.Add(-time.Hour), 600, nil)}, http.StatusForbidden, "AccessDenied"},
+		{"signed in the future", call{method: http.MethodGet, path: s.presign(http.MethodGet, "/bkt/shared.txt", serverNow.Add(time.Hour), 600, nil)}, http.StatusForbidden, "RequestTimeTooSkewed"},
+		{"valid for longer than a week", call{method: http.MethodGet, path: s.presign(http.MethodGet, "/bkt/shared.txt", serverNow, 604801, nil)}, http.StatusBadRequest, "AuthorizationQueryParametersError"},
+		{"with half a signature", call{method: http.MethodGet, path: "/bkt/shared.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=00"}, http.StatusBadRequest, "AuthorizationQueryParametersError"},
+		{"with only an expiry", call{method: http.MethodGet, path: "/bkt/shared.txt?X-Amz-Expires=60"}, http.StatusBadRequest, "AuthorizationQueryParametersError"},
+		{"with an unsigned x-amz header", call{method: http.MethodGet, path: get, headers: map[string]string{"X-Amz-Meta-A": "b"}}, http.StatusBadRequest, "AuthorizationHeaderMalformed"},
+		{"Signature Version 2", call{method: http.MethodGet, path: "/bkt/shared.txt?AWSAccessKeyId=x&Signature=y&Expires=1"}, http.StatusBadRequest, "InvalidRequest"},
+	}
+	for _, tt := range refused {
+		tt.c.unsigned = true
+		r := s.do(tt.c)
+		if r.err != nil {
+			t.Fatalf("%s: %v", tt.name, r.err)
+		}
+		if got := s.errorCode(r); r.status != tt.status || got != tt.code {
+			t.Errorf("a presigned URL %s = %d %s, want %d %s", tt.name, r.status, got, tt.status, tt.code)
+		}
+	}
+	// Two signatures on one request: neither is chosen.
+	s.expectError(s.do(call{method: http.MethodGet, path: get}), http.StatusBadRequest, "AuthorizationQueryParametersError")
+	// The object is as it was after all of that.
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/shared.txt"}), http.StatusOK); !bytes.Equal(got.body, content) {
+		t.Error("a refused presigned request changed the object")
+	}
+	// A URL acts as its signer does now, not as the signer did then: when
+	// the key stops working, so do its URLs.
+	if strings.Contains(s.logs.String(), string(s.key)) {
+		t.Fatal("the secret key is in the log")
+	}
+}
+
+// TestSignedStreamingUpload: an upload in signed chunks through the whole
+// handler, and one with a chunk changed on the way.
+func TestSignedStreamingUpload(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	content := bytes.Repeat([]byte("signed in pieces. "), 5000)
+
+	upload := func(tamper func(body []byte) []byte) reply {
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodPut, s.URL+"/bkt/streamed", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Host = r.URL.Host
+		r.Header.Set("Content-Encoding", "aws-chunked")
+		r.Header.Set(headerDecodedLen, strconv.Itoa(len(content)))
+		signRequest(r, s.keyID, s.key, serverNow, payloadStreamingSigned)
+		authorization := r.Header.Get("Authorization")
+		seed := authorization[strings.LastIndex(authorization, "=")+1:]
+		sig := signature{accessKeyID: s.keyID, scopeDate: serverNow.Format(scopeDateFormat), region: DefaultRegion}
+		signer := &chunkSigner{key: signingKey(s.key, sig), timestamp: serverNow.Format(amzDateFormat), scope: scopeOf(sig), previous: seed}
+		var body bytes.Buffer
+		for rest := content; ; {
+			chunk := rest[:min(len(rest), 32<<10)]
+			rest = rest[len(chunk):]
+			digest := sha256.Sum256(chunk)
+			text := chunkAlgorithm + "\n" + signer.timestamp + "\n" + signer.scope + "\n" + signer.previous + "\n" + emptyPayloadSHA256 + "\n" + hex.EncodeToString(digest[:])
+			signer.previous = hex.EncodeToString(hmacSHA256(signer.key, text))
+			fmt.Fprintf(&body, "%x;chunk-signature=%s\r\n%s\r\n", len(chunk), signer.previous, chunk)
+			if len(chunk) == 0 {
+				break
+			}
+		}
+		sent := body.Bytes()
+		if tamper != nil {
+			sent = tamper(sent)
+		}
+		r.Body = io.NopCloser(bytes.NewReader(sent))
+		r.ContentLength = int64(len(sent))
+		resp, err := s.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		data, _ := io.ReadAll(resp.Body)
+		return reply{status: resp.StatusCode, header: resp.Header, body: data}
+	}
+
+	// A chunk changed in transit: refused, and nothing is stored.
+	s.expectError(upload(func(body []byte) []byte {
+		body[len(body)/2] ^= 1
+		return body
+	}), http.StatusForbidden, "SignatureDoesNotMatch")
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/streamed"}), http.StatusNotFound, "NoSuchKey")
+
+	s.mustStatus(upload(nil), http.StatusOK)
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/streamed"}), http.StatusOK); !bytes.Equal(got.body, content) {
+		t.Fatal("the object is not what was uploaded in signed chunks")
+	}
+	head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/bkt/streamed"}), http.StatusOK)
+	if head.header.Get("Content-Encoding") != "" {
+		t.Errorf("aws-chunked was stored as the object's Content-Encoding: %q", head.header.Get("Content-Encoding"))
 	}
 }
 
@@ -387,8 +559,7 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 		{method: http.MethodPut, path: "/bkt/k?partNumber=1&uploadId=u"},
 		{method: http.MethodDelete, path: "/bkt/k?uploadId=u"},
 		{method: http.MethodPut, path: "/bkt/copy", headers: map[string]string{"X-Amz-Copy-Source": "/bkt/k"}},
-		{method: http.MethodPut, path: "/bkt/k", body: []byte("x"), payloadHash: "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"},
-		{method: http.MethodPut, path: "/bkt/k", body: []byte("x"), payloadHash: "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("x"), payloadHash: "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD"},
 	}
 	for _, c := range notImplemented {
 		s.expectError(s.do(c), http.StatusNotImplemented, "NotImplemented")

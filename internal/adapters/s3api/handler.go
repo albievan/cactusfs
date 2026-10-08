@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -127,6 +128,8 @@ type request struct {
 	principal iam.Principal
 	// payloadHash is the x-amz-content-sha256 value the signature covers.
 	payloadHash string
+	// chunks verifies the chunk signatures of a signed streaming body.
+	chunks *chunkSigner
 }
 
 // responseWriter records what was sent.
@@ -262,27 +265,69 @@ func (h *Handler) virtualHostBucket(host string) (string, bool) {
 // authenticate verifies the request's signature and sets the principal.
 func (h *Handler) authenticate(ctx context.Context, req *request) error {
 	query := req.URL.Query()
-	if query.Has("X-Amz-Algorithm") || query.Has("X-Amz-Signature") || query.Has("Signature") {
-		// Presigned URLs are PLAN 6.3.
-		return errNotImplemented()
-	}
 	header := req.Header.Get("Authorization")
-	if header == "" {
-		return errAuthMissing
+	if query.Has("Signature") || query.Has("AWSAccessKeyId") {
+		// Signature Version 2 in the query string.
+		return fmt.Errorf("%w: Signature Version 2", errAuthUnsupported)
 	}
-	sig, err := parseAuthorization(header)
-	if err != nil {
-		return err
+	var (
+		sig    signature
+		signed presigned
+		err    error
+	)
+	viaQuery := isPresigned(query)
+	switch {
+	case viaQuery && header != "":
+		// Two signatures: which one counts must not be ours to choose.
+		return fmt.Errorf("%w: both a presigned query and an Authorization header", errAuthQuery)
+	case viaQuery:
+		if signed, err = parsePresigned(query); err != nil {
+			return err
+		}
+		sig = signed.signature
+	case header == "":
+		return errAuthMissing
+	default:
+		if sig, err = parseAuthorization(header); err != nil {
+			return err
+		}
 	}
 	secret, principal, err := h.cfg.Identities.SecretFor(ctx, sig.accessKeyID)
 	if err != nil {
 		return err
 	}
 	defer clear(secret)
-	payloadHash, err := verifySignature(req.Request, sig, secret, h.cfg.Clock.Now())
+	var checked verified
+	if viaQuery {
+		checked, err = verifyPresigned(req.Request, signed, secret, h.cfg.Clock.Now())
+	} else {
+		checked, err = verifySignature(req.Request, sig, secret, h.cfg.Clock.Now())
+	}
 	if err != nil {
 		return err
 	}
+	if viaQuery {
+		// The signature has done its work; what is left of the query
+		// string is the request.
+		req.URL.RawQuery = withoutParameter(req.URL.RawQuery, presignedParameters()...)
+		// A signer may put x-amz-* headers into the query string, where
+		// the signature covers them; SDKs do. They mean what the header
+		// would mean, and are judged as headers from here on.
+		var hoisted []string
+		for name, values := range req.URL.Query() {
+			if !strings.HasPrefix(strings.ToLower(name), "x-amz-") {
+				continue
+			}
+			if req.Header.Get(name) != "" || len(values) != 1 {
+				return fmt.Errorf("%w: %s is given more than once", errAuthQuery, name)
+			}
+			req.Header.Set(name, values[0])
+			hoisted = append(hoisted, name)
+		}
+		req.URL.RawQuery = withoutParameter(req.URL.RawQuery, hoisted...)
+	}
+	payloadHash := checked.payloadHash
+	req.chunks = checked.chunks
 	// Where and how the request arrived is part of who is asking:
 	// conditions in policies test it.
 	principal.Session = sessionOf(req)

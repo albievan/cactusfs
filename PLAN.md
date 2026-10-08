@@ -16,7 +16,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | 3 | Cluster | done |
 | 4 | IAM | done |
 | 5 | Admin API, Swagger UI, console | done |
-| 6 | S3 depth | todo |
+| 6 | S3 depth | in_progress |
 | 7 | Deployment hardening | todo |
 | 8 | Hybrid | todo |
 
@@ -165,7 +165,7 @@ Design: ADR-0007. The contract comes first: nothing below 5.1 is written before
 |---|---|---|---|---|
 | 6.1 | todo | Multipart upload | compat tests recorded | `internal/app/multipart.go`, `internal/adapters/s3api/` |
 | 6.2 | todo | Versioning | compat tests recorded | `internal/domain/object/`, `internal/app/` |
-| 6.3 | todo | Presigned URLs and streaming SigV4 | fuzz tests extended | `internal/adapters/s3api/` |
+| 6.3 | done | Presigned URLs and streaming SigV4 | fuzz tests extended | `internal/adapters/s3api/` |
 | 6.4 | todo | Object Lock (governance, compliance) | a compliance-locked version cannot be deleted by anyone | `internal/domain/object/lock.go` |
 | 6.5 | todo | SSE-KMS and SSE-C | alongside SSE-S3 | `internal/app/` |
 | 6.6 | todo | Lifecycle | expiration and non-current version rules | `internal/app/lifecycle.go` |
@@ -292,4 +292,5 @@ Design: ADR-0007. The contract comes first: nothing below 5.1 is written before
 | 2026-10-08 | Maintenance status is per answering node; the console is one bundle with a hash router and no dependencies beyond the generated client. | A cluster-wide view needs nodes to ask each other; left for later. |
 | 2026-10-08 | Review of milestone 5 (0 blocker, 3 major, 9 minor). Fixed: uploads and downloads were recognised by a path ending in `/object`, so an entity of that name escaped the body limit, the media-type check and the request fingerprint - now by the matched operation; idempotency reservations were deleted by ID alone, so a slow request could undo the repeat that took over - the delete now names the reservation's time, and a reservation goes stale after 15 minutes, not 2; failed sign-ins were counted after the password check, so parallel guesses were not limited - now before, and the queue for password hashing is bounded. Also: HEAD of an object is 405; a test pins the exact set of public operations; tests for a user named `object`, bearer and cookie together, session and key scopes, CSRF token not in logs. | Recorded so the reasoning survives. |
 | 2026-10-08 | Deferred from that review: sign-in limit keyed on the peer address only (shared behind a proxy; no trusted-proxy setting, no per-user count); parameters bound before authentication (400 instead of 401, unaudited); no cap on idempotency records per caller, and the console sends a fresh key on every change; upload fingerprint without content; no progress timeout on transfers; a new sign-in does not end the previous session; cookies shared between the S3 and admin ports. All in ADR-0007 under "Known limits". | Honest list of what was not done. |
+| 2026-10-08 | Step 6.3. Presigned URLs (SigV4 in the query string, 1 second to 7 days) and signed aws-chunked uploads (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, with and without signed trailers). A request with both a presigned query and an Authorization header is refused. Signed `x-amz-*` query parameters of a presigned URL are treated as the headers they stand for. A signed `content-length` header is taken from the request's length. Signature Version 2 and SigV4A stay unsupported. | Verified against the worked examples of the AWS documentation (presigned GET and the three chunk signatures) and with the AWS SDK's presigner in the compat suite. A presigned URL acts as its signer does at the time of use: revoking the key ends its URLs. |
 

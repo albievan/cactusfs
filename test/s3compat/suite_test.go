@@ -5,9 +5,11 @@ package s3compat_test
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -581,5 +583,97 @@ func TestAnonymousIsRejected(t *testing.T) {
 	_, err = anonymous.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String("compat-does-not-exist"), Key: aws.String("k")})
 	if code := errorCode(err); code != "AccessDenied" {
 		t.Errorf("GetObject in a missing bucket: code = %q (%v), want AccessDenied", code, err)
+	}
+}
+
+// presignedDo sends a presigned request with a plain HTTP client: no SDK, no
+// credentials - only the URL and the headers that were signed into it.
+func presignedDo(t *testing.T, method, rawURL string, header http.Header, body []byte) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, rawURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	for name, values := range header {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
+	resp, err := httpClient().Do(req)
+	if err != nil {
+		t.Fatalf("%s presigned: %v", method, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read presigned response: %v", err)
+	}
+	return resp.StatusCode, data
+}
+
+func TestPresignedGetObject(t *testing.T) {
+	name := newBucket(t)
+	put(t, name, "shared/report.txt", []byte("for whoever holds the link"))
+	presigner := s3.NewPresignClient(client())
+
+	signed, err := presigner.PresignGetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("shared/report.txt")},
+		s3.WithPresignExpires(5*time.Minute))
+	if err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	status, data := presignedDo(t, signed.Method, signed.URL, signed.SignedHeader, nil)
+	if status != http.StatusOK || string(data) != "for whoever holds the link" {
+		t.Fatalf("presigned GET = %d %q", status, data)
+	}
+	// The URL is for that object and nothing else.
+	other := strings.Replace(signed.URL, "report.txt", "other.txt", 1)
+	if status, data := presignedDo(t, signed.Method, other, signed.SignedHeader, nil); status != http.StatusForbidden || !strings.Contains(string(data), "SignatureDoesNotMatch") {
+		t.Errorf("the URL of one object used for another = %d %s", status, data)
+	}
+	if status, _ := presignedDo(t, http.MethodDelete, signed.URL, signed.SignedHeader, nil); status != http.StatusForbidden {
+		t.Errorf("a GET URL used to DELETE = %d", status)
+	}
+	if data, _ := get(t, name, "shared/report.txt"); string(data) != "for whoever holds the link" {
+		t.Error("the object was changed through a GET URL")
+	}
+}
+
+func TestPresignedPutObject(t *testing.T) {
+	name := newBucket(t)
+	presigner := s3.NewPresignClient(client())
+	signed, err := presigner.PresignPutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("uploads/from-a-browser.bin"), ContentType: aws.String("application/x-test"),
+	}, s3.WithPresignExpires(5*time.Minute))
+	if err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	content := bytes.Repeat([]byte("uploaded with a link "), 4096)
+	if status, data := presignedDo(t, signed.Method, signed.URL, signed.SignedHeader, content); status != http.StatusOK {
+		t.Fatalf("presigned PUT = %d %s", status, data)
+	}
+	data, out := get(t, name, "uploads/from-a-browser.bin")
+	if !bytes.Equal(data, content) {
+		t.Fatal("the object is not what was uploaded")
+	}
+	if aws.ToString(out.ContentType) != "application/x-test" {
+		t.Errorf("Content-Type = %q", aws.ToString(out.ContentType))
+	}
+}
+
+func TestPresignedURLExpires(t *testing.T) {
+	name := newBucket(t)
+	put(t, name, "k", []byte("briefly shared"))
+	presigner := s3.NewPresignClient(client())
+	signed, err := presigner.PresignGetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("k")},
+		s3.WithPresignExpires(2*time.Second))
+	if err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	if status, _ := presignedDo(t, signed.Method, signed.URL, signed.SignedHeader, nil); status != http.StatusOK {
+		t.Fatalf("presigned GET before expiry = %d", status)
+	}
+	time.Sleep(4 * time.Second)
+	if status, data := presignedDo(t, signed.Method, signed.URL, signed.SignedHeader, nil); status != http.StatusForbidden || !strings.Contains(string(data), "AccessDenied") {
+		t.Errorf("presigned GET after expiry = %d %s", status, data)
 	}
 }

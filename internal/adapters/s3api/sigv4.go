@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,8 +29,15 @@ const (
 	headerContentSHA = "X-Amz-Content-Sha256"
 	headerAmzDate    = "X-Amz-Date"
 
-	payloadUnsigned          = "UNSIGNED-PAYLOAD"
-	payloadStreamingTrailer  = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	payloadUnsigned         = "UNSIGNED-PAYLOAD"
+	payloadStreamingTrailer = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	payloadStreamingSigned  = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+	payloadSignedTrailer    = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+	chunkAlgorithm          = "AWS4-HMAC-SHA256-PAYLOAD"
+	trailerAlgorithm        = "AWS4-HMAC-SHA256-TRAILER"
+	// maxPresignedExpiry is the longest a presigned URL may be valid:
+	// seven days, as SigV4 defines.
+	maxPresignedExpiry       = 7 * 24 * time.Hour
 	payloadStreamingPrefix   = "STREAMING-"
 	emptyPayloadSHA256       = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	maxAuthorizationHeader   = 4 << 10
@@ -46,7 +54,57 @@ var (
 	errAuthSkew           = errors.New("request time is too far from the server time")
 	errAuthSignature      = errors.New("signature does not match")
 	errAuthMissingContent = errors.New("x-amz-content-sha256 header is required")
+	errAuthExpired        = errors.New("presigned request has expired")
+	errAuthQuery          = errors.New("presigned query parameters are malformed")
 )
+
+// Query parameters of a presigned URL.
+const (
+	queryAlgorithm     = "X-Amz-Algorithm"
+	querySigner        = "X-Amz-Credential"
+	queryDate          = "X-Amz-Date"
+	queryExpires       = "X-Amz-Expires"
+	querySignedHeaders = "X-Amz-SignedHeaders"
+	querySignature     = "X-Amz-Signature"
+)
+
+func presignedParameters() []string {
+	return []string{queryAlgorithm, querySigner, queryDate, queryExpires, querySignedHeaders, querySignature}
+}
+
+// verified is what a request that passed signature verification carries on:
+// how its payload is declared, and what signs the chunks of a streamed one.
+type verified struct {
+	// payloadHash is the payload declaration the signature covers.
+	payloadHash string
+	// chunks verifies the chunk signatures of a signed streaming payload,
+	// which continue from the signature of the request.
+	chunks *chunkSigner
+}
+
+// chunkSigner verifies the chain of signatures of a signed aws-chunked body.
+// It holds the signing key of one day, region and service - never the secret.
+type chunkSigner struct {
+	key       []byte
+	timestamp string
+	scope     string
+	previous  string
+}
+
+// check verifies the declared signature of the next link of the chain:
+// a chunk whose data hashes to digestHex, or the trailers.
+func (c *chunkSigner) check(algorithm, declared, digestHex string) error {
+	stringToSign := algorithm + "\n" + c.timestamp + "\n" + c.scope + "\n" + c.previous + "\n"
+	if algorithm == chunkAlgorithm {
+		stringToSign += emptyPayloadSHA256 + "\n"
+	}
+	want := hex.EncodeToString(hmacSHA256(c.key, stringToSign+digestHex))
+	if !iam.SecretsEqual([]byte(want), []byte(declared)) {
+		return fmt.Errorf("%w: chunk signature", errAuthSignature)
+	}
+	c.previous = want
+	return nil
+}
 
 // signature is a parsed SigV4 Authorization header.
 type signature struct {
@@ -166,6 +224,11 @@ func checkSignedHeaders(r *http.Request, sig signature) error {
 		}
 	}
 	for _, name := range sig.signedHeaders {
+		// net/http keeps the host and the content length out of the
+		// header map.
+		if name == "content-length" && r.ContentLength >= 0 {
+			continue
+		}
 		if name != "host" && len(r.Header.Values(name)) == 0 {
 			return fmt.Errorf("%w: signed header %s is absent", errAuthMalformed, name)
 		}
@@ -185,9 +248,12 @@ func canonicalRequest(r *http.Request, sig signature, payloadHash string) string
 	for _, name := range sig.signedHeaders {
 		b.WriteString(name)
 		b.WriteByte(':')
-		if name == "host" {
+		switch {
+		case name == "host":
 			b.WriteString(r.Host)
-		} else {
+		case name == "content-length" && len(r.Header.Values(name)) == 0:
+			b.WriteString(strconv.FormatInt(r.ContentLength, 10))
+		default:
 			for i, value := range r.Header.Values(name) {
 				if i > 0 {
 					b.WriteByte(',')
@@ -261,46 +327,174 @@ func hmacSHA256(key []byte, data string) []byte {
 	return mac.Sum(nil)
 }
 
-// expectedSignature computes the signature a holder of secret would have
-// produced for the request.
-func expectedSignature(secret []byte, sig signature, timestamp, canonical string) string {
-	scope := sig.scopeDate + "/" + sig.region + "/" + sigV4Service + "/" + sigV4Terminator
-	digest := sha256.Sum256([]byte(canonical))
-	stringToSign := sigV4Algorithm + "\n" + timestamp + "\n" + scope + "\n" + hex.EncodeToString(digest[:])
+func scopeOf(sig signature) string {
+	return sig.scopeDate + "/" + sig.region + "/" + sigV4Service + "/" + sigV4Terminator
+}
 
+// signingKey derives the key that signs the requests of one day, region and
+// service from the secret.
+func signingKey(secret []byte, sig signature) []byte {
 	seed := make([]byte, 0, len("AWS4")+len(secret))
 	seed = append(append(seed, "AWS4"...), secret...)
 	key := hmacSHA256(seed, sig.scopeDate)
 	clear(seed)
 	key = hmacSHA256(key, sig.region)
 	key = hmacSHA256(key, sigV4Service)
-	key = hmacSHA256(key, sigV4Terminator)
-	return hex.EncodeToString(hmacSHA256(key, stringToSign))
+	return hmacSHA256(key, sigV4Terminator)
+}
+
+// expectedSignature computes the signature a holder of secret would have
+// produced for the request.
+func expectedSignature(secret []byte, sig signature, timestamp, canonical string) string {
+	digest := sha256.Sum256([]byte(canonical))
+	stringToSign := sigV4Algorithm + "\n" + timestamp + "\n" + scopeOf(sig) + "\n" + hex.EncodeToString(digest[:])
+	return hex.EncodeToString(hmacSHA256(signingKey(secret, sig), stringToSign))
 }
 
 // verifySignature checks a parsed signature against the request. It returns
 // the payload hash declaration the signature covers.
-func verifySignature(r *http.Request, sig signature, secret []byte, now time.Time) (payloadHash string, err error) {
+func verifySignature(r *http.Request, sig signature, secret []byte, now time.Time) (verified, error) {
 	signedAt, timestamp, err := requestTime(r)
 	if err != nil {
-		return "", err
+		return verified{}, err
 	}
 	if signedAt.UTC().Format(scopeDateFormat) != sig.scopeDate {
-		return "", fmt.Errorf("%w: credential date does not match the request date", errAuthMalformed)
+		return verified{}, fmt.Errorf("%w: credential date does not match the request date", errAuthMalformed)
 	}
 	if skew := now.Sub(signedAt); skew > maxClockSkew || skew < -maxClockSkew {
-		return "", errAuthSkew
+		return verified{}, errAuthSkew
 	}
 	if err := checkSignedHeaders(r, sig); err != nil {
-		return "", err
+		return verified{}, err
 	}
-	payloadHash = r.Header.Get(headerContentSHA)
+	payloadHash := r.Header.Get(headerContentSHA)
 	if payloadHash == "" {
-		return "", errAuthMissingContent
+		return verified{}, errAuthMissingContent
 	}
 	want := expectedSignature(secret, sig, timestamp, canonicalRequest(r, sig, payloadHash))
 	if !iam.SecretsEqual([]byte(want), []byte(sig.signatureHex)) {
-		return "", errAuthSignature
+		return verified{}, errAuthSignature
 	}
-	return payloadHash, nil
+	out := verified{payloadHash: payloadHash}
+	if payloadHash == payloadStreamingSigned || payloadHash == payloadSignedTrailer {
+		// The chunks of the body are signed in a chain that begins with
+		// the signature just verified.
+		out.chunks = &chunkSigner{key: signingKey(secret, sig), timestamp: timestamp, scope: scopeOf(sig), previous: want}
+	}
+	return out, nil
+}
+
+// presigned is the signature of a presigned URL: SigV4 carried in the query
+// string, implemented from the public AWS documentation ("Authenticating
+// Requests: Using Query Parameters (AWS Signature Version 4)").
+type presigned struct {
+	signature
+	timestamp string
+	signedAt  time.Time
+	expires   time.Duration
+}
+
+// isPresigned reports whether a request carries any part of a signature in
+// its query string.
+func isPresigned(query url.Values) bool {
+	for _, name := range presignedParameters() {
+		if query.Has(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// parsePresigned reads the signature out of the query string. Every error
+// wraps errAuthQuery or errAuthUnsupported.
+func parsePresigned(query url.Values) (presigned, error) {
+	one := func(name string) (string, error) {
+		values := query[name]
+		if len(values) != 1 || values[0] == "" {
+			return "", fmt.Errorf("%w: %s must be given once", errAuthQuery, name)
+		}
+		return values[0], nil
+	}
+	algorithm, err := one(queryAlgorithm)
+	if err != nil {
+		return presigned{}, err
+	}
+	if algorithm != sigV4Algorithm {
+		return presigned{}, fmt.Errorf("%w: %q", errAuthUnsupported, algorithm)
+	}
+	var fields [5]string
+	for i, name := range presignedParameters()[1:] {
+		if fields[i], err = one(name); err != nil {
+			return presigned{}, err
+		}
+	}
+	credential, date, expiry, signedHeaders, signatureHex := fields[0], fields[1], fields[2], fields[3], fields[4]
+	// The same checks as for the header form, on the same grammar.
+	sig, err := parseAuthorization(sigV4Algorithm + " Credential=" + credential + ",SignedHeaders=" + signedHeaders + ",Signature=" + signatureHex)
+	if err != nil {
+		if strings.ContainsAny(credential+signedHeaders+signatureHex, ", ") || !errors.Is(err, errAuthMalformed) {
+			return presigned{}, fmt.Errorf("%w: bad credential, signed headers or signature", errAuthQuery)
+		}
+		return presigned{}, fmt.Errorf("%w: %w", errAuthQuery, err)
+	}
+	signedAt, err := time.Parse(amzDateFormat, date)
+	if err != nil {
+		return presigned{}, fmt.Errorf("%w: bad %s", errAuthQuery, queryDate)
+	}
+	seconds, err := strconv.ParseInt(expiry, 10, 64)
+	if err != nil || seconds < 1 || seconds > int64(maxPresignedExpiry/time.Second) {
+		return presigned{}, fmt.Errorf("%w: %s must be 1 to %d seconds", errAuthQuery, queryExpires, int64(maxPresignedExpiry/time.Second))
+	}
+	return presigned{signature: sig, timestamp: date, signedAt: signedAt, expires: time.Duration(seconds) * time.Second}, nil
+}
+
+// verifyPresigned checks the signature of a presigned URL against the
+// request. The URL is good from its signing time until it expires; a request
+// with a signing time in the future is refused like any other skewed one.
+func verifyPresigned(r *http.Request, p presigned, secret []byte, now time.Time) (verified, error) {
+	if p.signedAt.UTC().Format(scopeDateFormat) != p.scopeDate {
+		return verified{}, fmt.Errorf("%w: credential date does not match %s", errAuthQuery, queryDate)
+	}
+	if p.signedAt.Sub(now) > maxClockSkew {
+		return verified{}, errAuthSkew
+	}
+	if now.After(p.signedAt.Add(p.expires)) {
+		return verified{}, errAuthExpired
+	}
+	if err := checkSignedHeaders(r, p.signature); err != nil {
+		return verified{}, err
+	}
+	// The payload of a presigned request is not signed, unless the signer
+	// chose to sign a declaration of it as a header.
+	payloadHash := payloadUnsigned
+	if declared := r.Header.Get(headerContentSHA); declared != "" {
+		payloadHash = declared
+	}
+	if strings.HasPrefix(payloadHash, payloadStreamingPrefix) {
+		return verified{}, fmt.Errorf("%w: a presigned request cannot stream signed chunks", errAuthQuery)
+	}
+	// Everything in the query string is signed, except the signature.
+	unsigned := *r
+	target := *r.URL
+	target.RawQuery = withoutParameter(r.URL.RawQuery, querySignature)
+	unsigned.URL = &target
+	want := expectedSignature(secret, p.signature, p.timestamp, canonicalRequest(&unsigned, p.signature, payloadHash))
+	if !iam.SecretsEqual([]byte(want), []byte(p.signatureHex)) {
+		return verified{}, errAuthSignature
+	}
+	return verified{payloadHash: payloadHash}, nil
+}
+
+// withoutParameter removes every occurrence of a parameter from a raw query
+// string and leaves the rest byte for byte as it was.
+func withoutParameter(raw string, names ...string) string {
+	parts := strings.Split(raw, "&")
+	kept := parts[:0]
+	for _, part := range parts {
+		name, _, _ := strings.Cut(part, "=")
+		if !slices.Contains(names, unescape(name)) {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "&")
 }
