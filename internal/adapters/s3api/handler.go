@@ -582,6 +582,15 @@ func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 		abortResponse(req)
 		return
 	}
+	if api.status >= http.StatusInternalServerError && !req.principal.Anonymous() {
+		// A caller we know is told that the store cannot serve it right
+		// now, and must be able to hear it. A client that is still
+		// sending its upload when the connection closes sees a reset and
+		// never the answer, so a body of modest size is taken off the
+		// wire first. Nothing is read for a caller who did not
+		// authenticate.
+		_, _ = io.CopyN(io.Discard, req.Body, maxDrainedBody)
+	}
 	if req.Method == http.MethodHead {
 		req.w.WriteHeader(api.status)
 		return
@@ -590,6 +599,10 @@ func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 		Code: api.code, Message: api.message, Resource: req.URL.Path, RequestID: req.id,
 	})
 }
+
+// maxDrainedBody is how much of an unread request body is discarded before
+// an answer that says "try again".
+const maxDrainedBody = 1 << 20
 
 // abortResponse ends a response that has already started. With the write
 // deadline in the past nothing more can be sent, and net/http closes the

@@ -35,7 +35,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
@@ -355,11 +355,26 @@ func (c *Cluster) address(ctx context.Context, id, port string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	mapped, err := ctr.MappedPort(ctx, port)
+	// Asked of the engine every time, not of a cached inspection: the
+	// engine publishes a port anew, at another number, when a container is
+	// restarted and also when its network is taken away and given back.
+	inspected, err := c.docker.ContainerInspect(ctx, ctr.GetContainerID(), client.ContainerInspectOptions{})
 	if err != nil {
 		return "", err
 	}
-	return net.JoinHostPort(host, mapped.Port()), nil
+	if settings := inspected.Container.NetworkSettings; settings != nil {
+		for published, bindings := range settings.Ports {
+			if published.String() != port {
+				continue
+			}
+			for _, binding := range bindings {
+				if binding.HostPort != "" {
+					return net.JoinHostPort(host, binding.HostPort), nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("port %s of node %s is not published", port, id)
 }
 
 // transport returns an HTTP transport that reaches a node at its published
@@ -511,29 +526,88 @@ func tail(s string, n int) string {
 	return s
 }
 
-// Isolate cuts a node off from the other nodes. Its S3 port stays reachable.
+// Isolate cuts a node off from the other nodes while clients can still
+// reach it: every packet the node would send to another node is dropped.
+// Connections that are open stall; new ones, in either direction, are never
+// completed.
+//
+// The partition is made inside the node's own network namespace, with routes
+// that lead nowhere, by a helper container that shares the namespace. Taking
+// the cluster network away from the container would do it too, but makes the
+// engine publish the node's ports anew when the network is given back - and
+// then, now and then, nothing listens at the published port any more, which
+// fails a test for something the node did not do.
 func (c *Cluster) Isolate(id string) {
 	c.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	_, err := c.docker.NetworkDisconnect(ctx, c.cluster.ID, client.NetworkDisconnectOptions{
-		Container: c.container(id).GetContainerID(), Force: true,
-	})
-	if err != nil {
-		c.t.Fatalf("isolate %s: %v", id, err)
-	}
+	c.routes(id, "add")
 }
 
 // Rejoin undoes Isolate.
 func (c *Cluster) Rejoin(id string) {
 	c.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	c.routes(id, "del")
+}
+
+// peerAddresses returns the addresses of the other nodes on the cluster
+// network.
+func (c *Cluster) peerAddresses(ctx context.Context, id string) []string {
+	c.t.Helper()
+	var addresses []string
+	for _, other := range Nodes {
+		if other == id {
+			continue
+		}
+		c.mu.Lock()
+		ctr := c.containers[other]
+		c.mu.Unlock()
+		if ctr == nil {
+			continue
+		}
+		inspected, err := c.docker.ContainerInspect(ctx, ctr.GetContainerID(), client.ContainerInspectOptions{})
+		if err != nil || inspected.Container.NetworkSettings == nil {
+			c.t.Fatalf("inspect %s: %v", other, err)
+		}
+		for _, endpoint := range inspected.Container.NetworkSettings.Networks {
+			if endpoint != nil && endpoint.NetworkID == c.cluster.ID && endpoint.IPAddress.IsValid() {
+				addresses = append(addresses, endpoint.IPAddress.String())
+			}
+		}
+	}
+	if len(addresses) == 0 {
+		c.t.Fatalf("no other node of %s has an address on the cluster network", id)
+	}
+	return addresses
+}
+
+// routes adds or removes, in the network namespace of a node, a route to
+// nowhere for every other node.
+func (c *Cluster) routes(id, verb string) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	_, err := c.docker.NetworkConnect(ctx, c.cluster.ID, client.NetworkConnectOptions{
-		Container: c.container(id).GetContainerID(), EndpointConfig: &network.EndpointSettings{Aliases: []string{id}},
-	})
+	var script strings.Builder
+	script.WriteString("set -e\n")
+	for _, address := range c.peerAddresses(ctx, id) {
+		fmt.Fprintf(&script, "ip route %s blackhole %s/32\n", verb, address)
+	}
+	script.WriteString("ip route\n")
+	target := c.container(id).GetContainerID()
+	helper, err := testcontainers.Run(ctx, helperImage,
+		testcontainers.WithCmd("sh", "-c", script.String()),
+		testcontainers.WithHostConfigModifier(func(host *container.HostConfig) {
+			host.NetworkMode = container.NetworkMode("container:" + target)
+			host.CapAdd = []string{"NET_ADMIN"}
+		}),
+		testcontainers.WithWaitStrategy(wait.ForExit().WithExitTimeout(time.Minute)),
+	)
+	if helper != nil {
+		defer func() { _ = helper.Terminate(context.WithoutCancel(ctx)) }()
+	}
 	if err != nil {
-		c.t.Fatalf("rejoin %s: %v", id, err)
+		c.t.Fatalf("routes of %s: %v", id, err)
+	}
+	if state, err := helper.State(ctx); err != nil || state.ExitCode != 0 {
+		c.t.Fatalf("routes of %s: %v, %v\n%s", id, state, err, logsOf(ctx, helper))
 	}
 }
 

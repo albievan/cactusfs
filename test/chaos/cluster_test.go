@@ -274,6 +274,12 @@ func TestClusterPartition(t *testing.T) {
 			case err == nil && !bytes.Equal(got, fresh):
 				t.Fatalf("%s, cut off, returned bytes that were never written", cut)
 			case err != nil:
+				// The client reaches the node, and the node says no. A
+				// request that never got an answer would prove nothing
+				// about what the node does when it is cut off.
+				if status := httpStatus(err); status < http.StatusInternalServerError {
+					t.Fatalf("%s, cut off: a read ended with %v (status %d); want an answer from the node, and a 5xx", cut, err, status)
+				}
 				refused++
 			}
 			time.Sleep(150 * time.Millisecond)
@@ -289,8 +295,8 @@ func TestClusterPartition(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s, cut off from the cluster, acknowledged a write", cut)
 		}
-		if status := httpStatus(err); status != 0 && status < http.StatusInternalServerError {
-			t.Errorf("%s, cut off: Put failed with status %d, want a 5xx", cut, status)
+		if status := httpStatus(err); status < http.StatusInternalServerError {
+			t.Errorf("%s, cut off: Put ended with %v (status %d); want an answer from the node, and a 5xx", cut, err, status)
 		}
 		verifyCluster(ctx, t, c, others[1], objects, "on the majority side, with "+cut+" cut off")
 
