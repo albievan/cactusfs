@@ -169,7 +169,10 @@ func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID
 	if err != nil {
 		return nil, fmt.Errorf("nodetls.Listen: %w", err)
 	}
-	l := &listener{Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{})}
+	l := &listener{
+		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
+		open: map[*tracked]struct{}{},
+	}
 	// The listener outlives the call that opened it.
 	go l.run(context.WithoutCancel(ctx))
 	return l, nil
@@ -183,6 +186,33 @@ type listener struct {
 	accepted chan net.Conn
 	closed   chan struct{}
 	once     sync.Once
+
+	// open holds the connections that were handed out and are not closed
+	// yet. Closing the listener closes them: a node that stops must not
+	// leave its peers talking to connections nobody reads any more.
+	mu   sync.Mutex
+	open map[*tracked]struct{}
+}
+
+// tracked is a connection the listener handed out.
+type tracked struct {
+	net.Conn
+	owner *listener
+	state tls.ConnectionState
+}
+
+// ConnectionState returns the TLS state of the connection, from which
+// PeerNodeID tells who is at the other end.
+func (c *tracked) ConnectionState() tls.ConnectionState {
+	return c.state
+}
+
+// Close implements net.Conn.
+func (c *tracked) Close() error {
+	c.owner.mu.Lock()
+	delete(c.owner.open, c)
+	c.owner.mu.Unlock()
+	return c.Conn.Close()
 }
 
 func (l *listener) run(ctx context.Context) {
@@ -210,10 +240,14 @@ func (l *listener) admit(ctx context.Context, raw net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	handed := &tracked{Conn: conn, owner: l, state: conn.ConnectionState()}
+	l.mu.Lock()
+	l.open[handed] = struct{}{}
+	l.mu.Unlock()
 	select {
-	case l.accepted <- conn:
+	case l.accepted <- handed:
 	case <-l.closed:
-		_ = conn.Close()
+		_ = handed.Close()
 	}
 }
 
@@ -231,6 +265,15 @@ func (l *listener) Accept() (net.Conn, error) {
 func (l *listener) Close() error {
 	err := l.Listener.Close()
 	l.once.Do(func() { close(l.closed) })
+	l.mu.Lock()
+	open := make([]*tracked, 0, len(l.open))
+	for conn := range l.open {
+		open = append(open, conn)
+	}
+	l.mu.Unlock()
+	for _, conn := range open {
+		_ = conn.Close()
+	}
 	return err
 }
 

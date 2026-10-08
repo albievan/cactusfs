@@ -28,6 +28,11 @@ var serverNow = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 
 // testServer is the S3 handler over real use cases and in-memory stores.
 type testServer struct {
+	// iamStore, auditor and iam let a test make users and keys and read
+	// the audit trail.
+	iamStore *porttest.MemIAM
+	auditor  *app.Auditor
+	iam      *app.IAMService
 	*httptest.Server
 	t       *testing.T
 	keyID   string
@@ -93,9 +98,15 @@ func newTestServer(t *testing.T, domainName string) *testServer {
 	}
 	logger := slog.New(slog.NewJSONHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	clock := porttest.NewClock(serverNow)
-	authz := app.NewAuthorizer(logger)
+	s.iamStore = porttest.NewMemIAM()
+	s.auditor = app.NewAuditor(s.iamStore, clock, logger)
+	authz := app.NewAuthorizer(logger, clock, s.auditor)
+	s.iam = app.NewIAMService(app.IAMServiceConfig{
+		Store: s.iamStore, Trail: s.iamStore, Authz: authz, Auditor: s.auditor, KMS: kms, Hasher: &porttest.Hasher{},
+		Clock: clock, Entropy: rand.Reader,
+	})
 
-	identities := app.NewIdentityService(s.meta, kms, clock, rand.Reader)
+	identities := app.NewIdentityService(s.meta, kms, clock, rand.Reader).WithIAM(s.iamStore, s.auditor)
 	generated, err := identities.EnsureRoot(ctx, nil)
 	if err != nil {
 		t.Fatalf("EnsureRoot: %v", err)

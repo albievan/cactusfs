@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strconv"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
@@ -48,6 +49,15 @@ type TopologyOptions struct {
 	// Entropy names a new deployment. It must be cryptographically secure.
 	Entropy io.Reader
 	Logger  *slog.Logger
+	// Auditor, when not nil, records a topology that is created or changed
+	// in the audit trail.
+	Auditor *Auditor
+}
+
+func (o TopologyOptions) audit(ctx context.Context, action string, details map[string]string) {
+	if o.Auditor != nil {
+		o.Auditor.Succeeded(ctx, o.Auditor.System(action, "", details))
+	}
 }
 
 // EnsureTopology returns the deployment's drive topology, bringing it in line
@@ -124,6 +134,9 @@ func ensureTopology(
 		if err := store.SetTopology(ctx, created); err != nil {
 			return cluster.Topology{}, err
 		}
+		opts.audit(ctx, "system:CreateTopology", map[string]string{
+			"deployment_id": created.DeploymentID, "drives": strconv.Itoa(len(all)), "nodes": strconv.Itoa(len(created.NodeIDs())),
+		})
 		opts.Logger.InfoContext(ctx, "new deployment: drive topology recorded",
 			slog.String("deployment_id", created.DeploymentID),
 			slog.Int("erasure_sets", len(created.Sets)), slog.Int("drives_per_set", created.SetSize()),
@@ -163,6 +176,9 @@ func ensureTopology(
 	if err := store.SetTopology(ctx, stored.Replace(*replacement)); err != nil {
 		return cluster.Topology{}, err
 	}
+	opts.audit(ctx, "system:ReplaceDrive", map[string]string{
+		"node": opts.NodeID, "missing_drive": replacement.Old, "new_drive": replacement.New,
+	})
 	opts.Logger.WarnContext(ctx, "an empty drive has replaced a missing drive; its shards will be rebuilt by healing",
 		slog.String("missing_drive", replacement.Old), slog.String("new_drive", replacement.New),
 		slog.Int("erasure_set", replacement.Position.Set), slog.Int("slot", replacement.Position.Slot))

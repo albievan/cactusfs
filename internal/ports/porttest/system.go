@@ -154,3 +154,31 @@ func (e *entropy) Read(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// Hasher is a fast ports.PasswordHasher for tests. It is not a password
+// hash: it only lets tests see what was hashed and verified.
+type Hasher struct {
+	mu sync.Mutex
+	// Verified counts the calls to Verify.
+	Verified int
+}
+
+// Hash implements ports.PasswordHasher.
+func (h *Hasher) Hash(password string) (string, error) {
+	return "test-hash:" + password, nil
+}
+
+// Verify implements ports.PasswordHasher.
+func (h *Hasher) Verify(encoded, password string) (bool, error) {
+	h.mu.Lock()
+	h.Verified++
+	h.mu.Unlock()
+	return encoded == "test-hash:"+password, nil
+}
+
+// Verifications returns how often Verify was called.
+func (h *Hasher) Verifications() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Verified
+}

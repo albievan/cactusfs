@@ -55,8 +55,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 |---|---|---|
 | Use of a built-in or default account | No default credentials; first start requires or generates root credentials, shown once on standard error and stored sealed | **implemented** |
 | Forged S3 requests | SigV4 verification (checked against AWS's documented examples); host and every `x-amz-*` header must be signed; constant-time comparison; 15-minute clock-skew window | **implemented** (header authentication; presigned URLs M6) |
-| Stolen API key used indefinitely | Expiry, last-used tracking, immediate revocation, scoped-down inline policy | M4 |
-| Password guessing against the console | Argon2id; short-lived `HttpOnly`, `Secure`, `SameSite=Strict` session cookies; CSRF protection | M4 |
+| Stolen API key used indefinitely | Expiry; last use recorded (to within five minutes); revocation that every node honours with the next request; an inline policy that narrows the key | **implemented**; there is no admin API to do it through until milestone 5 |
+| Password guessing against the console | Argon2id (64 MiB, 3 passes); a refused sign-in looks and costs the same whether the user exists or not; sessions of 30 minutes stored as hashes; `__Host-` cookie that is `HttpOnly`, `Secure`, `SameSite=Strict`; CSRF token on every changing request | **implemented** in the use cases and helpers; **no lockout or rate limit yet**; the console that uses them is milestone 5 |
 | Rogue node joining the cluster | Mutual TLS 1.3 for node RPC and Raft; only certificates of the cluster's node CA are accepted; a node's identity is the name in its certificate, never its address; every call passes the authorizer as that node; a node joins, leaves and records only itself; the Raft port admits voters only; no plaintext mode exists | **implemented**, with a limit: any node certificate may propose changes to buckets, objects and the topology, so a stolen one breaches the cluster's metadata, not just one node; the node CA must issue node certificates only — whatever it signs is a node. Certificates are read at start: rotation needs a restart, and there is no revocation list |
 | A node is impersonated at its address (DNS or routing) | The caller checks that the certificate names the node it meant, whatever answered | **implemented** |
 | A cut-off or deposed leader serves stale data | Reads on every node wait for a read index that the leader gives only after a majority of the *voters* confirm its term; a node without a majority answers nothing | **implemented**; tested with a network partition |
@@ -75,7 +75,10 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Reordered, truncated or spliced ciphertext | Streaming AEAD with a unique nonce per segment and the segment index and final flag bound into the AAD (ADR-0002) | **implemented** |
 | Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs, and all drive I/O is confined by `os.Root` | **implemented** |
 | Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order and exactly once; an entry this binary cannot interpret stops the node rather than being skipped | **implemented** (single voter); mTLS between voters M3 |
-| Policy tampering | Policies live in Raft; every mutation is authorized and audited | M4 |
+| Policy tampering | Policies live in Raft; every change is authorized and written to the audit trail in the same entry as the change | **implemented** |
+| A policy silently means less than it says | Parsing is strict: an unknown field, operator or condition key is an error, never ignored; evaluation is fuzzed against its laws (silence refuses, a matching Deny always wins, a key's policy only takes away) | **implemented** |
+| The audit trail is edited | Records are numbered and hash-chained by the state machine; reading verifies the chain; the latest hash is published as an event and can be exported | **implemented**; a rewrite of the whole chain is only detected by somebody who kept a hash outside |
+| The audit trail is flooded or outrun | Refusals are written in the background, repeats within ten seconds counted into one record, the queue bounded | **implemented**: what a caller can vary (the key claimed, the object named) does not make a new record; at most 64 kinds of refusal are written per ten seconds and node, the rest counted. Limit: under flood a record per refusal can be dropped, and is then only in the node's log; changes are never dropped |
 
 ### Repudiation
 
@@ -90,7 +93,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Theft of drives, backups or decommissioned disks | Encryption at rest is always on: AES-256-GCM, a data key per object, wrapped by a KMS key; no unencrypted fallback | **implemented** |
 | Theft of the local KMS key file | The master key is sealed with AES-256-GCM under an Argon2id-derived key; the passphrase is never stored | **implemented** (strength is the passphrase's; Vault Transit M4) |
 | A node started with the wrong key | A missing key file on an existing deployment, a wrong passphrase or another deployment's key stops the node | **implemented** |
-| Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once | **implemented** for the root key; user keys M4 |
+| Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once; console passwords are Argon2id hashes; sessions are stored as hashes of their tokens | **implemented** |
+| The KMS key is on the nodes | `--kms vault`: the key stays in Vault Transit; wrapped data keys are bound to their owner by associated data, and a key type that cannot bind is refused at start; HTTPS only; the token is read from a file and never logged | **implemented**; token authentication only, renewal is the platform's job |
 | Bucket names, keys or object metadata read from the metadata store | Not encrypted: `state.db` and the Raft log hold names, sizes and user metadata in the clear | **not mitigated** — see open question 6 |
 | Secrets in logs | Secrets, keys, tokens and object contents are never logged; secrets have no command-line flag | **implemented**, tested for the root secret and the KMS passphrase |
 | Internal state disclosed through errors | Integrity, key and storage failures all answer `InternalError`; the cause is logged, not returned | **implemented** |
@@ -119,9 +123,10 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| A handler forgets an authorization check | Every use case calls the single `ports.Authorizer`; no authorization logic in handlers; default deny | **implemented** (root only); policies and explicit deny M4 |
+| A handler forgets an authorization check | Every use case calls the single `ports.Authorizer`, which decides on the policies resolved at authentication; no authorization logic in handlers; default deny; explicit deny wins | **implemented** |
 | An unimplemented S3 feature is served as a different operation | Allow-list: any query parameter, `x-amz-*` header or conditional header the routed operation does not implement answers `501`; an unparseable query answers `400` | **implemented** |
-| An API key exceeds its owner | A key's effective policy is the intersection with its owner's | M4 |
+| An API key exceeds its owner | A request with a key must be allowed by the owner's policies and, when the key has one, by its inline policy too | **implemented** |
+| An administrator of users makes themselves an administrator of everything | Whoever may put users, groups, roles or policies, or make keys for an administrator, in effect holds every permission: by design, as in IAM. Of the built-in roles only `cluster-admin` can; a custom policy granting one of these grants the deployment. Every such change, and what it granted, is in the audit trail; a narrowed key cannot make keys | **accepted** |
 | Anonymous access | Only when a bucket policy explicitly grants it | M6 |
 | Ransomware with stolen admin credentials | Versioning and Object Lock; a compliance-locked version cannot be deleted by anyone, `cluster-admin` included | M6 |
 | Container escape or host damage | Distroless static image, non-root UID 65532, no shell; read-only root filesystem; all capabilities dropped; `restricted` Pod Security Standard; default-deny NetworkPolicy | image **implemented**; chart M7 |

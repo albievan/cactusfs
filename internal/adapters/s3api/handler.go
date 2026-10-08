@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -63,6 +64,12 @@ type Objects interface {
 // *app.IdentityService implements it.
 type Identities interface {
 	SecretFor(ctx context.Context, accessKeyID string) ([]byte, iam.Principal, error)
+	// AuthenticationFailed is told of every request whose credentials were
+	// not accepted, for the audit trail. reason is a short code and never
+	// contains a secret.
+	AuthenticationFailed(ctx context.Context, accessKeyID string, session iam.Session, reason string)
+	// Authenticated is told that a request's signature verified.
+	Authenticated(p iam.Principal)
 }
 
 // Observation describes one finished request, for metrics and traces.
@@ -207,6 +214,11 @@ func newRequestID() string {
 func (h *Handler) serve(ctx context.Context, req *request) error {
 	h.address(req)
 	if err := h.authenticate(ctx, req); err != nil {
+		if code := toAPIError(err); code.status == http.StatusForbidden {
+			// Refused credentials, as opposed to a request this adapter
+			// cannot serve: that goes to the audit trail.
+			h.cfg.Identities.AuthenticationFailed(ctx, claimedAccessKey(req.Request), sessionOf(req), code.code)
+		}
 		h.cfg.Logger.WarnContext(ctx, "authentication failed",
 			slog.String("request_id", req.id),
 			slog.String("remote", remoteHost(req.RemoteAddr)),
@@ -271,8 +283,31 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 	if err != nil {
 		return err
 	}
+	// Where and how the request arrived is part of who is asking:
+	// conditions in policies test it.
+	principal.Session = sessionOf(req)
+	h.cfg.Identities.Authenticated(principal)
 	req.principal, req.payloadHash = principal, payloadHash
 	return nil
+}
+
+// sessionOf describes the connection a request arrived on.
+func sessionOf(req *request) iam.Session {
+	session := iam.Session{SecureTransport: req.TLS != nil, RequestID: req.id}
+	if addr, err := netip.ParseAddrPort(req.RemoteAddr); err == nil {
+		session.SourceIP = addr.Addr().Unmap()
+	}
+	return session
+}
+
+// claimedAccessKey returns the access key ID a request says it is signed
+// with, or "" when it says nothing that can be read.
+func claimedAccessKey(r *http.Request) string {
+	sig, err := parseAuthorization(r.Header.Get("Authorization"))
+	if err != nil {
+		return ""
+	}
+	return sig.accessKeyID
 }
 
 // queryClientInfo is a query parameter AWS SDKs add to name the operation

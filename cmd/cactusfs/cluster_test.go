@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -17,10 +18,12 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
+	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -92,9 +95,12 @@ func newTestCluster(t *testing.T, roles map[string]string) *testCluster {
 			Labels:  cluster.Labels{Zone: "zone-" + id[len(id)-1:]},
 			secrets: secrets{kmsPassphrase: nodePassphrase},
 			raftTiming: raftmeta.Timing{
-				Heartbeat: 200 * time.Millisecond, Election: 200 * time.Millisecond, LeaderLease: 200 * time.Millisecond,
-				Commit: 5 * time.Millisecond, LeaderWait: 8 * time.Second,
+				// Long enough that a machine busy with other tests is not
+				// taken for a lost leader.
+				Heartbeat: time.Second, Election: time.Second, LeaderLease: time.Second,
+				Commit: 5 * time.Millisecond, LeaderWait: 20 * time.Second,
 			},
+			passwordParams: passwords.Params{Time: 1, MemoryKiB: 8 << 10, Threads: 1},
 		}
 		if parsed.Has(cluster.RoleStorage) {
 			cfg.Data = []string{filepath.Join(c.dir, id, "d1"), filepath.Join(c.dir, id, "d2")}
@@ -614,6 +620,139 @@ func TestClusterConfigRules(t *testing.T) {
 			args = []string{"--dev-plaintext", "--kms", "local", "--data", dir, "--roles", "storage"}
 		}
 		if _, err := parseServerConfig(args, env, io.Discard); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// TestClusterIAM: identities are the cluster's, not a node's. A user and a
+// key made through one node authenticate on every other at once; a
+// revocation on one node is honoured by the next request on any other; and
+// every node holds the same audit trail, which verifies.
+func TestClusterIAM(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t, fourNodes())
+	c.start(c.all()...)
+
+	stored, err := c.node("n1").meta.GetRootCredential(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := iam.Principal{AccessKeyID: stored.AccessKeyID, Root: true}
+	if _, err := c.node("n1").iam.CreateUser(ctx, admin, app.UserInput{Name: "alice", Roles: []string{iam.RoleReadWrite}, Password: "a console password"}); err != nil {
+		t.Fatalf("CreateUser through n1: %v", err)
+	}
+	creds, _, err := c.node("n2").iam.CreateAPIKey(ctx, admin, app.APIKeyInput{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("CreateAPIKey through n2: %v", err)
+	}
+	for _, id := range c.all() {
+		secret, principal, err := c.node(id).identities.SecretFor(ctx, creds.AccessKeyID)
+		if err != nil || string(secret) != creds.SecretKey || principal.User != "alice" || len(principal.Policies) != 1 {
+			t.Fatalf("the key on %s: %+v, %v", id, principal, err)
+		}
+		// She writes through this node and reads through the next.
+		if err := c.node(id).buckets.Create(ctx, admin, "bkt-"+id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.node(id).objects.Put(ctx, principal, app.PutInput{Bucket: "bkt-" + id, Key: "k", Body: strings.NewReader("x"), Size: 1}); err != nil {
+			t.Errorf("alice writing through %s: %v", id, err)
+		}
+		// ...but makes no bucket: read-write does not allow it. The
+		// refusal is audited by this node.
+		if err := c.node(id).buckets.Create(ctx, principal, "alice-"+id); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("alice making a bucket through %s = %v", id, err)
+		}
+	}
+	// A console session started on one node is known on another.
+	signed, err := c.node("n3").sessions.SignIn(ctx, "alice", "a console password", iam.Session{})
+	if err != nil {
+		t.Fatalf("SignIn on n3: %v", err)
+	}
+	if p, err := c.node("n4").sessions.Authenticate(ctx, signed.Token, signed.CSRFToken, true, iam.Session{}); err != nil || p.User != "alice" {
+		t.Errorf("the session on n4: %+v, %v", p, err)
+	}
+
+	// Revoked on n3: refused on every node by the next request.
+	if err := c.node("n3").iam.DeleteAPIKey(ctx, admin, creds.AccessKeyID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range c.all() {
+		if _, _, err := c.node(id).identities.SecretFor(ctx, creds.AccessKeyID); !errors.Is(err, domain.ErrCredentialNotFound) {
+			t.Errorf("the revoked key on %s = %v, want %v", id, err, domain.ErrCredentialNotFound)
+		}
+	}
+
+	// One trail, the same on every node.
+	for _, id := range c.all() {
+		c.node(id).auditor.Flush(ctx)
+	}
+	reference, err := c.node("n1").iam.AuditLog(ctx, admin, 0, 1000)
+	if err != nil {
+		t.Fatalf("AuditLog on n1: %v", err)
+	}
+	var changes, denials, signIns int
+	for _, r := range reference {
+		switch {
+		case r.Outcome == audit.Denied:
+			denials++
+		case r.Action == "auth:SignIn":
+			signIns++
+		case strings.HasPrefix(r.Action, "admin:"):
+			changes++
+		}
+	}
+	if changes != 3 || denials != 4 || signIns != 1 {
+		t.Errorf("trail: %d changes, %d denials, %d sign-ins; want 3, 4, 1", changes, denials, signIns)
+	}
+	for _, id := range []string{"n2", "n3", "n4"} {
+		records, err := c.node(id).iam.AuditLog(ctx, admin, 0, 1000)
+		if err != nil || !reflect.DeepEqual(records, reference) {
+			t.Errorf("the audit trail on %s differs from the one on n1 (%d vs %d records, %v)", id, len(records), len(reference), err)
+		}
+	}
+}
+
+func TestVaultConfigRules(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	vaultArgs := []string{
+		"--dev-plaintext", "--data", dir, "--kms", "vault", "--vault-addr", "https://vault.test:8200",
+		"--vault-key", "cactusfs", "--vault-token-file", "/run/secrets/vault-token",
+	}
+	cfg, err := parseServerConfig(append(append([]string{}, vaultArgs...), "--vault-transit-mount", "kms", "--vault-ca-cert", "ca.pem",
+		"--vault-server-name", "vault.internal", "--vault-namespace", "team", "--audit-export"), noEnv, io.Discard)
+	if err != nil {
+		t.Fatalf("parseServerConfig: %v", err)
+	}
+	if cfg.KMS != kmsVault || cfg.VaultAddr != "https://vault.test:8200" || cfg.VaultMount != "kms" || cfg.VaultKey != "cactusfs" ||
+		cfg.VaultCACert != "ca.pem" || cfg.VaultServerName != "vault.internal" || cfg.VaultNamespace != "team" ||
+		cfg.KMSKeyFile != "" || !cfg.AuditExport {
+		t.Errorf("config = %+v", cfg)
+	}
+	// With the keys in Vault a cluster needs no shared key file.
+	clustered := append(append([]string{}, vaultArgs...), "--node-id", "a", "--peers", "a=h:1,b=h:2,c=h:3,d=h:4",
+		"--node-tls-cert", "c", "--node-tls-key", "k", "--node-tls-ca", "ca")
+	if _, err := parseServerConfig(clustered, noEnv, io.Discard); err != nil {
+		t.Errorf("a cluster member with Vault: %v", err)
+	}
+	passphrase := envMap(map[string]string{envKMSPhrase: nodePassphrase})
+	refused := map[string]struct {
+		args []string
+		env  func(string) string
+	}{
+		"no address":              {[]string{"--dev-plaintext", "--data", dir, "--kms", "vault", "--vault-key", "k", "--vault-token-file", "t"}, noEnv},
+		"no key":                  {[]string{"--dev-plaintext", "--data", dir, "--kms", "vault", "--vault-addr", "https://v", "--vault-token-file", "t"}, noEnv},
+		"no token file":           {[]string{"--dev-plaintext", "--data", dir, "--kms", "vault", "--vault-addr", "https://v", "--vault-key", "k"}, noEnv},
+		"vault with a passphrase": {vaultArgs, passphrase},
+		"vault with a key file":   {append(append([]string{}, vaultArgs...), "--kms-key-file", "k.json"), noEnv},
+		"local with vault flags":  {[]string{"--dev-plaintext", "--data", dir, "--kms", "local", "--vault-addr", "https://v"}, passphrase},
+		"unknown KMS":             {[]string{"--dev-plaintext", "--data", dir, "--kms", "hsm"}, passphrase},
+		"bad audit export":        {vaultArgs, envMap(map[string]string{envAuditExport: "maybe"})},
+	}
+	for name, tt := range refused {
+		if _, err := parseServerConfig(tt.args, tt.env, io.Discard); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

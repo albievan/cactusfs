@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -173,7 +174,7 @@ func TestBucketServiceAuthorizesEveryCall(t *testing.T) {
 					t.Fatalf("%+v: error = %v, want %v", principal, err, domain.ErrAccessDenied)
 				}
 				requests := f.authz.Requests()
-				if len(requests) != 1 || requests[0].Action != action || requests[0].Principal != principal {
+				if len(requests) != 1 || requests[0].Action != action || !reflect.DeepEqual(requests[0].Principal, principal) {
 					t.Fatalf("authorizer saw %+v, want one request for %s", requests, action)
 				}
 				wantBucket := "photos"
@@ -192,7 +193,7 @@ func TestAuthorizerLogsRefusalsWithoutSecrets(t *testing.T) {
 	t.Parallel()
 
 	var logs bytes.Buffer
-	authz := app.NewAuthorizer(slog.New(slog.NewJSONHandler(&logs, nil)))
+	authz := app.NewAuthorizer(slog.New(slog.NewJSONHandler(&logs, nil)), porttest.NewClock(testNow), nil)
 	resource := iam.Resource{Bucket: "photos", Key: "a.jpg"}
 
 	if err := authz.Authorize(context.Background(), iam.Request{Principal: porttest.Root(), Action: iam.ActionGetObject, Resource: resource}); err != nil {

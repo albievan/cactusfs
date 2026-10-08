@@ -136,7 +136,7 @@ func serve(t *testing.T, p *pki, nodeID string, drives ...ports.ShardStore) *ser
 	s.address = listener.Addr().String()
 	s.server = noderpc.NewServer(noderpc.ServerConfig{
 		TLS: p.identity(nodeID).Server(), PeerNodeID: nodetls.PeerNodeID,
-		Authz: app.NewAuthorizer(slog.New(slog.DiscardHandler)),
+		Authz: app.NewAuthorizer(slog.New(slog.DiscardHandler), porttest.NewClock(testNow), nil),
 		Info: func(context.Context) (noderpc.NodeInfo, error) {
 			info := noderpc.NodeInfo{
 				Node: cluster.Node{
@@ -546,7 +546,7 @@ func TestEveryCallPassesTheAuthorizer(t *testing.T) {
 		t.Fatalf("%d authorization requests for 2 calls", len(requests))
 	}
 	for _, req := range requests {
-		if req.Principal != (iam.Principal{NodeID: "gateway-7"}) || req.Action != iam.ActionNodeRPC {
+		if req.Principal.NodeID != "gateway-7" || req.Principal.AccessKeyID != "" || req.Principal.Root || req.Action != iam.ActionNodeRPC {
 			t.Errorf("authorization request = %+v", req)
 		}
 	}

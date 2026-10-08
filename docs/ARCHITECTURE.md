@@ -69,10 +69,11 @@ Conventions that follow from it:
 | `internal/domain` | typed sentinel errors, and their names on the wire between nodes |
 | `internal/domain/bucket` | bucket naming rules |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, the streaming AEAD (ADR-0002) |
-| `internal/domain/iam` | principals, actions, the default-deny decision, credential rules, sealed secrets |
+| `internal/domain/iam` | principals, actions, the policy language and the decision, users, groups, roles, API keys, built-in roles, sealed secrets |
+| `internal/domain/audit` | audit records and their hash chain |
 | `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
-| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `EventPublisher`, `Authorizer`, `Clock`, `ReadinessCheck` |
+| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck` |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
 | `internal/app` | bucket, object and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
@@ -86,6 +87,10 @@ Conventions that follow from it:
 | `internal/adapters/nodetls` | mutual TLS 1.3 between nodes; development certificates |
 | `internal/adapters/events/inproc` | out: in-process event bus |
 | `internal/adapters/kms/local` | out: sealed local key file |
+| `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
+| `internal/adapters/passwords` | out: Argon2id password hashes |
+| `internal/adapters/httpsession` | in: session cookie and CSRF header |
+| `internal/adapters/audit` | out: audit records as JSON lines |
 | `cmd/cactusfs` | composition root: configuration, node wiring, listeners, shutdown |
 
 ## 3. The binary **(implemented: `version`, `server` standalone and clustered, `dev-init`)**
@@ -107,7 +112,10 @@ matching flag, and the flag wins.
 |---|---|---|---|
 | `--data` | `CACTUSFS_DATA` | — (required) | drive directory; repeat or comma-separate |
 | `--meta-dir` | `CACTUSFS_META_DIR` | `<first drive>/meta` | metadata directory |
-| `--kms` | `CACTUSFS_KMS` | — (required) | `local`: sealed local key file. No default and no unencrypted mode |
+| `--kms` | `CACTUSFS_KMS` | — (required) | `vault`: HashiCorp Vault Transit; `local`: sealed local key file. No default and no unencrypted mode |
+| `--vault-addr`, `--vault-key`, `--vault-token-file` | `CACTUSFS_VAULT_ADDR`, `…_KEY`, `…_TOKEN_FILE` | — | Vault's URL (https), the Transit key (an AEAD type), the file holding the token |
+| `--vault-transit-mount`, `--vault-ca-cert`, `--vault-server-name`, `--vault-namespace` | `CACTUSFS_VAULT_…` | `transit`, system CAs, —, — | where Transit is mounted and how Vault's certificate is checked |
+| `--audit-export` | `CACTUSFS_AUDIT_EXPORT` | `false` | write every audit record to standard output as a JSON line |
 | `--kms-key-file` | `CACTUSFS_KMS_KEY_FILE` | `<meta dir>/kms-local.json` | local KMS key file |
 | `--kms-passphrase-file` | `CACTUSFS_KMS_PASSPHRASE_FILE` | — | file holding the KMS passphrase |
 | `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` | S3 API listener |
@@ -283,17 +291,25 @@ The full analysis is in `docs/threat-model.md`. In brief:
 
 - Encryption at rest is always on **(implemented)**: AES-256-GCM streaming AEAD with a
   per-object data key wrapped by a KMS key. KMS adapters: a sealed local key file for
-  standalone **(implemented)**, Vault Transit for clusters (milestone 4). There is no
-  unencrypted fallback.
+  standalone **(implemented)**, Vault Transit for clusters **(implemented, ADR-0006)**.
+  There is no unencrypted fallback.
 - Encryption in transit: TLS 1.2+ for clients **(implemented for the admin listener)**,
   mTLS 1.3 between nodes including the Raft transport.
 - Every inbound request is authenticated and passes through the single
-  `ports.Authorizer` **(implemented: root only, default deny; policies are milestone 4)**.
-  The probe endpoints are the one exception and disclose nothing.
+  `ports.Authorizer` **(implemented, ADR-0006)**: users, groups, roles and IAM-style
+  policies; default deny; explicit deny wins; a key never exceeds its owner. The key,
+  its owner and every policy that applies are resolved in one consistent read when a
+  request is authenticated. The probe endpoints are the one exception and disclose
+  nothing.
 - No default credentials. API key secrets are envelope-encrypted, shown once, compared
-  in constant time.
-- Hash-chained, append-only audit trail. Versioning and Object Lock for ransomware
-  resistance.
+  in constant time **(implemented)**. Keys expire, can be narrowed by an inline policy
+  and are revoked for every node at once.
+- Hash-chained, append-only audit trail **(implemented)**: changes to identities are
+  recorded in the same Raft entry as the change; refusals in the background.
+  `--audit-export` writes the records to the log stream as JSON lines.
+- Console accounts with Argon2id and replicated, short-lived sessions **(use cases
+  implemented; the console is milestone 5)**.
+- Versioning and Object Lock for ransomware resistance (milestone 6).
 - Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset.
 
 ## 8. Build and delivery **(implemented)**

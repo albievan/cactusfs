@@ -267,11 +267,15 @@ func (s *Store) start(ctx context.Context, cfg Config) error {
 		s.leader = c.Leader
 		address = raft.ServerAddress(c.Advertise)
 		s.transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
-			Stream:                &streamLayer{Listener: c.Listener, dial: c.Dial},
-			MaxPool:               raftConnectionPool,
-			Timeout:               raftIOTimeout,
-			Logger:                logger,
-			ServerAddressProvider: addressProvider{advertise: address, local: conf.LocalID},
+			Stream:  &streamLayer{Listener: c.Listener, dial: c.Dial, advertise: address},
+			MaxPool: raftConnectionPool,
+			// One request at a time per follower. Raft's pipelined mode sends
+			// ahead without waiting; a follower that takes what it is sent and
+			// never answers can then block the leader's replication for good,
+			// and with it the leader's shutdown.
+			MaxRPCsInFlight: 1,
+			Timeout:         raftIOTimeout,
+			Logger:          logger,
 		})
 		transport = s.transport
 	} else {

@@ -53,6 +53,8 @@ type entry struct {
 	SetTopology  *topologyRecord  `json:"set_topology,omitempty"`
 	SetNode      *nodeRecord      `json:"set_node,omitempty"`
 	RemoveNode   *removeNodeCmd   `json:"remove_node,omitempty"`
+	// IAM is the payload of every identity, session and audit command.
+	IAM *iamCmd `json:"iam,omitempty"`
 }
 
 type removeNodeCmd struct {
@@ -234,7 +236,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
-		e.SetNode != nil, e.RemoveNode != nil,
+		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil,
 	} {
 		if present {
 			set++
@@ -259,7 +261,10 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 	case cmdRemoveNode:
 		ok = ok && e.RemoveNode != nil
 	default:
-		return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
+		if !isIAMCommand(e.Type) {
+			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
+		}
+		ok = ok && e.IAM != nil && iamPayloadFits(e.Type, *e.IAM)
 	}
 	if !ok {
 		return entry{}, fmt.Errorf("%w: metadata command %q does not match its payload", domain.ErrUnsupportedFormat, e.Type)
@@ -408,4 +413,28 @@ func decodeResult(data []byte) (applyResult, error) {
 		r.err = domain.FromCodes(w.Codes, w.Message)
 	}
 	return r, nil
+}
+
+// iamPayloadFits reports whether an IAM command carries what its type needs.
+func iamPayloadFits(kind string, c iamCmd) bool {
+	switch kind {
+	case cmdPutUser:
+		return c.User != nil
+	case cmdPutGroup:
+		return c.Group != nil
+	case cmdPutRole:
+		return c.Role != nil
+	case cmdPutPolicy:
+		return c.Policy != nil
+	case cmdCreateKey:
+		return c.Key != nil
+	case cmdPutSession:
+		return c.Session != nil
+	case cmdAppendAudit:
+		return c.Audit != nil
+	case cmdDeleteUser, cmdDeleteGroup, cmdDeleteRole, cmdDeletePolicy, cmdDeleteKey, cmdTouchKey, cmdDeleteSession:
+		return c.Name != ""
+	default:
+		return true
+	}
 }

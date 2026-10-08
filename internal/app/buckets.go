@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -14,6 +15,22 @@ type BucketService struct {
 	buckets ports.BucketStore
 	authz   ports.Authorizer
 	clock   ports.Clock
+	// auditor records buckets made and removed; nil records nothing.
+	auditor *Auditor
+}
+
+// WithAuditor makes the service record every bucket it makes or removes in
+// the audit trail. It is called once, when the node is assembled.
+func (s *BucketService) WithAuditor(auditor *Auditor) *BucketService {
+	s.auditor = auditor
+	return s
+}
+
+// audited records a change to a bucket that has been made.
+func (s *BucketService) audited(ctx context.Context, principal iam.Principal, action iam.Action, name string) {
+	if s.auditor != nil {
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, action, iam.Resource{Bucket: name}, audit.Succeeded, nil))
+	}
 }
 
 // NewBucketService returns a BucketService.
@@ -32,6 +49,7 @@ func (s *BucketService) Create(ctx context.Context, principal iam.Principal, nam
 	if err := s.buckets.CreateBucket(ctx, bucket.Bucket{Name: name, CreatedAt: s.clock.Now().UTC()}); err != nil {
 		return fmt.Errorf("bucket.Create: %w", err)
 	}
+	s.audited(ctx, principal, iam.ActionCreateBucket, name)
 	return nil
 }
 
@@ -43,6 +61,7 @@ func (s *BucketService) Delete(ctx context.Context, principal iam.Principal, nam
 	if err := s.buckets.DeleteBucket(ctx, name); err != nil {
 		return fmt.Errorf("bucket.Delete: %w", err)
 	}
+	s.audited(ctx, principal, iam.ActionDeleteBucket, name)
 	return nil
 }
 

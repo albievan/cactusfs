@@ -398,6 +398,9 @@ func (n *node) joinCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 			return err
 		}
 	}
+	n.auditor.Succeeded(ctx, n.auditor.System("cluster:RegisterNode", "arn:cactusfs:cluster:::node/"+cfg.NodeID, map[string]string{
+		"roles": cfg.Roles.String(), "rpc_addr": cfg.AdvertiseRPC,
+	}))
 	logger.InfoContext(ctx, "joined the cluster", slog.String("node_id", cfg.NodeID), slog.String("roles", cfg.Roles.String()),
 		slog.String("leader", n.meta.Leader()))
 	return nil

@@ -16,6 +16,7 @@ const (
 	EventTopologyChanged = "cactusfs.cluster.topology-changed.v1"
 	EventNodeRegistered  = "cactusfs.cluster.node-registered.v1"
 	EventNodeRemoved     = "cactusfs.cluster.node-removed.v1"
+	EventAuditRecorded   = "cactusfs.audit.recorded.v1"
 )
 
 // Event is a fact: a change of state that was committed through Raft. Events
@@ -69,6 +70,18 @@ type TopologyEvent struct {
 type NodeEvent struct {
 	NodeID string   `json:"node_id"`
 	Roles  []string `json:"roles,omitempty"`
+}
+
+// AuditEvent is the payload of EventAuditRecorded: that a record was added
+// to the audit trail, and enough of it to follow the chain. The record
+// itself is read from the audit log.
+type AuditEvent struct {
+	Sequence uint64 `json:"sequence"`
+	Actor    string `json:"actor"`
+	Action   string `json:"action"`
+	Resource string `json:"resource,omitempty"`
+	Outcome  string `json:"outcome"`
+	Hash     string `json:"hash"`
 }
 
 // EventPublisher delivers events to whoever consumes them. Publish must not

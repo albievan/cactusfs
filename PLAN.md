@@ -14,7 +14,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | 1 | Standalone store | done |
 | 2 | Erasure coding and integrity on local drives | done |
 | 3 | Cluster | done |
-| 4 | IAM | todo |
+| 4 | IAM | done |
 | 5 | Admin API, Swagger UI, console | todo |
 | 6 | S3 depth | todo |
 | 7 | Deployment hardening | todo |
@@ -121,15 +121,27 @@ says so at start), an operator surface for join/leave beyond the node RPC (5.x).
 
 ## Milestone 4 — IAM
 
+Design (ADR-0006): users belong to groups; users and groups hold roles; a role is a
+named set of policies; a policy is an IAM-style JSON document. An API key belongs to a
+user and may carry an inline policy that can only narrow what its owner may do. The
+identity of a request - key, owner, every policy that applies - is resolved in one
+consistent read at authentication and travels in the principal; the one authorizer
+decides on it. Everything is replicated through Raft; every IAM change carries its
+audit record in the same entry.
+
 | ID | Status | Step | Acceptance criterion | Files |
 |---|---|---|---|---|
-| 4.1 | todo | IAM domain: users, groups, roles, policies | IAM-style JSON; default deny; explicit deny wins; fuzz + property tests for policy parsing | `internal/domain/iam/` |
-| 4.2 | todo | Policy-backed `ports.Authorizer` (the port and root-only default deny exist since 1.2) | no authorization logic in handlers; key never exceeds its owner | `internal/ports/`, `internal/app/authz.go` |
-| 4.3 | todo | API keys | secrets envelope-encrypted through the KMS, shown once; expiry, inline policy, last-used, revocation | `internal/app/apikeys.go` |
-| 4.4 | todo | Vault Transit KMS adapter | integration test against Vault via testcontainers | `internal/adapters/kms/vault/` |
-| 4.5 | todo | Built-in roles | `cluster-admin`, `bucket-admin`, `read-write`, `read-only`, `auditor` | `internal/domain/iam/` |
-| 4.6 | todo | Audit log | append-only, hash-chained; admin mutations, auth failures, denials; audit events added to the AsyncAPI contract | `internal/domain/audit/`, `internal/adapters/audit/`, `api/asyncapi/events.yaml` |
-| 4.7 | todo | Console users | Argon2id local accounts; `ports.IdentityProvider`; secure session cookies + CSRF | `internal/app/sessions.go` |
+| 4.1 | done | IAM domain: users, groups, roles, policies | IAM-style JSON; default deny; explicit deny wins; conditions; fuzz + property tests for policy parsing and evaluation | `internal/domain/iam/` |
+| 4.2 | done | Policy-backed `ports.Authorizer` | one decision point; no authorization logic in handlers; a key never exceeds its owner; denials audited | `internal/ports/iam.go`, `internal/app/authz.go`, `internal/adapters/raftmeta/iam.go` |
+| 4.3 | done | API keys | secrets envelope-encrypted through the KMS, shown once; expiry, inline policy, last-used, immediate revocation; S3 requests authenticated with them | `internal/app/iam.go`, `internal/app/identity.go`, `internal/adapters/s3api/` |
+| 4.4 | done | Vault Transit KMS adapter | `--kms vault`; integration test against Vault via testcontainers | `internal/adapters/kms/vault/`, `cmd/cactusfs/` |
+| 4.5 | done | Built-in roles | `cluster-admin`, `bucket-admin`, `read-write`, `read-only`, `auditor`; cannot be changed or removed | `internal/domain/iam/builtin.go` |
+| 4.6 | done | Audit log | append-only, hash-chained in the replicated state; IAM mutations (atomically with the change), authentication failures, denials; audit events in the AsyncAPI contract; export as JSON lines | `internal/domain/audit/`, `internal/app/audit.go`, `internal/adapters/audit/`, `api/asyncapi/events.yaml` |
+| 4.7 | done | Console users | Argon2id local accounts behind `ports.IdentityProvider`; replicated sessions, short-lived; `HttpOnly`/`Secure`/`SameSite=Strict` cookie and CSRF token helpers | `internal/app/sessions.go`, `internal/adapters/passwords/`, `internal/adapters/httpsession/` |
+
+Out of scope for milestone 4: the HTTP surface for managing IAM (admin API, milestone
+5 - until then IAM is reachable through the use cases only), OIDC, SSE-KMS/SSE-C,
+bucket policies (6.x).
 
 ## Milestone 5 — Admin API, Swagger UI, console
 
@@ -254,3 +266,16 @@ says so at start), an operator surface for join/leave beyond the node RPC (5.x).
 | 2026-10-07 | In a cluster `CommitTimeout` is 10 ms; listeners (probes included) still open only after a node has joined its cluster. | Followers learn of commits with the leader's next message, and every read on a non-leader waits for that. Early probes are needed for Helm and moved to 7.1. |
 | 2026-10-07 | Review of milestone 3 (2 blocker, 3 major, 9 minor, 2 nit). Fixed: a topology recorded before slots named their node is migrated at first start (upgrade test, and proven with the previous commit's binary); PLAN statuses; the Raft port admits voters only and completes its handshake with a deadline; only a node may propose its own record; the leader decides who votes and the voters are fixed at formation; tests that pin leadership confirmation by voters and a new leader's catch-up (each kills the mutant the reviewer found alive); node certificates carry exactly one name; the state machine validates a node record only by rules every release shares; generated root credentials are shown even when their commit was uncertain; `noderpc` no longer imports `nodetls`; compose and README wording. | Recorded so the reasoning survives. |
 | 2026-10-07 | Deferred from that review, with reasons: any node certificate may still propose bucket, object and topology changes (narrowing by role belongs to IAM, milestone 4; stated in ADR-0005 and the threat model); the dev compose cluster shares one config volume, so nodes can read each other's keys (stated in the file); three tests assert "nothing happens" with short fixed sleeps; a certificate with two names is refused by code that no test exercises with such a certificate. | Honest list of what was not done. |
+| 2026-10-08 | Milestone 4. A request's identity - key, owner, every policy that applies - is resolved in one linearizable read at authentication and travels in the principal; `iam.Decide` is the only place a decision is made. ADR-0006. | One read-index round per request; revocation, disabling and role changes take effect with the next request on every node. |
+| 2026-10-08 | Policy parsing is strict (unknown, repeated or differently-cased fields, unknown operators and keys, empty conditions are errors). Conditions on an unknown source address are decided against the request in both Allow and Deny. | A policy must mean what it reads; the fuzzers and the review each found a way it did not (a literal `*` in a key; duplicate fields; a Deny that failed open). |
+| 2026-10-08 | Built-in roles and policies are part of the binary, not of the state; the proposer vouches for built-in names in the entry so that the state machine decides nothing a release could decide differently. | Same meaning everywhere, extendable by upgrade, no divergence between replicas of two releases. |
+| 2026-10-08 | IAM, session and audit commands are added to entry schema version 1, not a version 2. | No release has shipped version 1. A released schema would need a new version and the rolling-upgrade rule of ADR-0005. |
+| 2026-10-08 | Changes to identities carry their audit record in the same Raft entry. Refusals and other administrative changes are appended in the background; refusals are coalesced by what the caller cannot vary and capped per window; under flood a record per refusal can be dropped (counted, logged), a change never. | Atomic where it matters most; an unauthenticated client must not be able to grow the replicated log one request at a time. **Open question for Albie:** CLAUDE.md §3 says every admin mutation, authentication failure and denial is an audit event - read strictly that allows no dropping at all, which would let a flood stop the store. |
+| 2026-10-08 | Vault Transit through `net/http`, no Vault SDK; data keys are made on the node and wrapped with `encrypt` + associated data; a key type that cannot bind associated data is refused at start; token from a file, re-read at every use; no redirects, no proxy. | Smallest dependency and attack surface; the SDK is MPL-2.0 and large. Token renewal and other auth methods are left to the platform. |
+| 2026-10-08 | Console passwords: Argon2id `m=65536,t=3,p=4` behind `ports.PasswordHasher` (the domain may not import `x/crypto`), at most four hashes at once. Sessions: 30 minutes, fixed, replicated, stored as hashes; `__Host-` cookie; CSRF token per session. | RFC 9106's second recommended set; the cap bounds memory when sign-in becomes reachable in milestone 5. No lockout or rate limit yet. |
+| 2026-10-08 | The root credential is read once per process and stays the way back in: it has no policy and cannot be locked out. | It is written once and never changes; a policy mistake must not be unrecoverable. |
+| 2026-10-08 | Review of milestone 4 (3 blocker, 6 major, 9 minor). Fixed: denials with long names were not audited; repeat counts lost at a window boundary; PLAN statuses; flooding the trail by varying the claimed key or the object; Deny conditions that failed open (unknown address, zoned IPv6, IPv4-mapped ranges); duplicate, differently-cased and empty fields accepted by the parser; audit records that did not say what was granted; bucket, bootstrap, topology and registration changes not audited; tests for owner-scoped key permissions, the Vault token's destination, the node's clock, literal wildcards. Also: last use only after the signature verified; narrowed keys cannot make keys; refusals do not name a key's owner; Vault's refusal (not an error on the way) proves the binding; Argon2id concurrency cap. | Recorded so the reasoning survives. |
+| 2026-10-08 | Deferred from that review: `UpdateUser` without compare-and-set, and a password change not ending sessions; the built-in-immutable rule lives in the store adapters; no test that a failed `/metrics` authentication is audited; sign-out of a session that is already gone writes a record; the map of touched keys is never pruned. | Honest list of what was not done; the first is stated in ADR-0006. |
+| 2026-10-08 | Raft replicates one request at a time per follower (`MaxRPCsInFlight: 1`, no pipelining), and a node that stops closes the Raft connections it accepted. | Found by a test that hung for 30 minutes: with pipelining, a follower that takes what it is sent and never answers blocks the leader's replication goroutine for good, and Raft's shutdown waits for that goroutine. Costs replication throughput, which metadata does not need; not benchmarked. |
+| 2026-10-08 | Raft learns a node's advertised address from the stream layer's `Addr()`, not from an address provider that answered "use the configured address" for every other node. | Without pipelining that provider made Raft log a warning on every replication request, which drowned the node log (and hid the cause of a chaos failure). |
+

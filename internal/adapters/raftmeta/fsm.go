@@ -133,7 +133,7 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range [][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket(), nodesBucket()} {
+		for _, name := range append([][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket(), nodesBucket()}, iamBuckets()...) {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -326,6 +326,9 @@ func applyEntry(tx *bbolt.Tx, e entry) (applyResult, error) {
 	case cmdRemoveNode:
 		return applyRemoveNode(tx, e.RemoveNode.ID)
 	default:
+		if isIAMCommand(e.Type) {
+			return applyIAM(tx, e.Type, *e.IAM)
+		}
 		return applyResult{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
 	}
 }

@@ -66,6 +66,11 @@ channels:
     messages:
       event:
         $ref: '#/components/messages/NodeRemoved'
+  auditRecorded:
+    address: cactusfs.audit.recorded.v1
+    messages:
+      event:
+        $ref: '#/components/messages/AuditRecorded'
 
 operations:
   publishBucketCreated:
@@ -100,6 +105,10 @@ operations:
     action: send
     channel:
       $ref: '#/channels/nodeRemoved'
+  publishAuditRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/auditRecorded'
 
 components:
   messages:
@@ -199,6 +208,18 @@ components:
                 const: cactusfs.cluster.node-removed.v1
               data:
                 $ref: '#/components/schemas/Node'
+    AuditRecorded:
+      name: cactusfs.audit.recorded.v1
+      title: A record was appended to the audit trail
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.audit.recorded.v1
+              data:
+                $ref: '#/components/schemas/Audit'
 
   schemas:
     Envelope:
@@ -281,3 +302,26 @@ components:
           items:
             type: string
             enum: [gateway, meta, storage, console]
+    Audit:
+      type: object
+      required: [sequence, actor, action, outcome, hash]
+      additionalProperties: false
+      description: >-
+        Enough of an audit record to follow the hash chain. The record itself is read from
+        the audit log. No secret is ever part of it.
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        actor:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        outcome:
+          type: string
+          enum: [success, denied, failed]
+        hash:
+          type: string
+          description: SHA-256 of the record, which includes the hash of the record before it.

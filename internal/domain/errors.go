@@ -98,6 +98,18 @@ var (
 	ErrUnsupportedFormat = errors.New("unsupported format version")
 )
 
+// Errors of identity and access management.
+var (
+	// ErrEntityNotFound means that a user, group, role, policy, API key or
+	// session does not exist.
+	ErrEntityNotFound = errors.New("no such entity")
+	// ErrEntityExists means that the name is taken.
+	ErrEntityExists = errors.New("entity already exists")
+	// ErrEntityInUse means that something still refers to what was to be
+	// removed: a role a user holds, a policy a role contains.
+	ErrEntityInUse = errors.New("entity is in use")
+)
+
 // Errors that describe the state of the cluster.
 var (
 	// ErrUnavailable means that something the request needs cannot be
@@ -141,6 +153,10 @@ func wireCodes() []struct {
 		{"unsupported_format", ErrUnsupportedFormat},
 		{"unavailable", ErrUnavailable},
 		{"drive_offline", ErrDriveOffline},
+		{"entity_not_found", ErrEntityNotFound},
+		{"entity_exists", ErrEntityExists},
+		{"entity_in_use", ErrEntityInUse},
+		{"credential_not_found", ErrCredentialNotFound},
 	}
 }
 

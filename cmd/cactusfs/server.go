@@ -63,7 +63,13 @@ type serveOptions struct {
 // gracefully. Logs are written to logOutput as JSON; notice is the operator's
 // terminal, used once for generated credentials.
 func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Writer) (err error) {
+	// The log and, when exported, the audit records share one stream; each
+	// line is written whole.
+	logOutput = &lineWriter{out: logOutput}
 	logger := slog.New(slog.NewJSONHandler(logOutput, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	if cfg.AuditExport {
+		cfg.auditOut = logOutput
+	}
 
 	tlsConfig, err := loadTLSConfig(cfg)
 	if err != nil {
@@ -129,6 +135,18 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		drainDelay:      cfg.DrainDelay,
 		shutdownTimeout: cfg.ShutdownTimeout,
 	}, gate, logger)
+}
+
+// lineWriter serialises writes to a stream that several writers share.
+type lineWriter struct {
+	mu  sync.Mutex
+	out io.Writer
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.out.Write(p)
 }
 
 // listen opens a listener for every endpoint. On failure the ones already

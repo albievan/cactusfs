@@ -322,3 +322,8 @@ func TestStoreRefusesUseAfterClose(t *testing.T) {
 		}
 	}
 }
+
+func TestIAMContract(t *testing.T) {
+	t.Parallel()
+	porttest.IAMContract(t, func(t *testing.T) porttest.IAM { return open(t, t.TempDir()) })
+}

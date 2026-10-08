@@ -20,7 +20,8 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 		domain.ErrInvalidBucketName, domain.ErrBucketNotFound, domain.ErrBucketAlreadyExists, domain.ErrBucketNotEmpty,
 		domain.ErrInvalidObjectKey, domain.ErrObjectNotFound, domain.ErrInvalidID, domain.ErrIntegrity,
 		domain.ErrInsufficientDrives, domain.ErrShardNotFound, domain.ErrUnsupportedFormat, domain.ErrUnavailable,
-		domain.ErrDriveOffline,
+		domain.ErrDriveOffline, domain.ErrEntityNotFound, domain.ErrEntityExists, domain.ErrEntityInUse,
+		domain.ErrCredentialNotFound,
 	}
 	seen := map[string]bool{}
 	for i, sentinel := range sentinels {

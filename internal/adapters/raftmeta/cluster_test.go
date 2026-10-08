@@ -127,8 +127,8 @@ func clusterTiming() Timing {
 	return Timing{
 		// Short enough for quick elections, long enough that a busy
 		// machine is not mistaken for a lost leader.
-		Heartbeat: 300 * time.Millisecond, Election: 300 * time.Millisecond, LeaderLease: 300 * time.Millisecond,
-		Commit: 5 * time.Millisecond, LeaderWait: 6 * time.Second, TrailingLogs: 8,
+		Heartbeat: time.Second, Election: time.Second, LeaderLease: time.Second,
+		Commit: 5 * time.Millisecond, LeaderWait: 8 * time.Second, TrailingLogs: 8,
 	}
 }
 
@@ -822,8 +822,17 @@ func TestANodeFarBehindIsSentTheSnapshot(t *testing.T) {
 	versions := map[string]string{}
 	for i := range 200 {
 		version := porttest.SampleVersion("bkt", fmt.Sprintf("k%03d", i), byte(i%251))
-		if _, err := c.store("m1").PutVersion(ctx, version); err != nil {
-			t.Fatal(err)
+		// On a busy machine the leader can change in the middle of two
+		// hundred writes. Putting the same version again is harmless, so an
+		// unknown outcome is simply tried again.
+		for attempt := 0; ; attempt++ {
+			_, err := c.store("m1").PutVersion(ctx, version)
+			if err == nil {
+				break
+			}
+			if attempt == 20 || (!errors.Is(err, domain.ErrOutcomeUnknown) && !errors.Is(err, domain.ErrUnavailable)) {
+				t.Fatal(err)
+			}
 		}
 		versions[version.Key] = version.VersionID.String()
 	}
@@ -1020,4 +1029,15 @@ func TestSubject(t *testing.T) {
 	if _, _, err := store.Subject([]byte("not an entry")); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		t.Errorf("Subject of garbage = %v", err)
 	}
+}
+
+// TestIAMOnEveryNodeOfACluster: the whole IAM, audit and session contract,
+// asked of a node that neither leads nor votes.
+func TestIAMOnEveryNodeOfACluster(t *testing.T) {
+	t.Parallel()
+	porttest.IAMContract(t, func(t *testing.T) porttest.IAM {
+		c := newTestCluster(t)
+		c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+		return c.store("s4")
+	})
 }

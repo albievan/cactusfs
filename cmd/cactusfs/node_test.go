@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/passwords"
+
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
@@ -28,7 +30,7 @@ func nodeConfig(dir string) serverConfig {
 	return serverConfig{
 		Data: []string{filepath.Join(dir, "d1"), filepath.Join(dir, "d2")}, MetaDir: meta,
 		KMS: kmsLocal, KMSKeyFile: filepath.Join(meta, kmsKeyFileName), Roles: cluster.AllRoles(),
-		secrets: secrets{kmsPassphrase: nodePassphrase},
+		secrets: secrets{kmsPassphrase: nodePassphrase}, passwordParams: passwords.Params{Time: 1, MemoryKiB: 8 << 10, Threads: 1},
 		raftTiming: raftmeta.Timing{
 			Heartbeat: 50 * time.Millisecond, Election: 50 * time.Millisecond,
 			LeaderLease: 50 * time.Millisecond, Commit: 5 * time.Millisecond,

@@ -15,15 +15,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	auditexport "github.com/albievan/cactusfs/internal/adapters/audit"
 	"github.com/albievan/cactusfs/internal/adapters/disk"
 	"github.com/albievan/cactusfs/internal/adapters/erasurecodec"
 	"github.com/albievan/cactusfs/internal/adapters/events/inproc"
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
+	"github.com/albievan/cactusfs/internal/adapters/kms/vault"
 	"github.com/albievan/cactusfs/internal/adapters/noderpc"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
+	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -54,6 +59,9 @@ type node struct {
 	rpcServer *noderpc.Server
 	rpcDone   chan error
 	events    *inproc.Bus
+	// auditOut is where exported audit records are written; nil when they
+	// are not exported.
+	auditOut io.Writer
 	// inFlight answers other nodes' collectors; it is set once the object
 	// service exists. started is the metadata store as node RPC sees it:
 	// node RPC serves before the store is open, and from other goroutines.
@@ -64,6 +72,9 @@ type node struct {
 	objects    *app.ObjectService
 	identities *app.IdentityService
 	authorizer *app.Authorizer
+	auditor    *app.Auditor
+	iam        *app.IAMService
+	sessions   *app.SessionService
 	clock      ports.Clock
 	telemetry  *telemetry.Telemetry
 
@@ -91,8 +102,12 @@ func openNode(
 
 func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, notice io.Writer) error {
 	n.roles = cfg.Roles
+	n.auditOut = cfg.auditOut
 	// The one authorization decision point. Node RPC needs it first.
-	n.authorizer = app.NewAuthorizer(logger)
+	// Refusals are audited from the first request on; the trail they are
+	// written to becomes reachable when the metadata store is open.
+	n.auditor = app.NewAuditor(lateAuditLog{node: n}, n.clock, logger)
+	n.authorizer = app.NewAuthorizer(logger, n.clock, n.auditor)
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
 	attached := make([]app.AttachedDrive, 0, len(cfg.Data))
 	for _, dir := range cfg.Data {
@@ -107,11 +122,11 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 			slog.String("drive_id", drive.DriveID()), slog.String("dir", dir), slog.Bool("empty", drive.Empty()))
 	}
 
-	localKMS, err := openKMS(ctx, cfg, logger)
+	opened, err := openKMS(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
-	kms := n.telemetry.InstrumentKMS(localKMS)
+	kms := n.telemetry.InstrumentKMS(opened)
 
 	// Events are derived from applied metadata entries and delivered inside
 	// the process.
@@ -152,7 +167,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		logger.WarnContext(ctx, "the drives of this cluster are spread so that the loss of ONE NODE can make objects unreadable")
 	}
 
-	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock)
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Drives: n.driveSource(stores), Codec: erasurecodec.New(), KMS: kms,
 		OnHeal: n.telemetry.ObserveHeal,
@@ -162,7 +177,29 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 	n.inFlight.Store(n.objects)
-	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader)
+	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader).WithIAM(n.meta, n.auditor)
+	cost := cfg.passwordParams
+	if cost == (passwords.Params{}) {
+		cost = passwords.DefaultParams()
+	}
+	hasher, err := passwords.New(cost, rand.Reader)
+	if err != nil {
+		return err
+	}
+	n.iam = app.NewIAMService(app.IAMServiceConfig{
+		Store: n.meta, Trail: n.meta, Authz: n.authorizer, Auditor: n.auditor, KMS: kms, Hasher: hasher,
+		Clock: n.clock, Entropy: rand.Reader,
+	})
+	provider, err := app.NewLocalIdentityProvider(n.meta, hasher, rand.Reader)
+	if err != nil {
+		return err
+	}
+	n.sessions = app.NewSessionService(app.SessionServiceConfig{
+		Sessions: n.meta, Users: n.meta, Provider: provider, Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
+	})
+	if cfg.AuditExport && n.auditOut != nil {
+		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(n.meta, n.auditOut, logger).Handle))
+	}
 	n.scrubber = app.NewScrubber(app.ScrubberConfig{
 		Buckets: meta, Index: meta, Healer: n.objects.Healer(), Logger: logger,
 		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20, OnPass: n.telemetry.ObserveScrub,
@@ -221,6 +258,7 @@ func (n *node) ensureTopology(
 ) (cluster.Topology, error) {
 	opts := app.TopologyOptions{
 		AllowReplacement: cfg.AllowDriveReplacement, NodeID: n.id, Labels: cfg.Labels, Entropy: rand.Reader, Logger: logger,
+		Auditor: n.auditor,
 	}
 	if !cfg.clustered() {
 		return app.EnsureTopology(ctx, meta, attached, opts)
@@ -236,6 +274,58 @@ func (n *node) ensureTopology(
 		}
 		if err := waiting.pause(ctx, err); err != nil {
 			return cluster.Topology{}, err
+		}
+	}
+}
+
+// lateAuditLog is the audit trail as the auditor sees it from the first
+// moment of the node: unavailable until the metadata store is open.
+type lateAuditLog struct {
+	node *node
+}
+
+func (l lateAuditLog) store() (*raftmeta.Store, error) {
+	meta := l.node.started.Load()
+	if meta == nil {
+		return nil, fmt.Errorf("%w: the node is starting", domain.ErrUnavailable)
+	}
+	return meta, nil
+}
+
+// AppendAudit implements ports.AuditLog.
+func (l lateAuditLog) AppendAudit(ctx context.Context, record audit.Record) error {
+	meta, err := l.store()
+	if err != nil {
+		return err
+	}
+	return meta.AppendAudit(ctx, record)
+}
+
+// ListAudit implements ports.AuditLog.
+func (l lateAuditLog) ListAudit(ctx context.Context, after uint64, limit int) ([]audit.Record, error) {
+	meta, err := l.store()
+	if err != nil {
+		return nil, err
+	}
+	return meta.ListAudit(ctx, after, limit)
+}
+
+// sessionSweepInterval is how often ended console sessions are removed.
+const sessionSweepInterval = 10 * time.Minute
+
+// sweepSessions removes ended sessions now and then, on the node that leads
+// the metadata group.
+func (n *node) sweepSessions(ctx context.Context) {
+	ticker := time.NewTicker(sessionSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n.meta.IsLeader() {
+				_, _ = n.sessions.Sweep(ctx)
+			}
 		}
 	}
 }
@@ -305,6 +395,26 @@ before the first start.
 // missing key file means the wrong path was given, and creating a new key
 // there would leave every object unreadable while looking healthy.
 func openKMS(ctx context.Context, cfg serverConfig, logger *slog.Logger) (ports.KMS, error) {
+	if cfg.KMS == kmsVault {
+		kms, err := vault.Open(ctx, vault.Config{
+			Address: cfg.VaultAddr, Mount: cfg.VaultMount, Key: cfg.VaultKey, TokenFile: cfg.VaultTokenFile,
+			Namespace: cfg.VaultNamespace, CACertFile: cfg.VaultCACert, ServerName: cfg.VaultServerName,
+			AllowPlaintextLoopback: cfg.DevPlaintext, Entropy: rand.Reader,
+		})
+		if err != nil {
+			return nil, err
+		}
+		logger.InfoContext(ctx, "KMS opened", slog.String("kms", kmsVault), slog.String("key_id", kms.KeyID()))
+		return kms, nil
+	}
+	if cfg.clustered() {
+		logger.WarnContext(ctx, "this cluster shares a sealed local KMS key file: a development arrangement; "+
+			"production clusters keep the key in Vault (--kms vault)")
+	}
+	return openLocalKMS(ctx, cfg, logger)
+}
+
+func openLocalKMS(ctx context.Context, cfg serverConfig, logger *slog.Logger) (ports.KMS, error) {
 	passphrase, err := readPassphrase(cfg)
 	if err != nil {
 		return nil, err
@@ -400,6 +510,9 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 		n.background.Go(func() { n.collector.Run(ctx, cfg.GCInterval) })
 	}
 	n.background.Go(func() { n.events.Run(ctx) })
+	n.background.Go(func() { n.auditor.Run(ctx) })
+	n.background.Go(func() { n.identities.Run(ctx) })
+	n.background.Go(func() { n.sweepSessions(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases

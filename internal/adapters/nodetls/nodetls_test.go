@@ -55,7 +55,7 @@ func echo(t *testing.T, id *nodetls.Identity) string {
 			}
 			go func() {
 				defer func() { _ = conn.Close() }()
-				secured, ok := conn.(*tls.Conn)
+				secured, ok := conn.(interface{ ConnectionState() tls.ConnectionState })
 				if !ok {
 					return
 				}
@@ -229,4 +229,44 @@ func TestIdentityIsCheckedWhenItIsLoaded(t *testing.T) {
 	if string(again) == string(certPEM) || string(againKey) == string(keyPEM) {
 		t.Error("two issued certificates are identical")
 	}
+}
+
+// TestClosingTheListenerClosesItsConnections: a node that stops must not
+// leave its peers writing into connections that nobody reads any more. They
+// would wait for answers that never come.
+func TestClosingTheListenerClosesItsConnections(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	ca := authority(t)
+	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
+	listener, err := server.Listen(ctx, "127.0.0.1:0", func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	conn, err := client.Dial(ctx, nodetls.Address("meta-1", listener.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	held := <-accepted // the server keeps it open and reads nothing
+
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("after the listener closed, a peer's read = %v; want the connection closed", err)
+	}
+	if _, err := listener.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("Accept after Close = %v", err)
+	}
+	// Closing a connection twice, from either side, is harmless.
+	_ = held.Close()
 }

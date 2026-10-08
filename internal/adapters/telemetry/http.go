@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,8 @@ func (t *Telemetry) ObserveS3(ctx context.Context, o s3api.Observation) {
 // *app.IdentityService implements it.
 type Identities interface {
 	SecretFor(ctx context.Context, accessKeyID string) ([]byte, iam.Principal, error)
+	AuthenticationFailed(ctx context.Context, accessKeyID string, session iam.Session, reason string)
+	Authenticated(p iam.Principal)
 }
 
 // MetricsHandler serves the metrics in the Prometheus text format to
@@ -72,7 +75,8 @@ func (t *Telemetry) MetricsHandler(identities Identities, authorizer ports.Autho
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if err := authorizer.Authorize(r.Context(), iam.Request{Principal: principal, Action: iam.ActionGetMetrics}); err != nil {
+		request := iam.Request{Principal: principal, Action: iam.ActionGetMetrics, Resource: iam.Resource{Admin: "metrics"}}
+		if err := authorizer.Authorize(r.Context(), request); err != nil {
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -91,13 +95,21 @@ func authenticate(r *http.Request, identities Identities) (iam.Principal, bool) 
 	if !ok || accessKeyID == "" || presented == "" {
 		return iam.Principal{}, false
 	}
+	session := iam.Session{SecureTransport: r.TLS != nil}
+	if addr, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		session.SourceIP = addr.Addr().Unmap()
+	}
 	secret, principal, err := identities.SecretFor(r.Context(), accessKeyID)
 	if err != nil {
+		identities.AuthenticationFailed(r.Context(), accessKeyID, session, "unknown access key")
 		return iam.Principal{}, false
 	}
 	defer clear(secret)
 	if !iam.SecretsEqual(secret, []byte(presented)) {
+		identities.AuthenticationFailed(r.Context(), accessKeyID, session, "wrong secret")
 		return iam.Principal{}, false
 	}
+	principal.Session = session
+	identities.Authenticated(principal)
 	return principal, true
 }

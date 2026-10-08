@@ -140,6 +140,40 @@ The image runs as UID 65532. Its directories under `/var/lib/cactusfs` (`data1` 
 is writable; a volume mounted anywhere else, or a bind mount, must be made writable for
 UID 65532 by you.
 
+### Keys in Vault
+
+With `--kms vault` the KMS key never leaves HashiCorp Vault: the node asks Vault's Transit
+engine to wrap and unwrap the data keys of objects and secrets.
+
+```sh
+vault secrets enable transit
+vault write -f transit/keys/cactusfs type=aes256-gcm96      # an AEAD type is required
+vault policy write cactusfs - <<'POLICY'
+path "transit/encrypt/cactusfs" { capabilities = ["update"] }
+path "transit/decrypt/cactusfs" { capabilities = ["update"] }
+POLICY
+vault token create -policy=cactusfs -no-default-policy -field=token > /run/secrets/vault-token
+
+cactusfs server --data /mnt/d1 --kms vault --vault-addr https://vault.example:8200 \
+  --vault-key cactusfs --vault-token-file /run/secrets/vault-token --tls-cert s3.pem --tls-key s3.key
+```
+
+Vault must be reached over HTTPS. The token file is read at every use, so an agent can
+renew it in place; the node does not renew it itself. If Vault cannot be reached the
+node does not start, and has no fallback.
+
+### Users, keys and the audit trail
+
+Access is decided by IAM-style policies: users belong to groups, users and groups hold
+roles, roles are sets of policies, and an API key belongs to a user and can never do more
+than its owner. Five roles are built in: `cluster-admin`, `bucket-admin`, `read-write`,
+`read-only` and `auditor`. Every change to identities, every refusal and every failed
+sign-in is written to a hash-chained audit trail; `--audit-export` also writes each
+record to standard output as a JSON line.
+
+Managing users and keys is done through the admin API, which is the next milestone;
+until it exists, a deployment is used with its root credentials.
+
 ### A cluster
 
 The same binary forms a cluster when it is started with `--peers`: at least four nodes
@@ -186,9 +220,9 @@ majority of the voters to start. Things to know for now:
   a log.
 - **The voters are fixed when the cluster forms.** Gateways can join later; a node
   cannot be given a vote afterwards yet.
-- **Every node must open the same KMS key.** Until the Vault adapter exists, the nodes
-  share one sealed key file (`cactusfs dev-init` writes one, with development
-  certificates). That is a development arrangement, not a production one.
+- **Every node must open the same KMS key.** In production that is a key in Vault
+  (`--kms vault`, below). The development cluster shares one sealed key file instead
+  (`cactusfs dev-init` writes it, with development certificates).
 - **The cluster's storage is fixed when it forms**: storage nodes and drives cannot be
   added afterwards yet.
 - **A voter that lost its metadata directory must be removed from the cluster before it

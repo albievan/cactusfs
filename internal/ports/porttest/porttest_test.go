@@ -86,3 +86,8 @@ func TestClockAuthorizerAndEntropy(t *testing.T) {
 		t.Error("Entropy is not deterministic or repeats immediately")
 	}
 }
+
+func TestMemIAMContract(t *testing.T) {
+	t.Parallel()
+	porttest.IAMContract(t, func(*testing.T) porttest.IAM { return porttest.NewMemIAM() })
+}

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -70,22 +71,53 @@ func TestServerRefusesToStartWithoutTLS(t *testing.T) {
 type server struct {
 	cmd    *exec.Cmd
 	logs   *bufio.Scanner
-	stderr *bytes.Buffer
+	stderr *lockedBuffer
+}
+
+// lockedBuffer collects what a process writes while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 func startServer(ctx context.Context, t *testing.T, bin, dir string, extraEnv ...string) *server {
 	t.Helper()
-
-	cmd := exec.CommandContext(ctx, bin, "server",
+	return startServerWith(ctx, t, bin, []string{
+		"server",
 		"--data", filepath.Join(dir, "drive1"), "--data", filepath.Join(dir, "drive2"), "--kms", "local",
-		"--admin-addr", "127.0.0.1:0", "--s3-addr", "127.0.0.1:0")
-	cmd.Env = append(cmd.Environ(), "CACTUSFS_DEV_PLAINTEXT=true", "CACTUSFS_KMS_PASSPHRASE=integration test passphrase")
-	cmd.Env = append(cmd.Env, extraEnv...)
+		"--admin-addr", "127.0.0.1:0", "--s3-addr", "127.0.0.1:0",
+	}, append([]string{"CACTUSFS_DEV_PLAINTEXT=true", "CACTUSFS_KMS_PASSPHRASE=integration test passphrase"}, extraEnv...)...)
+}
+
+// startServerWith runs the binary with the given arguments and environment.
+func startServerWith(ctx context.Context, t *testing.T, bin string, args []string, env ...string) *server {
+	t.Helper()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(cmd.Environ(), env...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
-	s := &server{cmd: cmd, logs: bufio.NewScanner(stdout), stderr: &bytes.Buffer{}}
+	s := &server{cmd: cmd, logs: bufio.NewScanner(stdout), stderr: &lockedBuffer{}}
 	cmd.Stderr = s.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)

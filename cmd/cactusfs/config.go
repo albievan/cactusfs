@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
@@ -29,6 +30,14 @@ const (
 	envKMS             = "CACTUSFS_KMS"
 	envKMSKeyFile      = "CACTUSFS_KMS_KEY_FILE"
 	envKMSPhraseFile   = "CACTUSFS_KMS_PASSPHRASE_FILE"
+	envVaultAddr       = "CACTUSFS_VAULT_ADDR"
+	envVaultMount      = "CACTUSFS_VAULT_TRANSIT_MOUNT"
+	envVaultKey        = "CACTUSFS_VAULT_KEY"
+	envVaultAuthFile   = "CACTUSFS_VAULT_TOKEN_FILE"
+	envVaultCACert     = "CACTUSFS_VAULT_CA_CERT"
+	envVaultServerName = "CACTUSFS_VAULT_SERVER_NAME"
+	envVaultNamespace  = "CACTUSFS_VAULT_NAMESPACE"
+	envAuditExport     = "CACTUSFS_AUDIT_EXPORT"
 	envTLSCert         = "CACTUSFS_TLS_CERT"
 	envTLSKey          = "CACTUSFS_TLS_KEY"
 	envDevPlaintext    = "CACTUSFS_DEV_PLAINTEXT"
@@ -84,6 +93,7 @@ const (
 	metaDirName    = "meta"
 	kmsKeyFileName = "kms-local.json"
 	kmsLocal       = "local"
+	kmsVault       = "vault"
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -110,6 +120,17 @@ type serverConfig struct {
 	KMS               string
 	KMSKeyFile        string
 	KMSPassphraseFile string
+	// Vault configures the Vault Transit KMS.
+	VaultAddr       string
+	VaultMount      string
+	VaultKey        string
+	VaultTokenFile  string
+	VaultCACert     string
+	VaultServerName string
+	VaultNamespace  string
+	// AuditExport writes every audit record to standard output as a JSON
+	// line, next to the log.
+	AuditExport bool
 	// TLSCert and TLSKey are the paths of the PEM certificate chain and
 	// private key of the listeners.
 	TLSCert string
@@ -167,6 +188,12 @@ type serverConfig struct {
 	Labels cluster.Labels
 	// secrets come from the environment and are never logged or printed.
 	secrets secrets
+	// auditOut is where exported audit records go. It has no flag: the
+	// server sets it to its log stream when AuditExport is on.
+	auditOut io.Writer
+	// passwordParams overrides the cost of console password hashes. It has
+	// no flag: tests lower it, production keeps the default.
+	passwordParams passwords.Params
 	// raftTiming overrides Raft's timeouts. It has no flag: tests shorten
 	// the timeouts, production keeps Raft's defaults.
 	raftTiming raftmeta.Timing
@@ -241,6 +268,11 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		return cfg, err
 	}
 
+	auditExport, err := envBool(getenv, envAuditExport, false)
+	if err != nil {
+		return cfg, err
+	}
+
 	fs := flag.NewFlagSet("cactusfs server", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var data stringList
@@ -248,7 +280,23 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 	fs.StringVar(&cfg.MetaDir, "meta-dir", getenv(envMetaDir),
 		"metadata `directory`; default <first data directory>/"+metaDirName+" ($"+envMetaDir+")")
 	fs.StringVar(&cfg.KMS, "kms", getenv(envKMS),
-		"key management `service`: \""+kmsLocal+"\" for a sealed local key file; there is no default ($"+envKMS+")")
+		"key management `service`: \""+kmsVault+"\" for HashiCorp Vault Transit, \""+kmsLocal+
+			"\" for a sealed local key file; there is no default ($"+envKMS+")")
+	fs.StringVar(&cfg.VaultAddr, "vault-addr", getenv(envVaultAddr), "`URL` of Vault, https://host:port ($"+envVaultAddr+")")
+	fs.StringVar(&cfg.VaultMount, "vault-transit-mount", getenv(envVaultMount),
+		"`path` of Vault's Transit engine; default transit ($"+envVaultMount+")")
+	fs.StringVar(&cfg.VaultKey, "vault-key", getenv(envVaultKey),
+		"`name` of the Transit key, of an AEAD type such as aes256-gcm96 ($"+envVaultKey+")")
+	fs.StringVar(&cfg.VaultTokenFile, "vault-token-file", getenv(envVaultAuthFile),
+		"`path` of a file holding the Vault token; read at every use, so it can be renewed in place ($"+envVaultAuthFile+")")
+	fs.StringVar(&cfg.VaultCACert, "vault-ca-cert", getenv(envVaultCACert),
+		"`path` of the CA certificate that issued Vault's certificate; default the system's CAs ($"+envVaultCACert+")")
+	fs.StringVar(&cfg.VaultServerName, "vault-server-name", getenv(envVaultServerName),
+		"`name` expected in Vault's certificate, when Vault is reached under another ($"+envVaultServerName+")")
+	fs.StringVar(&cfg.VaultNamespace, "vault-namespace", getenv(envVaultNamespace),
+		"Vault Enterprise `namespace` ($"+envVaultNamespace+")")
+	fs.BoolVar(&cfg.AuditExport, "audit-export", auditExport,
+		"write every audit record to standard output as a JSON line with \"stream\":\"audit\" ($"+envAuditExport+")")
 	fs.StringVar(&cfg.KMSKeyFile, "kms-key-file", getenv(envKMSKeyFile),
 		"`path` of the local KMS key file; default <metadata directory>/"+kmsKeyFileName+" ($"+envKMSKeyFile+")")
 	fs.StringVar(&cfg.KMSPassphraseFile, "kms-passphrase-file", getenv(envKMSPhraseFile),
@@ -515,11 +563,22 @@ func (c *serverConfig) validateStorage() error {
 	}
 	switch c.KMS {
 	case kmsLocal:
+		if c.VaultAddr != "" || c.VaultKey != "" || c.VaultTokenFile != "" {
+			return errors.New("the --vault-* settings are for --kms " + kmsVault)
+		}
+	case kmsVault:
+		if c.VaultAddr == "" || c.VaultKey == "" || c.VaultTokenFile == "" {
+			return errors.New("--kms " + kmsVault + " needs --vault-addr, --vault-key and --vault-token-file")
+		}
+		if c.KMSKeyFile != "" || c.KMSPassphraseFile != "" || c.secrets.kmsPassphrase != "" {
+			return errors.New("the key file and passphrase settings are for --kms " + kmsLocal)
+		}
+		return nil
 	case "":
-		return errors.New("a key management service must be chosen: set --kms " + kmsLocal +
-			" for a sealed local key file (there is no unencrypted mode)")
+		return errors.New("a key management service must be chosen: set --kms " + kmsVault + " for HashiCorp Vault Transit or --kms " +
+			kmsLocal + " for a sealed local key file (there is no unencrypted mode)")
 	default:
-		return fmt.Errorf("unknown key management service %q: want %q", c.KMS, kmsLocal)
+		return fmt.Errorf("unknown key management service %q: want %q or %q", c.KMS, kmsVault, kmsLocal)
 	}
 	if c.KMSKeyFile == "" {
 		if c.clustered() {
@@ -534,6 +593,12 @@ func (c *serverConfig) validateStorage() error {
 }
 
 func (c *serverConfig) validateSecrets() error {
+	if (c.secrets.rootAccessKey == "") != (c.secrets.rootSecretKey == "") {
+		return errors.New("set both $" + envRootKeyID + " and $" + envRootKeyValue + ", or neither")
+	}
+	if c.KMS == kmsVault {
+		return nil
+	}
 	if c.secrets.kmsPassphrase != "" && c.KMSPassphraseFile != "" {
 		return errors.New("set either $" + envKMSPhrase + " or --kms-passphrase-file, not both")
 	}

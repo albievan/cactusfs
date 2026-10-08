@@ -62,6 +62,8 @@ type Member struct {
 type streamLayer struct {
 	net.Listener
 	dial func(ctx context.Context, address string) (net.Conn, error)
+	// advertise is where the other nodes reach this one.
+	advertise raft.ServerAddress
 }
 
 // Dial implements raft.StreamLayer.
@@ -71,21 +73,21 @@ func (l *streamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (n
 	return l.dial(ctx, string(address))
 }
 
-// addressProvider tells Raft's transport where a server is. Raft passes the
-// address from its configuration; the provider only makes sure the local
-// node is always reached at the address it advertises now.
-type addressProvider struct {
-	advertise raft.ServerAddress
-	local     raft.ServerID
+// Addr implements raft.StreamLayer. Raft tells its peers that this is where
+// the node is, so it is the address the node advertises, not the one the
+// listener is bound to.
+func (l *streamLayer) Addr() net.Addr {
+	return advertised(l.advertise)
 }
 
-// ServerAddr implements raft.ServerAddressProvider.
-func (p addressProvider) ServerAddr(id raft.ServerID) (raft.ServerAddress, error) {
-	if id == p.local {
-		return p.advertise, nil
-	}
-	return "", errors.New("use the configured address")
-}
+// advertised is the address a node tells its peers to reach it at.
+type advertised raft.ServerAddress
+
+// Network implements net.Addr.
+func (advertised) Network() string { return "tcp" }
+
+// String implements net.Addr.
+func (a advertised) String() string { return string(a) }
 
 // Formed reports whether this node knows of a Raft group: it bootstrapped
 // one, or the leader of one has sent it the configuration.

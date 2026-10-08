@@ -89,6 +89,7 @@ func TestEventsMatchTheContract(t *testing.T) {
 		ports.EventTopologyChanged: {ports.TopologyEvent{}, "Topology"},
 		ports.EventNodeRegistered:  {ports.NodeEvent{}, "Node"},
 		ports.EventNodeRemoved:     {ports.NodeEvent{}, "Node"},
+		ports.EventAuditRecorded:   {ports.AuditEvent{}, "Audit"},
 	}
 
 	var addresses []string

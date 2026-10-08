@@ -453,6 +453,9 @@ type notRoot struct {
 	next *app.IdentityService
 }
 
+func (n notRoot) AuthenticationFailed(context.Context, string, iam.Session, string) {}
+func (n notRoot) Authenticated(iam.Principal)                                       {}
+
 func (n notRoot) SecretFor(ctx context.Context, accessKeyID string) ([]byte, iam.Principal, error) {
 	secret, principal, err := n.next.SecretFor(ctx, accessKeyID)
 	principal.Root = false
