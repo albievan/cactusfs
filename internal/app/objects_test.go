@@ -451,12 +451,9 @@ func TestGetWithTamperedOrForeignMetadata(t *testing.T) {
 			t.Parallel()
 			f := newFixture(t)
 			f.createBucket(t, "b")
-			version := f.put(t, "b", "k", randomBytes(t, 2*segment))
+			f.put(t, "b", "k", randomBytes(t, 2*segment))
 
-			tt.tamper(&version)
-			if _, err := f.meta.PutVersion(context.Background(), version); err != nil {
-				t.Fatalf("PutVersion: %v", err)
-			}
+			f.meta.Tamper("b", "k", tt.tamper)
 
 			if got, _, err := f.get("b", "k", nil); !errors.Is(err, tt.wantErr) || len(got) != 0 {
 				t.Errorf("Get = %d bytes, %v; want no bytes and %v", len(got), err, tt.wantErr)

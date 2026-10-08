@@ -349,6 +349,28 @@ func applySetVersioning(tx *bbolt.Tx, cmd versioningCmd) (applyResult, error) {
 	}}, nil
 }
 
+// removable reports, as a refusal, why a version may not be removed at the
+// time of the entry: every path that takes a version out of the state for
+// good asks here. bypass is the proposer's word that the caller may lift a
+// governance retention. A version without a lock is always removable.
+func removable(v *versionRecord, now applied, bypass bool) *applyResult {
+	if v == nil {
+		return nil
+	}
+	lock := v.Lock.toDomain()
+	if lock.IsZero() {
+		return nil
+	}
+	if now.at.IsZero() {
+		result, _ := refuse(domain.ErrUnavailable, "an entry without a time cannot be judged against Object Lock")
+		return &result
+	}
+	if err := lock.CheckDelete(now.at, bypass); err != nil {
+		return &applyResult{err: err}
+	}
+	return nil
+}
+
 // dropData takes back the reference of a removed version to its stored data.
 func dropData(tx *bbolt.Tx, v versionRecord) error {
 	if v.DeleteMarker {
@@ -370,6 +392,24 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 	}
 	if v.DeleteMarker {
 		return refuse(domain.ErrInvalidArgument, "a delete marker cannot be put")
+	}
+	// What the entry says is not taken on trust: an entry that cannot be
+	// stored is refused, like any other that asks for what cannot be. It
+	// must never stop the state machine - every replica would stop with
+	// it, and stay stopped.
+	if err := object.ValidateKey(v.Key); err != nil {
+		return applyResult{err: err}, nil
+	}
+	versionID, errVersion := object.ParseID(v.VersionID)
+	dataID, errData := object.ParseID(v.DataID)
+	if errVersion != nil || errData != nil || versionID.IsZero() || dataID.IsZero() {
+		return refuse(domain.ErrInvalidArgument, "version or data ID of the put")
+	}
+	// Stored data belongs to one version. A second version that named
+	// the data of another could have it removed from under that one, by
+	// being overwritten or deleted itself.
+	if tx.Bucket(dataBucket()).Get(dataID[:]) != nil {
+		return refuse(domain.ErrConflict, "data %s belongs to a version already", v.DataID)
 	}
 	// What keeps the version: what the put asked for, or else what the
 	// bucket gives every version. Decided here, on the time of this entry.
@@ -415,6 +455,9 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 		if err != nil {
 			return applyResult{}, err
 		}
+		if refused := removable(old, now, false); refused != nil {
+			return *refused, nil
+		}
 		if old != nil {
 			if err := h.remove(*old, storedKey); err != nil {
 				return applyResult{}, err
@@ -428,6 +471,9 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 		v.Versioned, v.Seq = false, 0
 		if removed, err = readVersion(h.current, v.Key); err != nil {
 			return applyResult{}, err
+		}
+		if refused := removable(removed, now, false); refused != nil {
+			return *refused, nil
 		}
 	}
 	data, err := json.Marshal(v)
@@ -472,6 +518,9 @@ func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd) (applyResult, error) {
 	if err != nil || previous == nil {
 		return applyResult{}, err
 	}
+	if refused := removable(previous, applied{}, false); refused != nil {
+		return *refused, nil
+	}
 	if err := index.Delete([]byte(cmd.Key)); err != nil {
 		return applyResult{}, err
 	}
@@ -492,6 +541,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 	if b == nil || tx.Bucket(objectsBucket()).Bucket([]byte(cmd.Bucket)) == nil {
 		return refuse(domain.ErrBucketNotFound, "%s", cmd.Bucket)
 	}
+	if err := object.ValidateKey(cmd.Key); err != nil {
+		return applyResult{err: err}, nil
+	}
 	state := bucket.Versioning(b.Versioning)
 	h, err := openHistory(tx, cmd.Bucket, true)
 	if err != nil {
@@ -509,13 +561,8 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		// ended; the proposer's word lifts governance and nothing else;
 		// and what "ended" means is the time of this entry, the same on
 		// every replica.
-		if lock := target.Lock.toDomain(); !lock.IsZero() {
-			if now.at.IsZero() {
-				return refuse(domain.ErrUnavailable, "an entry without a time cannot be judged against Object Lock")
-			}
-			if err := lock.CheckDelete(now.at, cmd.Bypass); err != nil {
-				return applyResult{err: err}, nil
-			}
+		if refused := removable(target, now, cmd.Bypass); refused != nil {
+			return *refused, nil
 		}
 		if err := h.remove(*target, storedKey); err != nil {
 			return applyResult{}, err
@@ -535,6 +582,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		previous, err := readVersion(h.current, cmd.Key)
 		if err != nil || previous == nil {
 			return applyResult{}, err
+		}
+		if refused := removable(previous, now, false); refused != nil {
+			return *refused, nil
 		}
 		if err := h.current.Delete([]byte(cmd.Key)); err != nil {
 			return applyResult{}, err
@@ -570,6 +620,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		old, storedKey, err := h.find(cmd.Key, object.NullVersion)
 		if err != nil {
 			return applyResult{}, err
+		}
+		if refused := removable(old, now, false); refused != nil {
+			return *refused, nil
 		}
 		if old != nil {
 			if err := h.remove(*old, storedKey); err != nil {
@@ -616,7 +669,12 @@ func applySetBucketLock(tx *bbolt.Tx, cmd bucketLockCmd) (applyResult, error) {
 	if err != nil {
 		return applyResult{}, err
 	}
-	return applyResult{}, tx.Bucket(bucketsBucket()).Put([]byte(cmd.Bucket), data)
+	if err := tx.Bucket(bucketsBucket()).Put([]byte(cmd.Bucket), data); err != nil {
+		return applyResult{}, err
+	}
+	return applyResult{events: []ports.Event{
+		{Type: ports.EventBucketLockChanged, Data: ports.BucketEvent{Bucket: cmd.Bucket}},
+	}}, nil
 }
 
 // lockTarget finds the version a lock command is about, in a bucket whose
@@ -698,7 +756,7 @@ func applySetRetention(tx *bbolt.Tx, cmd retentionCmd, now applied) (applyResult
 }
 
 // applySetLegalHold puts a version under legal hold or takes it off.
-func applySetLegalHold(tx *bbolt.Tx, cmd legalHoldCmd) (applyResult, error) {
+func applySetLegalHold(tx *bbolt.Tx, cmd legalHoldCmd, now applied) (applyResult, error) {
 	h, target, storedKey, refused, err := lockTarget(tx, cmd.Bucket, cmd.Key, cmd.VersionRef)
 	if err != nil || refused != nil {
 		if refused != nil {
@@ -714,6 +772,6 @@ func applySetLegalHold(tx *bbolt.Tx, cmd legalHoldCmd) (applyResult, error) {
 	}
 	stored := *target
 	return applyResult{stored: &stored, events: []ports.Event{
-		{Type: ports.EventObjectLegalHoldChanged, Data: objectEvent(stored)},
+		{Type: ports.EventObjectLegalHoldChanged, Time: now.at, Data: objectEvent(stored)},
 	}}, nil
 }

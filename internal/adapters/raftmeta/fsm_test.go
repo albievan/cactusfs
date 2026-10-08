@@ -487,10 +487,8 @@ func TestDataIndexIsRebuiltForAnOlderState(t *testing.T) {
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "bkt"}); err != nil {
 		t.Fatal(err)
 	}
-	kept, shared := porttest.SampleVersion("bkt", "a", 1), porttest.SampleVersion("bkt", "b", 5)
-	also := shared
-	also.Key = "c"
-	for _, v := range []object.Version{kept, shared, also} {
+	kept, other := porttest.SampleVersion("bkt", "a", 1), porttest.SampleVersion("bkt", "b", 5)
+	for _, v := range []object.Version{kept, other} {
 		if _, err := store.PutVersion(ctx, v); err != nil {
 			t.Fatal(err)
 		}
@@ -504,23 +502,26 @@ func TestDataIndexIsRebuiltForAnOlderState(t *testing.T) {
 	}
 
 	reopened := openStore(t, dir)
-	for _, v := range []object.Version{kept, shared} {
+	for _, v := range []object.Version{kept, other} {
 		if ok, err := reopened.IsDataReferenced(ctx, v.DataID); err != nil || !ok {
 			t.Errorf("data %s is not referenced after the index was rebuilt: %v", v.DataID, err)
 		}
 	}
-	// The rebuilt counts are right: data used twice survives one delete.
+	// The rebuilt index is the one puts are checked against: data that
+	// belongs to a version is not given to another.
+	twin := porttest.SampleVersion("bkt", "c", 9)
+	twin.DataID = other.DataID
+	if _, err := reopened.PutVersion(ctx, twin); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("a put that names another version's data, after the rebuild = %v, want %v", err, domain.ErrConflict)
+	}
 	if _, err := reopened.DeleteObject(ctx, "bkt", "b", ports.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); !ok {
-		t.Error("data still used by another object is reported as unreferenced")
+	if ok, _ := reopened.IsDataReferenced(ctx, other.DataID); ok {
+		t.Error("data is still referenced after its object was deleted")
 	}
-	if _, err := reopened.DeleteObject(ctx, "bkt", "c", ports.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); ok {
-		t.Error("data is still referenced after its last object was deleted")
+	if ok, _ := reopened.IsDataReferenced(ctx, kept.DataID); !ok {
+		t.Error("deleting one object released the data of another")
 	}
 }
 

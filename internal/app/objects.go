@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -25,6 +27,7 @@ type ObjectService struct {
 	authz   ports.Authorizer
 	clock   ports.Clock
 	logger  *slog.Logger
+	auditor *Auditor
 	healer  *Healer
 
 	// entropy is the source of identifiers and nonce prefixes. It is read
@@ -49,6 +52,9 @@ type ObjectServiceConfig struct {
 	// Entropy must be a cryptographically secure random source.
 	Entropy io.Reader
 	Logger  *slog.Logger
+	// Auditor, when not nil, records every lock that is lifted: a
+	// governance retention bypassed, a legal hold taken off.
+	Auditor *Auditor
 }
 
 // NewObjectService returns an ObjectService.
@@ -59,7 +65,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	}
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, storage: storage, kms: cfg.KMS,
-		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy,
+		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
 		healer: newHealer(cfg.Index, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
@@ -232,9 +238,7 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	}
 	// What the put removed for good has no reader any more. A version that
 	// is merely no longer current keeps its data.
-	if replaced := committed.Removed; replaced != nil && !replaced.DeleteMarker {
-		s.storage.remove(ctx, replaced.DataID, replaced.Layout)
-	}
+	s.discard(ctx, committed.Removed)
 	version = committed.Stored
 	if degraded {
 		// Committed on a quorum, but not on every drive: rebuild the rest.
@@ -555,6 +559,14 @@ func (s *ObjectService) SetRetention(
 	if err != nil {
 		return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
 	}
+	if bypassGovernance && s.auditor != nil {
+		details := map[string]string{"operation": "PutObjectRetention", "version": stored.Ref().String(), "retention": "none"}
+		if retention != nil {
+			details["retention"] = string(retention.Mode) + " until " + retention.Until.UTC().Format(time.RFC3339)
+		}
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionOverrideGovernance,
+			iam.Resource{Bucket: in.Bucket, Key: in.Key}, audit.Succeeded, details))
+	}
 	return stored, nil
 }
 
@@ -576,6 +588,11 @@ func (s *ObjectService) SetLegalHold(ctx context.Context, principal iam.Principa
 	stored, err := s.index.SetLegalHold(ctx, in.Bucket, in.Key, version.Ref(), on)
 	if err != nil {
 		return object.Version{}, fmt.Errorf("object.SetLegalHold: %w", err)
+	}
+	if !on && version.Lock.LegalHold && s.auditor != nil {
+		// A legal hold was taken off: what it kept can now be removed.
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutObjectLegalHold,
+			iam.Resource{Bucket: in.Bucket, Key: in.Key}, audit.Succeeded, map[string]string{"legal_hold": "off", "version": stored.Ref().String()}))
 	}
 	return stored, nil
 }
@@ -687,6 +704,22 @@ func (s *ObjectService) ListVersions(
 	return page, nil
 }
 
+// discard removes the stored data of a version that was removed for good.
+// The index is asked first whether anything still refers to the data: it is
+// the last word, and data that is still referred to, or about which the
+// index cannot be asked, is left where it is. What is left behind without a
+// reference is the collector's.
+func (s *ObjectService) discard(ctx context.Context, removed *object.Version) {
+	if removed == nil || removed.DeleteMarker {
+		return
+	}
+	referenced, err := s.index.IsDataReferenced(context.WithoutCancel(ctx), removed.DataID)
+	if err != nil || referenced {
+		return
+	}
+	s.storage.remove(ctx, removed.DataID, removed.Layout)
+}
+
 // DeleteInput names what to delete.
 type DeleteInput struct {
 	Bucket string
@@ -742,8 +775,12 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
-	if removed := result.Removed; removed != nil && !removed.DeleteMarker {
-		s.storage.remove(ctx, removed.DataID, removed.Layout)
+	s.discard(ctx, result.Removed)
+	if in.BypassGovernance && result.Removed != nil && s.auditor != nil {
+		// A retention was lifted to remove this: that is said in the trail.
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionOverrideGovernance, resource, audit.Succeeded, map[string]string{
+			"operation": "DeleteObjectVersion", "version": result.Removed.Ref().String(),
+		}))
 	}
 	return DeleteOutput{Marker: result.Marker, Removed: result.Removed}, nil
 }

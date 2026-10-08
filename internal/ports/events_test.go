@@ -94,6 +94,7 @@ func TestEventsMatchTheContract(t *testing.T) {
 		ports.EventObjectDeleteMarkerCreated: {ports.ObjectEvent{}, "Object"},
 		ports.EventObjectRetentionChanged:    {ports.ObjectEvent{}, "Object"},
 		ports.EventObjectLegalHoldChanged:    {ports.ObjectEvent{}, "Object"},
+		ports.EventBucketLockChanged:         {ports.BucketEvent{}, "Bucket"},
 	}
 
 	var addresses []string

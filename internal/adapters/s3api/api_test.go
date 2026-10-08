@@ -1476,7 +1476,7 @@ func FuzzStrictXML(f *testing.F) {
 			}
 		}
 		var del deleteRequest
-		if err := decodeStrictXML(bytes.NewReader(data), maxDeleteXML, &del, "Delete", "Quiet", "Object", "Key", "VersionId"); err == nil {
+		if err := decodeStrictXML(bytes.NewReader(data), maxDeleteXML, &del, "Delete", "Quiet", "Object*", "Key", "VersionId"); err == nil {
 			if len(del.Objects) > 0 && bytes.Count(data, []byte("<Object")) < len(del.Objects) {
 				t.Fatalf("more objects decoded than the document names: %q", data)
 			}
@@ -1488,7 +1488,7 @@ func FuzzStrictXML(f *testing.F) {
 // what it says, or not at all.
 func TestStrictDocuments(t *testing.T) {
 	t.Parallel()
-	del := []string{"Delete", "Quiet", "Object", "Key", "VersionId"}
+	del := []string{"Delete", "Quiet", "Object*", "Key", "VersionId"}
 	tests := map[string]string{
 		"an object hidden inside another": `<Delete><Object><Key>a</Key><Object><Key>hidden</Key></Object></Object></Delete>`,
 		"two keys in one object":          `<Delete><Object><Key>a</Key><Key>b</Key></Object></Delete>`,
@@ -1684,5 +1684,29 @@ func TestObjectLockThroughTheAPI(t *testing.T) {
 	// At the end the first version is where it was.
 	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/ledger?versionId=" + version}), http.StatusOK); string(got.body) != "entries" {
 		t.Fatal("the compliance-locked version changed")
+	}
+}
+
+// TestOneRuleOneAnswer: a lock configuration that says two things is not
+// read as either.
+func TestOneRuleOneAnswer(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault", headers: map[string]string{headerLockEnabled: "true"}}), http.StatusOK)
+	two := []byte(`<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>` +
+		`<Rule><DefaultRetention><Mode>COMPLIANCE</Mode><Days>3650</Days></DefaultRetention></Rule>` +
+		`<Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>`)
+	s.expectError(s.do(call{method: http.MethodPut, path: "/vault?object-lock", body: two}), http.StatusBadRequest, "MalformedXML")
+	if cfg := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault?object-lock"}), http.StatusOK); strings.Contains(string(cfg.body), "<Rule>") {
+		t.Errorf("a refused configuration left a rule: %s", cfg.body)
+	}
+	// A date no record can hold is an invalid date, not a failure of ours.
+	far := map[string]string{headerLockMode: "COMPLIANCE", headerLockUntil: "9999-12-31T23:59:59-10:00"}
+	s.expectError(s.do(call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: far}), http.StatusBadRequest, "InvalidArgument")
+	// A version without a lock says nothing about one.
+	s.putObject("/vault/plain", []byte("x"))
+	head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/vault/plain"}), http.StatusOK)
+	if head.header.Get(headerLockMode) != "" || head.header.Get(headerLockUntil) != "" || head.header.Get(headerLockLegalHold) != "" {
+		t.Errorf("lock headers of a version without a lock: %v", head.header)
 	}
 }

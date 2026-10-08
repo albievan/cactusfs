@@ -181,6 +181,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 			n.maintenance.ObserveHeal(r)
 		},
 		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
+		Auditor: n.auditor,
 	})
 	if err != nil {
 		return err

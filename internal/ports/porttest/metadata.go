@@ -148,6 +148,21 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	if !ok {
 		return ports.PutResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, v.Bucket)
 	}
+	if err := object.ValidateKey(v.Key); err != nil {
+		return ports.PutResult{}, err
+	}
+	if v.VersionID.IsZero() || v.DataID.IsZero() {
+		return ports.PutResult{}, fmt.Errorf("%w: version or data ID of the put", domain.ErrInvalidArgument)
+	}
+	for _, objects := range m.objects {
+		for _, versions := range objects {
+			for _, existing := range versions {
+				if !existing.DeleteMarker && existing.DataID == v.DataID {
+					return ports.PutResult{}, fmt.Errorf("%w: data %s belongs to a version already", domain.ErrConflict, v.DataID)
+				}
+			}
+		}
+	}
 	lock := v.Lock
 	switch {
 	case !b.ObjectLock && !lock.IsZero():
@@ -535,4 +550,15 @@ func CloneVersion(v object.Version) object.Version {
 		v.Lock.Retention = &retention
 	}
 	return v
+}
+
+// Tamper changes the stored record of the current version of a key in place,
+// as nothing but a fault or an attacker with the metadata store in hand
+// could. Tests use it to see what reading does with a record that lies.
+func (m *MemMetadata) Tamper(bucketName, key string, change func(v *object.Version)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if versions := m.objects[bucketName][key]; len(versions) > 0 {
+		change(&versions[0])
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"reflect"
@@ -22,12 +23,31 @@ import (
 
 // SampleVersion returns a fully populated object version for tests. fill
 // varies the identifiers so that two samples differ.
+// sampleVersionID is the version ID of a sample: the fill, sixteen times,
+// which a test can name. It is never the zero ID, which no version has.
+func sampleVersionID(fill byte) object.ID {
+	id := object.ID(bytes.Repeat([]byte{fill}, object.IDSize))
+	if id.IsZero() {
+		id[object.IDSize-1] = 1
+	}
+	return id
+}
+
+// sampleDataID is the data ID of a sample. Stored data belongs to one
+// version, so it is different for every bucket, key and fill.
+func sampleDataID(bucketName, key string, fill byte) object.ID {
+	sum := sha256.Sum256([]byte(bucketName + "\x00" + key + "\x00" + string(rune(fill))))
+	return object.ID(sum[:object.IDSize])
+}
+
+// SampleVersion returns a version with every field set. Its version ID is
+// the fill repeated; its data ID is its own.
 func SampleVersion(bucketName, key string, fill byte) object.Version {
 	return object.Version{
 		Bucket:             bucketName,
 		Key:                key,
-		VersionID:          object.ID(bytes.Repeat([]byte{fill}, object.IDSize)),
-		DataID:             object.ID(bytes.Repeat([]byte{fill + 1}, object.IDSize)),
+		VersionID:          sampleVersionID(fill),
+		DataID:             sampleDataID(bucketName, key, fill),
 		Size:               int64(fill) * 1000,
 		ETag:               "9e107d9d372bb6826bd81d3542a419d6",
 		ModifiedAt:         time.Date(2026, 10, 7, 12, 30, 45, 123000000, time.UTC),
@@ -296,19 +316,32 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		if referenced(first) || !referenced(second) {
 			t.Errorf("after overwrite: old referenced = %v, new referenced = %v", referenced(first), referenced(second))
 		}
-		// The same data ID under another key keeps it referenced.
+		// Stored data belongs to one version. A second version that named
+		// it could have it removed from under the first, by being
+		// overwritten or deleted itself; such a put is refused.
 		other := second
 		other.Key = "other"
-		if _, err := store.PutVersion(ctx, other); err != nil {
-			t.Fatal(err)
+		other.VersionID = object.ID(bytes.Repeat([]byte{9}, object.IDSize))
+		if _, err := store.PutVersion(ctx, other); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("a put that names the data of another version = %v, want %v", err, domain.ErrConflict)
 		}
+		if _, err := store.GetObject(ctx, "b", "other"); !errors.Is(err, domain.ErrObjectNotFound) {
+			t.Errorf("the refused put left an object: %v", err)
+		}
+		// Nor is an ID that is not one, or a key that is not one, stored.
+		for name, change := range map[string]func(v *object.Version){
+			"no data ID":    func(v *object.Version) { v.DataID = object.ID{} },
+			"no version ID": func(v *object.Version) { v.VersionID = object.ID{} },
+			"no key":        func(v *object.Version) { v.Key = "" },
+		} {
+			bad := SampleVersion("b", "bad", 7)
+			change(&bad)
+			if _, err := store.PutVersion(ctx, bad); !errors.Is(err, domain.ErrInvalidArgument) && !errors.Is(err, domain.ErrInvalidObjectKey) {
+				t.Errorf("a put with %s = %v, want it refused as invalid", name, err)
+			}
+		}
+		// The store still works after what it refused.
 		if _, err := store.DeleteObject(ctx, "b", "k", ports.DeleteOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		if !referenced(second) {
-			t.Error("data still used by another object is reported as unreferenced")
-		}
-		if _, err := store.DeleteObject(ctx, "b", "other", ports.DeleteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if referenced(second) {

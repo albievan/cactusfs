@@ -66,6 +66,11 @@ channels:
     messages:
       event:
         $ref: '#/components/messages/ObjectLegalHoldChanged'
+  bucketObjectLockChanged:
+    address: cactusfs.bucket.object-lock-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketObjectLockChanged'
   rootCredentialSet:
     address: cactusfs.iam.root-credential-set.v1
     messages:
@@ -125,6 +130,10 @@ operations:
     action: send
     channel:
       $ref: '#/channels/objectLegalHoldChanged'
+  publishBucketObjectLockChanged:
+    action: send
+    channel:
+      $ref: '#/channels/bucketObjectLockChanged'
   publishRootCredentialSet:
     action: send
     channel:
@@ -244,6 +253,18 @@ components:
                 const: cactusfs.object.legal-hold-changed.v1
               data:
                 $ref: '#/components/schemas/Object'
+    BucketObjectLockChanged:
+      name: cactusfs.bucket.object-lock-changed.v1
+      title: The default retention of a bucket was set, changed or removed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.object-lock-changed.v1
+              data:
+                $ref: '#/components/schemas/Bucket'
     RootCredentialSet:
       name: cactusfs.iam.root-credential-set.v1
       title: The deployment was given its root credential

@@ -423,6 +423,13 @@ func (s *switchingIndex) GetVersion(ctx context.Context, bucketName, key string,
 // healerOver returns a healer that looks objects up through index.
 func (f *fixture) healerOver(t *testing.T, index ports.ObjectIndex) *app.Healer {
 	t.Helper()
+	return f.objectServiceOver(t, index).Healer()
+}
+
+// objectServiceOver returns an object service on the fixture's drives that
+// uses another index.
+func (f *fixture) objectServiceOver(t *testing.T, index ports.ObjectIndex) *app.ObjectService {
+	t.Helper()
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
 		Index: index, Buckets: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)), Codec: porttest.NewCodec(),
 		KMS: f.kms, Authz: f.authz, Clock: f.clock, Entropy: porttest.Entropy(), Logger: slog.New(slog.DiscardHandler),
@@ -430,7 +437,7 @@ func (f *fixture) healerOver(t *testing.T, index ports.ObjectIndex) *app.Healer 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return svc.Healer()
+	return svc
 }
 
 // TestHealKeepsEverythingWhenItCannotTellWhetherTheObjectChanged: after

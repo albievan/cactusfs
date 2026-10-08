@@ -640,7 +640,7 @@ func TestRollingUpgrade(t *testing.T) {
 		// Everything that both releases understand keeps working, on every
 		// node, throughout.
 		for _, other := range nodes {
-			version := porttest.SampleVersion("from-release-n", "k", byte(i))
+			version := porttest.SampleVersion("from-release-n", "k-"+other, byte(i))
 			if _, err := c.store(other).PutVersion(ctx, version); err != nil {
 				t.Fatalf("upgrade step %d: PutVersion on %s: %v", i, other, err)
 			}

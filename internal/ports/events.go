@@ -33,6 +33,10 @@ const (
 	EventObjectLegalHoldChanged = "cactusfs.object.legal-hold-changed.v1"
 )
 
+// EventBucketLockChanged tells that the default retention of a bucket was
+// set, changed or removed. The payload is a BucketEvent.
+const EventBucketLockChanged = "cactusfs.bucket.object-lock-changed.v1"
+
 // BucketVersioningEvent is the payload of EventBucketVersioningChanged.
 type BucketVersioningEvent struct {
 	Bucket string `json:"bucket"`

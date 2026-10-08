@@ -144,9 +144,6 @@ state machine must be deterministic.
 - A GET or HEAD of an object whose newest version is a delete marker answers 404
   without the `x-amz-delete-marker` header, and a HEAD of a marker by its ID answers
   405 without it.
-- Shards of a version that was removed are deleted without asking the reference index.
-  No path gives two versions the same stored data today; CopyObject (PLAN 6.9) must
-  change this first.
 - Healing by name and healing "the current version" of the same key do not exclude each
   other.
 

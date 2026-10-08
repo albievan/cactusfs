@@ -585,6 +585,8 @@ func (s *Store) stamp(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	if level < entrySchemaTimed {
+		// No entry carries a time yet. (One that claims to, in an entry
+		// of the first schema, is not believed when it is applied.)
 		return data, nil
 	}
 	e, err := decodeEntry(data, s.supported)

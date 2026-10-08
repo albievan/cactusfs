@@ -43,11 +43,38 @@ made when the entry is applied:
   retention being set through another gateway.
 - Every node may propose entries. A check outside the state machine would trust every
   proposer.
+- Every path that takes a version out of the state for good asks one function whether
+  it may: a named delete, an overwrite or a delete of the null version, and the delete
+  of entry schema 1. Today only the first can meet a locked version, because a bucket
+  with Object Lock always keeps versions; the others ask anyway, so that the claim does
+  not rest on that staying true.
 - The entry that removes a version carries one thing the state machine takes on trust:
   `bypass_governance`, which says that the proposer authorized the caller to lift a
   governance retention. It lifts governance and nothing else. Whoever can forge it - a
   node with a valid certificate - can lift governance; nobody can lift compliance or a
   legal hold, because no field does.
+
+### A hostile proposer
+
+Every node may propose entries, so the state machine treats what an entry says as a
+claim, not as a fact:
+
+- An entry that cannot be stored - a key that is not one, an ID that is not one, a date
+  no record can hold - is **refused**. It never stops the state machine: an entry that
+  did would stop every replica, for good, and take every locked version out of reach
+  with everything else.
+- **Stored data belongs to one version.** A put that names data another version refers
+  to is refused. Without that, a node could give a second, unlocked version the data of
+  a locked one, and the next honest overwrite or delete of that second version would
+  have a gateway remove the shards. As a second line, a gateway asks the reference
+  index before it removes the shards of a removed version, and leaves them when the
+  answer is yes or cannot be had.
+- An entry of schema 1 says nothing about time or locks, whatever is written in it.
+- A node with a valid certificate can still delete shards directly over node RPC; that
+  is outside what the metadata can enforce, and in the threat model.
+
+A test feeds the state machine such entries at random and requires that the locked
+version, its mode, its date and the single reference to its data survive each of them.
 
 ### The time of an entry decides
 
@@ -98,6 +125,12 @@ majority of voters - is an open question for Albie.
   to the drives of enough nodes, or to the metadata of a majority of voters, can destroy
   data whatever its lock says. This is in the threat model.
 - **A stolen node certificate** can send shard deletes over node RPC.
+
+### Lifting a lock is audited
+
+Removing a version with the governance bypass, changing a retention with it, and taking
+a legal hold off each write an audit record. Object writes in general are not audited
+one by one; these three are, because each makes removable what was protected.
 
 ## Consequences
 

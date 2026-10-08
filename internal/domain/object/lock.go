@@ -29,6 +29,9 @@ const (
 	Compliance RetentionMode = "COMPLIANCE"
 )
 
+// maxRetentionYear is the last year a retention can end in.
+const maxRetentionYear = 9999
+
 // Retention keeps a version from being removed until a time.
 type Retention struct {
 	Mode  RetentionMode
@@ -45,6 +48,10 @@ func (r Retention) Validate(at time.Time) error {
 		return fmt.Errorf("%w: retention without a date", domain.ErrInvalidArgument)
 	case !r.Until.After(at):
 		return fmt.Errorf("%w: the retain-until date is not in the future", domain.ErrInvalidArgument)
+	case r.Until.UTC().Year() > maxRetentionYear:
+		// A date no record can hold: timestamps are written with four
+		// digits for the year.
+		return fmt.Errorf("%w: the retain-until date is after the year %d", domain.ErrInvalidArgument, maxRetentionYear)
 	}
 	return nil
 }

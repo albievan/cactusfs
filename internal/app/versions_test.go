@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
@@ -731,4 +732,44 @@ func TestObjectLockUseCases(t *testing.T) {
 	if err := f.buckets.Delete(ctx, root, "vault"); !errors.Is(err, domain.ErrBucketNotEmpty) {
 		t.Errorf("deleting a bucket that holds a locked version = %v", err)
 	}
+}
+
+// TestStoredDataIsRemovedOnlyWhenNothingRefersToIt: before the shards of a
+// removed version are deleted, the index is asked whether anything still
+// refers to their data. When it says yes, or cannot say, they stay.
+func TestStoredDataIsRemovedOnlyWhenNothingRefersToIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, index := range map[string]func(f *fixture) *referencedIndex{
+		"still referred to":    func(f *fixture) *referencedIndex { return &referencedIndex{ObjectIndex: f.meta, referenced: true} },
+		"the index cannot say": func(f *fixture) *referencedIndex { return &referencedIndex{ObjectIndex: f.meta, err: errBoom} },
+	} {
+		f := erasureFixture(t)
+		objects := f.objectServiceOver(t, index(f))
+		put := func(content string) {
+			t.Helper()
+			if _, err := objects.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: bytes.NewReader([]byte(content)), Size: int64(len(content))}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		put("first")
+		put("second") // removes the first version for good
+		if _, err := objects.Delete(ctx, porttest.Root(), app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
+			t.Fatal(err)
+		}
+		if f.shardCount() != 2*sixDrives {
+			t.Errorf("%s: %d shards left, want those of both versions (%d)", name, f.shardCount(), 2*sixDrives)
+		}
+	}
+}
+
+// referencedIndex answers the question about stored data as a test says.
+type referencedIndex struct {
+	ports.ObjectIndex
+	referenced bool
+	err        error
+}
+
+func (i *referencedIndex) IsDataReferenced(context.Context, object.ID) (bool, error) {
+	return i.referenced, i.err
 }

@@ -583,10 +583,24 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 			if lock.Retention == nil || lock.Retention.Mode != object.Compliance || lock.Retention.Until.Before(until) {
 				t.Fatalf("seed %d: after %s the version is retained as %+v, was compliance until %v", seed, what, lock.Retention, until)
 			}
+			// Its data is still its own: referred to once, by it.
+			var references uint64
+			if err := f.view(func(tx *bbolt.Tx) error {
+				if raw := tx.Bucket(dataBucket()).Get(locked.DataID[:]); len(raw) == 8 {
+					references = binary.BigEndian.Uint64(raw)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if references != 1 || record.DataID != locked.DataID.String() {
+				t.Fatalf("seed %d: after %s the data of the locked version is referred to %d times (record names %s)", seed, what, references, record.DataID)
+			}
 			return lock.Retention.Until
 		}
 
 		at := start
+		serial := uint64(1 << 32)
 		modes := []string{"", string(object.Governance), string(object.Compliance), "NONE", "compliance"}
 		for step := range 400 {
 			// Time passes, never as far as the date. Now and then an
@@ -623,10 +637,8 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 				binary.BigEndian.PutUint64(other.DataID[:8], uint64(step)+1)
 				e = entry{Type: cmdPutObject, PutObject: versionToRecord(other)}
 			default:
-				e = entry{Type: cmdDeleteBucket, DeleteBucket: &deleteBucketCmd{Name: "vault"}}
-				if random.IntN(2) == 0 {
-					e = entry{Type: cmdSetVersioning, SetVersioning: &versioningCmd{Bucket: "vault", Status: string(bucket.VersioningSuspended)}}
-				}
+				serial++
+				e = hostile(random, serial, locked)
 			}
 			apply(stamp, e)
 			// An extension that was accepted is the new floor.
@@ -664,5 +676,111 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 		if r := apply(until, remove); r.err != nil || r.previous == nil {
 			t.Fatalf("seed %d: at the date the delete = %+v, %v", seed, r.previous, r.err)
 		}
+	}
+}
+
+// hostile returns an entry as a node that means harm could propose it:
+// well-formed, of a command that exists, and saying something no honest
+// proposer says.
+func hostile(random *choices, serial uint64, locked object.Version) entry {
+	fresh := func() object.Version {
+		v := porttest.SampleVersion("vault", "ledger", 5)
+		binary.BigEndian.PutUint64(v.VersionID[:8], serial)
+		binary.BigEndian.PutUint64(v.DataID[:8], serial)
+		return v
+	}
+	put := func(change func(r *versionRecord)) entry {
+		record := versionToRecord(fresh())
+		change(record)
+		return entry{Type: cmdPutObject, PutObject: record}
+	}
+	far := time.Date(9999, 12, 31, 23, 59, 59, 0, time.FixedZone("west", -10*3600))
+	switch random.IntN(16) {
+	case 0:
+		return entry{Type: cmdDeleteBucket, DeleteBucket: &deleteBucketCmd{Name: "vault"}}
+	case 1:
+		return entry{Type: cmdSetVersioning, SetVersioning: &versioningCmd{Bucket: "vault", Status: string(bucket.VersioningSuspended)}}
+	case 2: // the data of the locked version, under another key
+		return put(func(r *versionRecord) { r.Key, r.DataID = "twin", locked.DataID.String() })
+	case 3: // the same, in another bucket, where an overwrite removes
+		return put(func(r *versionRecord) { r.Bucket, r.DataID = "plain", locked.DataID.String() })
+	case 4: // the ID of the locked version
+		return put(func(r *versionRecord) { r.VersionID = locked.VersionID.String() })
+	case 5:
+		return put(func(r *versionRecord) { r.VersionID = "zz" })
+	case 6:
+		return put(func(r *versionRecord) { r.DataID = "x" })
+	case 7:
+		return put(func(r *versionRecord) { r.Key = "" })
+	case 8: // claims to be the null version, a marker, and older than all
+		return put(func(r *versionRecord) { r.Versioned, r.DeleteMarker, r.Seq = false, random.IntN(2) == 0, 0 })
+	case 9: // a date no record can hold
+		return put(func(r *versionRecord) { r.Lock = &lockRecord{Mode: string(object.Compliance), RetainUntil: far} })
+	case 10:
+		return entry{Type: cmdSetRetention, SetRetention: &retentionCmd{
+			Bucket: "vault", Key: "ledger", VersionRef: locked.VersionID.String(), Mode: string(object.Compliance), RetainUntil: far, Bypass: true,
+		}}
+	case 11:
+		return entry{Type: cmdSetBucketLock, SetBucketLock: &bucketLockCmd{Bucket: "vault", Default: &retentionRule{Mode: "NONE", Days: -5, Years: 900}}}
+	case 12:
+		return entry{Type: cmdSetBucketLock, SetBucketLock: &bucketLockCmd{Bucket: "vault"}}
+	case 13: // the bucket again, this time without Object Lock
+		return entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "vault", Versioning: string(bucket.VersioningSuspended)}}
+	case 14:
+		return entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "plain"}}
+	default:
+		return entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
+			Bucket: "vault", Key: "", VersionRef: object.NullVersion, Bypass: true, MarkerID: "not an ID",
+		}}
+	}
+}
+
+// TestAnEntryOfTheFirstSchemaSaysNothingAboutTimeOrLocks: only the leader
+// gives an entry its time, and only an entry of the second schema carries
+// one. A node that writes a time, or a lock, into an entry of the first is
+// not believed: the state's time does not move and the state stays what the
+// previous release can read.
+func TestAnEntryOfTheFirstSchemaSaysNothingAboutTimeOrLocks(t *testing.T) {
+	t.Parallel()
+	f := newFSM(t)
+	future := time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)
+	apply := func(index uint64, e entry) applyResult {
+		t.Helper()
+		data, err := encodeEntry(e, entrySchemaVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+		if r.fatal {
+			t.Fatalf("entry %d stopped the state machine: %v", index, r.err)
+		}
+		return r
+	}
+	if r := apply(1, entry{Type: cmdCreateBucket, At: future, CreateBucket: &bucketRecord{Name: "b", ObjectLock: true, Versioning: "Enabled"}}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	locked := porttest.SampleVersion("b", "k", 1)
+	locked.Lock = object.Lock{LegalHold: true}
+	if r := apply(2, entry{Type: cmdPutObject, At: future, PutObject: versionToRecord(locked)}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if err := f.view(func(tx *bbolt.Tx) error {
+		if at := readTime(tx); !at.IsZero() {
+			t.Errorf("an entry of the first schema moved the state's time to %v", at)
+		}
+		if schema := binary.BigEndian.Uint64(tx.Bucket(metaBucket()).Get(schemaKey())); schema != stateSchemaVersion {
+			t.Errorf("an entry of the first schema made the state schema %d", schema)
+		}
+		b, err := readBucket(tx, "b")
+		if err != nil || b == nil || b.ObjectLock || b.Versioning != "" {
+			t.Errorf("a bucket created by an entry of the first schema = %+v, %v", b, err)
+		}
+		v, err := readVersion(tx.Bucket(objectsBucket()).Bucket([]byte("b")), "k")
+		if err != nil || v == nil || v.Lock != nil {
+			t.Errorf("a version put by an entry of the first schema = %+v, %v", v, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

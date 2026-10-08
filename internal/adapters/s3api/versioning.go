@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -38,8 +39,9 @@ const (
 // decodeStrictXML reads a request body that decides something: which
 // versions to destroy, what a bucket keeps. It is bounded, and it is strict -
 // a document type declaration, a processing instruction, nesting deeper than
-// any of these documents needs, or an element that is not one of allowed is
-// malformed, never ignored. An element that was silently skipped could be the
+// any of these documents needs, an element that is not one of allowed, or an
+// element said twice where the caller did not mark it (with a trailing "*")
+// as one that repeats, is malformed, never ignored. An element that was silently skipped could be the
 // one that mattered.
 func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) error {
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
@@ -48,6 +50,14 @@ func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) e
 	}
 	if int64(len(data)) > limit || len(data) == 0 {
 		return errMalformedXML
+	}
+	// A name written with a trailing "*" may repeat inside its parent.
+	var repeatable []string
+	allowed = slices.Clone(allowed)
+	for i, name := range allowed {
+		if base, ok := strings.CutSuffix(name, "*"); ok {
+			allowed[i], repeatable = base, append(repeatable, base)
+		}
 	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	decoder.Strict = true
@@ -78,12 +88,12 @@ func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) e
 					return errMalformedXML
 				}
 			} else {
-				// Only the entries of a list repeat: the children of
-				// the root that have children of their own. A second
-				// <Status>, or a second <Key> in one <Object>, is a
-				// document that says two things.
+				// Only what the caller says may repeat, repeats: the
+				// entries of a list. A second <Status>, a second <Rule>
+				// or a second <Key> in one <Object> is a document that
+				// says two things.
 				parent := seen[len(seen)-1]
-				if parent[name]++; parent[name] > 1 && depth > 2 {
+				if parent[name]++; parent[name] > 1 && !slices.Contains(repeatable, name) {
 					return errMalformedXML
 				}
 			}
@@ -94,13 +104,6 @@ func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) e
 			if inside["#text"] > 0 && len(inside) > 1 {
 				// Text beside elements: "<Quiet>true<Object>...".
 				return errMalformedXML
-			}
-			if depth == 1 && len(inside) == 1 && inside["#text"] > 0 {
-				// A child of the root that holds text is a setting,
-				// not a list entry: there is one of it.
-				if seen[0][open[len(open)-1]] > 1 {
-					return errMalformedXML
-				}
 			}
 			open, seen = open[:len(open)-1], seen[:len(seen)-1]
 		case xml.CharData:
@@ -331,7 +334,7 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 		return errUnsignedBody
 	}
 	var in deleteRequest
-	if err := decodeStrictXML(body.body, maxDeleteXML, &in, "Delete", "Quiet", "Object", "Key", "VersionId", "ETag", "LastModifiedTime", "Size"); err != nil {
+	if err := decodeStrictXML(body.body, maxDeleteXML, &in, "Delete", "Quiet", "Object*", "Key", "VersionId", "ETag", "LastModifiedTime", "Size"); err != nil {
 		return err
 	}
 	// Nothing is deleted on the strength of a body that is not the one

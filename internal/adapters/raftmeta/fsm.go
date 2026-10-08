@@ -349,6 +349,19 @@ func (f *fsm) Apply(log *raft.Log) any {
 		if err != nil {
 			return err
 		}
+		if log.Data[0] < entrySchemaTimed {
+			// An entry of the first schema says nothing about time or
+			// locks, whatever is written in it: only the leader gives
+			// an entry its time, and only an entry of the second schema
+			// carries one.
+			e.At = time.Time{}
+			if e.PutObject != nil {
+				e.PutObject.Lock = nil
+			}
+			if e.CreateBucket != nil {
+				e.CreateBucket.ObjectLock, e.CreateBucket.Versioning, e.CreateBucket.DefaultRetention = false, "", nil
+			}
+		}
 		now := applied{index: log.Index}
 		if !e.At.IsZero() {
 			if now.at, err = stampState(tx, e.At); err != nil {
@@ -403,7 +416,7 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 	case cmdSetRetention:
 		return applySetRetention(tx, *e.SetRetention, now)
 	case cmdSetLegalHold:
-		return applySetLegalHold(tx, *e.SetLegalHold)
+		return applySetLegalHold(tx, *e.SetLegalHold, now)
 	case cmdDeleteObject:
 		return applyDeleteObject(tx, *e.DeleteObject)
 	case cmdSetRoot:
