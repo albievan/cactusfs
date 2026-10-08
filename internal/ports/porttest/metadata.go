@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
@@ -40,6 +41,9 @@ type MemMetadata struct {
 	root *iam.RootCredential
 	topo *cluster.Topology
 
+	// Now, when set, is the store's time: what Object Lock is judged on.
+	// The real store uses the time its leader stamps entries with.
+	Now func() time.Time
 	// FailWrites, when set, is returned by every mutating call. Tests use
 	// it to simulate a failed Raft commit.
 	FailWrites error
@@ -62,6 +66,12 @@ func (m *MemMetadata) CreateBucket(_ context.Context, b bucket.Bucket) error {
 	}
 	if _, ok := m.buckets[b.Name]; ok {
 		return fmt.Errorf("%w: %s", domain.ErrBucketAlreadyExists, b.Name)
+	}
+	// As the real store does it: a bucket begins without versions, or -
+	// created with Object Lock - keeping them.
+	b.Versioning, b.DefaultRetention = bucket.Unversioned, nil
+	if b.ObjectLock {
+		b.Versioning = bucket.VersioningEnabled
 	}
 	m.buckets[b.Name] = b
 	m.objects[b.Name] = map[string][]object.Version{}
@@ -138,9 +148,20 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	if !ok {
 		return ports.PutResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, v.Bucket)
 	}
+	lock := v.Lock
+	switch {
+	case !b.ObjectLock && !lock.IsZero():
+		return ports.PutResult{}, fmt.Errorf("%w: bucket %s", domain.ErrLockNotConfigured, v.Bucket)
+	case b.ObjectLock && lock.Retention != nil:
+		if err := lock.Retention.Validate(m.now()); err != nil {
+			return ports.PutResult{}, err
+		}
+	case b.ObjectLock && b.DefaultRetention != nil:
+		lock.Retention = &object.Retention{Mode: b.DefaultRetention.Mode, Until: b.DefaultRetention.Until(m.now())}
+	}
 	m.seq++
 	stored := CloneVersion(v)
-	stored.DeleteMarker = false
+	stored.DeleteMarker, stored.Lock = false, lock
 	versions := m.objects[v.Bucket][v.Key]
 	var removed *object.Version
 	switch b.Versioning {
@@ -176,6 +197,13 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 	m.seq++
 	versions := m.objects[bucketName][key]
 	if o.Version != nil {
+		for _, v := range versions {
+			if v.Is(*o.Version) {
+				if err := v.Lock.CheckDelete(m.now(), o.BypassGovernance); err != nil {
+					return ports.DeleteResult{}, err
+				}
+			}
+		}
 		rest, removed := take(versions, *o.Version)
 		m.store(bucketName, key, rest)
 		return ports.DeleteResult{Removed: removed}, nil
@@ -220,6 +248,95 @@ func (m *MemMetadata) SetBucketVersioning(_ context.Context, name string, state 
 	b.Versioning = state
 	m.buckets[name] = b
 	return nil
+}
+
+func (m *MemMetadata) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// SetBucketDefaultRetention implements ports.BucketStore.
+func (m *MemMetadata) SetBucketDefaultRetention(_ context.Context, name string, d *bucket.DefaultRetention) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailWrites != nil {
+		return m.FailWrites
+	}
+	b, ok := m.buckets[name]
+	switch {
+	case !ok:
+		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
+	case !b.ObjectLock:
+		return fmt.Errorf("%w: bucket %s", domain.ErrLockNotConfigured, name)
+	}
+	if d != nil {
+		if err := d.Validate(); err != nil {
+			return err
+		}
+		rule := *d
+		d = &rule
+	}
+	b.DefaultRetention = d
+	m.buckets[name] = b
+	return nil
+}
+
+// locked finds the version a lock change is about and applies change to it.
+func (m *MemMetadata) locked(bucketName, key string, ref object.VersionRef, change func(v *object.Version) error) (object.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailWrites != nil {
+		return object.Version{}, m.FailWrites
+	}
+	b, ok := m.buckets[bucketName]
+	switch {
+	case !ok:
+		return object.Version{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	case !b.ObjectLock:
+		return object.Version{}, fmt.Errorf("%w: bucket %s", domain.ErrLockNotConfigured, bucketName)
+	}
+	versions := m.objects[bucketName][key]
+	for i := range versions {
+		if !versions[i].Is(ref) {
+			continue
+		}
+		if versions[i].DeleteMarker {
+			return object.Version{}, fmt.Errorf("%w: a delete marker cannot be locked", domain.ErrMethodNotAllowed)
+		}
+		if err := change(&versions[i]); err != nil {
+			return object.Version{}, err
+		}
+		m.seq++
+		return CloneVersion(versions[i]), nil
+	}
+	return object.Version{}, fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
+}
+
+// SetRetention implements ports.ObjectIndex.
+func (m *MemMetadata) SetRetention(
+	_ context.Context, bucketName, key string, ref object.VersionRef, r *object.Retention, bypassGovernance bool,
+) (object.Version, error) {
+	return m.locked(bucketName, key, ref, func(v *object.Version) error {
+		if err := v.Lock.CheckRetention(r, m.now(), bypassGovernance); err != nil {
+			return err
+		}
+		v.Lock.Retention = nil
+		if r != nil {
+			next := *r
+			v.Lock.Retention = &next
+		}
+		return nil
+	})
+}
+
+// SetLegalHold implements ports.ObjectIndex.
+func (m *MemMetadata) SetLegalHold(_ context.Context, bucketName, key string, ref object.VersionRef, on bool) (object.Version, error) {
+	return m.locked(bucketName, key, ref, func(v *object.Version) error {
+		v.Lock.LegalHold = on
+		return nil
+	})
 }
 
 // GetObject implements ports.ObjectIndex.
@@ -413,5 +530,9 @@ func CloneVersion(v object.Version) object.Version {
 	v.Encryption.WrappedKey = slices.Clone(v.Encryption.WrappedKey)
 	v.Encryption.NoncePrefix = slices.Clone(v.Encryption.NoncePrefix)
 	v.Layout.Shards = slices.Clone(v.Layout.Shards)
+	if v.Lock.Retention != nil {
+		retention := *v.Lock.Retention
+		v.Lock.Retention = &retention
+	}
 	return v
 }

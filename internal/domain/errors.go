@@ -80,6 +80,12 @@ var (
 	// ErrVersionNotFound means that an object has no version with the ID
 	// that was named.
 	ErrVersionNotFound = errors.New("version not found")
+	// ErrObjectLocked means that a version is kept by Object Lock and may
+	// not be removed, or its retention changed, as was asked.
+	ErrObjectLocked = errors.New("the object version is locked")
+	// ErrLockNotConfigured means that a bucket was not created with Object
+	// Lock, or that a version has no retention to report.
+	ErrLockNotConfigured = errors.New("object lock is not configured")
 	// ErrMethodNotAllowed means that what was asked cannot be done with
 	// what was named: reading a delete marker.
 	ErrMethodNotAllowed = errors.New("method not allowed")
@@ -182,6 +188,8 @@ func wireCodes() []struct {
 		{"version_not_found", ErrVersionNotFound},
 		{"method_not_allowed", ErrMethodNotAllowed},
 		{"invalid_bucket_state", ErrInvalidBucketState},
+		{"object_locked", ErrObjectLocked},
+		{"lock_not_configured", ErrLockNotConfigured},
 	}
 }
 

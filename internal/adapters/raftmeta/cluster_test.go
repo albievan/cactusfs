@@ -309,6 +309,12 @@ func TestEveryNodeOfAClusterHonoursTheContract(t *testing.T) {
 		// Every member says which schema it applies, as nodes do when
 		// they start: without that the cluster stays at the first.
 		c.register("m1", "m2", "m3", "s4")
+		// The node that is asked has to have seen the registrations
+		// itself before it will write what needs the newer schema.
+		eventually(t, "the node to see every member's version", func() bool {
+			level, err := c.store("s4").entryVersion()
+			return err == nil && level == MetadataVersion
+		})
 		return c.store("s4")
 	})
 }

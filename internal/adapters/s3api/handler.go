@@ -49,6 +49,9 @@ type Buckets interface {
 	Get(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error)
 	Location(ctx context.Context, principal iam.Principal, name string) error
 	List(ctx context.Context, principal iam.Principal) ([]bucket.Bucket, error)
+	CreateWithObjectLock(ctx context.Context, principal iam.Principal, name string) error
+	ObjectLock(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error)
+	SetDefaultRetention(ctx context.Context, principal iam.Principal, name string, d *bucket.DefaultRetention) error
 	Versioning(ctx context.Context, principal iam.Principal, name string) (bucket.Versioning, error)
 	SetVersioning(ctx context.Context, principal iam.Principal, name string, state bucket.Versioning) error
 }
@@ -61,6 +64,10 @@ type Objects interface {
 	Head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error)
 	HeadVersion(ctx context.Context, principal iam.Principal, bucketName, key string, ref object.VersionRef) (object.Version, error)
 	ListVersions(ctx context.Context, principal iam.Principal, bucketName string, opts app.VersionListOptions) (app.VersionListPage, error)
+	Retention(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Retention, error)
+	SetRetention(ctx context.Context, principal iam.Principal, in app.LockInput, retention *object.Retention, bypassGovernance bool) (object.Version, error)
+	LegalHold(ctx context.Context, principal iam.Principal, in app.LockInput) (bool, error)
+	SetLegalHold(ctx context.Context, principal iam.Principal, in app.LockInput, on bool) (object.Version, error)
 	Delete(ctx context.Context, principal iam.Principal, in app.DeleteInput) (app.DeleteOutput, error)
 	List(ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions) (object.ListPage, error)
 }
@@ -413,7 +420,7 @@ func allowHeaders(header http.Header) error {
 			continue
 		}
 		switch {
-		case slices.Contains(knownAmzHeaders(), lower):
+		case slices.Contains(knownAmzHeaders(), lower), slices.Contains(lockHeaders(), lower):
 		case strings.HasPrefix(lower, "x-amz-meta-"), strings.HasPrefix(lower, checksumHeaderPrefix):
 		case lower == "x-amz-server-side-encryption" && len(values) == 1 && values[0] == "AES256":
 			// What every object gets anyway.
@@ -463,6 +470,13 @@ func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Value
 			req.operation = "PutBucketVersioning"
 			return h.putBucketVersioning(ctx, req)
 		}
+		if query.Has("object-lock") {
+			if err := allowQuery(query, "object-lock"); err != nil {
+				return err
+			}
+			req.operation = "PutObjectLockConfiguration"
+			return h.putObjectLockConfiguration(ctx, req)
+		}
 		if err := allowQuery(query); err != nil {
 			return err
 		}
@@ -500,6 +514,12 @@ func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Value
 			}
 			req.operation = "GetBucketVersioning"
 			return h.getBucketVersioning(ctx, req)
+		case query.Has("object-lock"):
+			if err := allowQuery(query, "object-lock"); err != nil {
+				return err
+			}
+			req.operation = "GetObjectLockConfiguration"
+			return h.getObjectLockConfiguration(ctx, req)
 		case query.Has("versions"):
 			if err := allowQuery(query, listVersionsParameters()...); err != nil {
 				return err
@@ -543,12 +563,35 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 	if req.Method == http.MethodGet || req.Method == http.MethodHead || req.Method == http.MethodDelete {
 		allowed = append(allowed, "versionId")
 	}
+	// The lock of a version is read and changed with GET and PUT.
+	sub := ""
+	if req.Method == http.MethodGet || req.Method == http.MethodPut {
+		for _, name := range []string{"retention", "legal-hold"} {
+			if query.Has(name) {
+				sub, allowed = name, []string{name, "versionId"}
+			}
+		}
+	}
 	if err := allowQuery(query, allowed...); err != nil {
 		return err
 	}
 	var err error
 	if req.version, err = versionOf(query); err != nil {
 		return err
+	}
+	switch {
+	case sub == "retention" && req.Method == http.MethodGet:
+		req.operation = "GetObjectRetention"
+		return h.getObjectRetention(ctx, req)
+	case sub == "retention":
+		req.operation = "PutObjectRetention"
+		return h.putObjectRetention(ctx, req)
+	case sub == "legal-hold" && req.Method == http.MethodGet:
+		req.operation = "GetObjectLegalHold"
+		return h.getObjectLegalHold(ctx, req)
+	case sub == "legal-hold":
+		req.operation = "PutObjectLegalHold"
+		return h.putObjectLegalHold(ctx, req)
 	}
 	switch req.Method {
 	case http.MethodPut:

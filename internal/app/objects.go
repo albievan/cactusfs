@@ -93,6 +93,10 @@ type PutInput struct {
 	CacheControl       string
 	UserMetadata       map[string]string
 
+	// Lock, when not empty, keeps the new version from being removed. The
+	// bucket must have been created with Object Lock.
+	Lock object.Lock
+
 	// Verify is called once Body has been read to its end and before
 	// anything becomes durable. It returns the entity tag of the content,
 	// or an error wrapping domain.ErrBadDigest when the content does not
@@ -126,14 +130,37 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if in.Size > object.MaxSize {
 		return object.Version{}, fmt.Errorf("%w: %d bytes declared", domain.ErrEntityTooLarge, in.Size)
 	}
-	// Fail before any byte is written when the bucket does not exist. The
-	// state machine checks again at commit, which is what makes it atomic.
-	if _, err := s.buckets.GetBucket(ctx, in.Bucket); err != nil {
+	// Locking a version is a permission of its own, on top of writing it.
+	if in.Lock.Retention != nil {
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectRetention, Resource: resource}); err != nil {
+			return object.Version{}, err
+		}
+	}
+	if in.Lock.LegalHold {
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectLegalHold, Resource: resource}); err != nil {
+			return object.Version{}, err
+		}
+	}
+	// Fail before any byte is written when the bucket does not exist, or
+	// cannot hold the lock that is asked for. The state machine checks
+	// again at commit, which is what makes it atomic.
+	target, err := s.buckets.GetBucket(ctx, in.Bucket)
+	if err != nil {
 		return object.Version{}, err
+	}
+	if !in.Lock.IsZero() {
+		if !target.ObjectLock {
+			return object.Version{}, fmt.Errorf("%w: bucket %s was not created with Object Lock", domain.ErrLockNotConfigured, in.Bucket)
+		}
+		if in.Lock.Retention != nil {
+			if err := in.Lock.Retention.Validate(s.clock.Now()); err != nil {
+				return object.Version{}, err
+			}
+		}
 	}
 
 	version := object.Version{
-		Bucket: in.Bucket, Key: in.Key,
+		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock,
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata,
 	}
@@ -451,6 +478,108 @@ func (s *ObjectService) head(ctx context.Context, principal iam.Principal, bucke
 	return version, nil
 }
 
+// LockInput names the version whose lock is read or changed.
+type LockInput struct {
+	Bucket string
+	Key    string
+	// Version, when nil, means the current version.
+	Version *object.VersionRef
+}
+
+// lockTarget authorizes a lock operation and resolves which version it is
+// about.
+func (s *ObjectService) lockTarget(ctx context.Context, principal iam.Principal, action iam.Action, in LockInput) (object.Version, error) {
+	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: action, Resource: resource}); err != nil {
+		return object.Version{}, err
+	}
+	if err := object.ValidateKey(in.Key); err != nil {
+		return object.Version{}, err
+	}
+	target, err := s.buckets.GetBucket(ctx, in.Bucket)
+	if err != nil {
+		return object.Version{}, err
+	}
+	if !target.ObjectLock {
+		return object.Version{}, fmt.Errorf("%w: bucket %s was not created with Object Lock", domain.ErrLockNotConfigured, in.Bucket)
+	}
+	if in.Version == nil {
+		return s.index.GetObject(ctx, in.Bucket, in.Key)
+	}
+	version, err := s.index.GetVersion(ctx, in.Bucket, in.Key, *in.Version)
+	if err != nil {
+		return object.Version{}, err
+	}
+	if version.DeleteMarker {
+		return object.Version{}, fmt.Errorf("%w: a delete marker has no lock", domain.ErrMethodNotAllowed)
+	}
+	return version, nil
+}
+
+// Retention returns the retention of a version. The error wraps
+// domain.ErrLockNotConfigured when the version has none.
+func (s *ObjectService) Retention(ctx context.Context, principal iam.Principal, in LockInput) (object.Retention, error) {
+	version, err := s.lockTarget(ctx, principal, iam.ActionGetObjectRetention, in)
+	if err != nil {
+		return object.Retention{}, fmt.Errorf("object.Retention: %w", err)
+	}
+	if version.Lock.Retention == nil {
+		return object.Retention{}, fmt.Errorf("object.Retention: %w: the version has no retention", domain.ErrLockNotConfigured)
+	}
+	return *version.Lock.Retention, nil
+}
+
+// SetRetention replaces the retention of a version; nil removes it. A
+// retention can always be extended. Shortening or removing a governance
+// retention needs bypassGovernance and the permission to bypass; a
+// compliance retention that has not ended can only be extended, by anybody.
+// Whether the change is allowed is decided when it is committed.
+func (s *ObjectService) SetRetention(
+	ctx context.Context, principal iam.Principal, in LockInput, retention *object.Retention, bypassGovernance bool,
+) (object.Version, error) {
+	version, err := s.lockTarget(ctx, principal, iam.ActionPutObjectRetention, in)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
+	}
+	if bypassGovernance {
+		resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionOverrideGovernance, Resource: resource}); err != nil {
+			return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
+		}
+	}
+	// Refuse early what is plainly not allowed; the commit decides.
+	if err := version.Lock.CheckRetention(retention, s.clock.Now(), bypassGovernance); err != nil {
+		return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
+	}
+	stored, err := s.index.SetRetention(ctx, in.Bucket, in.Key, version.Ref(), retention, bypassGovernance)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
+	}
+	return stored, nil
+}
+
+// LegalHold reports whether a version is under legal hold.
+func (s *ObjectService) LegalHold(ctx context.Context, principal iam.Principal, in LockInput) (bool, error) {
+	version, err := s.lockTarget(ctx, principal, iam.ActionGetObjectLegalHold, in)
+	if err != nil {
+		return false, fmt.Errorf("object.LegalHold: %w", err)
+	}
+	return version.Lock.LegalHold, nil
+}
+
+// SetLegalHold puts a version under legal hold or takes it off.
+func (s *ObjectService) SetLegalHold(ctx context.Context, principal iam.Principal, in LockInput, on bool) (object.Version, error) {
+	version, err := s.lockTarget(ctx, principal, iam.ActionPutObjectLegalHold, in)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetLegalHold: %w", err)
+	}
+	stored, err := s.index.SetLegalHold(ctx, in.Bucket, in.Key, version.Ref(), on)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetLegalHold: %w", err)
+	}
+	return stored, nil
+}
+
 // VersionListOptions select a page of the versions of a bucket.
 type VersionListOptions struct {
 	Prefix    string
@@ -564,6 +693,10 @@ type DeleteInput struct {
 	Key    string
 	// Version, when not nil, names one version to remove for good.
 	Version *object.VersionRef
+	// BypassGovernance asks to remove a version although a governance
+	// retention holds it. The caller needs the permission to; without it
+	// the request is refused, never carried out without the bypass.
+	BypassGovernance bool
 }
 
 // DeleteOutput says what a delete did.
@@ -588,6 +721,11 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: action, Resource: resource}); err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
+	if in.BypassGovernance {
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionOverrideGovernance, Resource: resource}); err != nil {
+			return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+		}
+	}
 	if err := object.ValidateKey(in.Key); err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
@@ -599,7 +737,7 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
 	result, err := s.index.DeleteObject(ctx, in.Bucket, in.Key, ports.DeleteOptions{
-		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(),
+		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(), BypassGovernance: in.BypassGovernance,
 	})
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)

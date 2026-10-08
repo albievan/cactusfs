@@ -26,6 +26,13 @@ const (
 	EventObjectDeleteMarkerCreated = "cactusfs.object.delete-marker-created.v1"
 )
 
+// Events of Object Lock: the retention or the legal hold of a version was
+// changed. The payload is an ObjectEvent that names the version.
+const (
+	EventObjectRetentionChanged = "cactusfs.object.retention-changed.v1"
+	EventObjectLegalHoldChanged = "cactusfs.object.legal-hold-changed.v1"
+)
+
 // BucketVersioningEvent is the payload of EventBucketVersioningChanged.
 type BucketVersioningEvent struct {
 	Bucket string `json:"bucket"`

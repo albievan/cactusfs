@@ -543,6 +543,15 @@ func wildcardMatch(pattern, s string) bool {
 func (s Statement) matches(action Action, resource string, ctx Context) bool {
 	hit := false
 	for _, pattern := range s.Actions {
+		// Lifting a retention is allowed only by its name. A Deny may
+		// still cover it with a wildcard: denying more is never wrong.
+		if action == ActionOverrideGovernance && s.Effect == Allow {
+			if strings.EqualFold(pattern, string(action)) {
+				hit = true
+				break
+			}
+			continue
+		}
 		// Action names are matched without regard to case, as in IAM.
 		if pattern == "*" || wildcardMatch(strings.ToLower(pattern), strings.ToLower(string(action))) {
 			hit = true

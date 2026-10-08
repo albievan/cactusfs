@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -50,6 +52,67 @@ func (s *BucketService) Create(ctx context.Context, principal iam.Principal, nam
 		return fmt.Errorf("bucket.Create: %w", err)
 	}
 	s.audited(ctx, principal, iam.ActionCreateBucket, name)
+	return nil
+}
+
+// CreateWithObjectLock creates a bucket whose versions can be locked. Such a
+// bucket keeps versions from the start and for good: that is decided here
+// and cannot be decided later.
+func (s *BucketService) CreateWithObjectLock(ctx context.Context, principal iam.Principal, name string) error {
+	if err := s.authorize(ctx, principal, iam.ActionCreateBucket, name); err != nil {
+		return fmt.Errorf("bucket.CreateWithObjectLock: %w", err)
+	}
+	if err := bucket.ValidateName(name); err != nil {
+		return fmt.Errorf("bucket.CreateWithObjectLock: %w", err)
+	}
+	b := bucket.Bucket{Name: name, CreatedAt: s.clock.Now().UTC(), ObjectLock: true}
+	if err := s.buckets.CreateBucket(ctx, b); err != nil {
+		return fmt.Errorf("bucket.CreateWithObjectLock: %w", err)
+	}
+	if s.auditor != nil {
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionCreateBucket, iam.Resource{Bucket: name}, audit.Succeeded,
+			map[string]string{"object_lock": "true"}))
+	}
+	return nil
+}
+
+// ObjectLock returns the Object Lock configuration of a bucket: whether its
+// versions can be locked, and the retention it gives new ones. The error
+// wraps domain.ErrLockNotConfigured for a bucket created without.
+func (s *BucketService) ObjectLock(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error) {
+	if err := s.authorize(ctx, principal, iam.ActionGetBucketObjectLock, name); err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.ObjectLock: %w", err)
+	}
+	b, err := s.buckets.GetBucket(ctx, name)
+	if err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.ObjectLock: %w", err)
+	}
+	if !b.ObjectLock {
+		return bucket.Bucket{}, fmt.Errorf("bucket.ObjectLock: %w: bucket %s was not created with Object Lock", domain.ErrLockNotConfigured, name)
+	}
+	return b, nil
+}
+
+// SetDefaultRetention sets the retention a bucket gives its new versions;
+// nil removes it. Versions that exist keep what they have. The change is
+// audited.
+func (s *BucketService) SetDefaultRetention(ctx context.Context, principal iam.Principal, name string, d *bucket.DefaultRetention) error {
+	if err := s.authorize(ctx, principal, iam.ActionPutBucketObjectLock, name); err != nil {
+		return fmt.Errorf("bucket.SetDefaultRetention: %w", err)
+	}
+	details := map[string]string{"default_retention": "none"}
+	if d != nil {
+		if err := d.Validate(); err != nil {
+			return fmt.Errorf("bucket.SetDefaultRetention: %w", err)
+		}
+		details = map[string]string{"mode": string(d.Mode), "days": strconv.Itoa(d.Days), "years": strconv.Itoa(d.Years)}
+	}
+	if err := s.buckets.SetBucketDefaultRetention(ctx, name, d); err != nil {
+		return fmt.Errorf("bucket.SetDefaultRetention: %w", err)
+	}
+	if s.auditor != nil {
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutBucketObjectLock, iam.Resource{Bucket: name}, audit.Succeeded, details))
+	}
 	return nil
 }
 

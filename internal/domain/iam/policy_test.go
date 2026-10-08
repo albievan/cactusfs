@@ -527,3 +527,58 @@ func duplicateField(data []byte) bool {
 		}
 	}
 }
+
+// TestBypassIsNeverGrantedByAWildcard: lifting a governance retention is
+// allowed only by a statement that names it. A role that has "everything"
+// does not have it. A Deny covers it however it is written.
+func TestBypassIsNeverGrantedByAWildcard(t *testing.T) {
+	t.Parallel()
+	allow := func(action string) iam.Document {
+		return mustPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"`+action+`","Resource":"*"}]}`)
+	}
+	deny := func(action string) iam.Document {
+		return mustPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"`+action+`","Resource":"*"}]}`)
+	}
+	object := iam.Resource{Bucket: "b", Key: "k"}
+	tests := []struct {
+		name     string
+		policies []iam.Document
+		want     bool
+	}{
+		{"everything", []iam.Document{allow("*")}, false},
+		{"all of S3", []iam.Document{allow("s3:*")}, false},
+		{"a pattern that fits", []iam.Document{allow("s3:Bypass*")}, false},
+		{"a pattern with a question mark", []iam.Document{allow("s3:BypassGovernanceRetentio?")}, false},
+		{"by name", []iam.Document{allow("s3:BypassGovernanceRetention")}, true},
+		{"by name, in another case", []iam.Document{allow("S3:bypassgovernanceretention")}, true},
+		{"by name, and denied by a wildcard", []iam.Document{allow("s3:BypassGovernanceRetention"), deny("s3:*")}, false},
+		{"by name, and denied by everything", []iam.Document{allow("s3:BypassGovernanceRetention"), deny("*")}, false},
+		{"cluster-admin", []iam.Document{iam.BuiltInPolicies()[iam.RoleClusterAdmin]}, false},
+		{"bucket-admin", []iam.Document{iam.BuiltInPolicies()[iam.RoleBucketAdmin]}, false},
+	}
+	for _, tt := range tests {
+		err := iam.Decide(iam.Request{
+			Principal: iam.Principal{AccessKeyID: "K", User: "u", Policies: tt.policies}, Action: iam.ActionOverrideGovernance, Resource: object,
+		})
+		if (err == nil) != tt.want {
+			t.Errorf("%s: bypass allowed = %v, want %v (%v)", tt.name, err == nil, tt.want, err)
+		}
+	}
+	// The same wildcards do grant what they always did.
+	for _, policy := range []iam.Document{allow("*"), allow("s3:*")} {
+		err := iam.Decide(iam.Request{Principal: iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{policy}}, Action: iam.ActionDeleteObjectVersion, Resource: object})
+		if err != nil {
+			t.Errorf("a wildcard no longer grants s3:DeleteObjectVersion: %v", err)
+		}
+	}
+	// A key's inline policy must name it as well.
+	named := allow("s3:BypassGovernanceRetention")
+	everything := allow("s3:*")
+	err := iam.Decide(iam.Request{
+		Principal: iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{named}, Boundary: &everything},
+		Action:    iam.ActionOverrideGovernance, Resource: object,
+	})
+	if err == nil {
+		t.Error("a key whose inline policy says s3:* may bypass governance")
+	}
+}

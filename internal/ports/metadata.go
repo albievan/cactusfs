@@ -28,6 +28,11 @@ type BucketStore interface {
 	// error wraps domain.ErrBucketNotFound, or what
 	// bucket.ValidateVersioningChange refuses.
 	SetBucketVersioning(ctx context.Context, name string, state bucket.Versioning) error
+	// SetBucketDefaultRetention sets the retention the bucket gives its
+	// new versions; nil removes it. The error wraps
+	// domain.ErrLockNotConfigured when the bucket was not created with
+	// Object Lock.
+	SetBucketDefaultRetention(ctx context.Context, name string, d *bucket.DefaultRetention) error
 }
 
 // ObjectIndex is the replicated index from bucket and key to object version.
@@ -60,6 +65,16 @@ type ObjectIndex interface {
 	// number of versions a key has. The error wraps
 	// domain.ErrBucketNotFound.
 	ScanVersions(ctx context.Context, bucketName string, start VersionCursor, visit func(v object.Version, latest bool) ScanControl) error
+	// SetRetention replaces the retention of a version; nil removes it.
+	// Whether it may is decided when the change is committed, by the rules
+	// of object.Lock and on the store's own time. The error wraps
+	// domain.ErrObjectLocked when it may not, domain.ErrLockNotConfigured
+	// when the bucket was not created with Object Lock, and
+	// domain.ErrVersionNotFound.
+	SetRetention(ctx context.Context, bucketName, key string, ref object.VersionRef, r *object.Retention, bypassGovernance bool) (object.Version, error)
+	// SetLegalHold puts a version under legal hold or takes it off. The
+	// errors are those of SetRetention.
+	SetLegalHold(ctx context.Context, bucketName, key string, ref object.VersionRef, on bool) (object.Version, error)
 	// GetObject returns the current version of an object. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrObjectNotFound.
 	GetObject(ctx context.Context, bucketName, key string) (object.Version, error)
@@ -104,6 +119,10 @@ type DeleteOptions struct {
 	// while a change is applied.
 	MarkerID object.ID
 	At       time.Time
+	// BypassGovernance says that the caller may lift a governance
+	// retention and asked to. The use case authorizes that; the store
+	// lifts nothing else on the strength of it.
+	BypassGovernance bool
 }
 
 // DeleteResult is what committing a delete did.

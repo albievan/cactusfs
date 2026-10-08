@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -11,6 +12,9 @@ import (
 
 	"go.etcd.io/bbolt"
 
+	"github.com/hashicorp/raft"
+
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -519,4 +523,146 @@ func TestAKeyWithManyVersions(t *testing.T) {
 		t.Fatalf("a put over a null version under %d others = %+v, %v", many, replaced.Removed, err)
 	}
 	checkInvariant(t, store, "b")
+}
+
+// TestNoEntryRemovesAComplianceLockedVersion feeds the state machine
+// arbitrary entries - retention changes of every mode and date, version
+// deletes, object deletes, legal holds, default retentions, every one of
+// them with the proposer claiming the right to bypass - at times before the
+// retention ends. The version is there after each of them, in compliance
+// mode, retained at least as long as it was. Only the time of an entry
+// reaching the date changes that; the state machine reads no clock.
+func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
+	t.Parallel()
+	for seed := range uint64(4) {
+		f := newFSM(t)
+		random := &choices{state: seed*7919 + 1}
+		start := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+		until := start.Add(1000 * time.Hour)
+		index := uint64(0)
+		apply := func(at time.Time, e entry) applyResult {
+			t.Helper()
+			index++
+			e.At = at
+			data, err := encodeEntry(e, entrySchemaTimed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+			if r.fatal {
+				t.Fatalf("entry %d (%s) stopped the state machine: %v", index, e.Type, r.err)
+			}
+			return r
+		}
+		locked := porttest.SampleVersion("vault", "ledger", 1)
+		locked.Lock = object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: until}}
+		if r := apply(start, entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "vault", ObjectLock: true}}); r.err != nil {
+			t.Fatal(r.err)
+		}
+		if r := apply(start, entry{Type: cmdPutObject, PutObject: versionToRecord(locked)}); r.err != nil {
+			t.Fatal(r.err)
+		}
+		ref := locked.VersionID.String()
+		check := func(what string) time.Time {
+			t.Helper()
+			var record *versionRecord
+			if err := f.view(func(tx *bbolt.Tx) error {
+				h, err := openHistory(tx, "vault", false)
+				if err != nil {
+					return err
+				}
+				record, _, err = h.find("ledger", ref)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if record == nil {
+				t.Fatalf("seed %d: after %s the compliance-locked version is gone", seed, what)
+			}
+			lock := record.Lock.toDomain()
+			if lock.Retention == nil || lock.Retention.Mode != object.Compliance || lock.Retention.Until.Before(until) {
+				t.Fatalf("seed %d: after %s the version is retained as %+v, was compliance until %v", seed, what, lock.Retention, until)
+			}
+			return lock.Retention.Until
+		}
+
+		at := start
+		modes := []string{"", string(object.Governance), string(object.Compliance), "NONE", "compliance"}
+		for step := range 400 {
+			// Time passes, never as far as the date. Now and then an
+			// entry is stamped earlier than the one before it.
+			at = at.Add(time.Duration(random.IntN(120)) * time.Minute)
+			if at.After(until.Add(-time.Hour)) {
+				at = until.Add(-time.Hour)
+			}
+			stamp := at
+			if random.IntN(10) == 0 {
+				stamp = at.Add(-time.Duration(random.IntN(5000)) * time.Hour)
+			}
+			var e entry
+			switch random.IntN(9) {
+			case 0, 1:
+				e = entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
+					Bucket: "vault", Key: "ledger", VersionRef: ref, Bypass: random.IntN(2) == 0, MarkerID: object.ID{9}.String(), At: stamp,
+				}}
+			case 2, 3, 4:
+				e = entry{Type: cmdSetRetention, SetRetention: &retentionCmd{
+					Bucket: "vault", Key: "ledger", VersionRef: ref, Bypass: random.IntN(2) == 0,
+					Mode:        modes[random.IntN(len(modes))],
+					RetainUntil: start.Add(time.Duration(random.IntN(3000)-500) * time.Hour),
+				}}
+			case 5:
+				e = entry{Type: cmdSetLegalHold, SetLegalHold: &legalHoldCmd{Bucket: "vault", Key: "ledger", VersionRef: ref, On: random.IntN(2) == 0}}
+			case 6:
+				marker := object.ID{}
+				binary.BigEndian.PutUint64(marker[:8], uint64(step)+1)
+				e = entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{Bucket: "vault", Key: "ledger", MarkerID: marker.String(), At: stamp, Bypass: true}}
+			case 7:
+				other := porttest.SampleVersion("vault", "ledger", 3)
+				binary.BigEndian.PutUint64(other.VersionID[:8], uint64(step)+1)
+				binary.BigEndian.PutUint64(other.DataID[:8], uint64(step)+1)
+				e = entry{Type: cmdPutObject, PutObject: versionToRecord(other)}
+			default:
+				e = entry{Type: cmdDeleteBucket, DeleteBucket: &deleteBucketCmd{Name: "vault"}}
+				if random.IntN(2) == 0 {
+					e = entry{Type: cmdSetVersioning, SetVersioning: &versioningCmd{Bucket: "vault", Status: string(bucket.VersioningSuspended)}}
+				}
+			}
+			apply(stamp, e)
+			// An extension that was accepted is the new floor.
+			until = check(fmt.Sprintf("step %d (%s)", step, e.Type))
+		}
+		// The schema 1 delete does not reach it either.
+		data, err := encodeEntry(entry{Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: "vault", Key: "ledger"}}, entrySchemaVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index++
+		_ = f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data})
+		check("a schema 1 delete")
+		// Nor does an entry without a time.
+		untimed, err := encodeEntry(entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
+			Bucket: "vault", Key: "ledger", VersionRef: ref, Bypass: true, MarkerID: object.ID{9}.String(),
+		}}, entrySchemaTimed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index++
+		_ = f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: untimed})
+		check("a delete without a time")
+
+		// When the time of an entry reaches the date - and only then -
+		// the version can be removed. Legal hold comes off first.
+		apply(until.Add(-time.Nanosecond), entry{Type: cmdSetLegalHold, SetLegalHold: &legalHoldCmd{Bucket: "vault", Key: "ledger", VersionRef: ref}})
+		remove := entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{Bucket: "vault", Key: "ledger", VersionRef: ref, MarkerID: object.ID{9}.String()}}
+		if r := apply(until.Add(-time.Nanosecond), remove); !errors.Is(r.err, domain.ErrObjectLocked) {
+			t.Fatalf("seed %d: a nanosecond before the date the delete = %v, want %v", seed, r.err, domain.ErrObjectLocked)
+		}
+		check("a delete a nanosecond early")
+		// An entry stamped before the last one does not turn time back,
+		// and one stamped at the date is on time.
+		if r := apply(until, remove); r.err != nil || r.previous == nil {
+			t.Fatalf("seed %d: at the date the delete = %+v, %v", seed, r.previous, r.err)
+		}
+	}
 }

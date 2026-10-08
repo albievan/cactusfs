@@ -31,6 +31,18 @@ const (
 	ActionListBucketVersions  Action = "s3:ListBucketVersions"
 	ActionGetBucketVersioning Action = "s3:GetBucketVersioning"
 	ActionPutBucketVersioning Action = "s3:PutBucketVersioning"
+	// Object Lock.
+	ActionPutObjectRetention  Action = "s3:PutObjectRetention"
+	ActionGetObjectRetention  Action = "s3:GetObjectRetention"
+	ActionPutObjectLegalHold  Action = "s3:PutObjectLegalHold"
+	ActionGetObjectLegalHold  Action = "s3:GetObjectLegalHold"
+	ActionGetBucketObjectLock Action = "s3:GetBucketObjectLockConfiguration"
+	ActionPutBucketObjectLock Action = "s3:PutBucketObjectLockConfiguration"
+	// ActionOverrideGovernance (s3:BypassGovernanceRetention) lifts a
+	// governance retention. It is granted
+	// only by a statement that names it: no wildcard includes it, so that
+	// no role holds it by having "everything".
+	ActionOverrideGovernance Action = "s3:BypassGovernanceRetention"
 )
 
 // The admin actions implemented so far. Reading actions begin with Get or

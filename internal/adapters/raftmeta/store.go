@@ -733,7 +733,7 @@ func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResu
 // DeleteObject implements ports.ObjectIndex.
 func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o ports.DeleteOptions) (ports.DeleteResult, error) {
 	e := entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
-		Bucket: bucketName, Key: key, MarkerID: o.MarkerID.String(), At: o.At.UTC(),
+		Bucket: bucketName, Key: key, MarkerID: o.MarkerID.String(), At: o.At.UTC(), Bypass: o.BypassGovernance,
 	}}
 	if o.Version != nil {
 		e.DeleteVersion.VersionRef = o.Version.String()
@@ -785,6 +785,52 @@ func (s *Store) SetBucketVersioning(ctx context.Context, name string, state buck
 		return fmt.Errorf("raftmeta.SetBucketVersioning: %w", err)
 	}
 	return nil
+}
+
+// SetBucketDefaultRetention implements ports.BucketStore.
+func (s *Store) SetBucketDefaultRetention(ctx context.Context, name string, d *bucket.DefaultRetention) error {
+	cmd := &bucketLockCmd{Bucket: name}
+	if d != nil {
+		cmd.Default = &retentionRule{Mode: string(d.Mode), Days: d.Days, Years: d.Years}
+	}
+	if _, err := s.propose(ctx, entry{Type: cmdSetBucketLock, SetBucketLock: cmd}); err != nil {
+		return fmt.Errorf("raftmeta.SetBucketDefaultRetention: %w", err)
+	}
+	return nil
+}
+
+// storedVersion returns the version a lock command left behind.
+func storedVersion(op string, result applyResult) (object.Version, error) {
+	stored, err := versionOfRecord(result.stored)
+	if err != nil || stored == nil {
+		return object.Version{}, fmt.Errorf("raftmeta.%s: %w: the answer does not say what was stored", op, domain.ErrOutcomeUnknown)
+	}
+	return *stored, nil
+}
+
+// SetRetention implements ports.ObjectIndex.
+func (s *Store) SetRetention(
+	ctx context.Context, bucketName, key string, ref object.VersionRef, r *object.Retention, bypassGovernance bool,
+) (object.Version, error) {
+	cmd := &retentionCmd{Bucket: bucketName, Key: key, VersionRef: ref.String(), Bypass: bypassGovernance}
+	if r != nil {
+		cmd.Mode, cmd.RetainUntil = string(r.Mode), r.Until.UTC()
+	}
+	result, err := s.propose(ctx, entry{Type: cmdSetRetention, SetRetention: cmd})
+	if err != nil {
+		return object.Version{}, fmt.Errorf("raftmeta.SetRetention: %w", err)
+	}
+	return storedVersion("SetRetention", result)
+}
+
+// SetLegalHold implements ports.ObjectIndex.
+func (s *Store) SetLegalHold(ctx context.Context, bucketName, key string, ref object.VersionRef, on bool) (object.Version, error) {
+	cmd := &legalHoldCmd{Bucket: bucketName, Key: key, VersionRef: ref.String(), On: on}
+	result, err := s.propose(ctx, entry{Type: cmdSetLegalHold, SetLegalHold: cmd})
+	if err != nil {
+		return object.Version{}, fmt.Errorf("raftmeta.SetLegalHold: %w", err)
+	}
+	return storedVersion("SetLegalHold", result)
 }
 
 // GetVersion implements ports.ObjectIndex.

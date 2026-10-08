@@ -60,6 +60,8 @@ func errorMappings() []mapping {
 		{domain.ErrEntityTooLarge, apiError{http.StatusBadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size."}},
 
 		// Buckets and objects.
+		{domain.ErrObjectLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied because object protected by object lock."}},
+		{domain.ErrLockNotConfigured, apiError{http.StatusBadRequest, "InvalidRequest", "Bucket is missing Object Lock Configuration."}},
 		{domain.ErrVersionNotFound, apiError{http.StatusNotFound, "NoSuchVersion", "The version ID specified in the request does not match an existing version."}},
 		{domain.ErrMethodNotAllowed, apiError{http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource."}},
 		{domain.ErrInvalidBucketState, apiError{http.StatusConflict, "InvalidBucketState", "The request is not valid for the current state of the bucket."}},

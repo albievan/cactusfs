@@ -205,6 +205,32 @@ func (m *metadata) ScanVersions(
 	return err
 }
 
+// SetBucketDefaultRetention implements ports.BucketStore.
+func (m *metadata) SetBucketDefaultRetention(ctx context.Context, name string, d *bucket.DefaultRetention) error {
+	ctx, done := m.t.call(ctx, portMetadata, "SetBucketDefaultRetention")
+	err := m.next.SetBucketDefaultRetention(ctx, name, d)
+	done(err)
+	return err
+}
+
+// SetRetention implements ports.ObjectIndex.
+func (m *metadata) SetRetention(
+	ctx context.Context, bucketName, key string, ref object.VersionRef, r *object.Retention, bypassGovernance bool,
+) (object.Version, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "SetRetention")
+	v, err := m.next.SetRetention(ctx, bucketName, key, ref, r, bypassGovernance)
+	done(err)
+	return v, err
+}
+
+// SetLegalHold implements ports.ObjectIndex.
+func (m *metadata) SetLegalHold(ctx context.Context, bucketName, key string, ref object.VersionRef, on bool) (object.Version, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "SetLegalHold")
+	v, err := m.next.SetLegalHold(ctx, bucketName, key, ref, on)
+	done(err)
+	return v, err
+}
+
 // SetBucketVersioning implements ports.BucketStore.
 func (m *metadata) SetBucketVersioning(ctx context.Context, name string, state bucket.Versioning) error {
 	ctx, done := m.t.call(ctx, portMetadata, "SetBucketVersioning")

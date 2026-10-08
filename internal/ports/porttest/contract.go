@@ -317,6 +317,7 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 	})
 
 	t.Run("versions", func(t *testing.T) { versionsContract(t, open(t)) })
+	t.Run("object lock", func(t *testing.T) { lockContract(t, open(t)) })
 
 	t.Run("topology", func(t *testing.T) {
 		store := open(t)
@@ -1021,4 +1022,203 @@ func versionsContract(t *testing.T, store Metadata) {
 		t.Errorf("a recreated bucket is %q", b.Versioning)
 	}
 	want("recreated")
+}
+
+// lockContract is what a store must do with locked versions. Its times are
+// real ones: the store judges on its own time, which nothing here can set.
+func lockContract(t *testing.T, store Metadata) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, b := range []bucket.Bucket{{Name: "locked", ObjectLock: true, Versioning: bucket.VersioningSuspended}, {Name: "plain"}} {
+		b.CreatedAt = now
+		if err := store.CreateBucket(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Object Lock is decided at creation, and brings versioning with it,
+	// for good.
+	if b, err := store.GetBucket(ctx, "locked"); err != nil || !b.ObjectLock || b.Versioning != bucket.VersioningEnabled || b.DefaultRetention != nil {
+		t.Fatalf("a bucket created with Object Lock = %+v, %v", b, err)
+	}
+	if b, _ := store.GetBucket(ctx, "plain"); b.ObjectLock || b.Versioning != bucket.Unversioned {
+		t.Fatalf("a plain bucket = %+v", b)
+	}
+	if err := store.SetBucketVersioning(ctx, "locked", bucket.VersioningSuspended); !errors.Is(err, domain.ErrInvalidBucketState) {
+		t.Fatalf("suspending versioning on a bucket with Object Lock = %v, want %v", err, domain.ErrInvalidBucketState)
+	}
+
+	id := func(fill byte) object.VersionRef {
+		return object.VersionRef{ID: object.ID(bytes.Repeat([]byte{fill}, object.IDSize))}
+	}
+	put := func(fill byte, lock object.Lock) (ports.PutResult, error) {
+		v := SampleVersion("locked", "k", fill)
+		v.Lock = lock
+		return store.PutVersion(ctx, v)
+	}
+	remove := func(fill byte, bypass bool) error {
+		ref := id(fill)
+		_, err := store.DeleteObject(ctx, "locked", "k", ports.DeleteOptions{Version: &ref, BypassGovernance: bypass, At: now})
+		return err
+	}
+	retention := func(mode object.RetentionMode, in time.Duration) *object.Retention {
+		return &object.Retention{Mode: mode, Until: now.Add(in)}
+	}
+	exists := func(fill byte) bool {
+		t.Helper()
+		v, err := store.GetVersion(ctx, "locked", "k", id(fill))
+		if err != nil && !errors.Is(err, domain.ErrVersionNotFound) {
+			t.Fatal(err)
+		}
+		referenced, refErr := store.IsDataReferenced(ctx, SampleVersion("locked", "k", fill).DataID)
+		if refErr != nil || (err == nil) != referenced {
+			t.Fatalf("version %x exists %v, its data is referenced %v (%v)", fill, err == nil, referenced, refErr)
+		}
+		return err == nil && !v.DeleteMarker
+	}
+
+	// A lock asked for where there can be none is an error, not ignored.
+	plain := SampleVersion("plain", "k", 0x01)
+	plain.Lock = object.Lock{Retention: retention(object.Compliance, time.Hour)}
+	if _, err := store.PutVersion(ctx, plain); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Fatalf("a put with retention into a bucket without Object Lock = %v, want %v", err, domain.ErrLockNotConfigured)
+	}
+	if _, err := store.SetRetention(ctx, "plain", "k", object.VersionRef{Null: true}, retention(object.Governance, time.Hour), false); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Errorf("SetRetention in a bucket without Object Lock = %v", err)
+	}
+	if _, err := store.SetLegalHold(ctx, "plain", "k", object.VersionRef{Null: true}, true); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Errorf("SetLegalHold in a bucket without Object Lock = %v", err)
+	}
+	if err := store.SetBucketDefaultRetention(ctx, "plain", &bucket.DefaultRetention{Mode: object.Governance, Days: 1}); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Errorf("a default retention on a bucket without Object Lock = %v", err)
+	}
+
+	// Compliance: nobody removes it, nobody shortens it.
+	stored, err := put(0x10, object.Lock{Retention: retention(object.Compliance, time.Hour)})
+	if err != nil || stored.Stored.Lock.Retention == nil || stored.Stored.Lock.Retention.Mode != object.Compliance {
+		t.Fatalf("put with compliance retention = %+v, %v", stored.Stored.Lock, err)
+	}
+	for _, bypass := range []bool{false, true} {
+		if err := remove(0x10, bypass); !errors.Is(err, domain.ErrObjectLocked) {
+			t.Fatalf("removing a compliance-locked version (bypass %v) = %v, want %v", bypass, err, domain.ErrObjectLocked)
+		}
+	}
+	if !exists(0x10) {
+		t.Fatal("a compliance-locked version is gone")
+	}
+	for name, next := range map[string]*object.Retention{
+		"shortened": retention(object.Compliance, time.Minute), "removed": nil, "made governance": retention(object.Governance, 2*time.Hour),
+	} {
+		if _, err := store.SetRetention(ctx, "locked", "k", id(0x10), next, true); !errors.Is(err, domain.ErrObjectLocked) {
+			t.Errorf("compliance retention %s = %v, want %v", name, err, domain.ErrObjectLocked)
+		}
+	}
+	extended, err := store.SetRetention(ctx, "locked", "k", id(0x10), retention(object.Compliance, 2*time.Hour), false)
+	if err != nil || !extended.Lock.Retention.Until.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("extending a compliance retention = %+v, %v", extended.Lock, err)
+	}
+	// Deleting the object - not the version - is a marker, and allowed.
+	deleted, err := store.DeleteObject(ctx, "locked", "k", ports.DeleteOptions{MarkerID: id(0x11).ID, At: now})
+	if err != nil || deleted.Marker == nil || !exists(0x10) {
+		t.Fatalf("deleting an object whose version is locked = %+v, %v", deleted, err)
+	}
+	if _, err := store.SetRetention(ctx, "locked", "k", id(0x11), retention(object.Governance, time.Hour), false); !errors.Is(err, domain.ErrMethodNotAllowed) {
+		t.Errorf("SetRetention on a delete marker = %v", err)
+	}
+	if _, err := store.SetRetention(ctx, "locked", "k", id(0x99), retention(object.Governance, time.Hour), false); !errors.Is(err, domain.ErrVersionNotFound) {
+		t.Errorf("SetRetention on an unknown version = %v", err)
+	}
+	// A bucket that holds a locked version cannot be deleted.
+	if err := store.DeleteBucket(ctx, "locked"); !errors.Is(err, domain.ErrBucketNotEmpty) {
+		t.Fatalf("DeleteBucket with a locked version = %v", err)
+	}
+
+	// Governance: lifted by the bypass and by nothing else.
+	if _, err := put(0x20, object.Lock{Retention: retention(object.Governance, time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(0x20, false); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Fatalf("removing a governance-locked version without bypass = %v", err)
+	}
+	if _, err := store.SetRetention(ctx, "locked", "k", id(0x20), nil, false); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Errorf("removing a governance retention without bypass = %v", err)
+	}
+	if err := remove(0x20, true); err != nil || exists(0x20) {
+		t.Fatalf("removing a governance-locked version with bypass = %v", err)
+	}
+
+	// Legal hold: until it is taken off, whatever else is true.
+	if _, err := put(0x30, object.Lock{LegalHold: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(0x30, true); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Fatalf("removing a version under legal hold = %v", err)
+	}
+	if v, err := store.SetLegalHold(ctx, "locked", "k", id(0x30), false); err != nil || v.Lock.LegalHold {
+		t.Fatalf("taking a legal hold off = %+v, %v", v.Lock, err)
+	}
+	if err := remove(0x30, false); err != nil {
+		t.Fatalf("removing a version whose legal hold was taken off: %v", err)
+	}
+	held, err := store.SetLegalHold(ctx, "locked", "k", id(0x10), true)
+	if err != nil || !held.Lock.LegalHold || held.Lock.Retention == nil {
+		t.Fatalf("a legal hold on a retained version = %+v, %v", held.Lock, err)
+	}
+
+	// A retention that is not in the future is refused; one that has
+	// ended holds nothing.
+	if _, err := put(0x40, object.Lock{Retention: retention(object.Compliance, -time.Hour)}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("a put retained until the past = %v, want %v", err, domain.ErrInvalidArgument)
+	}
+	if exists(0x40) {
+		t.Error("a refused put left a version")
+	}
+	short := 1500 * time.Millisecond
+	if _, err := put(0x50, object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: time.Now().Add(short)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(0x50, true); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Fatalf("removing a version whose retention has not ended = %v", err)
+	}
+	time.Sleep(short + 500*time.Millisecond)
+	if err := remove(0x50, false); err != nil {
+		t.Fatalf("removing a version whose compliance retention has ended: %v", err)
+	}
+
+	// The bucket's default: given to what is put without a retention.
+	for name, bad := range map[string]bucket.DefaultRetention{
+		"no period": {Mode: object.Compliance}, "two periods": {Mode: object.Compliance, Days: 1, Years: 1}, "no mode": {Days: 1},
+	} {
+		if err := store.SetBucketDefaultRetention(ctx, "locked", &bad); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("default retention with %s = %v", name, err)
+		}
+	}
+	if err := store.SetBucketDefaultRetention(ctx, "locked", &bucket.DefaultRetention{Mode: object.Governance, Days: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.GetBucket(ctx, "locked"); b.DefaultRetention == nil || b.DefaultRetention.Days != 2 {
+		t.Fatalf("the default retention as stored = %+v", b.DefaultRetention)
+	}
+	defaulted, err := put(0x60, object.Lock{})
+	if err != nil || defaulted.Stored.Lock.Retention == nil || defaulted.Stored.Lock.Retention.Mode != object.Governance {
+		t.Fatalf("a put without retention into a bucket with a default = %+v, %v", defaulted.Stored.Lock, err)
+	}
+	if until := defaulted.Stored.Lock.Retention.Until; until.Before(now.Add(47*time.Hour)) || until.After(time.Now().Add(49*time.Hour)) {
+		t.Errorf("default retention of two days ends %v", until)
+	}
+	// What a put asks for wins over the default.
+	own, err := put(0x70, object.Lock{Retention: retention(object.Compliance, time.Hour)})
+	if err != nil || own.Stored.Lock.Retention.Mode != object.Compliance {
+		t.Fatalf("a put with its own retention = %+v, %v", own.Stored.Lock, err)
+	}
+	if err := store.SetBucketDefaultRetention(ctx, "locked", nil); err != nil {
+		t.Fatal(err)
+	}
+	if plainPut, err := put(0x80, object.Lock{}); err != nil || !plainPut.Stored.Lock.IsZero() {
+		t.Errorf("a put after the default was removed = %+v, %v", plainPut.Stored.Lock, err)
+	}
+	// After all of it the first version is still there, locked.
+	if v, err := store.GetVersion(ctx, "locked", "k", id(0x10)); err != nil || v.Lock.Retention == nil || !v.Lock.LegalHold {
+		t.Fatalf("the compliance-locked version at the end = %+v, %v", v.Lock, err)
+	}
 }

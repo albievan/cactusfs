@@ -430,7 +430,7 @@ func TestPresignedURLs(t *testing.T) {
 	// not ignored.
 	hoisted := s.presign(http.MethodGet, "/bkt/shared.txt?x-amz-checksum-mode=ENABLED", serverNow, 600, nil)
 	s.mustStatus(s.do(call{method: http.MethodGet, path: hoisted, unsigned: true}), http.StatusOK)
-	locked := s.presign(http.MethodPut, "/bkt/locked.txt?x-amz-object-lock-mode=COMPLIANCE", serverNow, 600, nil)
+	locked := s.presign(http.MethodPut, "/bkt/locked.txt?x-amz-website-redirect-location=%2Felsewhere", serverNow, 600, nil)
 	s.expectError(s.do(call{method: http.MethodPut, path: locked, body: content, unsigned: true}), http.StatusNotImplemented, "NotImplemented")
 	twice := s.presign(http.MethodGet, "/bkt/shared.txt?x-amz-checksum-mode=ENABLED", serverNow, 600, map[string]string{"X-Amz-Checksum-Mode": "ENABLED"})
 	s.expectError(s.do(call{method: http.MethodGet, path: twice, unsigned: true, headers: map[string]string{"X-Amz-Checksum-Mode": "ENABLED"}}),
@@ -586,7 +586,7 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"If-Match": `"abc"`}},
 		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-None-Match": `"abc"`}},
 		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-Modified-Since": "Wed, 07 Oct 2026 12:00:00 GMT"}},
-		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Object-Lock-Mode": "COMPLIANCE"}},
+		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Website-Redirect-Location": "/elsewhere"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption": "aws:kms"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption-Customer-Algorithm": "AES256"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Tagging": "a=b"}},
@@ -1549,4 +1549,140 @@ func TestBodiesThatDestroyMustBeSigned(t *testing.T) {
 	})
 	s.mustStatus(withDigest, http.StatusOK)
 	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
+}
+
+func retentionBody(mode string, until time.Time) []byte {
+	return []byte(`<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Mode>` + mode + `</Mode><RetainUntilDate>` +
+		until.UTC().Format(time.RFC3339) + `</RetainUntilDate></Retention>`)
+}
+
+// TestObjectLockThroughTheAPI: Object Lock as an S3 client uses it. The
+// caller is the root credential throughout, which is the point: nothing it
+// sends removes a compliance-locked version.
+func TestObjectLockThroughTheAPI(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault", headers: map[string]string{headerLockEnabled: "true"}}), http.StatusOK)
+	s.createBucket("plain")
+
+	// The bucket keeps versions, and says that its versions can be locked.
+	if state := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault?versioning"}), http.StatusOK); !strings.Contains(string(state.body), "<Status>Enabled</Status>") {
+		t.Fatalf("versioning of a bucket created with Object Lock = %s", state.body)
+	}
+	s.expectError(s.do(call{method: http.MethodPut, path: "/vault?versioning", body: versioningBody("Suspended")}), http.StatusConflict, "InvalidBucketState")
+	cfg := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault?object-lock"}), http.StatusOK)
+	if !strings.Contains(string(cfg.body), "<ObjectLockEnabled>Enabled</ObjectLockEnabled>") || strings.Contains(string(cfg.body), "<Rule>") {
+		t.Errorf("lock configuration of a new bucket = %s", cfg.body)
+	}
+	s.expectError(s.do(call{method: http.MethodGet, path: "/plain?object-lock"}), http.StatusNotFound, "ObjectLockConfigurationNotFoundError")
+
+	// A locked version, put with headers.
+	until := serverNow.Add(30 * 24 * time.Hour)
+	put := s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault/ledger", body: []byte("entries"), headers: map[string]string{
+		headerLockMode: "COMPLIANCE", headerLockUntil: until.Format(time.RFC3339),
+	}}), http.StatusOK)
+	version := put.header.Get(headerVersionID)
+	head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/vault/ledger"}), http.StatusOK)
+	if head.header.Get(headerLockMode) != "COMPLIANCE" || !strings.HasPrefix(head.header.Get(headerLockUntil), until.Format("2006-01-02T15:04:05")) {
+		t.Errorf("lock headers of the version: %v", head.header)
+	}
+	shown := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/ledger?retention"}), http.StatusOK)
+	if !strings.Contains(string(shown.body), "<Mode>COMPLIANCE</Mode>") {
+		t.Errorf("GetObjectRetention = %s", shown.body)
+	}
+
+	// Nothing removes it: not a delete of the version, with or without
+	// the bypass header, not a batch delete, not a shorter retention.
+	for _, headers := range []map[string]string{nil, {headerLockOverride: "true"}} {
+		s.expectError(s.do(call{method: http.MethodDelete, path: "/vault/ledger?versionId=" + version, headers: headers}), http.StatusForbidden, "AccessDenied")
+	}
+	batch := []byte(`<Delete><Object><Key>ledger</Key><VersionId>` + version + `</VersionId></Object></Delete>`)
+	result := s.mustStatus(s.do(call{method: http.MethodPost, path: "/vault?delete", body: batch, headers: map[string]string{headerLockOverride: "true"}}), http.StatusOK)
+	if !strings.Contains(string(result.body), "<Code>AccessDenied</Code>") || strings.Contains(string(result.body), "<Deleted>") {
+		t.Errorf("DeleteObjects of a compliance-locked version = %s", result.body)
+	}
+	for name, body := range map[string][]byte{
+		"shorter":    retentionBody("COMPLIANCE", until.Add(-time.Hour)),
+		"governance": retentionBody("GOVERNANCE", until.Add(time.Hour)),
+		"none":       []byte(`<Retention/>`),
+	} {
+		r := s.do(call{method: http.MethodPut, path: "/vault/ledger?retention", body: body, headers: map[string]string{headerLockOverride: "true"}})
+		if code := s.errorCode(r); r.status != http.StatusForbidden || code != "AccessDenied" {
+			t.Errorf("compliance retention made %s = %d %s", name, r.status, code)
+		}
+	}
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault/ledger?retention&versionId=" + version, body: retentionBody("COMPLIANCE", until.Add(time.Hour))}), http.StatusOK)
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/ledger?versionId=" + version}), http.StatusOK); string(got.body) != "entries" {
+		t.Fatal("the compliance-locked version is not what was stored")
+	}
+	// Deleting the object is a marker: the version stays under it.
+	s.mustStatus(s.do(call{method: http.MethodDelete, path: "/vault/ledger"}), http.StatusNoContent)
+	s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/ledger?versionId=" + version}), http.StatusOK)
+	// And the bucket cannot be removed around it.
+	s.expectError(s.do(call{method: http.MethodDelete, path: "/vault"}), http.StatusConflict, "BucketNotEmpty")
+
+	// Governance: root may bypass, when it says so.
+	gov := s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault/draft", body: []byte("draft"), headers: map[string]string{
+		headerLockMode: "GOVERNANCE", headerLockUntil: until.Format(time.RFC3339),
+	}}), http.StatusOK).header.Get(headerVersionID)
+	s.expectError(s.do(call{method: http.MethodDelete, path: "/vault/draft?versionId=" + gov}), http.StatusForbidden, "AccessDenied")
+	s.mustStatus(s.do(call{method: http.MethodDelete, path: "/vault/draft?versionId=" + gov, headers: map[string]string{headerLockOverride: "true"}}), http.StatusNoContent)
+
+	// Legal hold.
+	held := s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault/evidence", body: []byte("exhibit"), headers: map[string]string{headerLockLegalHold: "ON"}}), http.StatusOK).header.Get(headerVersionID)
+	if hold := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/evidence?legal-hold"}), http.StatusOK); !strings.Contains(string(hold.body), "<Status>ON</Status>") {
+		t.Errorf("GetObjectLegalHold = %s", hold.body)
+	}
+	s.expectError(s.do(call{method: http.MethodDelete, path: "/vault/evidence?versionId=" + held, headers: map[string]string{headerLockOverride: "true"}}), http.StatusForbidden, "AccessDenied")
+	s.expectError(s.do(call{method: http.MethodGet, path: "/vault/evidence?retention"}), http.StatusNotFound, "NoSuchObjectLockConfiguration")
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault/evidence?legal-hold", body: []byte(`<LegalHold><Status>OFF</Status></LegalHold>`)}), http.StatusOK)
+	s.mustStatus(s.do(call{method: http.MethodDelete, path: "/vault/evidence?versionId=" + held}), http.StatusNoContent)
+
+	// The bucket's default retention.
+	rule := []byte(`<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>10</Days></DefaultRetention></Rule></ObjectLockConfiguration>`)
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/vault?object-lock", body: rule}), http.StatusOK)
+	if cfg := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault?object-lock"}), http.StatusOK); !strings.Contains(string(cfg.body), "<Days>10</Days>") {
+		t.Errorf("lock configuration with a rule = %s", cfg.body)
+	}
+	s.putObject("/vault/defaulted", []byte("x"))
+	if head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/vault/defaulted"}), http.StatusOK); head.header.Get(headerLockMode) != "GOVERNANCE" {
+		t.Errorf("a version put into a bucket with a default retention: %v", head.header)
+	}
+
+	// What cannot be understood, or cannot be done here, is refused.
+	refused := []struct {
+		name   string
+		c      call
+		status int
+		code   string
+	}{
+		{"a mode without a date", call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: map[string]string{headerLockMode: "COMPLIANCE"}}, 400, "InvalidArgument"},
+		{"a date without a mode", call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: map[string]string{headerLockUntil: until.Format(time.RFC3339)}}, 400, "InvalidArgument"},
+		{"a mode that does not exist", call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: map[string]string{headerLockMode: "FOREVER", headerLockUntil: until.Format(time.RFC3339)}}, 400, "InvalidArgument"},
+		{"a date in the past", call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: map[string]string{headerLockMode: "GOVERNANCE", headerLockUntil: serverNow.Add(-time.Hour).Format(time.RFC3339)}}, 400, "InvalidArgument"},
+		{"a legal hold that is neither", call{method: http.MethodPut, path: "/vault/x", body: []byte("x"), headers: map[string]string{headerLockLegalHold: "yes"}}, 400, "InvalidArgument"},
+		{"a lock in a bucket without", call{method: http.MethodPut, path: "/plain/x", body: []byte("x"), headers: map[string]string{headerLockLegalHold: "ON"}}, 400, "InvalidRequest"},
+		{"retention in a bucket without", call{method: http.MethodPut, path: "/plain/x?retention", body: retentionBody("GOVERNANCE", until)}, 400, "InvalidRequest"},
+		{"a rule on a bucket without", call{method: http.MethodPut, path: "/plain?object-lock", body: rule}, 400, "InvalidRequest"},
+		{"a rule with two periods", call{method: http.MethodPut, path: "/vault?object-lock", body: []byte(`<ObjectLockConfiguration><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>`)}, 400, "InvalidArgument"},
+		{"a rule of zero days", call{method: http.MethodPut, path: "/vault?object-lock", body: []byte(`<ObjectLockConfiguration><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>0</Days></DefaultRetention></Rule></ObjectLockConfiguration>`)}, 400, "InvalidArgument"},
+		{"a rule with an unknown element", call{method: http.MethodPut, path: "/vault?object-lock", body: []byte(`<ObjectLockConfiguration><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days><Hours>1</Hours></DefaultRetention></Rule></ObjectLockConfiguration>`)}, 400, "MalformedXML"},
+		{"an unsigned retention body", call{method: http.MethodPut, path: "/vault/defaulted?retention", body: retentionBody("COMPLIANCE", until), payloadHash: payloadUnsigned}, 400, "InvalidRequest"},
+		{"a bypass that is neither", call{method: http.MethodDelete, path: "/vault/defaulted", headers: map[string]string{headerLockOverride: "maybe"}}, 400, "InvalidArgument"},
+		{"lock enabled that is neither", call{method: http.MethodPut, path: "/another", headers: map[string]string{headerLockEnabled: "yes"}}, 400, "InvalidArgument"},
+		{"retention of a version that is not there", call{method: http.MethodGet, path: "/vault/ledger?retention&versionId=" + strings.Repeat("ab", 16)}, 404, "NoSuchVersion"},
+	}
+	for _, tt := range refused {
+		r := s.do(tt.c)
+		if r.err != nil {
+			t.Fatalf("%s: %v", tt.name, r.err)
+		}
+		if code := s.errorCode(r); r.status != tt.status || code != tt.code {
+			t.Errorf("%s = %d %s, want %d %s", tt.name, r.status, code, tt.status, tt.code)
+		}
+	}
+	// At the end the first version is where it was.
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/vault/ledger?versionId=" + version}), http.StatusOK); string(got.body) != "entries" {
+		t.Fatal("the compliance-locked version changed")
+	}
 }

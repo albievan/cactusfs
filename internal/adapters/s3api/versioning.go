@@ -342,10 +342,14 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 	if len(in.Objects) == 0 || len(in.Objects) > maxDeleteObjects {
 		return errMalformedXML
 	}
+	bypass, err := bypassOf(req.Header)
+	if err != nil {
+		return err
+	}
 	result := deleteResult{XMLNS: s3Namespace}
 	for _, target := range in.Objects {
 		entry := deletedEntry{Key: target.Key}
-		input := app.DeleteInput{Bucket: req.bucket, Key: target.Key}
+		input := app.DeleteInput{Bucket: req.bucket, Key: target.Key, BypassGovernance: bypass && target.VersionID != nil}
 		var failure error
 		if target.VersionID != nil {
 			entry.VersionID = *target.VersionID

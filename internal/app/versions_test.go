@@ -539,3 +539,196 @@ func TestReadWriteUnderSuspendedVersioning(t *testing.T) {
 		t.Errorf("%d shards, want only those of the version with an ID (%d)", f.shardCount(), sixDrives)
 	}
 }
+
+// TestObjectLockUseCases: who may lock, who may lift, and that nobody lifts
+// compliance.
+func TestObjectLockUseCases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := erasureFixture(t)
+	f.meta.Now = f.clock.Now
+	root := porttest.Root()
+	if err := f.buckets.CreateWithObjectLock(ctx, root, "vault"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := f.buckets.ObjectLock(ctx, root, "vault"); err != nil || !b.ObjectLock || b.Versioning != bucket.VersioningEnabled {
+		t.Fatalf("ObjectLock of a locked bucket = %+v, %v", b, err)
+	}
+	if _, err := f.buckets.ObjectLock(ctx, root, "b"); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Errorf("ObjectLock of a plain bucket = %v", err)
+	}
+	month := testNow.Add(30 * 24 * time.Hour)
+	put := func(p iam.Principal, key string, lock object.Lock) (object.Version, error) {
+		return f.objects.Put(ctx, p, app.PutInput{Bucket: "vault", Key: key, Body: bytes.NewReader([]byte(key)), Size: int64(len(key)), Lock: lock})
+	}
+	compliance := object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: month}}
+	governance := object.Lock{Retention: &object.Retention{Mode: object.Governance, Until: month}}
+	policy := func(actions string) iam.Principal {
+		return iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{
+			mustPolicyDoc(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":[`+actions+`],"Resource":"*"}]}`),
+		}}
+	}
+	writer := userWith(iam.RoleReadWrite)
+	admin := userWith(iam.RoleClusterAdmin)
+	bypasser := policy(`"s3:*","s3:BypassGovernanceRetention"`)
+
+	ledger, err := put(root, "ledger", compliance)
+	if err != nil || ledger.Lock.Retention == nil {
+		t.Fatalf("put with compliance retention = %+v, %v", ledger.Lock, err)
+	}
+	draft, err := put(root, "draft", governance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shards := f.shardCount()
+
+	// Locking is a permission on top of writing.
+	if _, err := put(writer, "x", governance); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("read-write putting a locked version = %v, want %v", err, domain.ErrAccessDenied)
+	}
+	if _, err := put(writer, "x", object.Lock{LegalHold: true}); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("read-write putting a version under legal hold = %v", err)
+	}
+	if _, err := put(writer, "plain", object.Lock{}); err != nil {
+		t.Errorf("read-write putting a plain version into a locked bucket: %v", err)
+	}
+	if f.shardCount() != shards+sixDrives {
+		t.Errorf("refused puts left shards behind: %d, want %d", f.shardCount(), shards+sixDrives)
+	}
+
+	ref := func(v object.Version) *object.VersionRef { r := v.Ref(); return &r }
+	remove := func(p iam.Principal, v object.Version, bypass bool) error {
+		_, err := f.objects.Delete(ctx, p, app.DeleteInput{Bucket: "vault", Key: v.Key, Version: ref(v), BypassGovernance: bypass})
+		return err
+	}
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"root removes a compliance-locked version", remove(root, ledger, false), domain.ErrObjectLocked},
+		{"root removes it with bypass", remove(root, ledger, true), domain.ErrObjectLocked},
+		{"cluster-admin removes it with bypass", remove(admin, ledger, true), domain.ErrAccessDenied},
+		{"a holder of the bypass removes it", remove(bypasser, ledger, true), domain.ErrObjectLocked},
+		{"cluster-admin removes a governance-locked version", remove(admin, draft, false), domain.ErrObjectLocked},
+		{"cluster-admin asks to bypass", remove(admin, draft, true), domain.ErrAccessDenied},
+		{"a holder of the bypass who does not ask", remove(bypasser, draft, false), domain.ErrObjectLocked},
+	}
+	for _, tt := range tests {
+		if !errors.Is(tt.err, tt.want) {
+			t.Errorf("%s: %v, want %v", tt.name, tt.err, tt.want)
+		}
+	}
+	if f.shardCount() != shards+sixDrives {
+		t.Fatalf("a refused delete removed shards: %d", f.shardCount())
+	}
+	for _, v := range []object.Version{ledger, draft} {
+		if got, err := f.objects.Get(ctx, root, app.GetInput{Bucket: "vault", Key: v.Key, Version: ref(v)}); err != nil {
+			t.Fatalf("locked version %s after the attempts: %v", v.Key, err)
+		} else {
+			_ = got.Body.Close()
+		}
+	}
+
+	// Retention: extended by anybody who may set it, shortened by nobody
+	// under compliance, and under governance only with the bypass.
+	in := func(v object.Version) app.LockInput {
+		return app.LockInput{Bucket: "vault", Key: v.Key, Version: ref(v)}
+	}
+	shorter := &object.Retention{Mode: object.Governance, Until: testNow.Add(time.Hour)}
+	longer := &object.Retention{Mode: object.Compliance, Until: month.Add(24 * time.Hour)}
+	retentions := []struct {
+		name string
+		do   func() error
+		want error
+	}{
+		{"compliance extended", func() error { _, err := f.objects.SetRetention(ctx, root, in(ledger), longer, false); return err }, nil},
+		{"compliance shortened by root", func() error {
+			_, err := f.objects.SetRetention(ctx, root, in(ledger), &object.Retention{Mode: object.Compliance, Until: month}, true)
+			return err
+		}, domain.ErrObjectLocked},
+		{"compliance removed by root", func() error { _, err := f.objects.SetRetention(ctx, root, in(ledger), nil, true); return err }, domain.ErrObjectLocked},
+		{"governance shortened without bypass", func() error { _, err := f.objects.SetRetention(ctx, bypasser, in(draft), shorter, false); return err }, domain.ErrObjectLocked},
+		{"governance shortened by cluster-admin asking to bypass", func() error { _, err := f.objects.SetRetention(ctx, admin, in(draft), shorter, true); return err }, domain.ErrAccessDenied},
+		{"governance shortened with the bypass", func() error { _, err := f.objects.SetRetention(ctx, bypasser, in(draft), shorter, true); return err }, nil},
+		{"retention set by read-write", func() error { _, err := f.objects.SetRetention(ctx, writer, in(draft), longer, false); return err }, domain.ErrAccessDenied},
+		{"retention read by read-write", func() error { _, err := f.objects.Retention(ctx, writer, in(draft)); return err }, domain.ErrAccessDenied},
+		{"legal hold set by read-write", func() error { _, err := f.objects.SetLegalHold(ctx, writer, in(draft), true); return err }, domain.ErrAccessDenied},
+		{"retention of a version that has none", func() error {
+			_, err := f.objects.Retention(ctx, root, app.LockInput{Bucket: "vault", Key: "plain"})
+			return err
+		}, domain.ErrLockNotConfigured},
+		{"retention in a bucket without Object Lock", func() error {
+			_, err := f.objects.SetRetention(ctx, root, app.LockInput{Bucket: "b", Key: "k"}, longer, false)
+			return err
+		}, domain.ErrLockNotConfigured},
+		{"a lock on a put into a bucket without", func() error {
+			_, err := f.objects.Put(ctx, root, app.PutInput{Bucket: "b", Key: "k", Body: bytes.NewReader(nil), Lock: compliance})
+			return err
+		}, domain.ErrLockNotConfigured},
+	}
+	for _, tt := range retentions {
+		if err := tt.do(); !errors.Is(err, tt.want) {
+			t.Errorf("%s: %v, want %v", tt.name, err, tt.want)
+		}
+	}
+	if got, err := f.objects.Retention(ctx, root, in(ledger)); err != nil || got.Mode != object.Compliance || !got.Until.Equal(longer.Until) {
+		t.Errorf("the compliance retention at the end = %+v, %v", got, err)
+	}
+
+	// Legal hold keeps a version whose retention has ended.
+	if _, err := f.objects.SetLegalHold(ctx, root, in(draft), true); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(2 * time.Hour) // the shortened governance retention has ended
+	if err := remove(root, draft, true); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Errorf("removing a version under legal hold = %v", err)
+	}
+	if on, err := f.objects.LegalHold(ctx, root, in(draft)); err != nil || !on {
+		t.Errorf("LegalHold = %v, %v", on, err)
+	}
+	if _, err := f.objects.SetLegalHold(ctx, root, in(draft), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(root, draft, false); err != nil {
+		t.Errorf("removing a version whose retention has ended and whose hold is off: %v", err)
+	}
+	// Time passes the compliance date: then, and only then, it can go.
+	f.clock.Advance(40 * 24 * time.Hour)
+	if err := remove(writer, ledger, false); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("read-write removing a version = %v", err)
+	}
+	if err := remove(root, ledger, false); err != nil {
+		t.Errorf("removing a version whose compliance retention has ended: %v", err)
+	}
+
+	// The default retention of the bucket, and who may set it.
+	rule := &bucket.DefaultRetention{Mode: object.Compliance, Days: 7}
+	if err := f.buckets.SetDefaultRetention(ctx, writer, "vault", rule); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("read-write setting a default retention = %v", err)
+	}
+	if err := f.buckets.SetDefaultRetention(ctx, root, "vault", &bucket.DefaultRetention{Mode: object.Compliance}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("a default retention without a period = %v", err)
+	}
+	if err := f.buckets.SetDefaultRetention(ctx, root, "b", rule); !errors.Is(err, domain.ErrLockNotConfigured) {
+		t.Errorf("a default retention on a plain bucket = %v", err)
+	}
+	if err := f.buckets.SetDefaultRetention(ctx, root, "vault", rule); err != nil {
+		t.Fatal(err)
+	}
+	// Even a caller who may not lock gets the bucket's lock on what they put.
+	defaulted, err := put(writer, "defaulted", object.Lock{})
+	if err != nil || defaulted.Lock.Retention == nil || defaulted.Lock.Retention.Mode != object.Compliance ||
+		!defaulted.Lock.Retention.Until.Equal(f.clock.Now().Add(7*24*time.Hour)) {
+		t.Fatalf("a put into a bucket with a default retention = %+v, %v", defaulted.Lock, err)
+	}
+	if err := remove(root, defaulted, true); !errors.Is(err, domain.ErrObjectLocked) {
+		t.Errorf("removing a version locked by the bucket's default = %v", err)
+	}
+	if err := f.buckets.SetVersioning(ctx, root, "vault", bucket.VersioningSuspended); !errors.Is(err, domain.ErrInvalidBucketState) {
+		t.Errorf("suspending versioning on a locked bucket = %v", err)
+	}
+	if err := f.buckets.Delete(ctx, root, "vault"); !errors.Is(err, domain.ErrBucketNotEmpty) {
+		t.Errorf("deleting a bucket that holds a locked version = %v", err)
+	}
+}

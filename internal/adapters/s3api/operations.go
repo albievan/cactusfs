@@ -53,7 +53,15 @@ func (h *Handler) createBucket(ctx context.Context, req *request) error {
 	if _, err := body.verify(); err != nil {
 		return err
 	}
-	if err := h.cfg.Buckets.Create(ctx, req.principal, req.bucket); err != nil {
+	create := h.cfg.Buckets.Create
+	switch req.Header.Get(headerLockEnabled) {
+	case "", "false":
+	case "true":
+		create = h.cfg.Buckets.CreateWithObjectLock
+	default:
+		return fmt.Errorf("%w: %s", domain.ErrInvalidArgument, headerLockEnabled)
+	}
+	if err := create(ctx, req.principal, req.bucket); err != nil {
 		return err
 	}
 	req.w.Header().Set("Location", "/"+req.bucket)
@@ -173,7 +181,12 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 	if err != nil {
 		return err
 	}
+	lock, err := lockOf(req.Header)
+	if err != nil {
+		return err
+	}
 	in := app.PutInput{
+		Lock:               lock,
 		Bucket:             req.bucket,
 		Key:                req.key,
 		Body:               body.body,
@@ -272,7 +285,13 @@ func (h *Handler) headObject(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) deleteObject(ctx context.Context, req *request) error {
-	out, err := h.cfg.Objects.Delete(ctx, req.principal, app.DeleteInput{Bucket: req.bucket, Key: req.key, Version: req.version})
+	bypass, err := bypassOf(req.Header)
+	if err != nil {
+		return err
+	}
+	out, err := h.cfg.Objects.Delete(ctx, req.principal, app.DeleteInput{
+		Bucket: req.bucket, Key: req.key, Version: req.version, BypassGovernance: bypass,
+	})
 	if err != nil {
 		return err
 	}
@@ -302,6 +321,7 @@ func setObjectHeaders(header http.Header, v object.Version) {
 	header.Set("Last-Modified", v.ModifiedAt.UTC().Format(http.TimeFormat))
 	header.Set("Accept-Ranges", "bytes")
 	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	setLockHeaders(header, v.Lock)
 	for name, value := range map[string]string{
 		"Content-Encoding":    v.ContentEncoding,
 		"Content-Disposition": v.ContentDisposition,

@@ -875,3 +875,152 @@ func TestDeleteObjects(t *testing.T) {
 		t.Errorf("after DeleteObjects the bucket holds %d objects, %v", len(listed.Contents), err)
 	}
 }
+
+func lockedBucket(t *testing.T) string {
+	t.Helper()
+	suffix := randomBytes(t, 4)
+	name := fmt.Sprintf("compat-lock-%x", suffix)
+	if _, err := client().CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String(name), ObjectLockEnabledForBucket: aws.Bool(true)}); err != nil {
+		t.Fatalf("CreateBucket with Object Lock: %v", err)
+	}
+	// Nothing removes what the tests lock in it, so the bucket stays: it
+	// is the server's data directory, which goes with the test run.
+	return name
+}
+
+func TestObjectLockConfiguration(t *testing.T) {
+	name := lockedBucket(t)
+	c := client()
+	state, err := c.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{Bucket: aws.String(name)})
+	if err != nil || state.Status != types.BucketVersioningStatusEnabled {
+		t.Fatalf("versioning of a bucket created with Object Lock = %q, %v", state.Status, err)
+	}
+	cfg, err := c.GetObjectLockConfiguration(t.Context(), &s3.GetObjectLockConfigurationInput{Bucket: aws.String(name)})
+	if err != nil || cfg.ObjectLockConfiguration == nil || cfg.ObjectLockConfiguration.ObjectLockEnabled != types.ObjectLockEnabledEnabled || cfg.ObjectLockConfiguration.Rule != nil {
+		t.Fatalf("GetObjectLockConfiguration = %+v, %v", cfg.ObjectLockConfiguration, err)
+	}
+	_, err = c.PutObjectLockConfiguration(t.Context(), &s3.PutObjectLockConfigurationInput{
+		Bucket: aws.String(name),
+		ObjectLockConfiguration: &types.ObjectLockConfiguration{
+			ObjectLockEnabled: types.ObjectLockEnabledEnabled,
+			Rule:              &types.ObjectLockRule{DefaultRetention: &types.DefaultRetention{Mode: types.ObjectLockRetentionModeGovernance, Days: aws.Int32(1)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutObjectLockConfiguration: %v", err)
+	}
+	put(t, name, "defaulted", []byte("x"))
+	head, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("defaulted")})
+	if err != nil || head.ObjectLockMode != types.ObjectLockModeGovernance || head.ObjectLockRetainUntilDate == nil {
+		t.Errorf("a version put under a default retention: mode %q, until %v, %v", head.ObjectLockMode, head.ObjectLockRetainUntilDate, err)
+	}
+	plain := newBucket(t)
+	if _, err := c.GetObjectLockConfiguration(t.Context(), &s3.GetObjectLockConfigurationInput{Bucket: aws.String(plain)}); errorCode(err) != "ObjectLockConfigurationNotFoundError" {
+		t.Errorf("GetObjectLockConfiguration of a plain bucket: %v", err)
+	}
+	if _, err := c.PutBucketVersioning(t.Context(), &s3.PutBucketVersioningInput{
+		Bucket: aws.String(name), VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusSuspended},
+	}); errorCode(err) != "InvalidBucketState" {
+		t.Errorf("suspending versioning on a locked bucket: %v", err)
+	}
+}
+
+func TestObjectLockCompliance(t *testing.T) {
+	name := lockedBucket(t)
+	c := client()
+	until := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	stored, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("ledger"), Body: strings.NewReader("entries"),
+		ObjectLockMode: types.ObjectLockModeCompliance, ObjectLockRetainUntilDate: aws.Time(until),
+	})
+	if err != nil {
+		t.Fatalf("PutObject with compliance retention: %v", err)
+	}
+	version := stored.VersionId
+	retention, err := c.GetObjectRetention(t.Context(), &s3.GetObjectRetentionInput{Bucket: aws.String(name), Key: aws.String("ledger")})
+	if err != nil || retention.Retention.Mode != types.ObjectLockRetentionModeCompliance || !retention.Retention.RetainUntilDate.Equal(until) {
+		t.Fatalf("GetObjectRetention = %+v, %v", retention.Retention, err)
+	}
+	// The root credential, with the bypass: refused.
+	for _, bypass := range []*bool{nil, aws.Bool(true)} {
+		_, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("ledger"), VersionId: version, BypassGovernanceRetention: bypass})
+		if errorCode(err) != "AccessDenied" {
+			t.Fatalf("deleting a compliance-locked version (bypass %v): %v", bypass != nil, err)
+		}
+	}
+	_, err = c.PutObjectRetention(t.Context(), &s3.PutObjectRetentionInput{
+		Bucket: aws.String(name), Key: aws.String("ledger"), VersionId: version, BypassGovernanceRetention: aws.Bool(true),
+		Retention: &types.ObjectLockRetention{Mode: types.ObjectLockRetentionModeCompliance, RetainUntilDate: aws.Time(until.Add(-time.Minute))},
+	})
+	if errorCode(err) != "AccessDenied" {
+		t.Errorf("shortening a compliance retention: %v", err)
+	}
+	_, err = c.PutObjectRetention(t.Context(), &s3.PutObjectRetentionInput{
+		Bucket: aws.String(name), Key: aws.String("ledger"), VersionId: version,
+		Retention: &types.ObjectLockRetention{Mode: types.ObjectLockRetentionModeCompliance, RetainUntilDate: aws.Time(until.Add(time.Hour))},
+	})
+	if err != nil {
+		t.Errorf("extending a compliance retention: %v", err)
+	}
+	// Deleting the object makes a marker; the version is under it.
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("ledger")}); err != nil {
+		t.Fatalf("deleting the object: %v", err)
+	}
+	if got, err := getVersion(t, name, "ledger", aws.ToString(version)); err != nil || got != "entries" {
+		t.Fatalf("the compliance-locked version after all of it = %q, %v", got, err)
+	}
+	if _, err := c.DeleteBucket(t.Context(), &s3.DeleteBucketInput{Bucket: aws.String(name)}); errorCode(err) != "BucketNotEmpty" {
+		t.Errorf("deleting a bucket that holds a locked version: %v", err)
+	}
+}
+
+func TestObjectLockGovernanceAndLegalHold(t *testing.T) {
+	name := lockedBucket(t)
+	c := client()
+	until := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	stored, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("draft"), Body: strings.NewReader("draft"),
+		ObjectLockMode: types.ObjectLockModeGovernance, ObjectLockRetainUntilDate: aws.Time(until),
+	})
+	if err != nil {
+		t.Fatalf("PutObject with governance retention: %v", err)
+	}
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("draft"), VersionId: stored.VersionId}); errorCode(err) != "AccessDenied" {
+		t.Fatalf("deleting a governance-locked version without bypass: %v", err)
+	}
+	if _, err := c.PutObjectLegalHold(t.Context(), &s3.PutObjectLegalHoldInput{
+		Bucket: aws.String(name), Key: aws.String("draft"), VersionId: stored.VersionId, LegalHold: &types.ObjectLockLegalHold{Status: types.ObjectLockLegalHoldStatusOn},
+	}); err != nil {
+		t.Fatalf("PutObjectLegalHold: %v", err)
+	}
+	hold, err := c.GetObjectLegalHold(t.Context(), &s3.GetObjectLegalHoldInput{Bucket: aws.String(name), Key: aws.String("draft"), VersionId: stored.VersionId})
+	if err != nil || hold.LegalHold.Status != types.ObjectLockLegalHoldStatusOn {
+		t.Fatalf("GetObjectLegalHold = %+v, %v", hold.LegalHold, err)
+	}
+	// Under legal hold the bypass lifts nothing.
+	remove := &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("draft"), VersionId: stored.VersionId, BypassGovernanceRetention: aws.Bool(true)}
+	if _, err := c.DeleteObject(t.Context(), remove); errorCode(err) != "AccessDenied" {
+		t.Fatalf("deleting a version under legal hold: %v", err)
+	}
+	if _, err := c.PutObjectLegalHold(t.Context(), &s3.PutObjectLegalHoldInput{
+		Bucket: aws.String(name), Key: aws.String("draft"), VersionId: stored.VersionId, LegalHold: &types.ObjectLockLegalHold{Status: types.ObjectLockLegalHoldStatusOff},
+	}); err != nil {
+		t.Fatalf("taking the legal hold off: %v", err)
+	}
+	// The root credential may bypass governance, when it says so.
+	if _, err := c.DeleteObject(t.Context(), remove); err != nil {
+		t.Fatalf("deleting a governance-locked version with bypass: %v", err)
+	}
+	if _, err := getVersion(t, name, "draft", aws.ToString(stored.VersionId)); errorCode(err) != "NoSuchVersion" {
+		t.Errorf("the removed version: %v", err)
+	}
+	// A lock asked for in a bucket that cannot hold one is an error.
+	plain := newBucket(t)
+	_, err = c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(plain), Key: aws.String("k"), Body: strings.NewReader("x"),
+		ObjectLockMode: types.ObjectLockModeGovernance, ObjectLockRetainUntilDate: aws.Time(until),
+	})
+	if errorCode(err) != "InvalidRequest" {
+		t.Errorf("a locked put into a bucket without Object Lock: %v", err)
+	}
+}

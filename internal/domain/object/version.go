@@ -91,6 +91,8 @@ type Version struct {
 	// DeleteMarker says that this version stands for the object having
 	// been deleted: it has no content.
 	DeleteMarker bool
+	// Lock is what keeps the version from being removed, if anything.
+	Lock Lock
 }
 
 // NullVersion is how the null version is named to clients.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 // Limits of a bucket name, from the Amazon S3 general purpose bucket naming
@@ -28,6 +29,46 @@ type Bucket struct {
 	// ObjectLock says that the versions of the bucket can be locked. It is
 	// decided when the bucket is created and never changes.
 	ObjectLock bool
+	// DefaultRetention, when not nil, is given to every version put into
+	// the bucket without a retention of its own.
+	DefaultRetention *DefaultRetention
+}
+
+// DefaultRetention is the retention a bucket gives its new versions: a mode,
+// and a period in days or in years.
+type DefaultRetention struct {
+	Mode  object.RetentionMode
+	Days  int
+	Years int
+}
+
+// Limits of a default retention period.
+const (
+	MaxRetentionDays  = 36500
+	MaxRetentionYears = 100
+)
+
+// Validate reports whether d is a default retention: a mode, and exactly one
+// of days and years, within limits. The error wraps
+// domain.ErrInvalidArgument.
+func (d DefaultRetention) Validate() error {
+	switch {
+	case d.Mode != object.Governance && d.Mode != object.Compliance:
+		return fmt.Errorf("%w: retention mode %q", domain.ErrInvalidArgument, d.Mode)
+	case (d.Days == 0) == (d.Years == 0):
+		return fmt.Errorf("%w: a default retention has days or years, not both and not neither", domain.ErrInvalidArgument)
+	case d.Days < 0 || d.Days > MaxRetentionDays || d.Years < 0 || d.Years > MaxRetentionYears:
+		return fmt.Errorf("%w: default retention period out of range", domain.ErrInvalidArgument)
+	}
+	return nil
+}
+
+// Until returns when a version put at the time at is retained until. A day
+// is 24 hours and a year is 365 days: fixed lengths, which every replica
+// computes alike and which do not depend on a calendar.
+func (d DefaultRetention) Until(at time.Time) time.Time {
+	const day = 24 * time.Hour
+	return at.Add(time.Duration(d.Days)*day + time.Duration(d.Years)*365*day).UTC()
 }
 
 // Versioning is the versioning state of a bucket.

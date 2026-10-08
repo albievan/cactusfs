@@ -43,3 +43,6 @@ github.com/albievan/cactusfs/test/s3compat TestDeleteObjects
 github.com/albievan/cactusfs/test/s3compat TestListObjectVersionsPagination
 github.com/albievan/cactusfs/test/s3compat TestObjectVersions
 github.com/albievan/cactusfs/test/s3compat TestSuspendedVersioning
+github.com/albievan/cactusfs/test/s3compat TestObjectLockCompliance
+github.com/albievan/cactusfs/test/s3compat TestObjectLockConfiguration
+github.com/albievan/cactusfs/test/s3compat TestObjectLockGovernanceAndLegalHold

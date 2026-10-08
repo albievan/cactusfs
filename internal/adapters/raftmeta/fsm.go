@@ -17,6 +17,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -397,6 +398,12 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return applySetVersioning(tx, *e.SetVersioning)
 	case cmdDeleteVersion:
 		return applyDeleteVersion(tx, *e.DeleteVersion, now)
+	case cmdSetBucketLock:
+		return applySetBucketLock(tx, *e.SetBucketLock)
+	case cmdSetRetention:
+		return applySetRetention(tx, *e.SetRetention, now)
+	case cmdSetLegalHold:
+		return applySetLegalHold(tx, *e.SetLegalHold)
 	case cmdDeleteObject:
 		return applyDeleteObject(tx, *e.DeleteObject)
 	case cmdSetRoot:
@@ -423,6 +430,12 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord) (applyResult, error) {
 	buckets := tx.Bucket(bucketsBucket())
 	if buckets.Get([]byte(b.Name)) != nil {
 		return refuse(domain.ErrBucketAlreadyExists, "%s", b.Name)
+	}
+	// A bucket begins without versions, or - created with Object Lock -
+	// keeping them, for good. Nothing else is said at creation.
+	b.Versioning, b.DefaultRetention = "", nil
+	if b.ObjectLock {
+		b.Versioning = string(bucket.VersioningEnabled)
 	}
 	data, err := json.Marshal(b)
 	if err != nil {

@@ -50,6 +50,9 @@ const (
 	// Schema 2.
 	cmdSetVersioning = "bucket.versioning.put"
 	cmdDeleteVersion = "object.version.delete"
+	cmdSetBucketLock = "bucket.lock.put"
+	cmdSetRetention  = "object.retention.put"
+	cmdSetLegalHold  = "object.legalhold.put"
 	cmdSetTopology   = "topology.set"
 	cmdSetNode       = "node.set"
 	cmdRemoveNode    = "node.remove"
@@ -74,12 +77,79 @@ type entry struct {
 	// Schema 2.
 	SetVersioning *versioningCmd    `json:"set_versioning,omitempty"`
 	DeleteVersion *deleteVersionCmd `json:"delete_version,omitempty"`
+	SetBucketLock *bucketLockCmd    `json:"set_bucket_lock,omitempty"`
+	SetRetention  *retentionCmd     `json:"set_retention,omitempty"`
+	SetLegalHold  *legalHoldCmd     `json:"set_legal_hold,omitempty"`
 }
 
 // versioningCmd changes the versioning state of a bucket.
 type versioningCmd struct {
 	Bucket string `json:"bucket"`
 	Status string `json:"status"`
+}
+
+// retentionRule is the default retention of a bucket.
+type retentionRule struct {
+	Mode  string `json:"mode"`
+	Days  int    `json:"days,omitempty"`
+	Years int    `json:"years,omitempty"`
+}
+
+// lockRecord is what keeps a version from being removed.
+type lockRecord struct {
+	Mode        string    `json:"mode,omitempty"`
+	RetainUntil time.Time `json:"retain_until,omitzero"`
+	LegalHold   bool      `json:"legal_hold,omitempty"`
+}
+
+func lockToRecord(l object.Lock) *lockRecord {
+	if l.IsZero() {
+		return nil
+	}
+	record := &lockRecord{LegalHold: l.LegalHold}
+	if l.Retention != nil {
+		record.Mode, record.RetainUntil = string(l.Retention.Mode), l.Retention.Until.UTC()
+	}
+	return record
+}
+
+func (r *lockRecord) toDomain() object.Lock {
+	if r == nil {
+		return object.Lock{}
+	}
+	lock := object.Lock{LegalHold: r.LegalHold}
+	if r.Mode != "" {
+		lock.Retention = &object.Retention{Mode: object.RetentionMode(r.Mode), Until: r.RetainUntil}
+	}
+	return lock
+}
+
+// bucketLockCmd sets or removes the default retention of a bucket.
+type bucketLockCmd struct {
+	Bucket  string         `json:"bucket"`
+	Default *retentionRule `json:"default,omitempty"`
+}
+
+// retentionCmd sets or removes the retention of one version. Whether it may
+// is decided when it is applied, on the time of the entry.
+type retentionCmd struct {
+	Bucket     string `json:"bucket"`
+	Key        string `json:"key"`
+	VersionRef string `json:"version"`
+	// Mode empty removes the retention.
+	Mode        string    `json:"mode,omitempty"`
+	RetainUntil time.Time `json:"retain_until,omitzero"`
+	// Bypass says that the proposer authorized the caller to lift a
+	// governance retention. It lifts nothing else.
+	Bypass bool `json:"bypass_governance,omitempty"`
+}
+
+// legalHoldCmd puts one version under legal hold, or takes it off.
+type legalHoldCmd struct {
+	Bucket     string `json:"bucket"`
+	Key        string `json:"key"`
+	VersionRef string `json:"version"`
+	On         bool   `json:"on"`
 }
 
 // deleteVersionCmd deletes an object, or one of its versions. What a delete
@@ -94,6 +164,9 @@ type deleteVersionCmd struct {
 	// be made.
 	MarkerID string    `json:"marker_id"`
 	At       time.Time `json:"at"`
+	// Bypass says that the proposer authorized the caller to lift a
+	// governance retention. It lifts nothing else.
+	Bypass bool `json:"bypass_governance,omitempty"`
 }
 
 type removeNodeCmd struct {
@@ -153,6 +226,8 @@ type bucketRecord struct {
 	// Versioning is "", "Enabled" or "Suspended" (schema 2).
 	Versioning string `json:"versioning,omitempty"`
 	ObjectLock bool   `json:"object_lock,omitempty"`
+	// DefaultRetention is given to versions put without a retention.
+	DefaultRetention *retentionRule `json:"default_retention,omitempty"`
 }
 
 // versionRecord is an object version as it is stored and replicated.
@@ -169,6 +244,8 @@ type versionRecord struct {
 	Versioned    bool   `json:"versioned,omitempty"`
 	Seq          uint64 `json:"seq,omitempty"`
 	DeleteMarker bool   `json:"delete_marker,omitempty"`
+	// Lock is what keeps the version from being removed (schema 2).
+	Lock *lockRecord `json:"lock,omitempty"`
 
 	ContentType        string            `json:"content_type,omitempty"`
 	ContentEncoding    string            `json:"content_encoding,omitempty"`
@@ -262,7 +339,11 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
-	if !e.At.IsZero() || e.Type == cmdSetVersioning || e.Type == cmdDeleteVersion {
+	switch e.Type {
+	case cmdSetVersioning, cmdDeleteVersion, cmdSetBucketLock, cmdSetRetention, cmdSetLegalHold:
+		return entrySchemaTimed
+	}
+	if !e.At.IsZero() || (e.PutObject != nil && e.PutObject.Lock != nil) {
 		return entrySchemaTimed
 	}
 	// A bucket created with what only this schema knows: a binary of the
@@ -291,6 +372,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
 		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil,
+		e.SetBucketLock != nil, e.SetRetention != nil, e.SetLegalHold != nil,
 	} {
 		if present {
 			set++
@@ -318,6 +400,12 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.SetVersioning != nil && data[0] >= entrySchemaTimed
 	case cmdDeleteVersion:
 		ok = ok && e.DeleteVersion != nil && data[0] >= entrySchemaTimed
+	case cmdSetBucketLock:
+		ok = ok && e.SetBucketLock != nil && data[0] >= entrySchemaTimed
+	case cmdSetRetention:
+		ok = ok && e.SetRetention != nil && data[0] >= entrySchemaTimed
+	case cmdSetLegalHold:
+		ok = ok && e.SetLegalHold != nil && data[0] >= entrySchemaTimed
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -331,11 +419,19 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 }
 
 func bucketToRecord(b bucket.Bucket) *bucketRecord {
-	return &bucketRecord{Name: b.Name, CreatedAt: b.CreatedAt.UTC(), Versioning: string(b.Versioning), ObjectLock: b.ObjectLock}
+	record := &bucketRecord{Name: b.Name, CreatedAt: b.CreatedAt.UTC(), Versioning: string(b.Versioning), ObjectLock: b.ObjectLock}
+	if d := b.DefaultRetention; d != nil {
+		record.DefaultRetention = &retentionRule{Mode: string(d.Mode), Days: d.Days, Years: d.Years}
+	}
+	return record
 }
 
 func (r bucketRecord) toDomain() bucket.Bucket {
-	return bucket.Bucket{Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock}
+	b := bucket.Bucket{Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock}
+	if d := r.DefaultRetention; d != nil {
+		b.DefaultRetention = &bucket.DefaultRetention{Mode: object.RetentionMode(d.Mode), Days: d.Days, Years: d.Years}
+	}
+	return b
 }
 
 func versionToRecord(v object.Version) *versionRecord {
@@ -354,6 +450,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		Versioned:          v.Versioned,
 		Seq:                v.Seq,
 		DeleteMarker:       v.DeleteMarker,
+		Lock:               lockToRecord(v.Lock),
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -397,6 +494,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		Versioned:          r.Versioned,
 		Seq:                r.Seq,
 		DeleteMarker:       r.DeleteMarker,
+		Lock:               r.Lock.toDomain(),
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,
