@@ -54,11 +54,12 @@ type ObjectIndex interface {
 	// domain.ErrVersionNotFound.
 	GetVersion(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Version, error)
 	// ScanVersions visits every version of every object in a bucket,
-	// delete markers included: keys in order from the first one greater
-	// than or equal to start, and the versions of a key from the newest to
-	// the oldest. latest is set for the newest version of its key. The
-	// error wraps domain.ErrBucketNotFound.
-	ScanVersions(ctx context.Context, bucketName, start string, visit func(v object.Version, latest bool) ScanControl) error
+	// delete markers included: keys in order from start, and the versions
+	// of a key from the newest to the oldest. latest is set for the newest
+	// version of its key. The cost of a scan is what it visits: not the
+	// number of versions a key has. The error wraps
+	// domain.ErrBucketNotFound.
+	ScanVersions(ctx context.Context, bucketName string, start VersionCursor, visit func(v object.Version, latest bool) ScanControl) error
 	// GetObject returns the current version of an object. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrObjectNotFound.
 	GetObject(ctx context.Context, bucketName, key string) (object.Version, error)
@@ -71,6 +72,17 @@ type ObjectIndex interface {
 	// steers the scan through its return value. The error wraps
 	// domain.ErrBucketNotFound.
 	ScanObjects(ctx context.Context, bucketName, start string, visit func(object.Version) ScanControl) error
+}
+
+// VersionCursor says where a scan of versions begins.
+type VersionCursor struct {
+	// Key is the first key to visit: the first one greater than or equal
+	// to it.
+	Key string
+	// After, when not nil, names a version of Key: the scan begins with
+	// the version after it. When Key has no such version any more, the
+	// scan begins with the key after Key.
+	After *object.VersionRef
 }
 
 // PutResult is what committing a version did.

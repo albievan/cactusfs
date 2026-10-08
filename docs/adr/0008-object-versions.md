@@ -85,8 +85,15 @@ state machine must be deterministic.
   current or not. When it is rebuilt it walks `versions` (and, from PLAN 6.1, the parts
   of uploads) as well as `objects`. A rebuild that forgot them would let the collector
   delete the shards of every noncurrent version; this has a test of its own.
-- Finding a version by its ID walks the versions of that one key. An index by version
-  ID can be added later without changing anything stored.
+- A key can have any number of versions, and nothing may cost time in proportion to
+  that number - least of all an entry being applied, with every other change waiting. A
+  third nested bucket, `versionids/<bucket>`, maps `enc(key) ‖ version ID` to the
+  sequence, so that a version is found by its name directly; the null version, which a
+  put or a delete under suspended versioning must find, is found the same way. The
+  index is derived from `versions` and rebuilt when missing. Scans read straight from
+  the cursor and can resume after a named version.
+- An ID a key already has is refused for another version of that key. IDs are random
+  and do not repeat; the rule keeps a mistaken entry from making a version unreachable.
 - Two commands are new: `bucket.versioning.put` and `object.version.delete`, which
   deletes an object (making a delete marker where the bucket keeps versions) or removes
   one named version for good. The `object.delete` of schema 1 stays for logs written
@@ -97,9 +104,20 @@ state machine must be deterministic.
   place in the order of versions is the Raft index of the entry.
 - Removing a version for good is its own permission (`s3:DeleteObjectVersion`), and so
   is reading one by name (`s3:GetObjectVersion`). The built-in `read-write` role can
-  delete objects and cannot remove versions: in a bucket that keeps versions, a holder
-  of that role, or of its stolen key, destroys nothing. Suspending versioning
-  (`s3:PutBucketVersioning`) is audited.
+  delete objects and cannot remove versions: while versioning is **enabled**, a holder
+  of that role, or of its stolen key, destroys nothing. While it is **suspended**, a put
+  or a delete replaces the null version, as S3 defines it; versions with IDs stay. The
+  role cannot suspend versioning (`s3:PutBucketVersioning`), and suspending is audited.
+- The body of DeleteObjects and of PutBucketVersioning must be covered by the request's
+  signature - by its SHA-256, by signed chunks, or by a digest in a signed header. An
+  unsigned payload or a presigned URL is refused for these two: whoever held the URL
+  would choose what is destroyed. AWS accepts both; this is the stricter reading.
+- Request bodies that decide what is destroyed are parsed strictly: an unknown element,
+  a repeated setting, an element inside one of its own kind, text beside elements, a
+  second document or a document type declaration is malformed, never skipped.
+- Once the state holds what only schema 2 expresses, a member that has not registered
+  its version does not take the cluster back to schema 1: a member of the previous
+  release would have stopped at the first such entry.
 - Scrubbing walks every version, and healing works on a named version: an old version
   that rots is found like a current one.
 
@@ -116,6 +134,21 @@ state machine must be deterministic.
   sequences of puts, deletes, version deletes and versioning changes
   (`TestVersionsAgainstAModel`), with the index invariant and the reference counts
   checked from the raw state after every step.
+
+## Known limits
+
+- A version listing resumed after a version that was removed in the meantime goes on
+  with the next key: where the removed version was cannot be told from its name. The
+  rest of that key's versions are missing from that listing. Scrubbing resumes the same
+  way and checks them on its next pass.
+- A GET or HEAD of an object whose newest version is a delete marker answers 404
+  without the `x-amz-delete-marker` header, and a HEAD of a marker by its ID answers
+  405 without it.
+- Shards of a version that was removed are deleted without asking the reference index.
+  No path gives two versions the same stored data today; CopyObject (PLAN 6.9) must
+  change this first.
+- Healing by name and healing "the current version" of the same key do not exclude each
+  other.
 
 ## Consequences
 

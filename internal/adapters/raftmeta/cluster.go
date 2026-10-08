@@ -2,6 +2,7 @@ package raftmeta
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -302,6 +303,19 @@ func (s *Store) entryVersion() (byte, error) {
 		// A node on its own is every member there is.
 		return s.supported, nil
 	}
+	// A state that holds what only schema 2 can express has no member of
+	// the previous release: such a member stopped at the first of those
+	// entries. A member that has merely not registered yet - one that was
+	// just added - does not take the cluster back.
+	floor := byte(entrySchemaVersion)
+	if err := s.fsm.view(func(tx *bbolt.Tx) error {
+		if raw := tx.Bucket(metaBucket()).Get(schemaKey()); len(raw) == 8 && binary.BigEndian.Uint64(raw) >= stateSchemaTimed {
+			floor = entrySchemaTimed
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
 	future := s.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
 		return 0, translateRaftError(err)
@@ -321,13 +335,13 @@ func (s *Store) entryVersion() (byte, error) {
 	for _, server := range future.Configuration().Servers {
 		version, registered := known[string(server.ID)]
 		if !registered || version < entrySchemaVersion {
-			return entrySchemaVersion, nil
+			return floor, nil
 		}
 		for int(level) > version {
 			level--
 		}
 	}
-	return level, nil
+	return max(level, floor), nil
 }
 
 // Term returns the Raft term this node is in. A leader asks the voters for

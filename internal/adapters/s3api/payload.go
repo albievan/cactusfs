@@ -31,7 +31,20 @@ var (
 	errUnsupportedPayload  = errors.New("payload option is not supported")
 	errUnsupportedChecksum = errors.New("checksum algorithm is not supported")
 	errBadPayloadHeader    = fmt.Errorf("%w: payload headers", domain.ErrInvalidArgument)
+	errUnsignedBody        = errors.New("the body of this request must be covered by its signature")
 )
+
+// bound reports whether the signature of the request covers the content of
+// the body: through its SHA-256, through signed chunks, or through a digest
+// in a header, which is signed like every x-amz-* header and Content-MD5.
+// The body of an upload may go unsigned over TLS. A body that says what to
+// destroy may not: whoever holds a presigned URL for it would choose.
+func (p *payload) bound(payloadHash string) bool {
+	if p.chunked != nil {
+		return p.chunked.signer != nil
+	}
+	return payloadHash != payloadUnsigned || len(p.expectations) > 0
+}
 
 // newChecksum returns the hash of an S3 checksum algorithm, by the name used
 // in x-amz-checksum-<name>.

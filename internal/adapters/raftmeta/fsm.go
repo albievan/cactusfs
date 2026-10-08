@@ -199,6 +199,9 @@ func openState(path string) (*bbolt.DB, error) {
 		if err := ensureDataIndex(tx); err != nil {
 			return err
 		}
+		if err := ensureVersionIndex(tx); err != nil {
+			return err
+		}
 		meta := tx.Bucket(metaBucket())
 		switch raw := meta.Get(schemaKey()); {
 		case raw == nil:
@@ -451,7 +454,7 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 			}
 		}
 	}
-	for _, parent := range [][]byte{objectsBucket(), versionsBucket()} {
+	for _, parent := range [][]byte{objectsBucket(), versionsBucket(), versionIDsBucket()} {
 		holder := tx.Bucket(parent)
 		if holder.Bucket([]byte(name)) != nil {
 			if err := holder.DeleteBucket([]byte(name)); err != nil {
@@ -466,7 +469,8 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 }
 
 func objectEvent(v versionRecord) ports.ObjectEvent {
-	return ports.ObjectEvent{Bucket: v.Bucket, Key: v.Key, VersionID: v.VersionID, Size: v.Size, ETag: v.ETag}
+	// The version is named as clients name it: a consumer can fetch by it.
+	return ports.ObjectEvent{Bucket: v.Bucket, Key: v.Key, VersionID: refOf(v), Size: v.Size, ETag: v.ETag}
 }
 
 func versionsBucket() []byte { return []byte("versions") }

@@ -51,7 +51,10 @@ func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) e
 	}
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	decoder.Strict = true
-	depth := 0
+	depth, roots := 0, 0
+	// The names of the open elements, and what each has had inside it.
+	var open []string
+	var seen []map[string]int
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
@@ -63,11 +66,47 @@ func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) e
 		switch t := token.(type) {
 		case xml.StartElement:
 			depth++
-			if depth > maxXMLDepth || !slices.Contains(allowed, t.Name.Local) {
+			name := t.Name.Local
+			if depth > maxXMLDepth || !slices.Contains(allowed, name) || slices.Contains(open, name) {
+				// Too deep, not a name of this document, or an
+				// element inside one of its own kind.
 				return errMalformedXML
 			}
+			if depth == 1 {
+				// One document, with the first allowed name as its root.
+				if roots++; roots > 1 || name != allowed[0] {
+					return errMalformedXML
+				}
+			} else {
+				// Only the entries of a list repeat: the children of
+				// the root that have children of their own. A second
+				// <Status>, or a second <Key> in one <Object>, is a
+				// document that says two things.
+				parent := seen[len(seen)-1]
+				if parent[name]++; parent[name] > 1 && depth > 2 {
+					return errMalformedXML
+				}
+			}
+			open, seen = append(open, name), append(seen, map[string]int{})
 		case xml.EndElement:
 			depth--
+			inside := seen[len(seen)-1]
+			if inside["#text"] > 0 && len(inside) > 1 {
+				// Text beside elements: "<Quiet>true<Object>...".
+				return errMalformedXML
+			}
+			if depth == 1 && len(inside) == 1 && inside["#text"] > 0 {
+				// A child of the root that holds text is a setting,
+				// not a list entry: there is one of it.
+				if seen[0][open[len(open)-1]] > 1 {
+					return errMalformedXML
+				}
+			}
+			open, seen = open[:len(open)-1], seen[:len(seen)-1]
+		case xml.CharData:
+			if len(seen) > 0 && len(bytes.TrimSpace(t)) > 0 {
+				seen[len(seen)-1]["#text"] = 1
+			}
 		case xml.Directive:
 			return errMalformedXML
 		case xml.ProcInst:
@@ -93,6 +132,9 @@ func (h *Handler) putBucketVersioning(ctx context.Context, req *request) error {
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
+	}
+	if !body.bound(req.payloadHash) {
+		return errUnsignedBody
 	}
 	var cfg versioningConfiguration
 	if err := decodeStrictXML(body.body, maxRequestXML, &cfg, "VersioningConfiguration", "Status", "MfaDelete"); err != nil {
@@ -284,6 +326,9 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
+	}
+	if !body.bound(req.payloadHash) {
+		return errUnsignedBody
 	}
 	var in deleteRequest
 	if err := decodeStrictXML(body.body, maxDeleteXML, &in, "Delete", "Quiet", "Object", "Key", "VersionId", "ETag", "LastModifiedTime", "Size"); err != nil {

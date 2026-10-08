@@ -133,6 +133,36 @@ func checkInvariant(t *testing.T, s *Store, bucketName string) {
 				return err
 			}
 		}
+		// The index of versions by name holds exactly the versions that
+		// are in "versions", and leads to each.
+		if h.older != nil {
+			indexed := 0
+			if err := h.ids.ForEach(func(at, inverted []byte) error {
+				indexed++
+				split := len(at) - object.IDSize
+				if h.older.Get(append(append(bytes.Clone(at[:split]), inverted...), at[split:]...)) == nil {
+					t.Errorf("the index of versions names one that is not there: %x", at)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			stored := 0
+			if err := h.older.ForEach(func(k, raw []byte) error {
+				stored++
+				split := len(k) - versionSuffixSize
+				if h.ids.Get(append(bytes.Clone(k[:split]), k[split+8:]...)) == nil {
+					v, _ := decodeVersion(raw)
+					t.Errorf("a stored version is not in the index of versions: %q %s marker=%v versioned=%v seq=%d", v.Key, v.VersionID[:4], v.DeleteMarker, v.Versioned, v.Seq)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			if stored != indexed {
+				t.Errorf("%d versions are stored and %d are in the index of them", stored, indexed)
+			}
+		}
 		for key := range keys {
 			current, err := readVersion(h.current, key)
 			if err != nil {
@@ -198,7 +228,7 @@ func describe(v *object.Version) string {
 func snapshotOf(t *testing.T, store porttest.Metadata, bucketName string) []string {
 	t.Helper()
 	var out []string
-	if err := store.ScanVersions(context.Background(), bucketName, "", func(v object.Version, latest bool) ports.ScanControl {
+	if err := store.ScanVersions(context.Background(), bucketName, ports.VersionCursor{}, func(v object.Version, latest bool) ports.ScanControl {
 		out = append(out, fmt.Sprintf("%s latest=%v", describe(&v), latest))
 		return ports.ScanControl{}
 	}); err != nil {
@@ -236,7 +266,16 @@ func TestVersionsAgainstAModel(t *testing.T) {
 			}
 			keys := []string{"a", "a\x00", "a\x00b", "ab", "b/c", "\x00"}
 			var refs []object.VersionRef
-			nextFill := byte(1)
+			var data []object.ID
+			serial := uint32(0)
+			// fresh returns a version with an ID and data of its own.
+			fresh := func(key string) object.Version {
+				serial++
+				v := porttest.SampleVersion("b", key, 1)
+				binary.BigEndian.PutUint32(v.VersionID[4:8], serial)
+				binary.BigEndian.PutUint32(v.DataID[4:8], serial)
+				return v
+			}
 			at := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
 
 			for step := range 300 {
@@ -244,9 +283,8 @@ func TestVersionsAgainstAModel(t *testing.T) {
 				var got [2]string
 				switch op := random.IntN(20); {
 				case op < 9: // put
-					v := porttest.SampleVersion("b", key, nextFill)
-					refs = append(refs, object.VersionRef{ID: v.VersionID})
-					nextFill += 2
+					v := fresh(key)
+					refs, data = append(refs, object.VersionRef{ID: v.VersionID}), append(data, v.DataID)
 					for i, s := range stores {
 						r, err := s.PutVersion(ctx, v)
 						if err != nil {
@@ -255,9 +293,8 @@ func TestVersionsAgainstAModel(t *testing.T) {
 						got[i] = "put " + describe(&r.Stored) + " removed " + describe(r.Removed)
 					}
 				case op < 13: // delete the object
-					marker := object.ID(bytes.Repeat([]byte{nextFill}, object.IDSize))
+					marker := fresh(key).VersionID
 					refs = append(refs, object.VersionRef{ID: marker})
-					nextFill += 2
 					for i, s := range stores {
 						r, err := s.DeleteObject(ctx, "b", key, ports.DeleteOptions{MarkerID: marker, At: at})
 						if err != nil {
@@ -300,8 +337,7 @@ func TestVersionsAgainstAModel(t *testing.T) {
 				if stored := storedCounts(t, real); fmt.Sprint(stored) != fmt.Sprint(counts) {
 					t.Fatalf("step %d (%s): the reference index says %v, a recount %v", step, got[0], stored, counts)
 				}
-				for fill := byte(1); fill < nextFill; fill += 2 {
-					id := porttest.SampleVersion("b", "x", fill).DataID
+				for _, id := range data {
 					a, errA := real.IsDataReferenced(ctx, id)
 					b, errB := model.IsDataReferenced(ctx, id)
 					if errA != nil || errB != nil || a != b {
@@ -339,7 +375,12 @@ func TestVersionsSurviveARestartAndARebuiltIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := snapshotOf(t, store, "b")
-	if err := store.fsm.db.Update(func(tx *bbolt.Tx) error { return tx.DeleteBucket(dataBucket()) }); err != nil {
+	if err := store.fsm.db.Update(func(tx *bbolt.Tx) error {
+		if err := tx.DeleteBucket(versionIDsBucket()); err != nil {
+			return err
+		}
+		return tx.DeleteBucket(dataBucket())
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -347,6 +388,15 @@ func TestVersionsSurviveARestartAndARebuiltIndex(t *testing.T) {
 	}
 
 	reopened := openStore(t, dir)
+	checkInvariant(t, reopened, "b")
+	for _, ref := range []object.VersionRef{old.Ref(), {ID: old.VersionID}, {ID: marker}} {
+		if ref.Null {
+			continue
+		}
+		if _, err := reopened.GetVersion(ctx, "b", "k", ref); err != nil {
+			t.Errorf("version %s after the index of versions was rebuilt: %v", ref, err)
+		}
+	}
 	if after := snapshotOf(t, reopened, "b"); !slices.Equal(before, after) {
 		t.Fatalf("versions after a restart:\n  %v\nbefore:\n  %v", after, before)
 	}
@@ -361,4 +411,112 @@ func TestVersionsSurviveARestartAndARebuiltIndex(t *testing.T) {
 	if b, err := reopened.GetBucket(ctx, "b"); err != nil || b.Versioning != bucket.VersioningEnabled {
 		t.Errorf("bucket after a restart = %+v, %v", b, err)
 	}
+}
+
+// TestAKeyWithManyVersions: a key may have any number of versions. Finding
+// one of them by name, finding the null version among them, and reading the
+// first of them do not walk the others - which matters most where it happens
+// inside the state machine, with every other change waiting.
+func TestAKeyWithManyVersions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openStore(t, t.TempDir())
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	null := porttest.SampleVersion("b", "k", 1)
+	if _, err := store.PutVersion(ctx, null); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBucketVersioning(ctx, "b", bucket.VersioningEnabled); err != nil {
+		t.Fatal(err)
+	}
+	const many = 600
+	var middle object.Version
+	for i := range many {
+		v := porttest.SampleVersion("b", "k", 3)
+		binary.BigEndian.PutUint32(v.VersionID[:4], uint32(i)+1000)
+		binary.BigEndian.PutUint32(v.DataID[:4], uint32(i)+1000)
+		put, err := store.PutVersion(ctx, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == many/2 {
+			// As it was stored: with its sequence and its name.
+			middle = put.Stored
+		}
+	}
+	// How many versions a lookup decodes, counted in the state itself.
+	walked := func(fn func(h history)) int {
+		t.Helper()
+		n := 0
+		if err := store.fsm.view(func(tx *bbolt.Tx) error {
+			h, err := openHistory(tx, "b", false)
+			if err != nil {
+				return err
+			}
+			stats := tx.Stats()
+			before := stats.GetCursorCount()
+			fn(h)
+			stats = tx.Stats()
+			n = int(stats.GetCursorCount() - before)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for name, ref := range map[string]string{"the null version": object.NullVersion, "a version in the middle": middle.VersionID.String()} {
+		cursors := walked(func(h history) {
+			found, _, err := h.find("k", ref)
+			if err != nil || found == nil || refOf(*found) != ref {
+				t.Errorf("%s: %+v, %v", name, found, err)
+			}
+		})
+		if cursors > 4 {
+			t.Errorf("finding %s among %d versions opened %d cursors: it walks", name, many, cursors)
+		}
+	}
+	// A scan that looks at the first version only does not read the rest.
+	visited := 0
+	if err := store.ScanVersions(ctx, "b", ports.VersionCursor{}, func(object.Version, bool) ports.ScanControl {
+		visited++
+		return ports.ScanControl{Stop: true}
+	}); err != nil || visited != 1 {
+		t.Fatalf("ScanVersions: %d visits, %v", visited, err)
+	}
+	// A scan resumed after a version in the middle goes on with the next.
+	var next []object.Version
+	after := middle.Ref()
+	if err := store.ScanVersions(ctx, "b", ports.VersionCursor{Key: "k", After: &after}, func(v object.Version, latest bool) ports.ScanControl {
+		if latest {
+			t.Error("a version in the middle of a key is called its latest")
+		}
+		next = append(next, v)
+		return ports.ScanControl{Stop: len(next) == 2}
+	}); err != nil || len(next) != 2 || next[0].Seq >= middle.Seq || next[1].Seq >= next[0].Seq {
+		t.Fatalf("resuming after a version in the middle: %d versions, %v", len(next), err)
+	}
+	// Resuming after the oldest version of the last key ends the scan;
+	// after one that is gone, goes on with the next key.
+	if _, err := store.PutVersion(ctx, porttest.SampleVersion("b", "z", 9)); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	gone := object.VersionRef{ID: object.ID{0xEE}}
+	if err := store.ScanVersions(ctx, "b", ports.VersionCursor{Key: "k", After: &gone}, func(v object.Version, _ bool) ports.ScanControl {
+		keys = append(keys, v.Key)
+		return ports.ScanControl{}
+	}); err != nil || !slices.Equal(keys, []string{"z"}) {
+		t.Errorf("resuming after a version that is gone visits %v, %v", keys, err)
+	}
+	// Under Suspended every put replaces the null version: found, not searched for.
+	if err := store.SetBucketVersioning(ctx, "b", bucket.VersioningSuspended); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := store.PutVersion(ctx, porttest.SampleVersion("b", "k", 5))
+	if err != nil || replaced.Removed == nil || replaced.Removed.DataID != null.DataID {
+		t.Fatalf("a put over a null version under %d others = %+v, %v", many, replaced.Removed, err)
+	}
+	checkInvariant(t, store, "b")
 }

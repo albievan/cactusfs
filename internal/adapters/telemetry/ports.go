@@ -197,7 +197,7 @@ func (m *metadata) GetVersion(ctx context.Context, bucketName, key string, ref o
 
 // ScanVersions implements ports.ObjectIndex.
 func (m *metadata) ScanVersions(
-	ctx context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+	ctx context.Context, bucketName string, start ports.VersionCursor, visit func(object.Version, bool) ports.ScanControl,
 ) error {
 	ctx, done := m.t.call(ctx, portMetadata, "ScanVersions")
 	err := m.next.ScanVersions(ctx, bucketName, start, visit)

@@ -265,6 +265,11 @@ func versionOf(e entry) byte {
 	if !e.At.IsZero() || e.Type == cmdSetVersioning || e.Type == cmdDeleteVersion {
 		return entrySchemaTimed
 	}
+	// A bucket created with what only this schema knows: a binary of the
+	// first would create it without, and not notice.
+	if e.CreateBucket != nil && (e.CreateBucket.Versioning != "" || e.CreateBucket.ObjectLock) {
+		return entrySchemaTimed
+	}
 	return entrySchemaVersion
 }
 

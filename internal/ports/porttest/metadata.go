@@ -146,6 +146,11 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	switch b.Versioning {
 	case bucket.VersioningEnabled:
 		stored.Versioned, stored.Seq = true, m.seq
+		for _, existing := range versions {
+			if existing.Versioned && existing.VersionID == stored.VersionID {
+				return ports.PutResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, stored.VersionID)
+			}
+		}
 	case bucket.VersioningSuspended:
 		stored.Versioned, stored.Seq = false, m.seq
 		versions, removed = take(versions, object.VersionRef{Null: true})
@@ -187,6 +192,12 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 	var removed *object.Version
 	if b.Versioning == bucket.VersioningSuspended {
 		versions, removed = take(versions, object.VersionRef{Null: true})
+	} else {
+		for _, existing := range versions {
+			if existing.Versioned && existing.VersionID == marker.VersionID {
+				return ports.DeleteResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, marker.VersionID)
+			}
+		}
 	}
 	m.store(bucketName, key, append([]object.Version{marker}, versions...))
 	return ports.DeleteResult{Marker: &marker, Removed: removed}, nil
@@ -339,16 +350,25 @@ func (m *MemMetadata) ScanObjects(
 
 // ScanVersions implements ports.ObjectIndex.
 func (m *MemMetadata) ScanVersions(
-	_ context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+	_ context.Context, bucketName string, start ports.VersionCursor, visit func(object.Version, bool) ports.ScanControl,
 ) error {
 	keys, versions, err := m.snapshot(bucketName)
 	if err != nil {
 		return err
 	}
-	for i := sort.SearchStrings(keys, start); i < len(keys); {
+	for i := sort.SearchStrings(keys, start.Key); i < len(keys); {
 		next := i + 1
-		for n, v := range versions[keys[i]] {
-			control := visit(v, n == 0)
+		list, first := versions[keys[i]], 0
+		if start.After != nil && keys[i] == start.Key {
+			first = len(list)
+			for n, v := range list {
+				if v.Is(*start.After) {
+					first = n + 1
+				}
+			}
+		}
+		for n := first; n < len(list); n++ {
+			control := visit(list[n], n == 0)
 			if control.Stop {
 				return nil
 			}

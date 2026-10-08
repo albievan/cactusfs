@@ -502,65 +502,51 @@ func (s *ObjectService) ListVersions(
 	}
 
 	var page VersionListPage
-	// Until the marker has been passed, entries are skipped: the versions
-	// of the marker's key up to and including the marker's version, or all
-	// of them when the marker names no version. A marker that is a common
-	// prefix skips everything under it.
-	passed := opts.KeyMarker == ""
-	lastPrefix := ""
-	count := 0
-	full := func(v object.Version) ports.ScanControl {
-		page.Truncated = true
-		_ = v
-		return ports.ScanControl{Stop: true}
+	// Where to begin: at the prefix, or after what the previous page ended
+	// with - a version of a key, a key, or a common prefix, which stands
+	// for every key under it.
+	start := ports.VersionCursor{Key: opts.Prefix}
+	skipKey := ""
+	switch group, grouped := object.CommonPrefix(opts.KeyMarker, opts.Prefix, opts.Delimiter); {
+	case opts.KeyMarker == "" || opts.KeyMarker < opts.Prefix:
+	case opts.VersionMarker != nil:
+		start = ports.VersionCursor{Key: opts.KeyMarker, After: opts.VersionMarker}
+	case grouped && group == opts.KeyMarker:
+		end, more := object.PrefixEnd(group)
+		if !more {
+			return page, nil
+		}
+		start.Key = end
+	default:
+		start.Key, skipKey = opts.KeyMarker, opts.KeyMarker
 	}
-	err := s.index.ScanVersions(ctx, bucketName, max(opts.Prefix, opts.KeyMarker), func(v object.Version, latest bool) ports.ScanControl {
-		if !strings.HasPrefix(v.Key, opts.Prefix) {
+	count := 0
+	err := s.index.ScanVersions(ctx, bucketName, start, func(v object.Version, latest bool) ports.ScanControl {
+		switch {
+		case !strings.HasPrefix(v.Key, opts.Prefix):
 			if v.Key < opts.Prefix {
 				return ports.ScanControl{SeekTo: opts.Prefix}
 			}
 			// Keys are ordered: past the prefix nothing can match.
 			return ports.ScanControl{Stop: true}
+		case v.Key == skipKey:
+			// Every version of the marker's key was on an earlier page.
+			return ports.ScanControl{SeekTo: v.Key + "\x00"}
+		case count == limit:
+			page.Truncated = true
+			return ports.ScanControl{Stop: true}
 		}
-		if !passed {
-			switch {
-			case v.Key != opts.KeyMarker:
-				passed = true
-			case opts.VersionMarker == nil:
-				return ports.ScanControl{SeekTo: v.Key + "\x00"}
-			default:
-				if v.Is(*opts.VersionMarker) {
-					passed = true
-				}
-				return ports.ScanControl{}
-			}
-		}
-		if opts.Delimiter != "" {
-			if i := strings.Index(v.Key[len(opts.Prefix):], opts.Delimiter); i >= 0 {
-				prefix := v.Key[:len(opts.Prefix)+i+len(opts.Delimiter)]
-				// Everything under the prefix is one entry; go on
-				// with the first key past it.
-				past := prefix[:len(prefix)-1] + string(rune(prefix[len(prefix)-1])+1)
-				if prefix == lastPrefix || (opts.VersionMarker == nil && opts.KeyMarker == prefix) {
-					return ports.ScanControl{SeekTo: past}
-				}
-				if count == limit {
-					return full(v)
-				}
-				lastPrefix = prefix
-				page.CommonPrefixes = append(page.CommonPrefixes, prefix)
-				page.NextKeyMarker, page.NextVersionMarker = prefix, nil
-				count++
-				return ports.ScanControl{SeekTo: past}
-			}
-		}
-		if count == limit {
-			return full(v)
+		count++
+		if group, ok := object.CommonPrefix(v.Key, opts.Prefix, opts.Delimiter); ok {
+			page.CommonPrefixes = append(page.CommonPrefixes, group)
+			page.NextKeyMarker, page.NextVersionMarker = group, nil
+			// Jump over every other key of the group.
+			end, more := object.PrefixEnd(group)
+			return ports.ScanControl{Stop: !more, SeekTo: end}
 		}
 		page.Versions = append(page.Versions, ListedVersion{Version: v, Latest: latest})
 		ref := v.Ref()
 		page.NextKeyMarker, page.NextVersionMarker = v.Key, &ref
-		count++
 		return ports.ScanControl{}
 	})
 	if err != nil {

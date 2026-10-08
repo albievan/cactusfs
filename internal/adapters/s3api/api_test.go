@@ -1483,3 +1483,70 @@ func FuzzStrictXML(f *testing.F) {
 		}
 	})
 }
+
+// TestStrictDocuments: a body that says what to destroy is read as exactly
+// what it says, or not at all.
+func TestStrictDocuments(t *testing.T) {
+	t.Parallel()
+	del := []string{"Delete", "Quiet", "Object", "Key", "VersionId"}
+	tests := map[string]string{
+		"an object hidden inside another": `<Delete><Object><Key>a</Key><Object><Key>hidden</Key></Object></Object></Delete>`,
+		"two keys in one object":          `<Delete><Object><Key>a</Key><Key>b</Key></Object></Delete>`,
+		"two version IDs in one object":   `<Delete><Object><Key>a</Key><VersionId>null</VersionId><VersionId>null</VersionId></Object></Delete>`,
+		"quiet said twice":                `<Delete><Quiet>true</Quiet><Quiet>false</Quiet><Object><Key>a</Key></Object></Delete>`,
+		"text beside elements":            `<Delete><Quiet>true<Object><Key>a</Key></Object></Quiet></Delete>`,
+		"a second document":               `<Delete><Object><Key>a</Key></Object></Delete><Delete><Object><Key>b</Key></Object></Delete>`,
+		"another root":                    `<Object><Key>a</Key></Object>`,
+		"a key inside a key":              `<Delete><Object><Key>a<Key>b</Key></Key></Object></Delete>`,
+	}
+	for name, body := range tests {
+		var in deleteRequest
+		if err := decodeStrictXML(strings.NewReader(body), maxDeleteXML, &in, del...); err == nil {
+			t.Errorf("%s: accepted, with %d objects", name, len(in.Objects))
+		}
+	}
+	var in deleteRequest
+	good := `<?xml version="1.0" encoding="UTF-8"?>
+		<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>false</Quiet>
+		<Object><Key>a</Key></Object><Object><Key>b</Key><VersionId>null</VersionId></Object></Delete>`
+	if err := decodeStrictXML(strings.NewReader(good), maxDeleteXML, &in, del...); err != nil || len(in.Objects) != 2 || in.Objects[1].VersionID == nil {
+		t.Fatalf("a well-formed document: %+v, %v", in, err)
+	}
+	var cfg versioningConfiguration
+	twice := `<VersioningConfiguration><Status>Enabled</Status><Status>Suspended</Status></VersioningConfiguration>`
+	if err := decodeStrictXML(strings.NewReader(twice), maxRequestXML, &cfg, "VersioningConfiguration", "Status", "MfaDelete"); err == nil {
+		t.Errorf("a status said twice was accepted as %q", cfg.Status)
+	}
+}
+
+// TestBodiesThatDestroyMustBeSigned: the body of DeleteObjects and of
+// PutBucketVersioning decides what is destroyed. A signature that does not
+// cover it - an unsigned payload, a presigned URL - is not enough.
+func TestBodiesThatDestroyMustBeSigned(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.putObject("/bkt/k", []byte("kept"))
+	body := []byte(`<Delete><Object><Key>k</Key></Object></Delete>`)
+
+	unsigned := s.do(call{method: http.MethodPost, path: "/bkt?delete", body: body, payloadHash: payloadUnsigned})
+	s.expectError(unsigned, http.StatusBadRequest, "InvalidRequest")
+	presigned := s.presign(http.MethodPost, "/bkt?delete", serverNow, 600, nil)
+	s.expectError(s.do(call{method: http.MethodPost, path: presigned, body: body, unsigned: true}), http.StatusBadRequest, "InvalidRequest")
+	suspend := s.do(call{method: http.MethodPut, path: "/bkt?versioning", body: versioningBody("Suspended"), payloadHash: payloadUnsigned})
+	s.expectError(suspend, http.StatusBadRequest, "InvalidRequest")
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusOK); string(got.body) != "kept" {
+		t.Fatal("a request whose body was not signed deleted an object")
+	}
+
+	// A digest in a signed header binds the body as well as its SHA-256.
+	digest := newETagHash()
+	digest.Write(body)
+	sum := digest.Sum(nil)
+	withDigest := s.do(call{
+		method: http.MethodPost, path: "/bkt?delete", body: body, payloadHash: payloadUnsigned,
+		headers: map[string]string{"Content-MD5": base64.StdEncoding.EncodeToString(sum)},
+	})
+	s.mustStatus(withDigest, http.StatusOK)
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
+}

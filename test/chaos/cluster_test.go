@@ -297,10 +297,20 @@ func TestClusterPartition(t *testing.T) {
 		// The partition heals. The node catches up and serves the new
 		// version; the write it refused does not exist.
 		c.Rejoin(cut)
+		// What the node last answered goes into the failure: "it did not
+		// recover" is not something anybody can act on.
+		var last error
+		rejoined := time.Now()
 		c.Eventually(cut+" to serve the current version after the partition", 90*time.Second, func() bool {
 			got, err := c.Get(ctx, cut, clusterBucket, "contested")
 			if err == nil && bytes.Equal(got, old) {
 				t.Fatalf("%s served the overwritten version after rejoining", cut)
+			}
+			if last = err; err == nil && !bytes.Equal(got, fresh) {
+				last = fmt.Errorf("%d bytes that are neither version", len(got))
+			}
+			if err != nil && time.Since(rejoined) > 80*time.Second {
+				t.Logf("%s, %s after rejoining: %v", cut, time.Since(rejoined).Round(time.Second), last)
 			}
 			return err == nil && bytes.Equal(got, fresh)
 		})

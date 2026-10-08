@@ -9,6 +9,7 @@
 package raftmeta
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -711,15 +712,18 @@ func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResu
 	if err != nil {
 		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
 	}
+	// From here on the version is committed. An answer that cannot be
+	// read is not a failure of the put: nothing the version refers to may
+	// be removed on the strength of it.
 	removed, err := versionOfRecord(result.previous)
 	if err != nil {
-		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
+		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w: %w", domain.ErrOutcomeUnknown, err)
 	}
 	out := ports.PutResult{Stored: v, Removed: removed}
 	// A leader of the previous release does not say what it stored; then
 	// the bucket cannot keep versions, and what was proposed is it.
 	if stored, err := versionOfRecord(result.stored); err != nil {
-		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
+		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w: %w", domain.ErrOutcomeUnknown, err)
 	} else if stored != nil {
 		out.Stored = *stored
 	}
@@ -740,7 +744,13 @@ func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o port
 		// first schema, no bucket keeps versions, and a delete is what it
 		// always was.
 		if level, levelErr := s.entryVersion(); levelErr == nil && level < entrySchemaTimed {
+			unavailable := err
 			result, err = s.propose(ctx, entry{Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: bucketName, Key: key}})
+			if errors.Is(err, domain.ErrInvalidBucketState) {
+				// The bucket keeps versions after all: the request is
+				// right and the cluster is not ready for it.
+				err = unavailable
+			}
 		}
 	}
 	if err != nil {
@@ -748,11 +758,11 @@ func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o port
 	}
 	removed, err := versionOfRecord(result.previous)
 	if err != nil {
-		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w: %w", domain.ErrOutcomeUnknown, err)
 	}
 	marker, err := versionOfRecord(result.marker)
 	if err != nil {
-		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w: %w", domain.ErrOutcomeUnknown, err)
 	}
 	return ports.DeleteResult{Marker: marker, Removed: removed}, nil
 }
@@ -808,9 +818,11 @@ func (s *Store) GetVersion(ctx context.Context, bucketName, key string, ref obje
 
 // ScanVersions implements ports.ObjectIndex. The whole scan sees one
 // consistent state. The current versions and the others live in two indexes
-// in the same key order; the scan walks both and joins them key by key.
+// in the same key order; the scan walks both and joins them key by key,
+// straight from the cursors: a key with a million versions costs what the
+// caller looks at, not a million.
 func (s *Store) ScanVersions(
-	ctx context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+	ctx context.Context, bucketName string, start ports.VersionCursor, visit func(object.Version, bool) ports.ScanControl,
 ) error {
 	err := s.view(ctx, func(tx *bbolt.Tx) error {
 		if tx.Bucket(objectsBucket()).Bucket([]byte(bucketName)) == nil {
@@ -849,7 +861,15 @@ func (s *Store) ScanVersions(
 			}
 			return best, found, nil
 		}
-		from := start
+		show := func(record *versionRecord, latest bool) (ports.ScanControl, error) {
+			version, err := record.toDomain()
+			if err != nil {
+				return ports.ScanControl{}, fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+			}
+			return visit(version, latest), nil
+		}
+
+		from, resume := start.Key, start.After
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -858,34 +878,62 @@ func (s *Store) ScanVersions(
 			if err != nil || !found {
 				return err
 			}
-			var versions []*versionRecord
-			if record, err := readVersion(h.current, key); err != nil {
-				return err
-			} else if record != nil {
-				versions = append(versions, record)
-			}
-			if err := h.each(key, func(_ []byte, v *versionRecord) (bool, error) {
-				versions = append(versions, v)
-				return true, nil
-			}); err != nil {
-				return err
-			}
 			// The first version after this key begins here: the key
 			// followed by the smallest byte there is.
 			from = key + "\x00"
-			for i, record := range versions {
-				version, err := record.toDomain()
+			record, err := readVersion(h.current, key)
+			if err != nil {
+				return err
+			}
+			// Where among the versions of this key to begin: at the
+			// newest, or right after the one the caller saw last.
+			prefix := encodeKey(key)
+			var k, raw []byte
+			if older != nil {
+				k, raw = older.Seek(prefix)
+			}
+			latest := true
+			if resume != nil && key == start.Key {
+				switch after, storedKey, err := h.find(key, resume.String()); {
+				case err != nil:
+					return err
+				case after == nil:
+					// The version the caller saw last is gone; where
+					// it was cannot be told. Go on with the next key.
+					resume = nil
+					continue
+				case storedKey == nil:
+					// It was the current one: the others follow.
+					record, latest = nil, false
+				default:
+					record, latest = nil, false
+					if k, raw = older.Seek(storedKey); k != nil {
+						k, raw = older.Next()
+					}
+				}
+			}
+			resume = nil
+			seek := ""
+			if record != nil {
+				control, err := show(record, true)
+				if err != nil || control.Stop {
+					return err
+				}
+				latest, seek = false, control.SeekTo
+			}
+			for ; seek <= key && k != nil && bytes.HasPrefix(k, prefix); k, raw = older.Next() {
+				record, err := decodeVersion(raw)
 				if err != nil {
-					return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+					return err
 				}
-				control := visit(version, i == 0)
-				if control.Stop {
-					return nil
+				control, err := show(record, latest)
+				if err != nil || control.Stop {
+					return err
 				}
-				if control.SeekTo > key {
-					from = control.SeekTo
-					break
-				}
+				latest, seek = false, control.SeekTo
+			}
+			if seek > key {
+				from = seek
 			}
 		}
 	})

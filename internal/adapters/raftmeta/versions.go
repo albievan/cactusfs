@@ -26,6 +26,12 @@ import (
 //
 // A key in "versions" is enc(object key) ‖ ^seq ‖ version ID: the versions of
 // one object key are together, newest first.
+//
+// "versionids/<bucket>" finds a version in "versions" by its name without
+// walking the versions of its key: enc(object key) ‖ version ID -> ^seq. It
+// is derived from "versions" and rebuilt when it is missing. A key can have
+// any number of versions; no request, and no entry being applied, may cost
+// time in proportion to that number.
 
 const (
 	versionSuffixSize = 8 + object.IDSize
@@ -105,10 +111,55 @@ func refOf(v versionRecord) string {
 	return v.VersionID
 }
 
+func versionIDsBucket() []byte { return []byte("versionids") }
+
+// locator returns the key of a version in "versionids", for a version named
+// as clients name it. ok is false for a name that is neither "null" nor an
+// ID.
+func locator(key, ref string) (out []byte, ok bool) {
+	out = encodeKey(key)
+	if ref == object.NullVersion {
+		return append(out, make([]byte, object.IDSize)...), true
+	}
+	id, err := object.ParseID(ref)
+	if err != nil {
+		return nil, false
+	}
+	return append(out, id[:]...), true
+}
+
+// ensureVersionIndex creates "versionids" from "versions" when the state
+// does not have it.
+func ensureVersionIndex(tx *bbolt.Tx) error {
+	if tx.Bucket(versionIDsBucket()) != nil {
+		return nil
+	}
+	index, err := tx.CreateBucket(versionIDsBucket())
+	if err != nil {
+		return err
+	}
+	holder := tx.Bucket(versionsBucket())
+	return holder.ForEachBucket(func(name []byte) error {
+		ids, err := index.CreateBucketIfNotExists(name)
+		if err != nil {
+			return err
+		}
+		return holder.Bucket(name).ForEach(func(k, _ []byte) error {
+			if len(k) < versionSuffixSize {
+				return fmt.Errorf("%w: stored version key", domain.ErrIntegrity)
+			}
+			split := len(k) - versionSuffixSize
+			at := append(bytes.Clone(k[:split]), k[split+8:]...)
+			return ids.Put(at, bytes.Clone(k[split:split+8]))
+		})
+	})
+}
+
 // history is the versions of one bucket inside a transaction.
 type history struct {
 	current *bbolt.Bucket // objects/<bucket>
 	older   *bbolt.Bucket // versions/<bucket>; nil when the bucket never kept any
+	ids     *bbolt.Bucket // versionids/<bucket>; nil exactly when older is
 }
 
 func openHistory(tx *bbolt.Tx, bucketName string, write bool) (history, error) {
@@ -117,15 +168,25 @@ func openHistory(tx *bbolt.Tx, bucketName string, write bool) (history, error) {
 	if holder == nil {
 		return h, nil
 	}
+	index := tx.Bucket(versionIDsBucket())
 	if write {
 		older, err := holder.CreateBucketIfNotExists([]byte(bucketName))
 		if err != nil {
 			return history{}, err
 		}
-		h.older = older
+		ids, err := index.CreateBucketIfNotExists([]byte(bucketName))
+		if err != nil {
+			return history{}, err
+		}
+		h.older, h.ids = older, ids
 		return h, nil
 	}
 	h.older = holder.Bucket([]byte(bucketName))
+	if h.older != nil {
+		if h.ids = index.Bucket([]byte(bucketName)); h.ids == nil {
+			return history{}, fmt.Errorf("%w: bucket %s has versions and no index of them", domain.ErrIntegrity, bucketName)
+		}
+	}
 	return h, nil
 }
 
@@ -160,14 +221,25 @@ func (h history) find(key, ref string) (found *versionRecord, storedKey []byte, 
 	if current != nil && refOf(*current) == ref {
 		return current, nil, nil
 	}
-	err = h.each(key, func(k []byte, v *versionRecord) (bool, error) {
-		if refOf(*v) == ref {
-			found, storedKey = v, k
-			return false, nil
-		}
-		return true, nil
-	})
-	return found, storedKey, err
+	at, ok := locator(key, ref)
+	if !ok || h.older == nil {
+		return nil, nil, nil
+	}
+	inverted := h.ids.Get(at)
+	if inverted == nil {
+		return nil, nil, nil
+	}
+	// The key in "versions": the object key, the sequence, the ID.
+	split := len(at) - object.IDSize
+	storedKey = append(append(bytes.Clone(at[:split]), inverted...), at[split:]...)
+	raw := h.older.Get(storedKey)
+	if raw == nil {
+		return nil, nil, fmt.Errorf("%w: the index of versions names one that is not there", domain.ErrIntegrity)
+	}
+	if found, err = decodeVersion(raw); err != nil {
+		return nil, nil, err
+	}
+	return found, storedKey, nil
 }
 
 // retire moves the current version of a key, if there is one, to "versions".
@@ -191,7 +263,20 @@ func (h history) putOlder(v versionRecord) error {
 	if err != nil {
 		return err
 	}
-	return h.older.Put(k, data)
+	if err := h.older.Put(k, data); err != nil {
+		return err
+	}
+	split := len(k) - versionSuffixSize
+	return h.ids.Put(append(bytes.Clone(k[:split]), k[split+8:]...), bytes.Clone(k[split:split+8]))
+}
+
+// dropOlder takes a version out of "versions" and out of the index of it.
+func (h history) dropOlder(storedKey []byte) error {
+	if err := h.older.Delete(storedKey); err != nil {
+		return err
+	}
+	split := len(storedKey) - versionSuffixSize
+	return h.ids.Delete(append(bytes.Clone(storedKey[:split]), storedKey[split+8:]...))
 }
 
 // remove takes a version out of the state for good.
@@ -199,7 +284,7 @@ func (h history) remove(v versionRecord, storedKey []byte) error {
 	if storedKey == nil {
 		return h.current.Delete([]byte(v.Key))
 	}
-	return h.older.Delete(storedKey)
+	return h.dropOlder(storedKey)
 }
 
 // promote restores the invariant after a version was removed: when the
@@ -223,7 +308,7 @@ func (h history) promote(key string) error {
 	if err := h.current.Put([]byte(key), data); err != nil {
 		return err
 	}
-	return h.older.Delete(newestKey)
+	return h.dropOlder(newestKey)
 }
 
 func readBucket(tx *bbolt.Tx, name string) (*bucketRecord, error) {
@@ -295,6 +380,14 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 	switch state {
 	case bucket.VersioningEnabled:
 		v.Versioned, v.Seq = true, now.index
+		// IDs are random and do not repeat; an entry that names one the
+		// key already has is a mistake, and two versions under one name
+		// would make one of them unreachable.
+		if taken, _, err := h.find(v.Key, v.VersionID); err != nil {
+			return applyResult{}, err
+		} else if taken != nil {
+			return refuse(domain.ErrConflict, "version %s of %s/%s exists", v.VersionID, v.Bucket, v.Key)
+		}
 		if err := h.retire(v.Key); err != nil {
 			return applyResult{}, err
 		}
@@ -433,6 +526,13 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 	}
 	if _, err := object.ParseID(cmd.MarkerID); err != nil {
 		return refuse(domain.ErrInvalidArgument, "delete marker ID")
+	}
+	if marker.Versioned {
+		if taken, _, err := h.find(cmd.Key, cmd.MarkerID); err != nil {
+			return applyResult{}, err
+		} else if taken != nil {
+			return refuse(domain.ErrConflict, "version %s of %s/%s exists", cmd.MarkerID, cmd.Bucket, cmd.Key)
+		}
 	}
 	var removed *versionRecord
 	if state == bucket.VersioningSuspended {

@@ -417,3 +417,125 @@ func TestOldVersionsAreKeptAndCared(t *testing.T) {
 		t.Errorf("%d shards after two versions were removed, want %d", f.shardCount(), sixDrives)
 	}
 }
+
+// TestListVersionsEdges: delimiters that are not ASCII, and a listing whose
+// marker disappears between two pages.
+func TestListVersionsEdges(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := erasureFixture(t)
+	f.versioning(t, "b", bucket.VersioningEnabled)
+	for _, key := range []string{"xéy", "xêz", "xëw", "a\x00b", "a\x00c"} {
+		f.put(t, "b", key, []byte(key))
+	}
+	list := func(opts app.VersionListOptions) app.VersionListPage {
+		t.Helper()
+		page, err := f.objects.ListVersions(ctx, porttest.Root(), "b", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+	keys := func(page app.VersionListPage) []string {
+		var out []string
+		for _, v := range page.Versions {
+			out = append(out, v.Version.Key)
+		}
+		return append(out, page.CommonPrefixes...)
+	}
+	// Whatever the delimiter, a version listing names what the object
+	// listing names.
+	for _, delimiter := range []string{"é", "ê", "\x00", "x", "y"} {
+		objects, err := f.objects.List(ctx, porttest.Root(), "b", object.ListOptions{MaxKeys: 1000, Delimiter: delimiter})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want []string
+		for _, v := range objects.Objects {
+			want = append(want, v.Key)
+		}
+		want = append(want, objects.CommonPrefixes...)
+		if got := keys(list(app.VersionListOptions{MaxKeys: 1000, Delimiter: delimiter})); !slices.Equal(got, want) {
+			t.Errorf("delimiter %q: versions %q, objects %q", delimiter, got, want)
+		}
+		// And page by page.
+		var paged []string
+		opts := app.VersionListOptions{MaxKeys: 1, Delimiter: delimiter}
+		for range 20 {
+			page := list(opts)
+			paged = append(paged, keys(page)...)
+			if !page.Truncated {
+				break
+			}
+			opts.KeyMarker, opts.VersionMarker = page.NextKeyMarker, page.NextVersionMarker
+		}
+		slices.Sort(paged)
+		sorted := slices.Clone(want)
+		slices.Sort(sorted)
+		if !slices.Equal(paged, sorted) {
+			t.Errorf("delimiter %q, pages of one: %q, want %q", delimiter, paged, sorted)
+		}
+	}
+
+	// The version a page ended with is removed before the next page is
+	// asked for. Where it was cannot be told any more: the listing goes on
+	// with the next key and repeats nothing.
+	for range 4 {
+		f.put(t, "b", "k", []byte("again"))
+	}
+	f.put(t, "b", "z", []byte("z"))
+	first := list(app.VersionListOptions{MaxKeys: 2, Prefix: "k"})
+	if len(first.Versions) != 2 || first.NextVersionMarker == nil {
+		t.Fatalf("first page = %+v", first)
+	}
+	if _, err := f.objects.Delete(ctx, porttest.Root(), app.DeleteInput{Bucket: "b", Key: "k", Version: first.NextVersionMarker}); err != nil {
+		t.Fatal(err)
+	}
+	rest := list(app.VersionListOptions{MaxKeys: 100, KeyMarker: first.NextKeyMarker, VersionMarker: first.NextVersionMarker})
+	for _, v := range rest.Versions {
+		if v.Version.Key <= "k" {
+			t.Errorf("after a marker that is gone the listing went back to %q", v.Version.Key)
+		}
+	}
+	if len(rest.Versions) == 0 {
+		t.Error("after a marker that is gone the listing ended instead of going on")
+	}
+}
+
+// TestReadWriteUnderSuspendedVersioning: what the read-write role cannot
+// destroy, it cannot destroy while versioning is enabled. Suspended, a put
+// or a delete replaces the null version, as S3 defines it - and versions
+// with IDs stay. The role cannot suspend versioning itself.
+func TestReadWriteUnderSuspendedVersioning(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := erasureFixture(t)
+	writer := userWith(iam.RoleReadWrite)
+	f.versioning(t, "b", bucket.VersioningEnabled)
+	kept := f.put(t, "b", "k", []byte("has an ID"))
+	if err := f.buckets.SetVersioning(ctx, writer, "b", bucket.VersioningSuspended); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Fatalf("read-write suspending versioning = %v", err)
+	}
+	f.versioning(t, "b", bucket.VersioningSuspended)
+	put := func(content string) {
+		t.Helper()
+		if _, err := f.objects.Put(ctx, writer, app.PutInput{Bucket: "b", Key: "k", Body: bytes.NewReader([]byte(content)), Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("null one")
+	put("null two")
+	if _, err := f.objects.Delete(ctx, writer, app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	null := object.VersionRef{Null: true}
+	if _, err := f.objects.Delete(ctx, writer, app.DeleteInput{Bucket: "b", Key: "k", Version: &null}); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("read-write removing the null version by name = %v", err)
+	}
+	if got, err := f.getVersion("k", kept.Ref()); err != nil || string(got) != "has an ID" {
+		t.Errorf("the version with an ID after puts and a delete under suspension: %q, %v", got, err)
+	}
+	if f.shardCount() != sixDrives {
+		t.Errorf("%d shards, want only those of the version with an ID (%d)", f.shardCount(), sixDrives)
+	}
+}

@@ -634,7 +634,10 @@ func TestCallsToTheLeader(t *testing.T) {
 	// The leader has the request and is working on it when the caller's
 	// patience ends: the entry may be in the log.
 	slow.meta.block = true
-	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	// Long enough that a busy machine has handed the request over before
+	// the patience ends: a call that ends before that is a definite
+	// failure, and not what is tested here.
+	short, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if _, err := client.Propose(short, "meta-3", []byte("late")); !errors.Is(err, domain.ErrOutcomeUnknown) {
 		t.Errorf("Propose whose answer did not come = %v, want %v", err, domain.ErrOutcomeUnknown)

@@ -147,18 +147,18 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 	// Every version is checked, not only the current one of each key: an
 	// old version that rots unnoticed is gone on the day it is wanted. A
 	// batch ends between two keys.
-	start := ""
+	// A batch is a fixed number of versions, wherever it ends: the next
+	// begins after the last version of this one.
+	var start ports.VersionCursor
 	for {
 		var batch []object.Version
-		next, more := "", false
-		err := s.index.ScanVersions(ctx, bucketName, start, func(v object.Version, latest bool) ports.ScanControl {
-			if latest && len(batch) >= scrubBatch {
-				next, more = v.Key, true
+		more := false
+		err := s.index.ScanVersions(ctx, bucketName, start, func(v object.Version, _ bool) ports.ScanControl {
+			if len(batch) == scrubBatch {
+				more = true
 				return ports.ScanControl{Stop: true}
 			}
-			if !v.DeleteMarker {
-				batch = append(batch, v)
-			}
+			batch = append(batch, v)
 			return ports.ScanControl{}
 		})
 		if errors.Is(err, domain.ErrBucketNotFound) {
@@ -174,12 +174,15 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 			if !s.isActive() {
 				return errStandby
 			}
-			s.scrubObject(ctx, version, stats)
+			if !version.DeleteMarker {
+				s.scrubObject(ctx, version, stats)
+			}
 		}
 		if !more {
 			return nil
 		}
-		start = next
+		last := batch[len(batch)-1].Ref()
+		start = ports.VersionCursor{Key: batch[len(batch)-1].Key, After: &last}
 	}
 }
 

@@ -739,7 +739,7 @@ func ShardStoreContract(t *testing.T, open func(t *testing.T) ports.ShardStore) 
 func listing(t *testing.T, store Metadata, bucketName, start string) []string {
 	t.Helper()
 	var out []string
-	err := store.ScanVersions(context.Background(), bucketName, start, func(v object.Version, latest bool) ports.ScanControl {
+	err := store.ScanVersions(context.Background(), bucketName, ports.VersionCursor{Key: start}, func(v object.Version, latest bool) ports.ScanControl {
 		entry := v.Key + "@" + v.Ref().String()
 		if !v.Ref().Null {
 			entry = v.Key + "@" + v.Ref().String()[:2]
@@ -850,6 +850,12 @@ func versionsContract(t *testing.T, store Metadata) {
 		t.Errorf("GetVersion in a missing bucket = %v", err)
 	}
 
+	// An ID a key already has is not given to another version of it.
+	if _, err := store.PutVersion(ctx, SampleVersion("v", "k", 0x20)); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("a put with the ID of an existing version = %v, want %v", err, domain.ErrConflict)
+	}
+	want("after a refused put", "k@30*", "k@20", "k@null")
+
 	// Deleting the object adds a marker and removes nothing.
 	d := del("k", nil, 0x40)
 	if d.Marker == nil || !d.Marker.DeleteMarker || !d.Marker.Versioned || d.Marker.VersionID != id(0x40).ID || d.Removed != nil {
@@ -939,7 +945,7 @@ func versionsContract(t *testing.T, store Metadata) {
 		del(key, nil, byte(0xa0+i))
 	}
 	var keys []string
-	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, latest bool) ports.ScanControl {
+	if err := store.ScanVersions(ctx, "v", ports.VersionCursor{}, func(v object.Version, latest bool) ports.ScanControl {
 		if latest {
 			keys = append(keys, v.Key)
 			if !v.DeleteMarker {
@@ -968,7 +974,7 @@ func versionsContract(t *testing.T, store Metadata) {
 		t.Errorf("scan from ab begins with %v", got)
 	}
 	var jumped []string
-	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, _ bool) ports.ScanControl {
+	if err := store.ScanVersions(ctx, "v", ports.VersionCursor{}, func(v object.Version, _ bool) ports.ScanControl {
 		jumped = append(jumped, v.Key)
 		if v.Key < "ab" {
 			return ports.ScanControl{SeekTo: "ab"}
@@ -980,13 +986,13 @@ func versionsContract(t *testing.T, store Metadata) {
 	if len(jumped) < 3 || jumped[0] != "\x00" || jumped[1] != "ab" || jumped[len(jumped)-1] != "k" {
 		t.Errorf("a scan that jumps to ab visited %q", jumped)
 	}
-	if err := store.ScanVersions(ctx, "nope", "", func(object.Version, bool) ports.ScanControl { return ports.ScanControl{} }); !errors.Is(err, domain.ErrBucketNotFound) {
+	if err := store.ScanVersions(ctx, "nope", ports.VersionCursor{}, func(object.Version, bool) ports.ScanControl { return ports.ScanControl{} }); !errors.Is(err, domain.ErrBucketNotFound) {
 		t.Errorf("ScanVersions of a missing bucket = %v", err)
 	}
 
 	// Emptying the bucket means removing every version, markers included.
 	var all []object.Version
-	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, _ bool) ports.ScanControl {
+	if err := store.ScanVersions(ctx, "v", ports.VersionCursor{}, func(v object.Version, _ bool) ports.ScanControl {
 		all = append(all, v)
 		return ports.ScanControl{}
 	}); err != nil {

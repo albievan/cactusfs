@@ -50,6 +50,7 @@ func errorMappings() []mapping {
 
 		// Payload.
 		{errUnsupportedPayload, errNotImplemented()},
+		{errUnsignedBody, apiError{http.StatusBadRequest, "InvalidRequest", "The body of this request must be covered by its signature: send x-amz-content-sha256, Content-MD5 or a checksum header."}},
 		{errUnsupportedChecksum, apiError{http.StatusBadRequest, "InvalidRequest", "The checksum algorithm you specified is not supported."}},
 		{errChunkFraming, apiError{http.StatusBadRequest, "IncompleteBody", "The request body is not valid aws-chunked content."}},
 		{errSHA256Mismatch, apiError{http.StatusBadRequest, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed."}},

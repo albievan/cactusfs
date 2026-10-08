@@ -1,6 +1,7 @@
 package raftmeta
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -20,6 +21,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -791,7 +793,7 @@ func TestEventsComeFromAppliedEntries(t *testing.T) {
 		}
 	}
 	created, ok := reference[1].Data.(ports.ObjectEvent)
-	if !ok || created.Key != "k" || created.VersionID != version.VersionID.String() || created.Size != version.Size {
+	if !ok || created.Key != "k" || created.VersionID != object.NullVersion || created.Size != version.Size {
 		t.Errorf("object-created payload = %+v", reference[1].Data)
 	}
 	if !reference[0].Time.Equal(time.Unix(1000, 0)) {
@@ -1120,5 +1122,64 @@ func TestTheLeaderStampsEntries(t *testing.T) {
 			schema, at := stateOf(id)
 			return schema == stateSchemaTimed && at.Equal(noon)
 		})
+	}
+}
+
+// TestVersionsWhenAMemberHasNotRegistered: once a bucket keeps versions, the
+// cluster holds what only schema 2 expresses, and a member that has not said
+// which schema it applies - one that was just added, or one whose record was
+// removed - cannot take it back to schema 1: deletes still make markers and
+// puts are still stamped.
+func TestVersionsWhenAMemberHasNotRegistered(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+	c.register("m1", "m2", "m3", "s4")
+	store := c.store("m1")
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "ver"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBucketVersioning(ctx, "ver", bucket.VersioningEnabled); err != nil {
+		t.Fatal(err)
+	}
+	first := porttest.SampleVersion("ver", "k", 1)
+	if _, err := store.PutVersion(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// s4's record goes; s4 is still a member of the group.
+	if err := store.RemoveNode(ctx, "s4"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"m1", "s4"} {
+		marker := object.ID(bytes.Repeat([]byte{0x70 + id[1]}, object.IDSize))
+		deleted, err := c.store(id).DeleteObject(ctx, "ver", "k", ports.DeleteOptions{MarkerID: marker, At: time.Now()})
+		if err != nil || deleted.Marker == nil || deleted.Removed != nil {
+			t.Fatalf("delete through %s with an unregistered member = %+v, %v; want a delete marker", id, deleted, err)
+		}
+	}
+	if _, err := store.GetVersion(ctx, "ver", "k", first.Ref()); err == nil {
+		// first was put while Enabled, so it has an ID of its own.
+		t.Log("the version is still there")
+	}
+	second := porttest.SampleVersion("ver", "k", 3)
+	put, err := c.store("s4").PutVersion(ctx, second)
+	if err != nil || !put.Stored.Versioned || put.Removed != nil {
+		t.Fatalf("put with an unregistered member = %+v, %v", put, err)
+	}
+	// Still stamped by the leader.
+	var schema uint64
+	var at time.Time
+	if err := c.store(c.leader()).fsm.view(func(tx *bbolt.Tx) error {
+		schema, at = binary.BigEndian.Uint64(tx.Bucket(metaBucket()).Get(schemaKey())), readTime(tx)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if schema != stateSchemaTimed || time.Since(at) > time.Minute {
+		t.Errorf("state schema %d, time of the newest entry %v: entries are no longer stamped", schema, at)
+	}
+	if got, err := store.GetVersion(ctx, "ver", "k", object.VersionRef{ID: first.VersionID}); err != nil || got.DataID != first.DataID {
+		t.Errorf("the first version after two deletes and a put: %v", err)
 	}
 }
