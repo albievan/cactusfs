@@ -110,6 +110,71 @@ type SessionService struct {
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
+
+	attempts attemptLimiter
+}
+
+const (
+	// signInAttempts is how many failed sign-ins one address may make in
+	// signInWindow before it has to wait for the window to end.
+	signInAttempts = 10
+	signInWindow   = 5 * time.Minute
+	// signInAddresses bounds how many addresses are remembered.
+	signInAddresses = 10_000
+)
+
+// attemptLimiter counts failed sign-ins per address. It lives in one node's
+// memory: it slows guessing down, it does not lock anybody out, and a
+// cluster allows as many attempts as it has gateways.
+type attemptLimiter struct {
+	mu     sync.Mutex
+	failed map[string]*attemptWindow
+}
+
+type attemptWindow struct {
+	since time.Time
+	count int
+}
+
+// reserve counts an attempt from an address that is about to be checked,
+// and reports false when the address has used up its attempts.
+func (l *attemptLimiter) reserve(address string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.failed == nil {
+		l.failed = map[string]*attemptWindow{}
+	}
+	w, ok := l.failed[address]
+	if ok && now.Sub(w.since) < signInWindow {
+		if w.count >= signInAttempts {
+			return false
+		}
+		w.count++
+		return true
+	}
+	if !ok && len(l.failed) >= signInAddresses {
+		// Full: forget the windows that have ended, and if none has,
+		// all of them. Forgetting errs towards letting people in.
+		for known, window := range l.failed {
+			if now.Sub(window.since) >= signInWindow {
+				delete(l.failed, known)
+			}
+		}
+		if len(l.failed) >= signInAddresses {
+			clear(l.failed)
+		}
+	}
+	l.failed[address] = &attemptWindow{since: now, count: 1}
+	return true
+}
+
+// forgive takes back the count of an attempt that was not a wrong guess.
+func (l *attemptLimiter) forgive(address string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w, ok := l.failed[address]; ok && w.count > 0 {
+		w.count--
+	}
 }
 
 // SessionServiceConfig lists what a SessionService depends on.
@@ -156,10 +221,28 @@ func (s *SessionService) newToken() (string, error) {
 
 // SignIn checks a user's credentials and starts a session. A refusal wraps
 // domain.ErrAccessDenied, says nothing about why, and is audited.
+//
+// An address that keeps failing is made to wait: the error then wraps
+// domain.ErrTooManyAttempts, and the password is not looked at.
 func (s *SessionService) SignIn(ctx context.Context, username, password string, session iam.Session) (SignedIn, error) {
+	from := session.SourceIP.String()
+	// The attempt is counted before the password is looked at: guesses
+	// made at the same moment count like guesses made one by one.
+	if !s.attempts.reserve(from, s.clock.Now()) {
+		s.auditor.AuthenticationFailed(ctx, string(ActionSignIn), "", session, "too many failed attempts from this address")
+		return SignedIn{}, fmt.Errorf("session.SignIn: %w", domain.ErrTooManyAttempts)
+	}
+	failed := false
+	defer func() {
+		if !failed {
+			// Only a wrong guess counts against an address.
+			s.attempts.forgive(from)
+		}
+	}()
 	name, err := s.provider.Authenticate(ctx, username, password)
 	if err != nil {
 		if errors.Is(err, domain.ErrAccessDenied) {
+			failed = true
 			// What was typed into the user field is kept only if it
 			// could be a user name: people type passwords there.
 			claimed := username

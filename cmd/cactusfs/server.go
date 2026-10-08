@@ -12,11 +12,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/albievan/cactusfs/api/openapi"
+	"github.com/albievan/cactusfs/internal/adapters/adminapi"
+	"github.com/albievan/cactusfs/internal/adapters/adminapi/swaggerui"
+	"github.com/albievan/cactusfs/internal/adapters/console"
 	"github.com/albievan/cactusfs/internal/adapters/health"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/web"
 )
 
 const (
@@ -110,6 +115,20 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	admin := http.NewServeMux()
 	health.NewHandler(app.NewHealthService(gate, n.meta), logger, readinessTimeout).Register(admin)
 	admin.Handle("GET /metrics", tel.MetricsHandler(n.identities, n.authorizer, logger))
+	// The management API and its documentation are the gateway's; the
+	// console is served by nodes with the console role. All of it shares
+	// the admin listener, and so one origin.
+	if cfg.Roles.Has(cluster.RoleGateway) {
+		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
+			Buckets: n.buckets, Objects: n.objects, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
+			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
+			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
+		})))
+		swaggerui.Register(admin)
+	}
+	if cfg.Roles.Has(cluster.RoleConsole) {
+		admin.Handle("/", console.NewHandler(web.Dist()))
+	}
 
 	s3 := tel.TraceS3(s3api.NewHandler(s3api.Config{
 		Buckets: n.buckets, Objects: n.objects, Identities: n.identities,

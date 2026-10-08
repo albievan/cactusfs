@@ -1,0 +1,18 @@
+# Configuration of oapi-codegen for the management API. Run through `make gen`.
+package: api
+output: internal/adapters/adminapi/api/api.gen.go
+generate:
+  std-http-server: true
+  strict-server: true
+  models: true
+compatibility:
+  # The generated wrapper marks, in the request context, which operations the
+  # contract says need a credential. The adapter's authentication reads that:
+  # what is public is decided by the contract and nowhere else.
+  enable-auth-scopes-on-context: true
+output-options:
+  # The contract itself is served from the embedded file, not through
+  # generated handlers.
+  exclude-operation-ids:
+    - getOpenAPIJSON
+    - getOpenAPIYAML

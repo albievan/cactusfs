@@ -53,6 +53,9 @@ const (
 	ActionCreateKey    Action = "admin:CreateAPIKey"
 	ActionDeleteKey    Action = "admin:DeleteAPIKey"
 	ActionGetAuditLog  Action = "admin:GetAuditLog"
+	// ActionGetClusterStatus allows reading the nodes, drives and
+	// background work of the deployment.
+	ActionGetClusterStatus Action = "admin:GetClusterStatus"
 )
 
 // ARN prefixes of the two kinds of resource a policy can name.

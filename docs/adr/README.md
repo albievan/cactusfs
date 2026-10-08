@@ -42,3 +42,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0004](0004-erasure-and-topology.md) | Erasure coding, drive topology and self-healing | accepted; the one-node topology is superseded by 0005 |
 | [0005](0005-cluster.md) | Cluster: replicated metadata, node RPC and distributed erasure sets | accepted |
 | [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted |
+| [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted |

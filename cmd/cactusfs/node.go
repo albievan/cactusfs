@@ -75,8 +75,12 @@ type node struct {
 	auditor    *app.Auditor
 	iam        *app.IAMService
 	sessions   *app.SessionService
-	clock      ports.Clock
-	telemetry  *telemetry.Telemetry
+	// cluster, idempotency and maintenance serve the management API.
+	cluster     *app.ClusterService
+	idempotency *app.IdempotencyService
+	maintenance *app.Maintenance
+	clock       ports.Clock
+	telemetry   *telemetry.Telemetry
 
 	scrubber  *app.Scrubber
 	collector *app.Collector
@@ -167,11 +171,16 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		logger.WarnContext(ctx, "the drives of this cluster are spread so that the loss of ONE NODE can make objects unreadable")
 	}
 
+	n.maintenance = app.NewMaintenance(n.id, n.clock)
+	drives := n.driveSource(stores)
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: meta, Buckets: meta, Drives: n.driveSource(stores), Codec: erasurecodec.New(), KMS: kms,
-		OnHeal: n.telemetry.ObserveHeal,
-		Authz:  n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
+		Index: meta, Buckets: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
+		OnHeal: func(r app.HealResult) {
+			n.telemetry.ObserveHeal(r)
+			n.maintenance.ObserveHeal(r)
+		},
+		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {
 		return err
@@ -197,18 +206,31 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.sessions = app.NewSessionService(app.SessionServiceConfig{
 		Sessions: n.meta, Users: n.meta, Provider: provider, Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
 	})
+	n.idempotency = app.NewIdempotencyService(n.meta, kms, n.clock, rand.Reader)
+	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
+		View: n.meta.Local(), Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
+		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },
+	})
 	if cfg.AuditExport && n.auditOut != nil {
 		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(n.meta, n.auditOut, logger).Handle))
 	}
 	n.scrubber = app.NewScrubber(app.ScrubberConfig{
 		Buckets: meta, Index: meta, Healer: n.objects.Healer(), Logger: logger,
-		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20, OnPass: n.telemetry.ObserveScrub,
+		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20,
+		OnPass: func(s app.ScrubStats) {
+			n.telemetry.ObserveScrub(s)
+			n.maintenance.ObserveScrub(s)
+		},
 		// One node scrubs at a time: the one that leads the metadata group.
 		Active: n.meta.IsLeader,
 	})
 	n.collector = app.NewCollector(app.CollectorConfig{
 		// Every node collects on its own drives.
-		Drives: stores, Index: meta, Clock: n.clock, Grace: cfg.GCGrace, Logger: logger, OnPass: n.telemetry.ObserveGC,
+		Drives: stores, Index: meta, Clock: n.clock, Grace: cfg.GCGrace, Logger: logger,
+		OnPass: func(s app.GCStats) {
+			n.telemetry.ObserveGC(s)
+			n.maintenance.ObserveGC(s)
+		},
 		// Nothing is collected while the metadata cannot be trusted, nor
 		// what a write in progress on any node has put on the drives.
 		Ready: n.meta.Check, InFlight: n.inFlightAnywhere,
@@ -313,8 +335,23 @@ func (l lateAuditLog) ListAudit(ctx context.Context, after uint64, limit int) ([
 // sessionSweepInterval is how often ended console sessions are removed.
 const sessionSweepInterval = 10 * time.Minute
 
-// sweepSessions removes ended sessions now and then, on the node that leads
-// the metadata group.
+// errProbed ends the listing a drive is probed with at its first entry.
+var errProbed = errors.New("drive answered")
+
+// driveAnswers reports whether the drive in a slot can be reached: it is
+// asked for the first shard it holds.
+func driveAnswers(ctx context.Context, drives ports.DriveSource, slot cluster.Slot) bool {
+	drive, ok := drives.Drive(slot)
+	if !ok {
+		return false
+	}
+	err := drive.List(ctx, func(ports.ShardInfo) error { return errProbed })
+	return err == nil || errors.Is(err, errProbed)
+}
+
+// sweepSessions removes ended sessions, and the answers kept for repeated
+// requests that are old, now and then, on the node that leads the metadata
+// group.
 func (n *node) sweepSessions(ctx context.Context) {
 	ticker := time.NewTicker(sessionSweepInterval)
 	defer ticker.Stop()
@@ -325,6 +362,7 @@ func (n *node) sweepSessions(ctx context.Context) {
 		case <-ticker.C:
 			if n.meta.IsLeader() {
 				_, _ = n.sessions.Sweep(ctx)
+				_, _ = n.idempotency.Sweep(ctx)
 			}
 		}
 	}

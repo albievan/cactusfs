@@ -12,9 +12,11 @@
     "build": "tsc --noEmit && vite build",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gen:api": "openapi-typescript ../api/openapi/admin.yaml -o src/api/schema.d.ts"
   },
   "dependencies": {
+    "openapi-fetch": "0.17.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -33,6 +35,7 @@
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.13.0",
     "jsdom": "30.1.2",
+    "openapi-typescript": "7.13.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.1",
     "vite": "8.3.3",

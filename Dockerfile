@@ -14,6 +14,7 @@ ARG GOLANGCI_LINT_IMAGE=golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0f
 ARG HELM_IMAGE=alpine/helm:4.3.0@sha256:a6cf54599ccb99d90cf0712b30f03fdb3cab062e6b94e0418cc4db7e8a1464b2
 ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca
 ARG BUF_IMAGE=bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608
+ARG OASDIFF_IMAGE=tufin/oasdiff:v1.33.0@sha256:6263a96dd2ef0726c54e21fea9b8e1607eac4841add0079324b424c1f52b819c
 ARG PNPM_VERSION=12.9.1
 
 # --- node: Node.js and pnpm, on the build host's architecture -----------------
@@ -51,6 +52,7 @@ FROM ${GOLANGCI_LINT_IMAGE} AS golangci-lint
 FROM ${HELM_IMAGE} AS helm
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 FROM ${BUF_IMAGE} AS buf
+FROM ${OASDIFF_IMAGE} AS oasdiff
 
 # --- builder: the image every `make` target runs in ----------------------------
 # Go tools (gofumpt, goimports, govulncheck, go-licenses) are NOT installed
@@ -61,11 +63,12 @@ COPY --from=node /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 COPY --from=golangci-lint /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --from=helm /usr/bin/helm /usr/local/bin/helm
 COPY --from=buf /usr/local/bin/buf /usr/local/bin/buf
+COPY --from=oasdiff /usr/bin/oasdiff /usr/local/bin/oasdiff
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 RUN git config --system --add safe.directory '*' \
  && go version && node --version && pnpm --version \
- && golangci-lint version && helm version --short && docker --version && buf --version
+ && golangci-lint version && helm version --short && docker --version && buf --version && oasdiff --version
 ENV CACTUSFS_IN_BUILDER=1 \
     GOTOOLCHAIN=local \
     GOCACHE=/cache/go-build \

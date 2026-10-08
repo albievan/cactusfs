@@ -1,0 +1,346 @@
+package app_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/netip"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/ports"
+	"github.com/albievan/cactusfs/internal/ports/porttest"
+)
+
+// TestIdempotency is the life of an idempotency key.
+func TestIdempotency(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+	kms, err := porttest.NewKMS("test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := app.NewIdempotencyService(store, kms, clock, rand.Reader)
+	request := app.IdempotentRequest{Scope: "key:AKID", Key: "k-1", Fingerprint: "POST /users {alice}"}
+	answer := app.IdempotentAnswer{Status: 201, ContentType: "application/json", Body: []byte(`{"secret_key":"shown once"}`)}
+
+	tests := []struct {
+		name string
+		req  app.IdempotentRequest
+		want error
+	}{
+		{"no key", app.IdempotentRequest{Scope: "key:AKID", Fingerprint: "x"}, domain.ErrInvalidArgument},
+		{"no scope", app.IdempotentRequest{Key: "k", Fingerprint: "x"}, domain.ErrInvalidArgument},
+	}
+	for _, tt := range tests {
+		if _, _, err := s.Begin(ctx, tt.req); !errors.Is(err, tt.want) {
+			t.Errorf("%s: Begin = %v, want %v", tt.name, err, tt.want)
+		}
+	}
+
+	replay, reservation, err := s.Begin(ctx, request)
+	if err != nil || replay != nil {
+		t.Fatalf("first Begin = %v, %v", replay, err)
+	}
+	// While the first is being carried out, a repeat waits.
+	if _, _, err := s.Begin(ctx, request); !errors.Is(err, domain.ErrRequestInProgress) {
+		t.Fatalf("Begin during the first request = %v, want %v", err, domain.ErrRequestInProgress)
+	}
+	if err := s.Complete(ctx, reservation, answer); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	replay, _, err = s.Begin(ctx, request)
+	if err != nil || replay == nil || replay.Status != 201 || replay.ContentType != "application/json" || !bytes.Equal(replay.Body, answer.Body) {
+		t.Fatalf("Begin after the answer = %+v, %v", replay, err)
+	}
+	// The answer is stored sealed, and bound to its record.
+	stored, err := store.GetIdempotent(ctx, hashOfIdempotent(t, store))
+	if err != nil || bytes.Contains(stored.Body.Ciphertext, []byte("shown once")) || stored.Body.KMSKeyID != "test:1" || len(stored.Body.WrappedKey) == 0 {
+		t.Fatalf("stored record = %+v, %v", stored, err)
+	}
+	// The same key for another request, or from another caller.
+	other := request
+	other.Fingerprint = "POST /users {bob}"
+	if _, _, err := s.Begin(ctx, other); !errors.Is(err, domain.ErrIdempotencyKeyReused) {
+		t.Errorf("another request with the key = %v, want %v", err, domain.ErrIdempotencyKeyReused)
+	}
+	stranger := request
+	stranger.Scope = "key:OTHER"
+	if replay, _, err := s.Begin(ctx, stranger); err != nil || replay != nil {
+		t.Errorf("another caller with the key was given an answer: %+v, %v", replay, err)
+	}
+
+	// A failure of the server, and an answer too large to keep, free the key.
+	for name, failed := range map[string]app.IdempotentAnswer{
+		"server error": {Status: 503},
+		"too large":    {Status: 200, Body: make([]byte, app.MaxIdempotentAnswer+1)},
+	} {
+		req := app.IdempotentRequest{Scope: "key:AKID", Key: name, Fingerprint: "f"}
+		_, res, err := s.Begin(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Complete(ctx, res, failed); err != nil {
+			t.Fatalf("%s: Complete: %v", name, err)
+		}
+		if replay, _, err := s.Begin(ctx, req); err != nil || replay != nil {
+			t.Errorf("%s: the key was not freed: %+v, %v", name, replay, err)
+		}
+	}
+	// A reservation nobody completed goes stale: the node stopped.
+	abandoned := app.IdempotentRequest{Scope: "key:AKID", Key: "crashed", Fingerprint: "f"}
+	if _, _, err := s.Begin(ctx, abandoned); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	if _, _, err := s.Begin(ctx, abandoned); !errors.Is(err, domain.ErrRequestInProgress) {
+		t.Errorf("a fresh reservation = %v", err)
+	}
+	clock.Advance(15 * time.Minute)
+	_, late, err := s.Begin(ctx, abandoned)
+	if err != nil {
+		t.Fatalf("a stale reservation was not taken over: %v", err)
+	}
+	if err := s.Abandon(ctx, late); err != nil {
+		t.Fatal(err)
+	}
+
+	// A request that outlives its reservation does not undo the repeat
+	// that took the key over: whatever the slow one does at its end, the
+	// repeat's reservation and answer stand.
+	slow := app.IdempotentRequest{Scope: "key:AKID", Key: "slow", Fingerprint: "f"}
+	_, original, err := s.Begin(ctx, slow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(16 * time.Minute)
+	_, takeover, err := s.Begin(ctx, slow)
+	if err != nil {
+		t.Fatalf("takeover of a stale reservation: %v", err)
+	}
+	if err := s.Complete(ctx, original, app.IdempotentAnswer{Status: 503}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Begin(ctx, slow); !errors.Is(err, domain.ErrRequestInProgress) {
+		t.Fatalf("after the slow original gave up, a third request = %v; want %v: the repeat is still running", err, domain.ErrRequestInProgress)
+	}
+	if err := s.Complete(ctx, original, app.IdempotentAnswer{Status: 200, Body: []byte("from the original")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete(ctx, takeover, app.IdempotentAnswer{Status: 201, Body: []byte("from the repeat")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Abandon(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	if replay, _, err := s.Begin(ctx, slow); err != nil || replay == nil || string(replay.Body) != "from the repeat" {
+		t.Fatalf("the answer after a takeover = %+v, %v; want the repeat's", replay, err)
+	}
+	if err := s.Abandon(ctx, app.Reservation{}); err != nil {
+		t.Errorf("abandoning nothing: %v", err)
+	}
+	if err := s.Complete(ctx, app.Reservation{}, answer); err != nil {
+		t.Errorf("completing nothing: %v", err)
+	}
+
+	// After a day the answer is forgotten, with or without a sweep.
+	clock.Advance(app.IdempotencyTTL + time.Minute)
+	if replay, _, err := s.Begin(ctx, request); err != nil || replay != nil {
+		t.Errorf("an answer older than the TTL = %+v, %v", replay, err)
+	}
+	clock.Advance(app.IdempotencyTTL + time.Minute)
+	if n, err := s.Sweep(ctx); err != nil || n == 0 {
+		t.Errorf("Sweep = %d, %v", n, err)
+	}
+	// A store that fails is an error, never a second execution.
+	store.FailWrites = errBoom
+	if _, _, err := s.Begin(ctx, app.IdempotentRequest{Scope: "s", Key: "k", Fingerprint: "f"}); !errors.Is(err, errBoom) {
+		t.Errorf("Begin with a failing store = %v", err)
+	}
+	if _, err := s.Sweep(ctx); !errors.Is(err, errBoom) {
+		t.Errorf("Sweep with a failing store = %v", err)
+	}
+}
+
+// hashOfIdempotent finds the one completed record of the store.
+func hashOfIdempotent(t *testing.T, store *porttest.MemIAM) string {
+	t.Helper()
+	ids := store.IdempotentIDs()
+	for _, id := range ids {
+		if r, err := store.GetIdempotent(context.Background(), id); err == nil && r.Done {
+			return id
+		}
+	}
+	t.Fatal("no completed idempotency record")
+	return ""
+}
+
+type staticView struct {
+	topology cluster.Topology
+	err      error
+}
+
+func (v staticView) Topology(context.Context) (cluster.Topology, error) { return v.topology, v.err }
+
+func (v staticView) Nodes(context.Context) ([]cluster.Node, error) {
+	return []cluster.Node{{ID: "n1", Roles: cluster.AllRoles()}, {ID: "n2", Roles: cluster.AllRoles()}}, v.err
+}
+
+func TestClusterStatus(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	clock := porttest.NewClock(testNow)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	trail := porttest.NewMemIAM()
+	authz := app.NewAuthorizer(logger, clock, app.NewAuditor(trail, clock, logger))
+	topology, err := cluster.NewTopology([]string{"d1", "d2", "d3", "d4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintenance := app.NewMaintenance("n1", clock)
+	newService := func(view ports.ClusterView) *app.ClusterService {
+		return app.NewClusterService(app.ClusterServiceConfig{
+			View: view, Authz: authz, NodeID: "n1", Leader: func() string { return "n2" }, Maintenance: maintenance,
+			Probe: func(_ context.Context, slot cluster.Slot) bool { return slot.DriveID != "d3" },
+		})
+	}
+	s := newService(staticView{topology: topology})
+	root := iam.Principal{AccessKeyID: "ROOT", Root: true}
+	allowed, err := iam.ParsePolicy([]byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:GetClusterStatus","Resource":"*"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		principal iam.Principal
+		want      error
+	}{
+		{"root", root, nil},
+		{"a user who may", iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{allowed}}, nil},
+		{"a user with no policy", iam.Principal{AccessKeyID: "K", User: "u"}, domain.ErrAccessDenied},
+		{"nobody", iam.Principal{}, domain.ErrAccessDenied},
+	}
+	for _, tt := range tests {
+		status, err := s.Status(ctx, tt.principal)
+		if !errors.Is(err, tt.want) {
+			t.Errorf("%s: Status = %v, want %v", tt.name, err, tt.want)
+		}
+		if _, err := s.Maintenance(ctx, tt.principal); !errors.Is(err, tt.want) {
+			t.Errorf("%s: Maintenance = %v, want %v", tt.name, err, tt.want)
+		}
+		if tt.want != nil {
+			if status.DrivesTotal != 0 || status.Nodes != nil {
+				t.Errorf("%s: a refusal came with a status: %+v", tt.name, status)
+			}
+			continue
+		}
+		if status.AnsweredBy != "n1" || status.Leader != "n2" || len(status.Nodes) != 2 || status.DrivesTotal != 4 || status.DrivesOnline != 3 ||
+			status.DeploymentID != topology.DeploymentID {
+			t.Errorf("%s: status = %+v", tt.name, status)
+		}
+		for _, set := range status.Sets {
+			for _, d := range set {
+				if d.Online == (d.ID == "d3") {
+					t.Errorf("drive %s online = %v", d.ID, d.Online)
+				}
+			}
+		}
+	}
+	if _, err := newService(staticView{err: domain.ErrNoTopology}).Status(ctx, root); !errors.Is(err, domain.ErrNoTopology) {
+		t.Errorf("Status without a topology = %v", err)
+	}
+
+	maintenance.ObserveScrub(app.ScrubStats{Objects: 3})
+	clock.Advance(time.Minute)
+	maintenance.ObserveScrub(app.ScrubStats{Objects: 5, Damaged: 1})
+	maintenance.ObserveGC(app.GCStats{Shards: 9, Removed: 2})
+	maintenance.ObserveHeal(app.HealResult{})
+	maintenance.ObserveHeal(app.HealResult{Damaged: 2, Rebuilt: 2})
+	maintenance.ObserveHeal(app.HealResult{Damaged: 3, Unrecoverable: true})
+	m, err := s.Maintenance(ctx, root)
+	if err != nil || m.NodeID != "n1" || !m.StartedAt.Equal(testNow) || m.ScrubPasses != 2 || m.LastScrub.Objects != 5 ||
+		!m.LastScrubAt.Equal(testNow.Add(time.Minute)) || m.GCPasses != 1 || m.LastGC.Removed != 2 ||
+		m.HealedObjects != 2 || m.HealedShards != 2 || m.UnrecoverableObject != 1 {
+		t.Errorf("maintenance = %+v, %v", m, err)
+	}
+}
+
+// gatedHasher is a password hasher that takes as long as the test says.
+type gatedHasher struct {
+	porttest.Hasher
+	checks  atomic.Int32
+	release chan struct{}
+}
+
+func (g *gatedHasher) Verify(encoded, password string) (bool, error) {
+	g.checks.Add(1)
+	<-g.release
+	return g.Hasher.Verify(encoded, password)
+}
+
+// TestGuessesAtTheSameMomentAreCounted: an address gets its ten attempts
+// whether it makes them one by one or all at once. Counting only after the
+// slow check would let every parallel guess through.
+func TestGuessesAtTheSameMomentAreCounted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hasher := &gatedHasher{release: make(chan struct{})}
+	slow, err := app.NewLocalIdentityProvider(store, hasher, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := app.NewSessionService(app.SessionServiceConfig{
+		Sessions: store, Users: store, Provider: slow, Auditor: app.NewAuditor(store, clock, logger), Clock: clock, Entropy: rand.Reader,
+	})
+	from := iam.Session{SourceIP: netip.MustParseAddr("203.0.113.77")}
+
+	const guesses = 60
+	results := make(chan error, guesses)
+	for i := range guesses {
+		go func() {
+			_, err := sessions.SignIn(ctx, "nobody", fmt.Sprintf("guess %d", i), from)
+			results <- err
+		}()
+	}
+	// Those that were let through are waiting in the hasher; the others
+	// have been refused already.
+	refused := 0
+	for refused < guesses-10 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, domain.ErrTooManyAttempts) {
+				t.Fatalf("a guess ended with %v before any password was checked", err)
+			}
+			refused++
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%d guesses were refused and %d reached the password check; want %d and 10", refused, hasher.checks.Load(), guesses-10)
+		}
+	}
+	close(hasher.release)
+	for range 10 {
+		if err := <-results; !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("a guess that was checked = %v", err)
+		}
+	}
+	if got := hasher.checks.Load(); got != 10 {
+		t.Errorf("%d passwords were checked, want 10", got)
+	}
+	// Another address is not affected, and a sign-in that fails for
+	// another reason than a wrong guess does not count.
+	if _, err := sessions.SignIn(ctx, "nobody", "x", iam.Session{SourceIP: netip.MustParseAddr("203.0.113.78")}); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("another address = %v", err)
+	}
+}

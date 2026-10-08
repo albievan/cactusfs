@@ -26,6 +26,7 @@ import (
 //	policies  <name> -> policyRecord
 //	keys      <access key ID> -> keyRecord
 //	sessions  <token hash> -> sessionRecord
+//	idempotency <record ID> -> idemRecord
 //	audit     <sequence, 8 bytes big endian> -> auditRecord
 //
 // Everything the state machine decides here it decides from the entry and
@@ -40,10 +41,12 @@ func rolesBucket() []byte    { return []byte("roles") }
 func policiesBucket() []byte { return []byte("policies") }
 func keysBucket() []byte     { return []byte("keys") }
 func sessionsBucket() []byte { return []byte("sessions") }
-func auditBucket() []byte    { return []byte("audit") }
+
+func idempotencyBucket() []byte { return []byte("idempotency") }
+func auditBucket() []byte       { return []byte("audit") }
 
 func iamBuckets() [][]byte {
-	return [][]byte{usersBucket(), groupsBucket(), rolesBucket(), policiesBucket(), keysBucket(), sessionsBucket(), auditBucket()}
+	return [][]byte{usersBucket(), groupsBucket(), rolesBucket(), policiesBucket(), keysBucket(), sessionsBucket(), auditBucket(), idempotencyBucket()}
 }
 
 // IAM command types.
@@ -63,12 +66,17 @@ const (
 	cmdDeleteSession  = "session.delete"
 	cmdExpireSessions = "session.expire"
 	cmdAppendAudit    = "audit.append"
+	cmdBeginIdem      = "idempotency.begin"
+	cmdCompleteIdem   = "idempotency.complete"
+	cmdDeleteIdem     = "idempotency.delete"
+	cmdExpireIdem     = "idempotency.expire"
 )
 
 func isIAMCommand(kind string) bool {
 	switch kind {
 	case cmdPutUser, cmdDeleteUser, cmdPutGroup, cmdDeleteGroup, cmdPutRole, cmdDeleteRole, cmdPutPolicy, cmdDeletePolicy,
-		cmdCreateKey, cmdDeleteKey, cmdTouchKey, cmdPutSession, cmdDeleteSession, cmdExpireSessions, cmdAppendAudit:
+		cmdCreateKey, cmdDeleteKey, cmdTouchKey, cmdPutSession, cmdDeleteSession, cmdExpireSessions, cmdAppendAudit,
+		cmdBeginIdem, cmdCompleteIdem, cmdDeleteIdem, cmdExpireIdem:
 		return true
 	default:
 		return false
@@ -91,6 +99,7 @@ type iamCmd struct {
 	Policy  *policyRecord  `json:"policy,omitempty"`
 	Key     *keyRecord     `json:"key,omitempty"`
 	Session *sessionRecord `json:"session,omitempty"`
+	Idem    *idemRecord    `json:"idempotency,omitempty"`
 	// At is the time of a touch or of an expiry sweep.
 	At time.Time `json:"at,omitzero"`
 	// Audit is the record of the change, appended in the same transaction.
@@ -136,6 +145,36 @@ type keyRecord struct {
 	ExpiresAt    time.Time       `json:"expires_at,omitzero"`
 	CreatedAt    time.Time       `json:"created_at"`
 	LastUsedAt   time.Time       `json:"last_used_at,omitzero"`
+}
+
+// idemRecord is a request that carried an idempotency key, and its answer.
+type idemRecord struct {
+	ID          string    `json:"id"`
+	Fingerprint string    `json:"fingerprint"`
+	Done        bool      `json:"done,omitempty"`
+	Status      int       `json:"status,omitempty"`
+	ContentType string    `json:"content_type,omitempty"`
+	KMSKeyID    string    `json:"kms_key_id,omitempty"`
+	WrappedKey  []byte    `json:"wrapped_key,omitempty"`
+	Nonce       []byte    `json:"nonce,omitempty"`
+	Ciphertext  []byte    `json:"ciphertext,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func idemToRecord(r ports.IdempotencyRecord) *idemRecord {
+	return &idemRecord{
+		ID: r.ID, Fingerprint: r.Fingerprint, Done: r.Done, Status: r.Status, ContentType: r.ContentType,
+		KMSKeyID: r.Body.KMSKeyID, WrappedKey: r.Body.WrappedKey, Nonce: r.Body.Nonce, Ciphertext: r.Body.Ciphertext,
+		CreatedAt: r.CreatedAt.UTC(),
+	}
+}
+
+func (r idemRecord) toPort() ports.IdempotencyRecord {
+	return ports.IdempotencyRecord{
+		ID: r.ID, Fingerprint: r.Fingerprint, Done: r.Done, Status: r.Status, ContentType: r.ContentType,
+		Body:      iam.SealedSecret{KMSKeyID: r.KMSKeyID, WrappedKey: r.WrappedKey, Nonce: r.Nonce, Ciphertext: r.Ciphertext},
+		CreatedAt: r.CreatedAt,
+	}
 }
 
 type sessionRecord struct {
@@ -431,6 +470,34 @@ func applyIAMChange(tx *bbolt.Tx, kind string, c iamCmd) (applyResult, error) {
 	case cmdAppendAudit:
 		// The record is the command; applyIAM appends it.
 		return applyResult{}, nil
+	case cmdBeginIdem:
+		if exists(tx, idempotencyBucket(), c.Idem.ID) {
+			return refuse(domain.ErrEntityExists, "idempotency record")
+		}
+		return applyResult{}, putJSON(tx, idempotencyBucket(), c.Idem.ID, *c.Idem)
+	case cmdCompleteIdem:
+		var current idemRecord
+		found, err := getJSON(tx, idempotencyBucket(), c.Idem.ID, &current)
+		// Only the request that began the record completes it: one that
+		// was forgotten and begun again belongs to somebody else.
+		if err != nil || !found || current.Done || !current.CreatedAt.Equal(c.Idem.CreatedAt) {
+			return applyResult{}, err
+		}
+		return applyResult{}, putJSON(tx, idempotencyBucket(), c.Idem.ID, *c.Idem)
+	case cmdDeleteIdem:
+		var current idemRecord
+		found, err := getJSON(tx, idempotencyBucket(), c.Name, &current)
+		// Only the record that was meant: one begun since is another
+		// request's reservation.
+		if err != nil || !found || !current.CreatedAt.Equal(c.At) {
+			return applyResult{}, err
+		}
+		return applyResult{}, tx.Bucket(idempotencyBucket()).Delete([]byte(c.Name))
+	case cmdExpireIdem:
+		return applyResult{}, deleteWhere(tx, idempotencyBucket(), func(raw []byte) bool {
+			var r idemRecord
+			return json.Unmarshal(raw, &r) == nil && r.CreatedAt.Before(c.At)
+		})
 	default:
 		return applyResult{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, kind)
 	}
@@ -965,4 +1032,69 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int, 
 		return 0, nil
 	}
 	return expired, s.proposeIAM(ctx, "DeleteExpiredSessions", cmdExpireSessions, iamCmd{At: now.UTC()}, audit.Record{})
+}
+
+var _ ports.IdempotencyStore = (*Store)(nil)
+
+// maxIdempotentBody bounds the sealed answer an idempotency record carries.
+const maxIdempotentBody = 128 << 10
+
+func checkIdempotent(r ports.IdempotencyRecord) error {
+	if r.ID == "" || len(r.ID) > 128 || r.Fingerprint == "" || len(r.Fingerprint) > 128 || r.CreatedAt.IsZero() ||
+		len(r.Body.Ciphertext) > maxIdempotentBody || len(r.ContentType) > 255 {
+		return fmt.Errorf("%w: idempotency record", domain.ErrInvalidArgument)
+	}
+	return nil
+}
+
+// BeginIdempotent implements ports.IdempotencyStore.
+func (s *Store) BeginIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
+	if err := checkIdempotent(r); err != nil {
+		return fmt.Errorf("raftmeta.BeginIdempotent: %w", err)
+	}
+	return s.proposeIAM(ctx, "BeginIdempotent", cmdBeginIdem, iamCmd{Idem: idemToRecord(r)}, audit.Record{})
+}
+
+// GetIdempotent implements ports.IdempotencyStore.
+func (s *Store) GetIdempotent(ctx context.Context, id string) (ports.IdempotencyRecord, error) {
+	var record idemRecord
+	if err := s.getEntity(ctx, "GetIdempotent", idempotencyBucket(), id, "idempotency record", &record); err != nil {
+		return ports.IdempotencyRecord{}, err
+	}
+	return record.toPort(), nil
+}
+
+// CompleteIdempotent implements ports.IdempotencyStore.
+func (s *Store) CompleteIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
+	if err := checkIdempotent(r); err != nil {
+		return fmt.Errorf("raftmeta.CompleteIdempotent: %w", err)
+	}
+	r.Done = true
+	return s.proposeIAM(ctx, "CompleteIdempotent", cmdCompleteIdem, iamCmd{Idem: idemToRecord(r)}, audit.Record{})
+}
+
+// DeleteIdempotent implements ports.IdempotencyStore.
+func (s *Store) DeleteIdempotent(ctx context.Context, id string, createdAt time.Time) error {
+	return s.proposeIAM(ctx, "DeleteIdempotent", cmdDeleteIdem, iamCmd{Name: id, At: createdAt.UTC()}, audit.Record{})
+}
+
+// DeleteIdempotentBefore implements ports.IdempotencyStore.
+func (s *Store) DeleteIdempotentBefore(ctx context.Context, before time.Time) (int, error) {
+	old := 0
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(idempotencyBucket()).ForEach(func(_, raw []byte) error {
+			var record idemRecord
+			if json.Unmarshal(raw, &record) == nil && record.CreatedAt.Before(before) {
+				old++
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("raftmeta.DeleteIdempotentBefore: %w", err)
+	}
+	if old == 0 {
+		return 0, nil
+	}
+	return old, s.proposeIAM(ctx, "DeleteIdempotentBefore", cmdExpireIdem, iamCmd{At: before.UTC()}, audit.Record{})
 }

@@ -17,14 +17,15 @@ import (
 // MemIAM is an in-memory ports.IAMStore, ports.AuditLog and
 // ports.SessionStore with the rules of the real one.
 type MemIAM struct {
-	mu       sync.Mutex
-	users    map[string]iam.User
-	groups   map[string]iam.Group
-	roles    map[string]iam.Role
-	policies map[string]iam.Policy
-	keys     map[string]iam.APIKey
-	sessions map[string]ports.Session
-	trail    []audit.Record
+	mu          sync.Mutex
+	users       map[string]iam.User
+	groups      map[string]iam.Group
+	roles       map[string]iam.Role
+	policies    map[string]iam.Policy
+	keys        map[string]iam.APIKey
+	idempotency map[string]ports.IdempotencyRecord
+	sessions    map[string]ports.Session
+	trail       []audit.Record
 
 	// FailWrites, when set, is returned by every change.
 	FailWrites error
@@ -516,4 +517,81 @@ func (m *MemIAM) Sessions() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sessions)
+}
+
+var _ ports.IdempotencyStore = (*MemIAM)(nil)
+
+// BeginIdempotent implements ports.IdempotencyStore.
+func (m *MemIAM) BeginIdempotent(_ context.Context, r ports.IdempotencyRecord) error {
+	return m.change(audit.Record{}, func() error {
+		if _, ok := m.idempotency[r.ID]; ok {
+			return fmt.Errorf("%w: idempotency record", domain.ErrEntityExists)
+		}
+		if m.idempotency == nil {
+			m.idempotency = map[string]ports.IdempotencyRecord{}
+		}
+		r.Done = false
+		m.idempotency[r.ID] = r
+		return nil
+	})
+}
+
+// GetIdempotent implements ports.IdempotencyStore.
+func (m *MemIAM) GetIdempotent(_ context.Context, id string) (ports.IdempotencyRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.idempotency[id]
+	if !ok {
+		return ports.IdempotencyRecord{}, fmt.Errorf("%w: idempotency record", domain.ErrEntityNotFound)
+	}
+	return record, nil
+}
+
+// CompleteIdempotent implements ports.IdempotencyStore.
+func (m *MemIAM) CompleteIdempotent(_ context.Context, r ports.IdempotencyRecord) error {
+	return m.change(audit.Record{}, func() error {
+		current, ok := m.idempotency[r.ID]
+		if !ok || current.Done || !current.CreatedAt.Equal(r.CreatedAt) {
+			return nil
+		}
+		r.Done = true
+		m.idempotency[r.ID] = r
+		return nil
+	})
+}
+
+// DeleteIdempotent implements ports.IdempotencyStore.
+func (m *MemIAM) DeleteIdempotent(_ context.Context, id string, createdAt time.Time) error {
+	return m.change(audit.Record{}, func() error {
+		if current, ok := m.idempotency[id]; ok && current.CreatedAt.Equal(createdAt) {
+			delete(m.idempotency, id)
+		}
+		return nil
+	})
+}
+
+// DeleteIdempotentBefore implements ports.IdempotencyStore.
+func (m *MemIAM) DeleteIdempotentBefore(_ context.Context, before time.Time) (int, error) {
+	removed := 0
+	err := m.change(audit.Record{}, func() error {
+		for id, record := range m.idempotency {
+			if record.CreatedAt.Before(before) {
+				delete(m.idempotency, id)
+				removed++
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
+// IdempotentIDs returns the IDs of the stored idempotency records.
+func (m *MemIAM) IdempotentIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.idempotency))
+	for id := range m.idempotency {
+		ids = append(ids, id)
+	}
+	return ids
 }

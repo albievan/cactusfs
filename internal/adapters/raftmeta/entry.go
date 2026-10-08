@@ -432,7 +432,9 @@ func iamPayloadFits(kind string, c iamCmd) bool {
 		return c.Session != nil
 	case cmdAppendAudit:
 		return c.Audit != nil
-	case cmdDeleteUser, cmdDeleteGroup, cmdDeleteRole, cmdDeletePolicy, cmdDeleteKey, cmdTouchKey, cmdDeleteSession:
+	case cmdBeginIdem, cmdCompleteIdem:
+		return c.Idem != nil && c.Idem.ID != ""
+	case cmdDeleteUser, cmdDeleteGroup, cmdDeleteRole, cmdDeletePolicy, cmdDeleteKey, cmdTouchKey, cmdDeleteSession, cmdDeleteIdem:
 		return c.Name != ""
 	default:
 		return true

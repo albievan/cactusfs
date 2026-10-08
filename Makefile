@@ -143,7 +143,8 @@ check: fmt-check lint vet cover test-int s3-compat vuln contracts licences \
 	web-check build-all image helm-lint verify-clone
 	@echo "make check: PASS"
 
-gen:
+# The web client is generated with a package of web/, so those are installed.
+gen: web-install
 	@scripts/gen.sh
 
 tidy:
@@ -156,12 +157,13 @@ fmt:
 fmt-check:
 	@scripts/fmt-check.sh
 
-lint:
+lint: web-build
 	@scripts/no-bypass.sh
 	golangci-lint run ./...
 	@echo "lint: PASS"
 
-vet:
+# With the console tag the built console is embedded, so it must be built.
+vet: web-build
 	go vet ./...
 	go vet -tags=integration,s3compat,chaos,console ./...
 	@echo "vet: PASS"

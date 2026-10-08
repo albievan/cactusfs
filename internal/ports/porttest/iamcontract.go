@@ -461,3 +461,97 @@ func containsDocs(got, want []iam.Document) bool {
 	}
 	return true
 }
+
+// IdempotencyContract is the behaviour every implementation of the
+// idempotency store must have. open returns a new, empty store.
+func IdempotencyContract(t *testing.T, open func(t *testing.T) ports.IdempotencyStore) {
+	t.Helper()
+	ctx := context.Background()
+	s := open(t)
+	sealed := iam.SealedSecret{KMSKeyID: "test:1", WrappedKey: []byte("wrapped"), Nonce: []byte("nonce"), Ciphertext: []byte("sealed answer")}
+	begun := ports.IdempotencyRecord{ID: "id-1", Fingerprint: "fp-1", CreatedAt: contractTime}
+
+	if _, err := s.GetIdempotent(ctx, "id-1"); !errors.Is(err, domain.ErrEntityNotFound) {
+		t.Fatalf("GetIdempotent of nothing = %v", err)
+	}
+	if err := s.BeginIdempotent(ctx, begun); err != nil {
+		t.Fatalf("BeginIdempotent: %v", err)
+	}
+	// Only one request begins a key.
+	if err := s.BeginIdempotent(ctx, ports.IdempotencyRecord{ID: "id-1", Fingerprint: "fp-2", CreatedAt: contractTime.Add(time.Second)}); !errors.Is(err, domain.ErrEntityExists) {
+		t.Fatalf("second BeginIdempotent = %v, want %v", err, domain.ErrEntityExists)
+	}
+	got, err := s.GetIdempotent(ctx, "id-1")
+	if err != nil || got.Done || got.Fingerprint != "fp-1" || !got.CreatedAt.Equal(contractTime) {
+		t.Fatalf("a record that has begun = %+v, %v", got, err)
+	}
+
+	// An answer for a record somebody else began later is not taken.
+	stranger := begun
+	stranger.CreatedAt = contractTime.Add(time.Hour)
+	stranger.Status, stranger.Body = 500, sealed
+	if err := s.CompleteIdempotent(ctx, stranger); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetIdempotent(ctx, "id-1"); got.Done {
+		t.Fatal("a record was completed by a request that did not begin it")
+	}
+
+	done := begun
+	done.Status, done.ContentType, done.Body = 201, "application/json", sealed
+	if err := s.CompleteIdempotent(ctx, done); err != nil {
+		t.Fatalf("CompleteIdempotent: %v", err)
+	}
+	got, err = s.GetIdempotent(ctx, "id-1")
+	if err != nil || !got.Done || got.Status != 201 || got.ContentType != "application/json" ||
+		string(got.Body.Ciphertext) != "sealed answer" || got.Body.KMSKeyID != "test:1" || string(got.Body.WrappedKey) != "wrapped" {
+		t.Fatalf("a completed record = %+v, %v", got, err)
+	}
+	// The first answer stands.
+	again := done
+	again.Status = 409
+	if err := s.CompleteIdempotent(ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetIdempotent(ctx, "id-1"); got.Status != 201 {
+		t.Fatalf("a completed record was completed again: status %d", got.Status)
+	}
+	// Completing what is not there makes nothing.
+	if err := s.CompleteIdempotent(ctx, ports.IdempotencyRecord{ID: "id-9", Fingerprint: "fp", CreatedAt: contractTime, Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetIdempotent(ctx, "id-9"); !errors.Is(err, domain.ErrEntityNotFound) {
+		t.Fatalf("completing an unknown record made one: %v", err)
+	}
+
+	// Old records are forgotten, newer ones kept.
+	if err := s.BeginIdempotent(ctx, ports.IdempotencyRecord{ID: "id-2", Fingerprint: "fp", CreatedAt: contractTime.Add(48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.DeleteIdempotentBefore(ctx, contractTime.Add(24*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("DeleteIdempotentBefore = %d, %v; want 1", n, err)
+	}
+	if n, err := s.DeleteIdempotentBefore(ctx, contractTime.Add(24*time.Hour)); err != nil || n != 0 {
+		t.Fatalf("second DeleteIdempotentBefore = %d, %v; want 0", n, err)
+	}
+	if _, err := s.GetIdempotent(ctx, "id-1"); !errors.Is(err, domain.ErrEntityNotFound) {
+		t.Fatalf("an old record after the sweep: %v", err)
+	}
+	// A delete meant for a record begun at another time removes nothing:
+	// that record is another request's.
+	if err := s.DeleteIdempotent(ctx, "id-2", contractTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetIdempotent(ctx, "id-2"); err != nil {
+		t.Fatalf("a delete meant for an earlier record removed a later one: %v", err)
+	}
+	if err := s.DeleteIdempotent(ctx, "id-2", contractTime.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteIdempotent(ctx, "id-2", contractTime.Add(48*time.Hour)); err != nil {
+		t.Fatalf("deleting a record twice: %v", err)
+	}
+	if _, err := s.GetIdempotent(ctx, "id-2"); !errors.Is(err, domain.ErrEntityNotFound) {
+		t.Fatalf("a deleted record: %v", err)
+	}
+}

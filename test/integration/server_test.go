@@ -167,7 +167,10 @@ func TestServerProbesAndGracefulShutdown(t *testing.T) {
 	for path, want := range map[string]int{
 		"/healthz": http.StatusOK,
 		"/readyz":  http.StatusOK,
-		"/":        http.StatusNotFound,
+		// Built with Go alone: no console, and a page that says so.
+		"/":           http.StatusOK,
+		"/index.html": http.StatusNotFound,
+		"/docs":       http.StatusOK,
 	} {
 		if got := status(ctx, t, client, "http://"+addrs["admin"]+path); got != want {
 			t.Errorf("GET %s: status = %d, want %d", path, got, want)

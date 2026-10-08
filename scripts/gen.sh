@@ -4,7 +4,8 @@
 #
 # A generator is added here in the same step that adds its contract:
 #   api/proto/             -> internal/adapters/noderpc/nodev1
-#   api/openapi/admin.yaml -> internal/adapters/adminapi, web/src/api (PLAN 5.1, 5.5)
+#   api/openapi/admin.yaml -> internal/adapters/adminapi/api, api/openapi/admin.json,
+#                             web/src/api/schema.d.ts
 #
 # api/asyncapi/events.yaml has no generated code: the event payloads are the
 # structs in internal/ports/events.go, and a test holds the two together.
@@ -29,3 +30,27 @@ go tool gofumpt -w $files
 # shellcheck disable=SC2086
 go tool goimports -w -local "$module" $files
 echo "gen: node RPC -> $generated"
+
+# Management API. The Go server and its types come from oapi-codegen, pinned
+# in go.mod; the JSON form of the contract, which the binary serves, and the
+# TypeScript client of the console come from packages of web/.
+contract=api/openapi/admin.yaml
+generated=internal/adapters/adminapi/api/api.gen.go
+go tool oapi-codegen -config api/openapi/oapi-codegen.yaml "$contract"
+if [ ! -s "$generated" ]; then
+	echo "gen: FAIL - oapi-codegen wrote no $generated" >&2
+	exit 1
+fi
+go tool gofumpt -w "$generated"
+go tool goimports -w -local "$module" "$generated"
+echo "gen: management API -> $generated"
+
+node scripts/openapi-json.mjs "$contract" api/openapi/admin.json
+echo "gen: management API -> api/openapi/admin.json"
+
+pnpm -C web run --silent gen:api
+if [ ! -s web/src/api/schema.d.ts ]; then
+	echo "gen: FAIL - openapi-typescript wrote no web/src/api/schema.d.ts" >&2
+	exit 1
+fi
+echo "gen: management API -> web/src/api/schema.d.ts"

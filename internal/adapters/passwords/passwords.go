@@ -17,6 +17,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/crypto/argon2"
 
@@ -64,14 +65,25 @@ type Hasher struct {
 	// slots bounds how many hashes are computed at once: each takes tens
 	// of megabytes, and sign-in can be tried by anybody.
 	slots chan struct{}
+	// waiting counts the hashes that wait for a slot.
+	waiting atomic.Int32
 }
 
 // maxConcurrent is the number of hashes computed at the same time.
 const maxConcurrent = 4
 
-func (h *Hasher) acquire() func() {
+// maxWaiting is how many hashes may wait for a slot. Beyond that the caller
+// is told to come back: a queue without end is memory without end.
+const maxWaiting = 32
+
+func (h *Hasher) acquire() (func(), error) {
+	if h.waiting.Add(1) > maxWaiting {
+		h.waiting.Add(-1)
+		return nil, fmt.Errorf("%w: too many password checks at once", domain.ErrUnavailable)
+	}
 	h.slots <- struct{}{}
-	return func() { <-h.slots }
+	h.waiting.Add(-1)
+	return func() { <-h.slots }, nil
 }
 
 var _ ports.PasswordHasher = (*Hasher)(nil)
@@ -91,7 +103,11 @@ func (h *Hasher) Hash(password string) (string, error) {
 	if _, err := io.ReadFull(h.entropy, salt); err != nil {
 		return "", fmt.Errorf("passwords.Hash: %w", err)
 	}
-	defer h.acquire()()
+	release, err := h.acquire()
+	if err != nil {
+		return "", fmt.Errorf("passwords.Hash: %w", err)
+	}
+	defer release()
 	sum := argon2.IDKey([]byte(password), salt, h.params.Time, h.params.MemoryKiB, h.params.Threads, hashSize)
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", version, h.params.MemoryKiB, h.params.Time, h.params.Threads,
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(sum)), nil
@@ -103,7 +119,11 @@ func (h *Hasher) Verify(encoded, password string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("passwords.Verify: %w", err)
 	}
-	defer h.acquire()()
+	release, err := h.acquire()
+	if err != nil {
+		return false, fmt.Errorf("passwords.Verify: %w", err)
+	}
+	defer release()
 	got := argon2.IDKey([]byte(password), salt, params.Time, params.MemoryKiB, params.Threads, hashSize)
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }

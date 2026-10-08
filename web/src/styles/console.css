@@ -1,0 +1,553 @@
+/*
+ * The one stylesheet of the console. It is a plain file that Vite emits next to
+ * the scripts: the Content-Security-Policy of the server allows no inline
+ * styles and nothing from another origin, so there are no web fonts either.
+ */
+
+:root {
+  /* Brand colours. */
+  --saguaro: #2e6b4e;
+  --night-green: #163b2c;
+  --sand: #f4ecdd;
+  --dune: #d9c39a;
+
+  --ink: #1d2a24;
+  --muted: #55645c;
+  --paper: #ffffff;
+  --line: #dccfb6;
+  --danger: #a3271f;
+  --danger-soft: #fbeceb;
+  --focus: #0b5fff;
+
+  --radius: 6px;
+  --gap: 1rem;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--sand);
+  color: var(--ink);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.6rem;
+  line-height: 1.25;
+  color: var(--night-green);
+  overflow-wrap: anywhere;
+}
+
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.2rem;
+  color: var(--night-green);
+}
+
+h3 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: 1rem;
+  color: var(--night-green);
+}
+
+p {
+  margin: 0 0 0.75rem;
+}
+
+a {
+  color: var(--saguaro);
+}
+
+code,
+pre,
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.9rem;
+}
+
+code {
+  overflow-wrap: anywhere;
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Frame */
+
+.layout {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem var(--gap);
+  padding: 0.6rem var(--gap);
+  background: var(--night-green);
+  color: var(--sand);
+}
+
+.topbar-brand {
+  display: inline-flex;
+}
+
+.topbar-logo {
+  display: block;
+  height: 36px;
+  width: auto;
+}
+
+.topbar-session {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.topbar-user {
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.sections {
+  background: var(--saguaro);
+  overflow-x: auto;
+}
+
+.sections ul {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0 0.5rem;
+  list-style: none;
+}
+
+.sections a {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  color: var(--sand);
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 3px solid transparent;
+}
+
+.sections a:hover {
+  border-bottom-color: var(--dune);
+}
+
+.sections a[aria-current='page'] {
+  border-bottom-color: var(--sand);
+  font-weight: 600;
+}
+
+.screen {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1.25rem var(--gap) 3rem;
+}
+
+.splash {
+  max-width: 30rem;
+  margin: 0 auto;
+  padding: 3rem var(--gap);
+}
+
+/* Sign-in */
+
+.signin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  min-height: 100vh;
+  padding: 3rem var(--gap);
+}
+
+/* The tagline logo is never shown below 64 px high. */
+.signin-logo {
+  height: 104px;
+  width: auto;
+  max-width: 100%;
+  min-height: 64px;
+  object-fit: contain;
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 24rem;
+}
+
+/* Cards */
+
+.card {
+  margin: 0 0 var(--gap);
+  padding: var(--gap);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* Forms */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.field > span {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+input:not([type='checkbox']),
+textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--muted);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+input:not([type='checkbox']):not([type='file']) {
+  font-family: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+textarea[readonly] {
+  background: var(--sand);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.check input {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.form-row .field {
+  flex: 1 1 14rem;
+}
+
+.form-row .field-wide {
+  flex-grow: 2;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.form-grid .field-full,
+.form-grid .form-actions,
+.form-grid .facts {
+  grid-column: 1 / -1;
+}
+
+.form-actions,
+.actions,
+.pager,
+.confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.pager {
+  margin: 0.75rem 0;
+}
+
+.confirm-question {
+  font-weight: 600;
+}
+
+.danger-zone {
+  margin-top: var(--gap);
+  padding-top: var(--gap);
+  border-top: 1px solid var(--line);
+}
+
+/* Buttons */
+
+.button {
+  display: inline-block;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--saguaro);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--saguaro);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1.3;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--sand);
+}
+
+.button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.button-primary {
+  background: var(--saguaro);
+  color: var(--paper);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--night-green);
+}
+
+.button-primary:disabled {
+  background: var(--line);
+}
+
+.button-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.button-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.button-on-dark {
+  border-color: var(--dune);
+  background: transparent;
+  color: var(--sand);
+}
+
+.button-on-dark:hover:not(:disabled) {
+  background: var(--saguaro);
+}
+
+/* Notices */
+
+.notice {
+  margin: 0 0 var(--gap);
+  padding: 0.75rem var(--gap);
+  border: 1px solid var(--line);
+  border-left-width: 6px;
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.notice p:last-child {
+  margin-bottom: 0;
+}
+
+.notice-title {
+  font-weight: 700;
+}
+
+.notice-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.notice-error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.notice-secret {
+  border-color: var(--saguaro);
+  background: var(--sand);
+}
+
+.loading {
+  color: var(--muted);
+}
+
+/* Facts: a list of names and values */
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: 0.25rem var(--gap);
+  margin: 0 0 0.75rem;
+}
+
+.facts dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.facts-pair {
+  display: contents;
+}
+
+.code {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: var(--sand);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0 0 var(--gap);
+  padding: 0;
+  list-style: none;
+}
+
+.breadcrumbs li + li::before {
+  content: '/';
+  margin-right: 0.25rem;
+  color: var(--muted);
+}
+
+.breadcrumbs a {
+  overflow-wrap: anywhere;
+}
+
+.state {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.state-online {
+  border-color: var(--saguaro);
+  color: var(--saguaro);
+}
+
+.state-offline {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* Tables */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.table th {
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/*
+ * On a narrow screen a table becomes a list of cards: every row is a block and
+ * every cell is shown under the name of its column.
+ */
+@media (max-width: 47.99rem) {
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+  }
+
+  .table tr {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .table td {
+    padding: 0.2rem 0;
+    border-bottom: 0;
+  }
+
+  .table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .facts {
+    grid-template-columns: 1fr;
+  }
+
+  .facts dd {
+    margin-bottom: 0.4rem;
+  }
+
+  .topbar-logo {
+    height: 30px;
+  }
+}

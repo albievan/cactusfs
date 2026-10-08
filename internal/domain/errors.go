@@ -110,6 +110,19 @@ var (
 	ErrEntityInUse = errors.New("entity is in use")
 )
 
+// Errors of the management API's request handling.
+var (
+	// ErrIdempotencyKeyReused means that an idempotency key came with a
+	// request other than the one it was first used for.
+	ErrIdempotencyKeyReused = errors.New("idempotency key was used for a different request")
+	// ErrRequestInProgress means that the request an idempotency key
+	// belongs to is still being carried out.
+	ErrRequestInProgress = errors.New("the request with this idempotency key is still in progress")
+	// ErrTooManyAttempts means that the caller must wait before trying
+	// again.
+	ErrTooManyAttempts = errors.New("too many attempts")
+)
+
 // Errors that describe the state of the cluster.
 var (
 	// ErrUnavailable means that something the request needs cannot be

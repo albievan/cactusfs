@@ -66,6 +66,8 @@ type Telemetry struct {
 	requests       *prometheus.CounterVec
 	requestSeconds *prometheus.HistogramVec
 	requestBytes   *prometheus.CounterVec
+	adminRequests  *prometheus.CounterVec
+	adminSeconds   *prometheus.HistogramVec
 	portCalls      *prometheus.CounterVec
 	portSeconds    *prometheus.HistogramVec
 	healObjects    *prometheus.CounterVec
@@ -100,6 +102,13 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	t.requestBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_s3_request_bytes_total", Help: "Bytes received from and sent to S3 clients by operation.",
 	}, []string{"operation", "direction"})
+	t.adminRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_admin_requests_total", Help: "Management API requests by operation and HTTP status code.",
+	}, []string{"operation", "code"})
+	t.adminSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "cactusfs_admin_request_duration_seconds", Help: "Duration of management API requests by operation.",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 9),
+	}, []string{"operation"})
 	t.portCalls = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_port_calls_total", Help: "Calls across an outbound adapter boundary by port, method and result.",
 	}, []string{"port", "method", "result"})
@@ -135,7 +144,7 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	}, []string{"type"})
 
 	for _, collector := range []prometheus.Collector{
-		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.portCalls, t.portSeconds,
+		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.events,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),

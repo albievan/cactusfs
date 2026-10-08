@@ -53,7 +53,41 @@ pending() {
 	fi
 }
 
-pending api/openapi "oapi-codegen diff + oasdiff" 5.1
+
+# Management API: no change that breaks a client of the previous contract.
+# (That the generated server, the JSON form and the web client are in sync
+# with the contract is the first check above.) The reference is the commit
+# this work is based on, as for the node RPC below.
+admin=api/openapi/admin.yaml
+admin_base=${CONTRACT_BASE:-HEAD}
+case "$admin_base" in
+*[!0]*) ;;
+*) admin_base=HEAD ;;
+esac
+if [ ! -s "$admin" ]; then
+	echo "contracts: FAIL - $admin is missing" >&2
+	status=1
+elif ! git rev-parse --verify --quiet "$admin_base^{commit}" >/dev/null; then
+	echo "contracts: FAIL - reference commit '$admin_base' not found" >&2
+	status=1
+elif git cat-file -e "$admin_base:$admin" 2>/dev/null; then
+	git show "$admin_base:$admin" >"$work/admin-base.yaml"
+	if oasdiff breaking "$work/admin-base.yaml" "$admin" --fail-on ERR; then
+		echo "contracts: management API - no breaking change against $admin_base"
+	else
+		echo "contracts: FAIL - breaking change in $admin against $admin_base;" \
+			"a change that breaks clients belongs in a new /api/v2" >&2
+		status=1
+	fi
+else
+	# Nothing to compare with: check that the tool reads the contract.
+	if oasdiff breaking "$admin" "$admin" --fail-on ERR >/dev/null; then
+		echo "contracts: management API - $admin_base has no contract yet, nothing to compare with"
+	else
+		echo "contracts: FAIL - oasdiff cannot read $admin" >&2
+		status=1
+	fi
+fi
 
 # Events: every AsyncAPI document must be valid. The validator runs on the
 # packages of web/, so those must be installed (`make contracts` does it).

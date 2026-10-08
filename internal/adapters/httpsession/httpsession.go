@@ -25,18 +25,28 @@ const (
 // Set stores a session token in the response. expires is when the session
 // ends; the browser drops the cookie then.
 func Set(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, Cookie(token, expires))
+}
+
+// Cookie returns the cookie that holds a session token until expires.
+func Cookie(token string, expires time.Time) *http.Cookie {
+	return &http.Cookie{
 		Name: CookieName, Value: token, Path: "/", Expires: expires,
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-	})
+	}
+}
+
+// Expired returns the cookie that makes a browser forget the session.
+func Expired() *http.Cookie {
+	return &http.Cookie{
+		Name: CookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+	}
 }
 
 // Clear makes the browser forget the session cookie.
 func Clear(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name: CookieName, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-	})
+	http.SetCookie(w, Expired())
 }
 
 // Token returns the session token of a request, or "" when it has none.

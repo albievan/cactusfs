@@ -171,8 +171,27 @@ than its owner. Five roles are built in: `cluster-admin`, `bucket-admin`, `read-
 sign-in is written to a hash-chained audit trail; `--audit-export` also writes each
 record to standard output as a JSON line.
 
-Managing users and keys is done through the admin API, which is the next milestone;
-until it exists, a deployment is used with its root credentials.
+### Management API, documentation and console
+
+The admin listener (`--admin-addr`, port 9001) serves:
+
+- the **management API** under `/api/v1`: buckets and objects, users, groups, roles,
+  policies, API keys, cluster status and the audit trail. Authenticate with an API key,
+  `Authorization: Bearer <access key ID>:<secret key>`; the root credentials work the
+  same way. Errors are `application/problem+json`, and every request that changes
+  something can be made safe to repeat with `Idempotency-Key`;
+- its **contract** at `/api/v1/openapi.yaml` and `.json`, and **Swagger UI** at `/docs`,
+  served from the binary - nothing is fetched from the internet;
+- the **console** at `/`, when the binary was built with it (`make build`, or the
+  container image). Sign in with a user that has a password; a binary built with plain
+  `go build` says that it has no console.
+
+```
+curl --cacert ca.pem -H "Authorization: Bearer $ACCESS_KEY:$SECRET_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: make-alice-1' \
+     -d '{"name":"alice","roles":["read-write"],"password":"a long password"}' \
+     https://localhost:9001/api/v1/users
+```
 
 ### A cluster
 

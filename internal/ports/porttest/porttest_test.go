@@ -90,4 +90,5 @@ func TestClockAuthorizerAndEntropy(t *testing.T) {
 func TestMemIAMContract(t *testing.T) {
 	t.Parallel()
 	porttest.IAMContract(t, func(*testing.T) porttest.IAM { return porttest.NewMemIAM() })
+	porttest.IdempotencyContract(t, func(*testing.T) ports.IdempotencyStore { return porttest.NewMemIAM() })
 }

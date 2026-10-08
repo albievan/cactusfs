@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -28,6 +29,32 @@ func (t *Telemetry) TraceS3(next http.Handler) http.Handler {
 		defer span.End()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// TraceAdmin wraps the management API so that every request runs inside a
+// server span. ObserveAdmin names the span once the operation is known.
+func (t *Telemetry) TraceAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := t.tracer.Start(r.Context(), "admin.request", trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// ObserveAdmin records one finished request of the management API. It is
+// the Observe hook of the admin handler. The operation is the route that
+// matched, never the path: names of buckets and users are not labels.
+func (t *Telemetry) ObserveAdmin(ctx context.Context, o adminapi.Observation) {
+	code := strconv.Itoa(o.Status)
+	t.adminRequests.WithLabelValues(o.Operation, code).Inc()
+	t.adminSeconds.WithLabelValues(o.Operation).Observe(o.Duration.Seconds())
+
+	span := trace.SpanFromContext(ctx)
+	span.SetName("admin " + o.Operation)
+	span.SetAttributes(attribute.String("admin.operation", o.Operation), attribute.Int("http.response.status_code", o.Status))
+	if o.Status >= http.StatusInternalServerError {
+		span.SetStatus(codes.Error, code)
+	}
 }
 
 // ObserveS3 records one finished S3 request. It is the Observe hook of the

@@ -4,7 +4,8 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', 'node_modules'] },
+  // src/api/schema.d.ts is generated from api/openapi/admin.yaml (pnpm gen:api).
+  { ignores: ['dist', 'coverage', 'node_modules', 'src/api/schema.d.ts'] },
   js.configs.recommended,
   ...tseslint.configs.strict,
   {

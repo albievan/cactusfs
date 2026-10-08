@@ -1,0 +1,2473 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CactusFS management API",
+    "version": "1.0.0",
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\n"
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "security": [
+    {
+      "apiKey": []
+    },
+    {
+      "session": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "session",
+      "description": "Signing in to the console and out of it."
+    },
+    {
+      "name": "buckets"
+    },
+    {
+      "name": "objects"
+    },
+    {
+      "name": "users"
+    },
+    {
+      "name": "groups"
+    },
+    {
+      "name": "roles"
+    },
+    {
+      "name": "policies"
+    },
+    {
+      "name": "keys",
+      "description": "API keys."
+    },
+    {
+      "name": "cluster"
+    },
+    {
+      "name": "audit"
+    },
+    {
+      "name": "meta",
+      "description": "This document."
+    }
+  ],
+  "paths": {
+    "/session": {
+      "post": {
+        "operationId": "signIn",
+        "tags": [
+          "session"
+        ],
+        "summary": "Sign in to the console",
+        "description": "Checks a user name and password and starts a session. The session token is set as an HttpOnly cookie;\nthe CSRF token is returned once, here. `Idempotency-Key` is accepted and has no effect: an answer that\nholds a session is never given twice, so repeating a sign-in starts another session.\n",
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in.",
+            "headers": {
+              "Set-Cookie": {
+                "description": "The session cookie.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getSession",
+        "tags": [
+          "session"
+        ],
+        "summary": "Who is making this request",
+        "responses": {
+          "200": {
+            "description": "The identity of the caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Identity"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "signOut",
+        "tags": [
+          "session"
+        ],
+        "summary": "Sign out",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Signed out. The cookie is cleared.",
+            "headers": {
+              "Set-Cookie": {
+                "description": "Clears the session cookie.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets": {
+      "get": {
+        "operationId": "listBuckets",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "List buckets",
+        "x-cactusfs-action": "s3:ListAllMyBuckets",
+        "responses": {
+          "200": {
+            "description": "The buckets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Bucket"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Create a bucket",
+        "x-cactusfs-action": "s3:CreateBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bucket"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}": {
+      "get": {
+        "operationId": "getBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get a bucket",
+        "x-cactusfs-action": "s3:ListBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bucket.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bucket"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Delete an empty bucket",
+        "x-cactusfs-action": "s3:DeleteBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/objects": {
+      "get": {
+        "operationId": "listObjects",
+        "tags": [
+          "objects"
+        ],
+        "summary": "List the objects of a bucket",
+        "x-cactusfs-action": "s3:ListBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Only keys that begin with this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "delimiter",
+            "in": "query",
+            "description": "Keys that contain it after the prefix are rolled up into common prefixes.",
+            "schema": {
+              "type": "string",
+              "maxLength": 16
+            }
+          },
+          {
+            "name": "continuation_token",
+            "in": "query",
+            "description": "The `next_continuation_token` of the previous page.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectList"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/object": {
+      "get": {
+        "operationId": "getObject",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Download an object",
+        "x-cactusfs-action": "s3:GetObject",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The content of the object.",
+            "headers": {
+              "Content-Length": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putObject",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Upload an object",
+        "description": "Stores the body as the object. `Content-Length` is required. With `Idempotency-Key`, a repeated request\nis recognised by its bucket, key and length, not by its content.\n",
+        "x-cactusfs-action": "s3:PutObject",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "name": "Content-Type",
+            "in": "header",
+            "description": "The media type to store with the object.",
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectMetadata"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteObject",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Delete an object",
+        "x-cactusfs-action": "s3:DeleteObject",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted, or was not there."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/object/metadata": {
+      "get": {
+        "operationId": "getObjectMetadata",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Get what is known about an object",
+        "x-cactusfs-action": "s3:GetObject",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectMetadata"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "operationId": "listUsers",
+        "tags": [
+          "users"
+        ],
+        "summary": "List users",
+        "x-cactusfs-action": "admin:ListUsers",
+        "responses": {
+          "200": {
+            "description": "The users.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "tags": [
+          "users"
+        ],
+        "summary": "Create a user",
+        "description": "A user with a password can sign in to the console. Whoever may create users can give them any role.\n",
+        "x-cactusfs-action": "admin:PutUser",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/users/{name}": {
+      "get": {
+        "operationId": "getUser",
+        "tags": [
+          "users"
+        ],
+        "summary": "Get a user",
+        "x-cactusfs-action": "admin:GetUser",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateUser",
+        "tags": [
+          "users"
+        ],
+        "summary": "Change a user",
+        "x-cactusfs-action": "admin:PutUser",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteUser",
+        "tags": [
+          "users"
+        ],
+        "summary": "Delete a user",
+        "x-cactusfs-action": "admin:DeleteUser",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/users/{name}/keys": {
+      "get": {
+        "operationId": "listAPIKeys",
+        "tags": [
+          "keys"
+        ],
+        "summary": "List the API keys of a user",
+        "x-cactusfs-action": "admin:ListAPIKeys",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The keys, without their secrets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/APIKey"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createAPIKey",
+        "tags": [
+          "keys"
+        ],
+        "summary": "Create an API key for a user",
+        "description": "The key acts as the user and can never do more than the user can. An inline policy narrows it further.\nThe secret key is returned once.\n",
+        "x-cactusfs-action": "admin:CreateAPIKey",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/APIKeyCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created. The secret is in this response and nowhere else, ever.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIKeyCreated"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/keys/{access_key_id}": {
+      "delete": {
+        "operationId": "deleteAPIKey",
+        "tags": [
+          "keys"
+        ],
+        "summary": "Revoke an API key",
+        "x-cactusfs-action": "admin:DeleteAPIKey",
+        "parameters": [
+          {
+            "name": "access_key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked. It stops working at once."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/groups": {
+      "get": {
+        "operationId": "listGroups",
+        "tags": [
+          "groups"
+        ],
+        "summary": "List groups",
+        "x-cactusfs-action": "admin:ListGroups",
+        "responses": {
+          "200": {
+            "description": "The groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Group"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createGroup",
+        "tags": [
+          "groups"
+        ],
+        "summary": "Create a group",
+        "description": "A group gives its roles to every user in it.\n",
+        "x-cactusfs-action": "admin:PutGroup",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/groups/{name}": {
+      "get": {
+        "operationId": "getGroup",
+        "tags": [
+          "groups"
+        ],
+        "summary": "Get a group",
+        "x-cactusfs-action": "admin:GetGroup",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateGroup",
+        "tags": [
+          "groups"
+        ],
+        "summary": "Change a group",
+        "x-cactusfs-action": "admin:PutGroup",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteGroup",
+        "tags": [
+          "groups"
+        ],
+        "summary": "Delete a group",
+        "x-cactusfs-action": "admin:DeleteGroup",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/roles": {
+      "get": {
+        "operationId": "listRoles",
+        "tags": [
+          "roles"
+        ],
+        "summary": "List roles",
+        "x-cactusfs-action": "admin:ListRoles",
+        "responses": {
+          "200": {
+            "description": "The roles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Role"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRole",
+        "tags": [
+          "roles"
+        ],
+        "summary": "Create a role",
+        "description": "A role is a named set of policies. The built-in roles cannot be changed.\n",
+        "x-cactusfs-action": "admin:PutRole",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Role"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/roles/{name}": {
+      "get": {
+        "operationId": "getRole",
+        "tags": [
+          "roles"
+        ],
+        "summary": "Get a role",
+        "x-cactusfs-action": "admin:GetRole",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Role"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateRole",
+        "tags": [
+          "roles"
+        ],
+        "summary": "Change a role",
+        "x-cactusfs-action": "admin:PutRole",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Role"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteRole",
+        "tags": [
+          "roles"
+        ],
+        "summary": "Delete a role",
+        "x-cactusfs-action": "admin:DeleteRole",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/policies": {
+      "get": {
+        "operationId": "listPolicies",
+        "tags": [
+          "policies"
+        ],
+        "summary": "List policies",
+        "x-cactusfs-action": "admin:ListPolicies",
+        "responses": {
+          "200": {
+            "description": "The policies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Policy"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createPolicy",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Create a policy",
+        "description": "A policy document in the IAM policy language. Anything in it that is not understood is refused.\n",
+        "x-cactusfs-action": "admin:PutPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/policies/{name}": {
+      "get": {
+        "operationId": "getPolicy",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Get a policy",
+        "x-cactusfs-action": "admin:GetPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updatePolicy",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Change a policy",
+        "x-cactusfs-action": "admin:PutPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deletePolicy",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Delete a policy",
+        "x-cactusfs-action": "admin:DeletePolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntityName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/cluster": {
+      "get": {
+        "operationId": "getCluster",
+        "tags": [
+          "cluster"
+        ],
+        "summary": "The nodes and drives of the deployment",
+        "x-cactusfs-action": "admin:GetClusterStatus",
+        "responses": {
+          "200": {
+            "description": "The state of the cluster as this node sees it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/cluster/maintenance": {
+      "get": {
+        "operationId": "getMaintenance",
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Scrubbing, healing and collection on this node",
+        "description": "Scrubbing runs on the node that leads the metadata group; a node that does not lead reports no scrub pass.\n",
+        "x-cactusfs-action": "admin:GetClusterStatus",
+        "responses": {
+          "200": {
+            "description": "What the background work of the answering node has done since it started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "operationId": "listAudit",
+        "tags": [
+          "audit"
+        ],
+        "summary": "Read the audit trail",
+        "x-cactusfs-action": "admin:GetAuditLog",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Return records with a sequence number greater than this.",
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Records in the order they were written. The chain of hashes is verified before they are returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenAPIJSON",
+        "tags": [
+          "meta"
+        ],
+        "summary": "This document as JSON",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/openapi.yaml": {
+      "get": {
+        "operationId": "getOpenAPIYAML",
+        "tags": [
+          "meta"
+        ],
+        "summary": "This document as YAML",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/yaml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An API key, as `<access key ID>:<secret key>`."
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-cactusfs-session",
+        "description": "The cookie that signing in sets. Requests that change something also need `X-CSRF-Token`."
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "description": "Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[\\x21-\\x7E]+$"
+        }
+      },
+      "CSRFToken": {
+        "name": "X-CSRF-Token",
+        "in": "header",
+        "description": "The CSRF token of the session. Required when the request is made with a session; ignored with an API key.",
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "BucketName": {
+        "name": "bucket",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 63
+        }
+      },
+      "ObjectKey": {
+        "name": "key",
+        "in": "query",
+        "required": true,
+        "description": "The key of the object.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "EntityName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Name"
+        }
+      }
+    },
+    "responses": {
+      "Problem": {
+        "description": "The request was not carried out.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Name": {
+        "type": "string",
+        "description": "The name of a user, group, role or policy.",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9+=,.@_-]*$"
+      },
+      "Problem": {
+        "type": "object",
+        "description": "Problem details (RFC 9457).",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "A URI reference that identifies the kind of problem."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "description": "A stable name for the kind of problem, for programs."
+          },
+          "request_id": {
+            "type": "string"
+          }
+        }
+      },
+      "SignInRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "user",
+          "csrf_token",
+          "expires_at"
+        ],
+        "properties": {
+          "user": {
+            "type": "string"
+          },
+          "csrf_token": {
+            "type": "string",
+            "description": "Send it back in `X-CSRF-Token` with every request that changes something."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Identity": {
+        "type": "object",
+        "required": [
+          "kind",
+          "via"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "root",
+              "user"
+            ]
+          },
+          "via": {
+            "type": "string",
+            "enum": [
+              "api_key",
+              "session"
+            ]
+          },
+          "user": {
+            "type": "string"
+          },
+          "access_key_id": {
+            "type": "string"
+          }
+        }
+      },
+      "Bucket": {
+        "type": "object",
+        "required": [
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "BucketCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 63
+          }
+        }
+      },
+      "ObjectSummary": {
+        "type": "object",
+        "required": [
+          "key",
+          "size",
+          "etag",
+          "last_modified"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "etag": {
+            "type": "string"
+          },
+          "last_modified": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ObjectList": {
+        "type": "object",
+        "required": [
+          "objects",
+          "common_prefixes",
+          "truncated"
+        ],
+        "properties": {
+          "objects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObjectSummary"
+            }
+          },
+          "common_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "next_continuation_token": {
+            "type": "string"
+          }
+        }
+      },
+      "ObjectMetadata": {
+        "type": "object",
+        "required": [
+          "bucket",
+          "key",
+          "size",
+          "etag",
+          "last_modified",
+          "content_type",
+          "encryption"
+        ],
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "etag": {
+            "type": "string"
+          },
+          "last_modified": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "encryption": {
+            "type": "string",
+            "description": "How the object is encrypted at rest."
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "name",
+          "groups",
+          "roles",
+          "disabled",
+          "has_password",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "Whether the user can sign in to the console."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserCreate": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "groups": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        }
+      },
+      "UserUpdate": {
+        "type": "object",
+        "required": [
+          "groups",
+          "roles",
+          "disabled"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "description": "When given, replaces the console password.",
+            "minLength": 12,
+            "maxLength": 1024
+          }
+        }
+      },
+      "Group": {
+        "type": "object",
+        "required": [
+          "name",
+          "roles",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "GroupCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "roles"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "roles": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          }
+        }
+      },
+      "GroupUpdate": {
+        "type": "object",
+        "required": [
+          "roles"
+        ],
+        "properties": {
+          "roles": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          }
+        }
+      },
+      "Role": {
+        "type": "object",
+        "required": [
+          "name",
+          "policies",
+          "built_in",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          "built_in": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RoleCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "policies"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "policies": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          }
+        }
+      },
+      "RoleUpdate": {
+        "type": "object",
+        "required": [
+          "policies"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/Name"
+            }
+          }
+        }
+      },
+      "PolicyDocument": {
+        "type": "object",
+        "description": "A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).",
+        "additionalProperties": true
+      },
+      "Policy": {
+        "type": "object",
+        "required": [
+          "name",
+          "document",
+          "built_in",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          },
+          "built_in": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PolicyCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "document"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "PolicyUpdate": {
+        "type": "object",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "APIKey": {
+        "type": "object",
+        "required": [
+          "access_key_id",
+          "owner",
+          "description",
+          "created_at"
+        ],
+        "properties": {
+          "access_key_id": {
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "description": {
+            "type": "string"
+          },
+          "inline_policy": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "APIKeyCreate": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "inline_policy": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "APIKeyCreated": {
+        "type": "object",
+        "required": [
+          "key",
+          "secret_key"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/APIKey"
+          },
+          "secret_key": {
+            "type": "string",
+            "format": "password",
+            "description": "Shown once. It cannot be had again."
+          }
+        }
+      },
+      "NodeLabels": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string"
+          },
+          "zone": {
+            "type": "string"
+          },
+          "rack": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "required": [
+          "id",
+          "roles",
+          "labels",
+          "leader"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "$ref": "#/components/schemas/NodeLabels"
+          },
+          "leader": {
+            "type": "boolean",
+            "description": "Whether the node leads the metadata group."
+          },
+          "metadata_version": {
+            "type": "integer"
+          }
+        }
+      },
+      "Drive": {
+        "type": "object",
+        "required": [
+          "id",
+          "node_id",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "online",
+              "offline"
+            ]
+          }
+        }
+      },
+      "ErasureSet": {
+        "type": "object",
+        "required": [
+          "index",
+          "drives"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "drives": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Drive"
+            }
+          }
+        }
+      },
+      "ClusterStatus": {
+        "type": "object",
+        "required": [
+          "deployment_id",
+          "answered_by",
+          "leader",
+          "nodes",
+          "erasure_sets",
+          "node_failures_tolerated",
+          "drives_online",
+          "drives_total"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "answered_by": {
+            "type": "string",
+            "description": "The node that answered."
+          },
+          "leader": {
+            "type": "string",
+            "description": "The node that leads the metadata group, or empty when there is none."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "erasure_sets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErasureSet"
+            }
+          },
+          "node_failures_tolerated": {
+            "type": "integer"
+          },
+          "drives_online": {
+            "type": "integer"
+          },
+          "drives_total": {
+            "type": "integer"
+          }
+        }
+      },
+      "ScrubStatus": {
+        "type": "object",
+        "required": [
+          "passes",
+          "objects",
+          "damaged",
+          "shards_rebuilt",
+          "unrecoverable",
+          "bytes"
+        ],
+        "properties": {
+          "passes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_pass_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Objects checked in the last pass."
+          },
+          "damaged": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shards_rebuilt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unrecoverable": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "HealStatus": {
+        "type": "object",
+        "required": [
+          "objects",
+          "shards_rebuilt",
+          "unrecoverable"
+        ],
+        "properties": {
+          "objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Objects found damaged since the node started."
+          },
+          "shards_rebuilt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unrecoverable": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CollectionStatus": {
+        "type": "object",
+        "required": [
+          "passes",
+          "shards",
+          "removed"
+        ],
+        "properties": {
+          "passes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_pass_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "shards": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Shards looked at in the last pass."
+          },
+          "removed": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "MaintenanceStatus": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "started_at",
+          "scrub",
+          "heal",
+          "collection"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "scrub": {
+            "$ref": "#/components/schemas/ScrubStatus"
+          },
+          "heal": {
+            "$ref": "#/components/schemas/HealStatus"
+          },
+          "collection": {
+            "$ref": "#/components/schemas/CollectionStatus"
+          }
+        }
+      },
+      "AuditRecord": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "time",
+          "actor",
+          "action",
+          "resource",
+          "outcome",
+          "hash",
+          "previous_hash"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "access_key_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "source_ip": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "previous_hash": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string"
+          }
+        }
+      },
+      "AuditPage": {
+        "type": "object",
+        "required": [
+          "records"
+        ],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditRecord"
+            }
+          },
+          "next_after": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Pass it as `after` for the next page. Absent on the last page."
+          }
+        }
+      }
+    }
+  }
+}
