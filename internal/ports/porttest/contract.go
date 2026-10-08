@@ -9,6 +9,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -352,6 +353,30 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 	t.Run("versions", func(t *testing.T) { versionsContract(t, open(t)) })
 	t.Run("object lock", func(t *testing.T) { lockContract(t, open(t)) })
 	t.Run("multipart uploads", func(t *testing.T) { uploadsContract(t, open) })
+	t.Run("whose key it takes", func(t *testing.T) {
+		// What a version records about its encryption comes back as it
+		// went in, for every mode.
+		store := open(t)
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		for i, change := range []func(e *object.Encryption){
+			func(e *object.Encryption) { e.Mode, e.Context = object.SSEKMS, []byte(`{"team":"finance"}`) },
+			func(e *object.Encryption) {
+				e.Mode, e.KeyCheck = object.SSEC, bytes.Repeat([]byte{7}, 16)
+			},
+		} {
+			v := SampleVersion("b", "k"+strconv.Itoa(i), byte(i+1))
+			change(&v.Encryption)
+			if _, err := store.PutVersion(ctx, v); err != nil {
+				t.Fatalf("PutVersion: %v", err)
+			}
+			got, err := store.GetObject(ctx, "b", v.Key)
+			if err != nil || !reflect.DeepEqual(got.Encryption, v.Encryption) {
+				t.Errorf("encryption of %s = %+v, %v; want %+v", v.Key, got.Encryption, err, v.Encryption)
+			}
+		}
+	})
 
 	t.Run("topology", func(t *testing.T) {
 		store := open(t)

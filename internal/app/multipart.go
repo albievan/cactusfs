@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -75,6 +76,9 @@ type CreateUploadInput struct {
 	// removed. Whether a retention can still be kept is decided when the
 	// upload is completed.
 	Lock object.Lock
+	// SSE says whose key it takes to read the object. With SSE-C every
+	// part must come with the same key.
+	SSE object.SSE
 }
 
 // CreateUpload begins a multipart upload.
@@ -105,15 +109,13 @@ func (s *ObjectService) createUpload(ctx context.Context, principal iam.Principa
 	}
 	// One data key for the upload, bound to its ID. It encrypts nothing:
 	// the key of every part is derived from it.
-	key, err := s.kms.GenerateDataKey(ctx, object.UploadKeyContext(upload.ID))
+	enc := object.Encryption{KeyMode: object.KeyModePartHKDF}
+	key, err := s.newDataKey(ctx, &enc, in.SSE, object.UploadKeyContext(upload.ID))
 	if err != nil {
 		return object.Upload{}, err
 	}
-	clear(key.Plaintext)
-	upload.Encryption = object.Encryption{
-		Scheme: object.StreamSchemeV1, KMSKeyID: s.kms.KeyID(), WrappedKey: key.Wrapped,
-		SegmentSize: object.DefaultSegmentSize, KeyMode: object.KeyModePartHKDF,
-	}
+	clear(key)
+	upload.Encryption = enc
 	if err := s.uploads.CreateUpload(ctx, upload); err != nil {
 		return object.Upload{}, err
 	}
@@ -139,6 +141,8 @@ type UploadPartInput struct {
 	Body   io.Reader
 	Size   int64
 	Verify func() (etag string, err error)
+	// CustomerKey is the client's key, for an upload under SSE-C.
+	CustomerKey []byte
 	// Checksums, when not nil, is called after Verify succeeded and
 	// returns the checksums the client declared for the part and that
 	// were found to hold, by the name of the header that carried each.
@@ -176,14 +180,18 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 		return object.Part{}, err
 	}
 	part := object.Part{Number: in.Number, DataID: object.ID(random[:object.IDSize]), NoncePrefix: random[object.IDSize:]}
-	stream, err := s.partStream(ctx, upload.Encryption, upload.ID, part)
+	keys, err := s.partStream(ctx, upload.Encryption, upload.ID, part, in.CustomerKey)
 	if err != nil {
 		return object.Part{}, err
 	}
-	err = s.write(ctx, part.DataID, stream, in.Body, in.Size, in.Verify, func(w written) (object.Extent, error) {
+	defer keys.tag.forget()
+	err = s.write(ctx, part.DataID, keys.stream, in.Body, in.Size, keys.tag.verify(in.Verify), func(w written) (object.Extent, error) {
 		part.Size, part.ETag, part.Layout = w.size, w.etag, w.layout
 		part.ModifiedAt = s.clock.Now().UTC()
-		if in.Checksums != nil {
+		// The checksums of a part under SSE-C were verified and are not
+		// kept: they are digests of plaintext, and the record is read by
+		// those who do not hold the key.
+		if in.Checksums != nil && upload.Encryption.Mode != object.SSEC {
 			part.Checksums = in.Checksums()
 		}
 		replaced, err := s.uploads.PutPart(ctx, in.Bucket, in.Key, in.UploadID, part)
@@ -206,15 +214,55 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 	return part, nil
 }
 
-// partStream returns the stream that encrypts or decrypts one part, under
-// the key derived for it from the data key of its upload.
-func (s *ObjectService) partStream(ctx context.Context, enc object.Encryption, uploadID object.ID, part object.Part) (*object.Stream, error) {
-	uploadKey, err := s.uploadKey(ctx, enc, uploadID)
+// partStream returns the stream that encrypts one part, under the key
+// derived for it from the data key of its upload, and what makes its entity
+// tag.
+func (s *ObjectService) partStream(
+	ctx context.Context, enc object.Encryption, uploadID object.ID, part object.Part, customerKey []byte,
+) (keyed, error) {
+	uploadKey, err := s.uploadDataKey(ctx, enc, uploadID, customerKey)
+	if err != nil {
+		return keyed{}, err
+	}
+	defer clear(uploadKey)
+	stream, err := partStreamWith(uploadKey, enc, part)
+	if err != nil {
+		return keyed{}, err
+	}
+	tag, err := newTagger(uploadKey, enc)
+	if err != nil {
+		return keyed{}, err
+	}
+	return keyed{stream: stream, tag: tag}, nil
+}
+
+// uploadDataKey returns the key the part keys of an upload are derived from,
+// which for SSE-C takes the client's key and proves it is the right one. The
+// caller clears it.
+func (s *ObjectService) uploadDataKey(ctx context.Context, enc object.Encryption, uploadID object.ID, customerKey []byte) ([]byte, error) {
+	if err := admitKey(enc, customerKey); err != nil {
+		return nil, err
+	}
+	kmsKey, err := s.uploadKey(ctx, enc, uploadID)
 	if err != nil {
 		return nil, err
 	}
-	defer clear(uploadKey)
-	return partStreamWith(uploadKey, enc, part)
+	return dataKey(kmsKey, enc, customerKey)
+}
+
+// checkUploadKey checks a customer key that came with a request about an
+// upload which does not need one: completing it, listing its parts. A client
+// may send it; if it does, it must be the upload's.
+func (s *ObjectService) checkUploadKey(ctx context.Context, upload object.Upload, customerKey []byte) error {
+	if len(customerKey) == 0 {
+		return nil
+	}
+	key, err := s.uploadDataKey(ctx, upload.Encryption, upload.ID, customerKey)
+	if err != nil {
+		return err
+	}
+	clear(key)
+	return nil
 }
 
 func partStreamWith(uploadKey []byte, enc object.Encryption, part object.Part) (*object.Stream, error) {
@@ -240,6 +288,9 @@ type CompleteUploadInput struct {
 	// formed is protocol; it holds only if the listed tags are those of
 	// the stored parts, which completing checks.
 	ETag string
+	// CustomerKey may be given for an upload under SSE-C, and is then
+	// checked. Completing does not need it.
+	CustomerKey []byte
 }
 
 // completeAttempts bounds how often completing starts over because a part
@@ -274,6 +325,18 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 	}
 	if err != nil {
 		return object.Version{}, err
+	}
+	if err := s.checkUploadKey(ctx, upload, in.CustomerKey); err != nil {
+		return object.Version{}, err
+	}
+	if upload.Encryption.Mode == object.SSEC {
+		// No checksum of a part was kept (see uploadPart); none can be
+		// compared. The entity tags are.
+		parts := slices.Clone(in.Parts)
+		for i := range parts {
+			parts[i].Checksums = nil
+		}
+		in.Parts = parts
 	}
 	uploadKey, err := s.uploadKey(ctx, upload.Encryption, upload.ID)
 	if err != nil {
@@ -380,6 +443,9 @@ type ListPartsInput struct {
 	After int
 	// Max is the greatest number of parts to return; at most object.MaxListKeys.
 	Max int
+	// CustomerKey may be given for an upload under SSE-C, and is then
+	// checked.
+	CustomerKey []byte
 }
 
 // ListPartsOutput is one page of the parts of an upload.
@@ -401,6 +467,9 @@ func (s *ObjectService) ListParts(ctx context.Context, principal iam.Principal, 
 	limit := min(max(in.Max, 0), object.MaxListKeys)
 	upload, err := s.uploads.GetUpload(ctx, in.Bucket, in.Key, in.UploadID)
 	if err != nil {
+		return ListPartsOutput{}, fmt.Errorf("object.ListParts: %w", err)
+	}
+	if err := s.checkUploadKey(ctx, upload, in.CustomerKey); err != nil {
 		return ListPartsOutput{}, fmt.Errorf("object.ListParts: %w", err)
 	}
 	parts, err := s.uploads.ListParts(ctx, in.Bucket, in.Key, in.UploadID, in.After, limit+1)
@@ -516,17 +585,24 @@ func (s *ObjectService) ListUploads(ctx context.Context, principal iam.Principal
 }
 
 // openParts opens a version that is made of parts for reading span.
-func (s *ObjectService) openParts(ctx context.Context, version object.Version, span object.Range) (io.ReadCloser, error) {
+func (s *ObjectService) openParts(ctx context.Context, version object.Version, span object.Range, customerKey []byte) (io.ReadCloser, error) {
 	if version.Encryption.SegmentSize <= 0 {
 		return nil, fmt.Errorf("%w: segment size %d", domain.ErrIntegrity, version.Encryption.SegmentSize)
 	}
-	uploadKey, err := s.uploadKey(ctx, version.Encryption, version.DataID)
+	kmsKey, err := s.uploadKey(ctx, version.Encryption, version.DataID)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := object.NewManifest(uploadKey)
+	// The part list is sealed under the KMS data key alone: completing an
+	// upload makes the seals, and has no customer key to make them with.
+	manifest, err := object.NewManifest(kmsKey)
 	if err != nil {
-		clear(uploadKey)
+		clear(kmsKey)
+		return nil, err
+	}
+	uploadKey, err := dataKey(kmsKey, version.Encryption, customerKey)
+	if err != nil {
+		manifest.Clear()
 		return nil, err
 	}
 	body := &partsBody{

@@ -83,6 +83,18 @@ func (o *observations) last() Observation {
 
 func newTestServer(t *testing.T, domainName string) *testServer {
 	t.Helper()
+	return startTestServer(t, domainName, false)
+}
+
+// newTLSTestServer is newTestServer over TLS, as clients reach a real node:
+// what is only accepted over TLS can be tested with it.
+func newTLSTestServer(t *testing.T) *testServer {
+	t.Helper()
+	return startTestServer(t, "", true)
+}
+
+func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
+	t.Helper()
 	ctx := context.Background()
 
 	kms, err := porttest.NewKMS("test:1")
@@ -132,7 +144,11 @@ func newTestServer(t *testing.T, domainName string) *testServer {
 		Buckets: app.NewBucketService(s.meta, authz, clock), Objects: s.objects, Identities: identities,
 		Clock: clock, Logger: logger, Domain: domainName, Observe: s.seen.add,
 	})
-	s.Server = httptest.NewServer(handler)
+	if secure {
+		s.Server = httptest.NewTLSServer(handler)
+	} else {
+		s.Server = httptest.NewServer(handler)
+	}
 	t.Cleanup(s.Close)
 	return s
 }

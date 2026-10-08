@@ -154,11 +154,8 @@ func uploadToRecord(u object.Upload) *uploadRecord {
 		Bucket: u.Bucket, Key: u.Key, ID: u.ID.String(), InitiatedAt: u.InitiatedAt.UTC(), Initiator: u.Initiator,
 		ContentType: u.ContentType, ContentEncoding: u.ContentEncoding, ContentDisposition: u.ContentDisposition,
 		ContentLanguage: u.ContentLanguage, CacheControl: u.CacheControl, UserMetadata: u.UserMetadata,
-		Lock: lockToRecord(u.Lock),
-		Encryption: encryptionRecord{
-			Scheme: u.Encryption.Scheme, KMSKeyID: u.Encryption.KMSKeyID, WrappedKey: u.Encryption.WrappedKey,
-			SegmentSize: u.Encryption.SegmentSize, KeyMode: u.Encryption.KeyMode,
-		},
+		Lock:       lockToRecord(u.Lock),
+		Encryption: encryptionToRecord(u.Encryption),
 	}
 }
 
@@ -171,11 +168,8 @@ func (r uploadRecord) toDomain() (object.Upload, error) {
 		Bucket: r.Bucket, Key: r.Key, ID: id, InitiatedAt: r.InitiatedAt, Initiator: r.Initiator,
 		ContentType: r.ContentType, ContentEncoding: r.ContentEncoding, ContentDisposition: r.ContentDisposition,
 		ContentLanguage: r.ContentLanguage, CacheControl: r.CacheControl, UserMetadata: r.UserMetadata,
-		Lock: r.Lock.toDomain(),
-		Encryption: object.Encryption{
-			Scheme: r.Encryption.Scheme, KMSKeyID: r.Encryption.KMSKeyID, WrappedKey: r.Encryption.WrappedKey,
-			SegmentSize: r.Encryption.SegmentSize, KeyMode: r.Encryption.KeyMode,
-		},
+		Lock:       r.Lock.toDomain(),
+		Encryption: r.Encryption.toDomain(),
 	}, nil
 }
 

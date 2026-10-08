@@ -185,8 +185,15 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 	if err != nil {
 		return err
 	}
+	sse, err := sseOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(sse.CustomerKey)
+	digest := req.Header.Get(headerSSECKeyMD5)
 	in := app.PutInput{
 		Lock:               lock,
+		SSE:                sse,
 		Bucket:             req.bucket,
 		Key:                req.key,
 		Body:               body.body,
@@ -206,7 +213,7 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 
 	header := req.w.Header()
 	header.Set("ETag", quote(version.ETag))
-	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	setSSEHeaders(header, version.Encryption, digest)
 	setVersionHeader(header, version, false)
 	for name, value := range body.checksums {
 		header.Set(name, value)
@@ -233,7 +240,14 @@ func userMetadata(header http.Header) map[string]string {
 }
 
 func (h *Handler) getObject(ctx context.Context, req *request) error {
-	in := app.GetInput{Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range")), Version: req.version}
+	customerKey, digest, err := customerKeyOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(customerKey)
+	in := app.GetInput{
+		Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range")), Version: req.version, CustomerKey: customerKey,
+	}
 	out, err := h.cfg.Objects.Get(ctx, req.principal, in)
 	if err != nil {
 		return err
@@ -245,7 +259,7 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 	}()
 
 	header := req.w.Header()
-	setObjectHeaders(header, out.Version)
+	setObjectHeaders(header, out.Version, digest)
 	setVersionHeader(header, out.Version, req.version != nil)
 	header.Set("Content-Length", strconv.FormatInt(out.Range.Length, 10))
 	status := http.StatusOK
@@ -266,18 +280,19 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) headObject(ctx context.Context, req *request) error {
-	var version object.Version
-	var err error
-	if req.version != nil {
-		version, err = h.cfg.Objects.HeadVersion(ctx, req.principal, req.bucket, req.key, *req.version)
-	} else {
-		version, err = h.cfg.Objects.Head(ctx, req.principal, req.bucket, req.key)
+	customerKey, digest, err := customerKeyOf(req.Request)
+	if err != nil {
+		return err
 	}
+	defer clear(customerKey)
+	version, err := h.cfg.Objects.Stat(ctx, req.principal, app.GetInput{
+		Bucket: req.bucket, Key: req.key, Version: req.version, CustomerKey: customerKey,
+	})
 	if err != nil {
 		return err
 	}
 	header := req.w.Header()
-	setObjectHeaders(header, version)
+	setObjectHeaders(header, version, digest)
 	setVersionHeader(header, version, req.version != nil)
 	header.Set("Content-Length", strconv.FormatInt(version.Size, 10))
 	req.w.WriteHeader(http.StatusOK)
@@ -311,7 +326,7 @@ func (h *Handler) deleteObject(ctx context.Context, req *request) error {
 	return nil
 }
 
-func setObjectHeaders(header http.Header, v object.Version) {
+func setObjectHeaders(header http.Header, v object.Version, customerDigest string) {
 	contentType := v.ContentType
 	if contentType == "" {
 		contentType = defaultContentType
@@ -320,7 +335,7 @@ func setObjectHeaders(header http.Header, v object.Version) {
 	header.Set("ETag", quote(v.ETag))
 	header.Set("Last-Modified", v.ModifiedAt.UTC().Format(http.TimeFormat))
 	header.Set("Accept-Ranges", "bytes")
-	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	setSSEHeaders(header, v.Encryption, customerDigest)
 	setLockHeaders(header, v.Lock)
 	for name, value := range map[string]string{
 		"Content-Encoding":    v.ContentEncoding,

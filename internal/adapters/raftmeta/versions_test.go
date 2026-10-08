@@ -927,3 +927,52 @@ func TestMultipartNeedsTheSecondSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestEncryptionModesNeedTheSecondSchema: a binary of the first schema would
+// store a version without the mode of its encryption, and then fail to read
+// what it stored. A put that names one is written in the second.
+func TestEncryptionModesNeedTheSecondSchema(t *testing.T) {
+	t.Parallel()
+	plain := porttest.SampleVersion("b", "k", 1)
+	if got := versionOf(entry{Type: cmdPutObject, PutObject: versionToRecord(plain)}); got != entrySchemaVersion {
+		t.Errorf("a plain put is written in schema %d", got)
+	}
+	for _, mode := range []string{object.SSEKMS, object.SSEC} {
+		v := plain
+		v.Encryption.Mode = mode
+		if got := versionOf(entry{Type: cmdPutObject, PutObject: versionToRecord(v)}); got != entrySchemaTimed {
+			t.Errorf("a put with %s is written in schema %d, want %d", mode, got, entrySchemaTimed)
+		}
+	}
+	// And an entry of the first schema that names one anyway is applied
+	// as a binary of that schema would apply it: without.
+	f := newFSM(t)
+	apply := func(index uint64, e entry) applyResult {
+		t.Helper()
+		data, err := encodeEntry(e, entrySchemaVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+	}
+	if r := apply(1, entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "b"}}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	v := plain
+	v.Encryption.Mode, v.Encryption.KeyCheck, v.Encryption.KeyMode, v.Parts = object.SSEC, []byte{1}, object.KeyModePartHKDF, 3
+	if r := apply(2, entry{Type: cmdPutObject, PutObject: versionToRecord(v)}); r.err != nil || r.fatal {
+		t.Fatalf("apply: %v", r.err)
+	}
+	if err := f.view(func(tx *bbolt.Tx) error {
+		stored, err := readVersion(tx.Bucket(objectsBucket()).Bucket([]byte("b")), "k")
+		if err != nil || stored == nil {
+			t.Fatalf("stored = %v, %v", stored, err)
+		}
+		if e := stored.Encryption; e.Mode != "" || e.KeyCheck != nil || e.KeyMode != "" || stored.Parts != 0 {
+			t.Errorf("an entry of the first schema stored %+v, parts %d", e, stored.Parts)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

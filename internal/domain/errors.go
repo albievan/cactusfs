@@ -98,6 +98,15 @@ var (
 	// ErrPartTooSmall means that a part other than the last is smaller
 	// than the minimum.
 	ErrPartTooSmall = errors.New("part is smaller than the minimum")
+	// ErrCustomerKeyRequired means that an object encrypted with a key the
+	// client holds (SSE-C) was asked for without that key.
+	ErrCustomerKeyRequired = errors.New("the object is encrypted with a customer key, which the request must provide")
+	// ErrCustomerKeyMismatch means that the customer key of the request is
+	// not the one the object was encrypted with.
+	ErrCustomerKeyMismatch = errors.New("the customer key is not the one the object was encrypted with")
+	// ErrCustomerKeyUnexpected means that a customer key came with a
+	// request for an object that is not encrypted with one.
+	ErrCustomerKeyUnexpected = errors.New("the object is not encrypted with a customer key")
 	// ErrMethodNotAllowed means that what was asked cannot be done with
 	// what was named: reading a delete marker.
 	ErrMethodNotAllowed = errors.New("method not allowed")
@@ -202,6 +211,9 @@ func wireCodes() []struct {
 		{"invalid_bucket_state", ErrInvalidBucketState},
 		{"object_locked", ErrObjectLocked},
 		{"entity_too_large", ErrEntityTooLarge},
+		{"customer_key_required", ErrCustomerKeyRequired},
+		{"customer_key_mismatch", ErrCustomerKeyMismatch},
+		{"customer_key_unexpected", ErrCustomerKeyUnexpected},
 		{"upload_not_found", ErrUploadNotFound},
 		{"part_not_found", ErrPartNotFound},
 		{"part_order", ErrPartOrder},

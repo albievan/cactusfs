@@ -1186,3 +1186,160 @@ func TestCompleteMultipartUploadRefusals(t *testing.T) {
 		t.Errorf("the object is %d bytes", len(got))
 	}
 }
+
+// Two customer keys for SSE-C - thirty-two times "k" and thirty-two times
+// "o" - in base64, each with the MD5 digest that S3 wants beside it. They are
+// written out because this suite computes no MD5 of its own.
+const (
+	customerKeyK    = "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="
+	customerKeyKMD5 = "mT2HRsMGJ5IX5C+0rreZ8Q=="
+	customerKeyO    = "b29vb29vb29vb29vb29vb29vb29vb29vb29vb29vb28="
+	customerKeyOMD5 = "PU6HMsdu0iozac5HrrKJcg=="
+)
+
+func TestSSECustomerKey(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	key, digest := aws.String(customerKeyK), aws.String(customerKeyKMD5)
+	data := randomBytes(t, 200_000)
+	put, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("secret"), Body: bytes.NewReader(data),
+		SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	})
+	if err != nil {
+		t.Fatalf("PutObject with a customer key: %v", err)
+	}
+	if aws.ToString(put.SSECustomerAlgorithm) != "AES256" || aws.ToString(put.SSECustomerKeyMD5) == "" {
+		t.Errorf("PutObject answered algorithm %q, digest %q", aws.ToString(put.SSECustomerAlgorithm), aws.ToString(put.SSECustomerKeyMD5))
+	}
+	out, err := c.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(name), Key: aws.String("secret"), SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	})
+	if err != nil {
+		t.Fatalf("GetObject with the key: %v", err)
+	}
+	got, _ := io.ReadAll(out.Body)
+	_ = out.Body.Close()
+	if !bytes.Equal(got, data) || aws.ToString(out.SSECustomerKeyMD5) != aws.ToString(put.SSECustomerKeyMD5) {
+		t.Errorf("GetObject returned %d bytes, digest %q", len(got), aws.ToString(out.SSECustomerKeyMD5))
+	}
+	if _, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{
+		Bucket: aws.String(name), Key: aws.String("secret"), SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	}); err != nil {
+		t.Errorf("HeadObject with the key: %v", err)
+	}
+	if _, err := c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("secret")}); errorCode(err) != "InvalidRequest" {
+		t.Errorf("GetObject without the key: code %q (%v), want InvalidRequest", errorCode(err), err)
+	}
+	_, err = c.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(name), Key: aws.String("secret"), SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: aws.String(customerKeyO), SSECustomerKeyMD5: aws.String(customerKeyOMD5),
+	})
+	if errorCode(err) != "AccessDenied" {
+		t.Errorf("GetObject with another key: code %q (%v), want AccessDenied", errorCode(err), err)
+	}
+	if _, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("secret")}); err == nil {
+		t.Error("HeadObject without the key succeeded")
+	}
+}
+
+func TestSSECustomerKeyMultipart(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	key, digest := aws.String(customerKeyK), aws.String(customerKeyKMD5)
+	created, err := c.CreateMultipartUpload(t.Context(), &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("film"), SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload with a customer key: %v", err)
+	}
+	contents := [][]byte{randomBytes(t, minPart), randomBytes(t, 999)}
+	var parts []types.CompletedPart
+	var number int32
+	for _, data := range contents {
+		number++
+		sent, err := c.UploadPart(t.Context(), &s3.UploadPartInput{
+			Bucket: aws.String(name), Key: aws.String("film"), UploadId: created.UploadId, PartNumber: aws.Int32(number), Body: bytes.NewReader(data),
+			SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+		})
+		if err != nil {
+			t.Fatalf("UploadPart %d: %v", number, err)
+		}
+		parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(number), ETag: sent.ETag, ChecksumCRC32: sent.ChecksumCRC32})
+	}
+	if _, err := c.UploadPart(t.Context(), &s3.UploadPartInput{
+		Bucket: aws.String(name), Key: aws.String("film"), UploadId: created.UploadId, PartNumber: aws.Int32(3), Body: bytes.NewReader([]byte("x")),
+	}); errorCode(err) != "InvalidRequest" {
+		t.Errorf("UploadPart without the key: code %q (%v), want InvalidRequest", errorCode(err), err)
+	}
+	// With the key, as the SDKs' transfer managers complete an upload;
+	// and not with another.
+	if _, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("film"), UploadId: created.UploadId, MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: aws.String(customerKeyO), SSECustomerKeyMD5: aws.String(customerKeyOMD5),
+	}); errorCode(err) != "AccessDenied" {
+		t.Errorf("CompleteMultipartUpload with another key: code %q (%v), want AccessDenied", errorCode(err), err)
+	}
+	if _, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("film"), UploadId: created.UploadId, MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	}); err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	out, err := c.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(name), Key: aws.String("film"), SSECustomerAlgorithm: aws.String("AES256"), SSECustomerKey: key, SSECustomerKeyMD5: digest,
+	})
+	if err != nil {
+		t.Fatalf("GetObject with the key: %v", err)
+	}
+	got, _ := io.ReadAll(out.Body)
+	_ = out.Body.Close()
+	if !bytes.Equal(got, slices.Concat(contents...)) {
+		t.Errorf("GetObject returned %d bytes", len(got))
+	}
+}
+
+func TestSSEKMS(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	put, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("k"), Body: bytes.NewReader([]byte("hello")),
+		ServerSideEncryption:    types.ServerSideEncryptionAwsKms,
+		SSEKMSEncryptionContext: aws.String("eyJ0ZWFtIjoiZmluYW5jZSJ9"), // {"team":"finance"}
+	})
+	if err != nil {
+		t.Fatalf("PutObject with SSE-KMS: %v", err)
+	}
+	if put.ServerSideEncryption != types.ServerSideEncryptionAwsKms || aws.ToString(put.SSEKMSKeyId) == "" {
+		t.Errorf("PutObject answered %q, key %q", put.ServerSideEncryption, aws.ToString(put.SSEKMSKeyId))
+	}
+	got, out := get(t, name, "k")
+	if string(got) != "hello" || out.ServerSideEncryption != types.ServerSideEncryptionAwsKms || aws.ToString(out.SSEKMSKeyId) != aws.ToString(put.SSEKMSKeyId) {
+		t.Errorf("GetObject = %q, %q, key %q", got, out.ServerSideEncryption, aws.ToString(out.SSEKMSKeyId))
+	}
+	// The key the server named can be asked for by name; no other can.
+	if _, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("named"), Body: bytes.NewReader([]byte("x")),
+		ServerSideEncryption: types.ServerSideEncryptionAwsKms, SSEKMSKeyId: put.SSEKMSKeyId,
+	}); err != nil {
+		t.Errorf("PutObject under the deployment's key by name: %v", err)
+	}
+	_, err = c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("other"), Body: bytes.NewReader([]byte("x")),
+		ServerSideEncryption: types.ServerSideEncryptionAwsKms, SSEKMSKeyId: aws.String("arn:aws:kms:us-east-1:111122223333:key/none"),
+	})
+	if errorCode(err) != "InvalidArgument" {
+		t.Errorf("PutObject under another KMS key: code %q (%v), want InvalidArgument", errorCode(err), err)
+	}
+	// The default says what it is.
+	plain := put2(t, name)
+	if plain != types.ServerSideEncryptionAes256 {
+		t.Errorf("a plain object is encrypted as %q", plain)
+	}
+}
+
+func put2(t *testing.T, bucket string) types.ServerSideEncryption {
+	t.Helper()
+	put(t, bucket, "plain", []byte("x"))
+	_, out := get(t, bucket, "plain")
+	return out.ServerSideEncryption
+}

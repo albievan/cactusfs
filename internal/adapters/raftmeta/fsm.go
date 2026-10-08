@@ -393,7 +393,11 @@ func (f *fsm) Apply(log *raft.Log) any {
 			// carries one.
 			e.At = time.Time{}
 			if e.PutObject != nil {
-				e.PutObject.Lock = nil
+				// Nor what the first schema has no word for: a binary
+				// of that schema would store the version without.
+				e.PutObject.Lock, e.PutObject.Parts, e.PutObject.Dropped = nil, 0, nil
+				enc := &e.PutObject.Encryption
+				enc.KeyMode, enc.Mode, enc.Context, enc.KeyCheck = "", "", nil, nil
 			}
 			if e.CreateBucket != nil {
 				e.CreateBucket.ObjectLock, e.CreateBucket.Versioning, e.CreateBucket.DefaultRetention = false, "", nil

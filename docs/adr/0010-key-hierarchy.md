@@ -1,7 +1,6 @@
 # ADR-0010: Key hierarchy - one data key, several uses
 
-- **Status:** accepted; the multipart part is implemented (PLAN 6.1). SSE-KMS and SSE-C
-  (PLAN 6.5) will extend this record, not replace it.
+- **Status:** accepted and implemented (PLAN 6.1: multipart; PLAN 6.5: SSE-KMS, SSE-C)
 - **Date:** 2026-10-08
 - **Milestone:** 6
 - **Builds on:** ADR-0002 (streaming AEAD, envelope keys)
@@ -74,6 +73,59 @@ What the seal does not do: bind the object to its name. As with a plain object, 
 version record put under another key reads as what it is. That is unchanged from
 ADR-0002 and outside what the metadata state can be defended against by encryption.
 
+### SSE-S3, SSE-KMS and SSE-C
+
+Every object is encrypted, whatever a client says (ADR-0002). What a client can say is
+whose key it takes to read it. The record of every version and upload names the mode.
+
+- **SSE-S3** (`AES256`, or nothing) is what there always was: a data key from the
+  deployment's KMS, wrapped and bound to the data ID.
+- **SSE-KMS** (`aws:kms`) is the same key from the same KMS: the deployment has one KMS
+  key, and a request that names another is refused. What it adds is the **encryption
+  context**. The context is written in one canonical form, stored with the version, and
+  bound into what the KMS wraps the key under, together with the mode. A record whose
+  context or mode was changed names another binding, and its key does not unwrap. A
+  reader does not send the context; it is in the record, as with AWS. Bucket keys and
+  dual-layer encryption answer 501.
+- **SSE-C** adds a key the client holds. The object is encrypted - or, for an upload,
+  its part keys are derived - under
+  `HKDF-SHA256(secret = customer key, salt = KMS data key, info = "cactusfs/sse-c/v1")`.
+  It takes both keys: the client's key alone, with the drives and the metadata, reads
+  nothing without the KMS, and the deployment alone reads nothing without the client.
+  **The customer key is never stored and never logged, and neither is a digest of it.**
+  S3 has clients send an MD5 of the key; it is checked against the key and echoed in
+  the answer to the request that carried it, and goes no further - stored, it would let
+  anybody with the metadata test guesses of a key at one MD5 each. What is stored is a
+  check value, sixteen bytes derived by HKDF from the derived key for that purpose
+  alone, by which a later request with the wrong key is told (`403 AccessDenied`) from
+  damaged data, in constant time. Testing a guess against it takes the KMS data key.
+- **Nothing stored about an SSE-C object is a digest of its plaintext.** Its entity
+  tag - and that of each part of an SSE-C upload - is not the MD5 of the content but an
+  HMAC of it under a key derived from the derived key, of the same length: the same
+  content under the same key has the same tag, and nobody without both keys can
+  confirm a guess of the content from a listing, an event or the metadata. The
+  checksums a client declares for a part are verified and not kept, so a checksum
+  listed when such an upload is completed is not compared; the entity tags are.
+- Reading an SSE-C object, or its metadata, needs the key; a request without it is a
+  `400`. Deleting, listing and locking do not: they touch no plaintext.
+- Completing an SSE-C upload, and listing its parts, need no key, as in S3. A client
+  that sends one - the SDKs' transfer managers do - has it checked. That completing
+  works without is why the manifest seal is made under the KMS data key and not under
+  the combined one: against a party that holds the KMS key the seal of an SSE-C object
+  proves nothing, and that party cannot read the object either way.
+- **A customer key is accepted only over TLS, only in headers, and only where it is
+  read.** Not on the plaintext development listener; not in a query string, signed or
+  not, because a URL is logged wherever it goes (a presigned URL for an SSE-C object
+  works with the key in signed headers); and the encryption headers on an operation
+  that does not read them are a `400`, not ignored.
+- The management API and the console cannot read an SSE-C object, or its metadata -
+  they have no key to offer - and say so with a `400`.
+- An encryption header that is given twice, or empty, is refused wherever it arrives;
+  whether one is there is never judged by its first value.
+- The mode, the context and the check value are fields of entry schema 2: a
+  put that names a mode is written in schema 2, and an entry of schema 1 that carries
+  them is applied as a binary of schema 1 would apply it, without.
+
 ## Alternatives rejected
 
 - **One key for every part, random nonce prefixes.** Rests the confidentiality of large
@@ -97,11 +149,15 @@ ADR-0002 and outside what the metadata state can be defended against by encrypti
   (ADR-0008), which no release has shipped yet; a binary of schema 1 refuses the entries
   that carry them.
 - Rotating the KMS key re-wraps one key per multipart object, as for any object.
-- SSE-C (6.5) will combine the client's key with the KMS data key by the same HKDF,
-  under another info string, and SSE-KMS will bind an encryption context when the key
-  is wrapped. Both are uses of the hierarchy above and will be added here.
 
 ## Tests
+
+- SSE-C and SSE-KMS: the derived key takes both keys and is neither
+  (`TestCustomerDataKey`); the customer key is in no record, on no drive and in no log,
+  and a record relabelled in five ways opens with no key (`TestCustomerKeys`); a
+  changed encryption context does not unwrap (`TestSSEKMS`); uploads
+  (`TestMultipartWithCustomerKey`); over HTTP with TLS, without it, and presigned; the
+  AWS SDK against the built binary.
 
 - Property: part keys differ whenever the number or the data ID differs, never equal the
   upload's key, and are reproducible (`TestPartKeys`).

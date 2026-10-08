@@ -170,8 +170,13 @@ func (h *Handler) createMultipartUpload(ctx context.Context, req *request) error
 	if err != nil {
 		return err
 	}
+	sse, err := sseOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(sse.CustomerKey)
 	upload, err := h.cfg.Objects.CreateUpload(ctx, req.principal, app.CreateUploadInput{
-		Bucket: req.bucket, Key: req.key, Lock: lock,
+		Bucket: req.bucket, Key: req.key, Lock: lock, SSE: sse,
 		ContentType:        req.Header.Get("Content-Type"),
 		ContentEncoding:    req.Header.Get("Content-Encoding"),
 		ContentDisposition: req.Header.Get("Content-Disposition"),
@@ -182,7 +187,7 @@ func (h *Handler) createMultipartUpload(ctx context.Context, req *request) error
 	if err != nil {
 		return err
 	}
-	req.w.Header().Set("X-Amz-Server-Side-Encryption", "AES256")
+	setSSEHeaders(req.w.Header(), upload.Encryption, req.Header.Get(headerSSECKeyMD5))
 	h.writeXML(ctx, req, http.StatusOK, initiateMultipartUploadResult{
 		XMLNS: s3Namespace, Bucket: req.bucket, Key: req.key, UploadID: upload.ID.String(),
 	})
@@ -205,8 +210,13 @@ func (h *Handler) uploadPart(ctx context.Context, req *request, query url.Values
 	if err != nil {
 		return err
 	}
+	customerKey, digest, err := customerKeyOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(customerKey)
 	part, err := h.cfg.Objects.UploadPart(ctx, req.principal, app.UploadPartInput{
-		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Number: number,
+		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Number: number, CustomerKey: customerKey,
 		Body: body.body, Size: body.size, Verify: body.verify,
 		Checksums: func() map[string]string { return body.checksums },
 	})
@@ -215,7 +225,12 @@ func (h *Handler) uploadPart(ctx context.Context, req *request, query url.Values
 	}
 	header := req.w.Header()
 	header.Set("ETag", quote(part.ETag))
-	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	if customerKey != nil {
+		header.Set(headerSSECAlgo, sseAES256)
+		header.Set(headerSSECKeyMD5, digest)
+	} else {
+		header.Set(headerSSE, sseAES256)
+	}
 	for name, value := range body.checksums {
 		header.Set(name, value)
 	}
@@ -290,14 +305,19 @@ func (h *Handler) completeMultipartUpload(ctx context.Context, req *request, que
 	if err != nil {
 		return err
 	}
+	customerKey, digest, err := customerKeyOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(customerKey)
 	version, err := h.cfg.Objects.CompleteUpload(ctx, req.principal, app.CompleteUploadInput{
-		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Parts: parts, ETag: etag,
+		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Parts: parts, ETag: etag, CustomerKey: customerKey,
 	})
 	if err != nil {
 		return err
 	}
 	header := req.w.Header()
-	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	setSSEHeaders(header, version.Encryption, digest)
 	setVersionHeader(header, version, false)
 	h.writeXML(ctx, req, http.StatusOK, completeMultipartUploadResult{
 		XMLNS: s3Namespace, Bucket: req.bucket, Key: req.key, ETag: quote(version.ETag),
@@ -340,7 +360,12 @@ func (h *Handler) listParts(ctx context.Context, req *request, query url.Values)
 	if err != nil {
 		return err
 	}
-	out, err := h.cfg.Objects.ListParts(ctx, req.principal, app.ListPartsInput{UploadRef: ref, After: marker, Max: maxParts})
+	customerKey, _, err := customerKeyOf(req.Request)
+	if err != nil {
+		return err
+	}
+	defer clear(customerKey)
+	out, err := h.cfg.Objects.ListParts(ctx, req.principal, app.ListPartsInput{UploadRef: ref, After: marker, Max: maxParts, CustomerKey: customerKey})
 	if err != nil {
 		return err
 	}

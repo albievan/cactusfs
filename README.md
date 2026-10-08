@@ -123,7 +123,7 @@ Supported S3 operations: ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
 GetBucketLocation, PutObject, GetObject (with a byte range), HeadObject, DeleteObject,
 DeleteObjects, ListObjectsV2, bucket versioning and object versions, Object Lock
 (retention, legal hold, default retention), multipart uploads (create, upload part,
-complete, abort, list parts, list uploads) and presigned URLs, by path or (with
+complete, abort, list parts, list uploads), SSE-KMS and SSE-C, and presigned URLs, by path or (with
 `--s3-domain`) by virtual host. Copies, bucket policies, tagging, lifecycle and the rest
 answer `501 NotImplemented` for now.
 

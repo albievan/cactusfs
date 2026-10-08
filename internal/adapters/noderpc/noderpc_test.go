@@ -637,10 +637,20 @@ func TestCallsToTheLeader(t *testing.T) {
 	// Long enough that a busy machine has handed the request over before
 	// the patience ends: a call that ends before that is a definite
 	// failure, and not what is tested here.
-	short, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	if _, err := client.Propose(short, "meta-3", []byte("late")); !errors.Is(err, domain.ErrOutcomeUnknown) {
-		t.Errorf("Propose whose answer did not come = %v, want %v", err, domain.ErrOutcomeUnknown)
+	// And if the patience does end before the handover - the machine can
+	// be that busy - the call says, rightly, that nothing happened; it is
+	// made again, because that is not the case under test either.
+	var proposeErr error
+	for range 5 {
+		short, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_, proposeErr = client.Propose(short, "meta-3", []byte("late"))
+		cancel()
+		if errors.Is(proposeErr, domain.ErrOutcomeUnknown) || !errors.Is(proposeErr, domain.ErrUnavailable) {
+			break
+		}
+	}
+	if !errors.Is(proposeErr, domain.ErrOutcomeUnknown) {
+		t.Errorf("Propose whose answer did not come = %v, want %v", proposeErr, domain.ErrOutcomeUnknown)
 	}
 
 	if err := client.Close(); err != nil {

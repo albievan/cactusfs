@@ -475,7 +475,8 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusBadRequest, code: "InvalidBucketName", title: "Invalid bucket name"}
 	case is(domain.ErrInvalidObjectKey):
 		return problem{status: http.StatusBadRequest, code: "InvalidObjectKey", title: "Invalid object key"}
-	case is(domain.ErrInvalidArgument), is(domain.ErrIncompleteBody), is(domain.ErrBadDigest), is(domain.ErrInvalidRange):
+	case is(domain.ErrInvalidArgument), is(domain.ErrIncompleteBody), is(domain.ErrBadDigest), is(domain.ErrInvalidRange),
+		is(domain.ErrCustomerKeyRequired):
 		return problem{status: http.StatusBadRequest, code: "InvalidArgument", title: "Invalid request"}
 	case is(domain.ErrUnavailable), is(domain.ErrNotLeader), is(domain.ErrOutcomeUnknown), is(domain.ErrInsufficientDrives),
 		is(domain.ErrKeyUnavailable), is(domain.ErrShuttingDown), is(domain.ErrDriveOffline), is(domain.ErrNoTopology),

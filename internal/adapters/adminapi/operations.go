@@ -182,7 +182,9 @@ func metadataOf(v object.Version) api.ObjectMetadata {
 
 // GetObjectMetadata implements api.StrictServerInterface.
 func (o *operations) GetObjectMetadata(ctx context.Context, request api.GetObjectMetadataRequestObject) (api.GetObjectMetadataResponseObject, error) {
-	v, err := o.h.cfg.Objects.Head(ctx, who(ctx), request.Bucket, request.Params.Key)
+	// As a read would see it: the metadata of an object under a customer
+	// key is for the holder of that key, which this API never is.
+	v, err := o.h.cfg.Objects.Stat(ctx, who(ctx), app.GetInput{Bucket: request.Bucket, Key: request.Params.Key})
 	if err != nil {
 		return nil, err
 	}

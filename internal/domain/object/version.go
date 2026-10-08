@@ -162,6 +162,15 @@ type Encryption struct {
 	NoncePrefix []byte
 	// SegmentSize is the plaintext size of every segment but the last.
 	SegmentSize int
+	// Mode is how the data key is managed: SSES3, SSEKMS or SSEC.
+	Mode string
+	// Context is the canonical SSE-KMS encryption context, bound to the
+	// wrapped key.
+	Context []byte
+	// KeyCheck belongs to SSE-C: the value a later read checks the
+	// client's key against. The key itself is never stored, nor any
+	// digest of it.
+	KeyCheck []byte
 	// KeyMode says how the data key is used: "" encrypts the version's
 	// stream with it; KeyModePartHKDF derives a key per part from it.
 	KeyMode string

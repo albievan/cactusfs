@@ -279,6 +279,25 @@ type encryptionRecord struct {
 	// KeyMode says how the data key is used; empty for the key of one
 	// stream (schema 2).
 	KeyMode string `json:"key_mode,omitempty"`
+	// Mode, Context and KeyCheck say whose key it takes to read: SSE-KMS
+	// and SSE-C (schema 2). Empty for the default.
+	Mode     string `json:"mode,omitempty"`
+	Context  []byte `json:"context,omitempty"`
+	KeyCheck []byte `json:"key_check,omitempty"`
+}
+
+func encryptionToRecord(e object.Encryption) encryptionRecord {
+	return encryptionRecord{
+		Scheme: e.Scheme, KMSKeyID: e.KMSKeyID, WrappedKey: e.WrappedKey, NoncePrefix: e.NoncePrefix, SegmentSize: e.SegmentSize,
+		KeyMode: e.KeyMode, Mode: e.Mode, Context: e.Context, KeyCheck: e.KeyCheck,
+	}
+}
+
+func (r encryptionRecord) toDomain() object.Encryption {
+	return object.Encryption{
+		Scheme: r.Scheme, KMSKeyID: r.KMSKeyID, WrappedKey: r.WrappedKey, NoncePrefix: r.NoncePrefix, SegmentSize: r.SegmentSize,
+		KeyMode: r.KeyMode, Mode: r.Mode, Context: r.Context, KeyCheck: r.KeyCheck,
+	}
 }
 
 type layoutRecord struct {
@@ -359,7 +378,7 @@ func versionOf(e entry) byte {
 		cmdCreateUpload, cmdPutPart, cmdCompleteUpload, cmdAbortUpload:
 		return entrySchemaTimed
 	}
-	if !e.At.IsZero() || (e.PutObject != nil && e.PutObject.Lock != nil) {
+	if !e.At.IsZero() || (e.PutObject != nil && (e.PutObject.Lock != nil || e.PutObject.Encryption.Mode != "")) {
 		return entrySchemaTimed
 	}
 	// A bucket created with what only this schema knows: a binary of the
@@ -483,14 +502,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		ContentLanguage:    v.ContentLanguage,
 		CacheControl:       v.CacheControl,
 		UserMetadata:       v.UserMetadata,
-		Encryption: encryptionRecord{
-			Scheme:      v.Encryption.Scheme,
-			KMSKeyID:    v.Encryption.KMSKeyID,
-			WrappedKey:  v.Encryption.WrappedKey,
-			NoncePrefix: v.Encryption.NoncePrefix,
-			SegmentSize: v.Encryption.SegmentSize,
-			KeyMode:     v.Encryption.KeyMode,
-		},
+		Encryption:         encryptionToRecord(v.Encryption),
 		Layout: layoutRecord{
 			DataShards:   v.Layout.DataShards,
 			ParityShards: v.Layout.ParityShards,
@@ -533,14 +545,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		ContentLanguage:    r.ContentLanguage,
 		CacheControl:       r.CacheControl,
 		UserMetadata:       r.UserMetadata,
-		Encryption: object.Encryption{
-			Scheme:      r.Encryption.Scheme,
-			KMSKeyID:    r.Encryption.KMSKeyID,
-			WrappedKey:  r.Encryption.WrappedKey,
-			NoncePrefix: r.Encryption.NoncePrefix,
-			SegmentSize: r.Encryption.SegmentSize,
-			KeyMode:     r.Encryption.KeyMode,
-		},
+		Encryption:         r.Encryption.toDomain(),
 		Layout: object.Layout{
 			DataShards:   r.Layout.DataShards,
 			ParityShards: r.Layout.ParityShards,

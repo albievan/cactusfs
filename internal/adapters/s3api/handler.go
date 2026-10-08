@@ -61,8 +61,7 @@ type Buckets interface {
 type Objects interface {
 	Put(ctx context.Context, principal iam.Principal, in app.PutInput) (object.Version, error)
 	Get(ctx context.Context, principal iam.Principal, in app.GetInput) (app.GetOutput, error)
-	Head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error)
-	HeadVersion(ctx context.Context, principal iam.Principal, bucketName, key string, ref object.VersionRef) (object.Version, error)
+	Stat(ctx context.Context, principal iam.Principal, in app.GetInput) (object.Version, error)
 	ListVersions(ctx context.Context, principal iam.Principal, bucketName string, opts app.VersionListOptions) (app.VersionListPage, error)
 	Retention(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Retention, error)
 	SetRetention(ctx context.Context, principal iam.Principal, in app.LockInput, retention *object.Retention, bypassGovernance bool) (object.Version, error)
@@ -340,6 +339,10 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 			if req.Header.Get(name) != "" || len(values) != 1 {
 				return fmt.Errorf("%w: %s is given more than once", errAuthQuery, name)
 			}
+			// A key in a URL is in every log the URL passes through.
+			if strings.EqualFold(name, headerSSECKey) {
+				return fmt.Errorf("%w: a customer key is not accepted in a query string", errAuthQuery)
+			}
 			req.Header.Set(name, values[0])
 			hoisted = append(hoisted, name)
 		}
@@ -428,8 +431,8 @@ func allowHeaders(header http.Header) error {
 		switch {
 		case slices.Contains(knownAmzHeaders(), lower), slices.Contains(lockHeaders(), lower):
 		case strings.HasPrefix(lower, "x-amz-meta-"), strings.HasPrefix(lower, checksumHeaderPrefix):
-		case lower == "x-amz-server-side-encryption" && len(values) == 1 && values[0] == "AES256":
-			// What every object gets anyway.
+		case isSSEHeader(lower):
+			// Read, or refused, by the operation: see allowSSEHeaders.
 		case lower == "x-amz-storage-class" && len(values) == 1 && values[0] == storageClass:
 		default:
 			return errNotImplemented()
@@ -446,6 +449,9 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 		return apiError{http.StatusBadRequest, "InvalidURI", "Couldn't parse the specified URI."}
 	}
 	if err := allowHeaders(req.Header); err != nil {
+		return err
+	}
+	if err := allowSSEHeaders(req, query); err != nil {
 		return err
 	}
 

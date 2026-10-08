@@ -19,6 +19,16 @@ func errInternal() apiError {
 	return apiError{http.StatusInternalServerError, "InternalError", "We encountered an internal error. Please try again."}
 }
 
+// errCustomerKeyInTheClear refuses a customer key that did not arrive over TLS.
+func errCustomerKeyInTheClear() apiError {
+	return apiError{http.StatusBadRequest, "InvalidRequest", "Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection."}
+}
+
+// errEncryptionAlgorithm refuses a customer algorithm other than AES256.
+func errEncryptionAlgorithm() apiError {
+	return apiError{http.StatusBadRequest, "InvalidEncryptionAlgorithmError", "The encryption request that you specified is not valid. The valid value is AES256."}
+}
+
 func errNotImplemented() apiError {
 	return apiError{http.StatusNotImplemented, "NotImplemented", "A header or query you provided implies functionality that is not implemented."}
 }
@@ -62,6 +72,9 @@ func errorMappings() []mapping {
 		// Buckets and objects.
 		{domain.ErrObjectLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied because object protected by object lock."}},
 		{domain.ErrLockNotConfigured, apiError{http.StatusBadRequest, "InvalidRequest", "Bucket is missing Object Lock Configuration."}},
+		{domain.ErrCustomerKeyRequired, apiError{http.StatusBadRequest, "InvalidRequest", "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."}},
+		{domain.ErrCustomerKeyUnexpected, apiError{http.StatusBadRequest, "InvalidRequest", "The encryption parameters are not applicable to this object."}},
+		{domain.ErrCustomerKeyMismatch, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},
 		{domain.ErrUploadNotFound, apiError{http.StatusNotFound, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed."}},
 		{domain.ErrPartNotFound, apiError{http.StatusBadRequest, "InvalidPart", "One or more of the specified parts could not be found. The part might not have been uploaded, or the specified entity tag or checksum might not have matched the part's."}},
 		{domain.ErrPartOrder, apiError{http.StatusBadRequest, "InvalidPartOrder", "The list of parts was not in ascending order. The parts list must be specified in order by part number."}},

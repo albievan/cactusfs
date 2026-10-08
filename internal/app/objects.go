@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,9 @@ type PutInput struct {
 	// Lock, when not empty, keeps the new version from being removed. The
 	// bucket must have been created with Object Lock.
 	Lock object.Lock
+	// SSE says whose key it takes to read the object. The zero value is
+	// the default: the deployment's KMS.
+	SSE object.SSE
 
 	// Verify is called once Body has been read to its end and before
 	// anything becomes durable. It returns the entity tag of the content,
@@ -142,11 +146,15 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata,
 	}
-	stream, err := s.newVersionKeys(ctx, &version)
+	if err := in.SSE.Validate(); err != nil {
+		return object.Version{}, err
+	}
+	keys, err := s.newVersionKeys(ctx, &version, in.SSE)
 	if err != nil {
 		return object.Version{}, err
 	}
-	err = s.write(ctx, version.DataID, stream, in.Body, in.Size, in.Verify, func(w written) (object.Extent, error) {
+	defer keys.tag.forget()
+	err = s.write(ctx, version.DataID, keys.stream, in.Body, in.Size, keys.tag.verify(in.Verify), func(w written) (object.Extent, error) {
 		version.Size, version.ETag, version.Layout = w.size, w.etag, w.layout
 		// ... then visible, through Raft. Nothing was acknowledged before this.
 		version.ModifiedAt = s.clock.Now().UTC()
@@ -264,10 +272,10 @@ func (s *ObjectService) random(n int) ([]byte, error) {
 
 // newVersionKeys fills in the identifiers and the encryption parameters of a
 // new version and returns the stream that encrypts it.
-func (s *ObjectService) newVersionKeys(ctx context.Context, version *object.Version) (*object.Stream, error) {
+func (s *ObjectService) newVersionKeys(ctx context.Context, version *object.Version, sse object.SSE) (keyed, error) {
 	random, err := s.random(2*object.IDSize + object.NoncePrefixSize)
 	if err != nil {
-		return nil, err
+		return keyed{}, err
 	}
 	copy(version.VersionID[:], random[:object.IDSize])
 	copy(version.DataID[:], random[object.IDSize:2*object.IDSize])
@@ -275,24 +283,135 @@ func (s *ObjectService) newVersionKeys(ctx context.Context, version *object.Vers
 
 	// The data ID ties both the wrapped key and the ciphertext to this
 	// version's data: neither can be moved to another object.
-	key, err := s.kms.GenerateDataKey(ctx, version.DataID[:])
+	enc := object.Encryption{NoncePrefix: noncePrefix}
+	key, err := s.newDataKey(ctx, &enc, sse, version.DataID[:])
+	if err != nil {
+		return keyed{}, err
+	}
+	defer clear(key)
+	stream, err := object.NewStream(key, noncePrefix, version.DataID[:], enc.SegmentSize)
+	if err != nil {
+		return keyed{}, err
+	}
+	tag, err := newTagger(key, enc)
+	if err != nil {
+		return keyed{}, err
+	}
+	version.Encryption = enc
+	return keyed{stream: stream, tag: tag}, nil
+}
+
+// keyed is what a new data key gives the write path: the stream that
+// encrypts, and what makes the entity tag.
+type keyed struct {
+	stream *object.Stream
+	tag    tagger
+}
+
+// tagger decides what entity tag a stored stream gets. For an object under
+// SSE-C it is not the digest the inbound adapter computed but an HMAC of it
+// (object.OpaqueTag); otherwise it is that digest.
+type tagger struct {
+	opaque func(etag string) (string, error)
+	// forget clears the key the tagger holds; it is safe to call twice.
+	forget func()
+}
+
+func newTagger(key []byte, enc object.Encryption) (tagger, error) {
+	if enc.Mode != object.SSEC {
+		return tagger{forget: func() {}}, nil
+	}
+	// The tag is made when the body has been read, after the key this
+	// function was given has been cleared: keep a copy until then.
+	held := slices.Clone(key)
+	return tagger{
+		opaque: func(etag string) (string, error) { return object.OpaqueTag(held, etag) },
+		forget: func() { clear(held) },
+	}, nil
+}
+
+// verify wraps the adapter's Verify so that what it returns is the entity
+// tag to store.
+func (t tagger) verify(verify func() (string, error)) func() (string, error) {
+	if t.opaque == nil {
+		return verify
+	}
+	return func() (string, error) {
+		etag := ""
+		if verify != nil {
+			var err error
+			if etag, err = verify(); err != nil {
+				return "", err
+			}
+		}
+		return t.opaque(etag)
+	}
+}
+
+// newDataKey asks the KMS for a data key bound to base and to what the
+// request says about encryption, fills in enc, and returns the key that data
+// is to be encrypted with - or, for an upload, derived from. With SSE-C that
+// is not the KMS data key but one made of it and the client's key together.
+// The caller clears it.
+func (s *ObjectService) newDataKey(ctx context.Context, enc *object.Encryption, sse object.SSE, base []byte) ([]byte, error) {
+	if sse.KMSKeyID != "" && sse.KMSKeyID != s.kms.KeyID() {
+		return nil, fmt.Errorf("%w: KMS key %q is not the key of this deployment", domain.ErrInvalidArgument, sse.KMSKeyID)
+	}
+	if err := sse.Apply(enc); err != nil {
+		return nil, err
+	}
+	enc.Scheme, enc.KMSKeyID, enc.SegmentSize = object.StreamSchemeV1, s.kms.KeyID(), object.DefaultSegmentSize
+	key, err := s.kms.GenerateDataKey(ctx, enc.KeyContext(base))
 	if err != nil {
 		return nil, err
+	}
+	enc.WrappedKey = key.Wrapped
+	if sse.Mode != object.SSEC {
+		return key.Plaintext, nil
 	}
 	defer clear(key.Plaintext)
-
-	stream, err := object.NewStream(key.Plaintext, noncePrefix, version.DataID[:], object.DefaultSegmentSize)
+	combined, err := object.CustomerDataKey(key.Plaintext, sse.CustomerKey)
 	if err != nil {
 		return nil, err
 	}
-	version.Encryption = object.Encryption{
-		Scheme:      object.StreamSchemeV1,
-		KMSKeyID:    s.kms.KeyID(),
-		WrappedKey:  key.Wrapped,
-		NoncePrefix: noncePrefix,
-		SegmentSize: object.DefaultSegmentSize,
+	enc.KeyCheck = object.KeyCheck(combined)
+	return combined, nil
+}
+
+// admitKey decides, before the KMS is asked, whether a request brings the
+// customer key that stored data needs, and none that it does not.
+func admitKey(enc object.Encryption, customerKey []byte) error {
+	switch {
+	case enc.Mode == object.SSEC && len(customerKey) == 0:
+		return fmt.Errorf("%w", domain.ErrCustomerKeyRequired)
+	case enc.Mode != object.SSEC && len(customerKey) != 0:
+		return fmt.Errorf("%w", domain.ErrCustomerKeyUnexpected)
 	}
-	return stream, nil
+	return nil
+}
+
+// dataKey turns the unwrapped KMS data key of stored data into the key the
+// data was encrypted with or derived from. For SSE-C it combines it with the
+// client's key and checks that this is the key the data was written with.
+// It takes over kmsKey; the caller clears what is returned.
+func dataKey(kmsKey []byte, enc object.Encryption, customerKey []byte) ([]byte, error) {
+	if err := admitKey(enc, customerKey); err != nil {
+		clear(kmsKey)
+		return nil, err
+	}
+	if enc.Mode != object.SSEC {
+		return kmsKey, nil
+	}
+	defer clear(kmsKey)
+	combined, err := object.CustomerDataKey(kmsKey, customerKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := object.VerifyKeyCheck(combined, enc.KeyCheck); err != nil {
+		clear(combined)
+		return nil, err
+	}
+	return combined, nil
 }
 
 type countingReader struct {
@@ -315,6 +434,36 @@ type GetInput struct {
 	// Version, when not nil, names the version to read instead of the
 	// current one.
 	Version *object.VersionRef
+	// CustomerKey is the client's key, for an object under SSE-C.
+	CustomerKey []byte
+}
+
+// Stat returns the metadata of an object as Get would serve it: for an
+// object under SSE-C only to a caller that holds its key.
+func (s *ObjectService) Stat(ctx context.Context, principal iam.Principal, in GetInput) (object.Version, error) {
+	version, err := s.head(ctx, principal, in.Bucket, in.Key, in.Version)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.Stat: %w", err)
+	}
+	if err := admitKey(version.Encryption, in.CustomerKey); err != nil {
+		return object.Version{}, fmt.Errorf("object.Stat: %w", err)
+	}
+	if version.Encryption.Mode == object.SSEC {
+		base := version.DataID[:]
+		if version.Multipart() {
+			base = object.UploadKeyContext(version.DataID)
+		}
+		kmsKey, err := s.unwrap(ctx, version.Encryption, base)
+		if err != nil {
+			return object.Version{}, fmt.Errorf("object.Stat: %w", err)
+		}
+		key, err := dataKey(kmsKey, version.Encryption, in.CustomerKey)
+		if err != nil {
+			return object.Version{}, fmt.Errorf("object.Stat: %w", err)
+		}
+		clear(key)
+	}
+	return version, nil
 }
 
 // GetOutput is an object being read.
@@ -377,15 +526,18 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 		}
 	}
 
+	if err := admitKey(version.Encryption, in.CustomerKey); err != nil {
+		return GetOutput{}, err
+	}
 	if version.Multipart() {
-		body, err := s.openParts(ctx, version, span)
+		body, err := s.openParts(ctx, version, span, in.CustomerKey)
 		if err != nil {
 			return GetOutput{}, err
 		}
 		return GetOutput{Version: version, Range: span, Body: body}, nil
 	}
 
-	stream, err := s.openVersionKeys(ctx, version)
+	stream, err := s.openVersionKeys(ctx, version, in.CustomerKey)
 	if err != nil {
 		return GetOutput{}, err
 	}
@@ -423,13 +575,17 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 
 // openVersionKeys unwraps the data key of a stored version and returns the
 // stream that decrypts it.
-func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Version) (*object.Stream, error) {
+func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Version, customerKey []byte) (*object.Stream, error) {
 	enc := version.Encryption
 	if enc.KeyMode != "" {
 		// The key of a version made of parts encrypts no stream.
 		return nil, fmt.Errorf("%w: key mode %q of a version that is not made of parts", domain.ErrUnsupportedFormat, enc.KeyMode)
 	}
-	key, err := s.unwrap(ctx, enc, version.DataID[:])
+	kmsKey, err := s.unwrap(ctx, enc, version.DataID[:])
+	if err != nil {
+		return nil, err
+	}
+	key, err := dataKey(kmsKey, enc, customerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -437,9 +593,13 @@ func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Vers
 	return object.NewStream(key, enc.NoncePrefix, version.DataID[:], enc.SegmentSize)
 }
 
-// unwrap returns the data key that was wrapped under the given context. The
-// caller clears it.
-func (s *ObjectService) unwrap(ctx context.Context, enc object.Encryption, context []byte) ([]byte, error) {
+// unwrap returns the KMS data key of stored data. base is the ID it was
+// wrapped for; the mode and the encryption context of the record are bound
+// with it. The caller clears the key.
+func (s *ObjectService) unwrap(ctx context.Context, enc object.Encryption, base []byte) ([]byte, error) {
+	if !object.KnownMode(enc.Mode) {
+		return nil, fmt.Errorf("%w: server-side encryption %q", domain.ErrUnsupportedFormat, enc.Mode)
+	}
 	if enc.Scheme != object.StreamSchemeV1 {
 		return nil, fmt.Errorf("%w: encryption scheme %q", domain.ErrUnsupportedFormat, enc.Scheme)
 	}
@@ -447,7 +607,7 @@ func (s *ObjectService) unwrap(ctx context.Context, enc object.Encryption, conte
 		return nil, fmt.Errorf("%w: object is encrypted under KMS key %s, this node uses %s",
 			domain.ErrKeyUnavailable, enc.KMSKeyID, s.kms.KeyID())
 	}
-	return s.kms.UnwrapDataKey(ctx, enc.WrappedKey, context)
+	return s.kms.UnwrapDataKey(ctx, enc.WrappedKey, enc.KeyContext(base))
 }
 
 type objectBody struct {
