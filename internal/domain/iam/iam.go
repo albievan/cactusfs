@@ -25,6 +25,12 @@ const (
 	ActionGetObject         Action = "s3:GetObject"
 	ActionPutObject         Action = "s3:PutObject"
 	ActionDeleteObject      Action = "s3:DeleteObject"
+	// Versions.
+	ActionGetObjectVersion    Action = "s3:GetObjectVersion"
+	ActionDeleteObjectVersion Action = "s3:DeleteObjectVersion"
+	ActionListBucketVersions  Action = "s3:ListBucketVersions"
+	ActionGetBucketVersioning Action = "s3:GetBucketVersioning"
+	ActionPutBucketVersioning Action = "s3:PutBucketVersioning"
 )
 
 // The admin actions implemented so far. Reading actions begin with Get or

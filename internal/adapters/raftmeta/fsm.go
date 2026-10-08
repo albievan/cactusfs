@@ -28,6 +28,9 @@ import (
 //	         "schema"  -> state schema version (uint64, big endian)
 //	buckets  <bucket name> -> bucketRecord (JSON)
 //	objects  <bucket name> (nested bucket) -> <object key> -> versionRecord (JSON)
+//	versions <bucket name> (nested bucket) -> <enc(key) ‖ ^seq ‖ version ID>
+//	         -> versionRecord (JSON): the versions that are no longer
+//	         current, and the delete markers. See versions.go.
 //	iam      "root" -> rootRecord (JSON)
 //	cluster  "topology" -> topologyRecord (JSON)
 //	nodes    <node ID> -> nodeRecord (JSON)
@@ -107,6 +110,10 @@ func nodesBucket() []byte   { return []byte("nodes") }
 type applyResult struct {
 	err      error
 	previous *versionRecord
+	// stored is the version a put committed; marker the delete marker a
+	// delete made.
+	stored *versionRecord
+	marker *versionRecord
 	// events describe what the entry changed; none when it was refused.
 	events []ports.Event
 	// fatal marks err as a failure to apply, as opposed to a refusal: the
@@ -184,7 +191,7 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range append([][]byte{metaBucket(), bucketsBucket(), objectsBucket(), iamBucket(), clusterBucket(), nodesBucket()}, iamBuckets()...) {
+		for _, name := range append([][]byte{metaBucket(), bucketsBucket(), objectsBucket(), versionsBucket(), iamBucket(), clusterBucket(), nodesBucket()}, iamBuckets()...) {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -219,16 +226,27 @@ func ensureDataIndex(tx *bbolt.Tx) error {
 	if err != nil {
 		return err
 	}
-	objects := tx.Bucket(objectsBucket())
-	return objects.ForEachBucket(func(name []byte) error {
-		return objects.Bucket(name).ForEach(func(_, raw []byte) error {
-			var v versionRecord
-			if err := json.Unmarshal(raw, &v); err != nil {
-				return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
-			}
-			return addDataReference(index, v.DataID, 1)
+	// Every version that has stored data counts, current or not: the
+	// collector removes what this index does not know.
+	for _, parent := range [][]byte{objectsBucket(), versionsBucket()} {
+		holder := tx.Bucket(parent)
+		err := holder.ForEachBucket(func(name []byte) error {
+			return holder.Bucket(name).ForEach(func(_, raw []byte) error {
+				var v versionRecord
+				if err := json.Unmarshal(raw, &v); err != nil {
+					return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+				}
+				if v.DeleteMarker {
+					return nil
+				}
+				return addDataReference(index, v.DataID, 1)
+			})
 		})
-	})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addDataReference changes the number of versions that refer to a data ID.
@@ -364,14 +382,18 @@ func (f *fsm) Apply(log *raft.Log) any {
 
 // applyEntry performs one command inside tx. A returned error is fatal and
 // rolls the transaction back; a refusal is reported in the result.
-func applyEntry(tx *bbolt.Tx, e entry, _ applied) (applyResult, error) {
+func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 	switch e.Type {
 	case cmdCreateBucket:
 		return applyCreateBucket(tx, *e.CreateBucket)
 	case cmdDeleteBucket:
 		return applyDeleteBucket(tx, e.DeleteBucket.Name)
 	case cmdPutObject:
-		return applyPutObject(tx, *e.PutObject)
+		return applyPutObject(tx, *e.PutObject, now)
+	case cmdSetVersioning:
+		return applySetVersioning(tx, *e.SetVersioning)
+	case cmdDeleteVersion:
+		return applyDeleteVersion(tx, *e.DeleteVersion, now)
 	case cmdDeleteObject:
 		return applyDeleteObject(tx, *e.DeleteObject)
 	case cmdSetRoot:
@@ -419,13 +441,22 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	if buckets.Get([]byte(name)) == nil {
 		return refuse(domain.ErrBucketNotFound, "%s", name)
 	}
-	objects := tx.Bucket(objectsBucket())
-	if index := objects.Bucket([]byte(name)); index != nil {
-		if first, _ := index.Cursor().First(); first != nil {
-			return refuse(domain.ErrBucketNotEmpty, "%s", name)
+	// A bucket is empty when it has no object and no version of one:
+	// versions that are no longer current, and delete markers, count.
+	for _, parent := range [][]byte{objectsBucket(), versionsBucket()} {
+		holder := tx.Bucket(parent)
+		if index := holder.Bucket([]byte(name)); index != nil {
+			if first, _ := index.Cursor().First(); first != nil {
+				return refuse(domain.ErrBucketNotEmpty, "%s", name)
+			}
 		}
-		if err := objects.DeleteBucket([]byte(name)); err != nil {
-			return applyResult{}, err
+	}
+	for _, parent := range [][]byte{objectsBucket(), versionsBucket()} {
+		holder := tx.Bucket(parent)
+		if holder.Bucket([]byte(name)) != nil {
+			if err := holder.DeleteBucket([]byte(name)); err != nil {
+				return applyResult{}, err
+			}
 		}
 	}
 	if err := buckets.Delete([]byte(name)); err != nil {
@@ -434,59 +465,11 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	return applyResult{events: []ports.Event{{Type: ports.EventBucketDeleted, Data: ports.BucketEvent{Bucket: name}}}}, nil
 }
 
-func applyPutObject(tx *bbolt.Tx, v versionRecord) (applyResult, error) {
-	index := tx.Bucket(objectsBucket()).Bucket([]byte(v.Bucket))
-	if index == nil {
-		return refuse(domain.ErrBucketNotFound, "%s", v.Bucket)
-	}
-	previous, err := readVersion(index, v.Key)
-	if err != nil {
-		return applyResult{}, err
-	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return applyResult{}, err
-	}
-	if err := index.Put([]byte(v.Key), data); err != nil {
-		return applyResult{}, err
-	}
-	references := tx.Bucket(dataBucket())
-	if err := addDataReference(references, v.DataID, 1); err != nil {
-		return applyResult{}, err
-	}
-	if previous != nil {
-		if err := addDataReference(references, previous.DataID, -1); err != nil {
-			return applyResult{}, err
-		}
-	}
-	return applyResult{previous: previous, events: []ports.Event{
-		{Type: ports.EventObjectCreated, Time: v.ModifiedAt, Data: objectEvent(v)},
-	}}, nil
-}
-
 func objectEvent(v versionRecord) ports.ObjectEvent {
 	return ports.ObjectEvent{Bucket: v.Bucket, Key: v.Key, VersionID: v.VersionID, Size: v.Size, ETag: v.ETag}
 }
 
-func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd) (applyResult, error) {
-	index := tx.Bucket(objectsBucket()).Bucket([]byte(cmd.Bucket))
-	if index == nil {
-		return refuse(domain.ErrBucketNotFound, "%s", cmd.Bucket)
-	}
-	previous, err := readVersion(index, cmd.Key)
-	if err != nil || previous == nil {
-		return applyResult{}, err
-	}
-	if err := index.Delete([]byte(cmd.Key)); err != nil {
-		return applyResult{}, err
-	}
-	if err := addDataReference(tx.Bucket(dataBucket()), previous.DataID, -1); err != nil {
-		return applyResult{}, err
-	}
-	return applyResult{previous: previous, events: []ports.Event{
-		{Type: ports.EventObjectDeleted, Data: objectEvent(*previous)},
-	}}, nil
-}
+func versionsBucket() []byte { return []byte("versions") }
 
 func applySetRoot(tx *bbolt.Tx, root rootRecord) (applyResult, error) {
 	bucket := tx.Bucket(iamBucket())

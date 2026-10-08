@@ -4,6 +4,7 @@ package s3compat_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -675,5 +676,202 @@ func TestPresignedURLExpires(t *testing.T) {
 	time.Sleep(4 * time.Second)
 	if status, data := presignedDo(t, signed.Method, signed.URL, signed.SignedHeader, nil); status != http.StatusForbidden || !strings.Contains(string(data), "AccessDenied") {
 		t.Errorf("presigned GET after expiry = %d %s", status, data)
+	}
+}
+
+func enableVersioning(t *testing.T, name string, status types.BucketVersioningStatus) {
+	t.Helper()
+	_, err := client().PutBucketVersioning(t.Context(), &s3.PutBucketVersioningInput{
+		Bucket: aws.String(name), VersioningConfiguration: &types.VersioningConfiguration{Status: status},
+	})
+	if err != nil {
+		t.Fatalf("PutBucketVersioning(%s): %v", status, err)
+	}
+}
+
+func getVersion(t *testing.T, name, key, versionID string) (string, error) {
+	t.Helper()
+	out, err := client().GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String(key), VersionId: aws.String(versionID)})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = out.Body.Close() }()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		t.Fatalf("read version %s: %v", versionID, err)
+	}
+	if aws.ToString(out.VersionId) != versionID {
+		t.Errorf("GetObject(versionId=%s) says it is version %q", versionID, aws.ToString(out.VersionId))
+	}
+	return string(data), nil
+}
+
+func TestBucketVersioning(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	state, err := c.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{Bucket: aws.String(name)})
+	if err != nil || state.Status != "" {
+		t.Fatalf("GetBucketVersioning of a new bucket = %q, %v", state.Status, err)
+	}
+	enableVersioning(t, name, types.BucketVersioningStatusEnabled)
+	state, err = c.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{Bucket: aws.String(name)})
+	if err != nil || state.Status != types.BucketVersioningStatusEnabled {
+		t.Fatalf("GetBucketVersioning = %q, %v", state.Status, err)
+	}
+	enableVersioning(t, name, types.BucketVersioningStatusSuspended)
+	state, err = c.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{Bucket: aws.String(name)})
+	if err != nil || state.Status != types.BucketVersioningStatusSuspended {
+		t.Fatalf("GetBucketVersioning after suspending = %q, %v", state.Status, err)
+	}
+}
+
+func TestObjectVersions(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	put(t, name, "k", []byte("before versioning"))
+	enableVersioning(t, name, types.BucketVersioningStatusEnabled)
+	first := aws.ToString(put(t, name, "k", []byte("first")).VersionId)
+	second := aws.ToString(put(t, name, "k", []byte("second")).VersionId)
+	if first == "" || second == "" || first == second {
+		t.Fatalf("version IDs %q and %q", first, second)
+	}
+	for id, want := range map[string]string{"null": "before versioning", first: "first", second: "second"} {
+		if got, err := getVersion(t, name, "k", id); err != nil || got != want {
+			t.Errorf("version %s = %q, %v; want %q", id, got, err, want)
+		}
+	}
+	if data, out := get(t, name, "k"); string(data) != "second" || aws.ToString(out.VersionId) != second {
+		t.Errorf("current = %q, version %q", data, aws.ToString(out.VersionId))
+	}
+
+	// Deleting adds a marker and keeps everything.
+	deleted, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("k")})
+	if err != nil || !aws.ToBool(deleted.DeleteMarker) || aws.ToString(deleted.VersionId) == "" {
+		t.Fatalf("DeleteObject = %+v, %v", deleted, err)
+	}
+	marker := aws.ToString(deleted.VersionId)
+	if _, err := c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("k")}); errorCode(err) != "NoSuchKey" {
+		t.Errorf("GetObject after a delete: %v", err)
+	}
+	if got, err := getVersion(t, name, "k", second); err != nil || got != "second" {
+		t.Errorf("the last version after a delete = %q, %v", got, err)
+	}
+
+	listed, err := c.ListObjectVersions(t.Context(), &s3.ListObjectVersionsInput{Bucket: aws.String(name)})
+	if err != nil {
+		t.Fatalf("ListObjectVersions: %v", err)
+	}
+	if len(listed.Versions) != 3 || len(listed.DeleteMarkers) != 1 {
+		t.Fatalf("ListObjectVersions: %d versions and %d markers, want 3 and 1", len(listed.Versions), len(listed.DeleteMarkers))
+	}
+	if m := listed.DeleteMarkers[0]; aws.ToString(m.VersionId) != marker || !aws.ToBool(m.IsLatest) {
+		t.Errorf("the delete marker = %+v", m)
+	}
+	var ids []string
+	for _, v := range listed.Versions {
+		ids = append(ids, aws.ToString(v.VersionId))
+		if aws.ToBool(v.IsLatest) {
+			t.Errorf("version %s is latest although a marker is newer", aws.ToString(v.VersionId))
+		}
+	}
+	if !slices.Equal(ids, []string{second, first, "null"}) {
+		t.Errorf("versions in the listing = %v, want newest first", ids)
+	}
+
+	// Removing the marker restores the object; removing a version is final.
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("k"), VersionId: aws.String(marker)}); err != nil {
+		t.Fatalf("DeleteObject(marker): %v", err)
+	}
+	if data, _ := get(t, name, "k"); string(data) != "second" {
+		t.Errorf("after the marker was removed: %q", data)
+	}
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("k"), VersionId: aws.String(first)}); err != nil {
+		t.Fatalf("DeleteObject(version): %v", err)
+	}
+	if _, err := getVersion(t, name, "k", first); errorCode(err) != "NoSuchVersion" {
+		t.Errorf("a removed version: %v", err)
+	}
+	// A bucket with versions left cannot be deleted.
+	if _, err := c.DeleteBucket(t.Context(), &s3.DeleteBucketInput{Bucket: aws.String(name)}); errorCode(err) != "BucketNotEmpty" {
+		t.Errorf("DeleteBucket with versions left: %v", err)
+	}
+}
+
+func TestListObjectVersionsPagination(t *testing.T) {
+	name := newBucket(t)
+	enableVersioning(t, name, types.BucketVersioningStatusEnabled)
+	want := 0
+	for _, key := range []string{"a", "b/1", "b/2", "c"} {
+		for round := range 3 {
+			put(t, name, key, []byte(fmt.Sprintf("%s-%d", key, round)))
+			want++
+		}
+	}
+	seen := map[string]bool{}
+	pages := s3.NewListObjectVersionsPaginator(client(), &s3.ListObjectVersionsInput{Bucket: aws.String(name), MaxKeys: aws.Int32(5)})
+	count := 0
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(t.Context())
+		if err != nil {
+			t.Fatalf("ListObjectVersions: %v", err)
+		}
+		if len(page.Versions) > 5 {
+			t.Fatalf("a page of 5 has %d versions", len(page.Versions))
+		}
+		for _, v := range page.Versions {
+			id := aws.ToString(v.Key) + "@" + aws.ToString(v.VersionId)
+			if seen[id] {
+				t.Fatalf("version %s is listed twice", id)
+			}
+			seen[id] = true
+			count++
+		}
+	}
+	if count != want {
+		t.Errorf("pages of 5 list %d versions, want %d", count, want)
+	}
+	rolled, err := client().ListObjectVersions(t.Context(), &s3.ListObjectVersionsInput{Bucket: aws.String(name), Delimiter: aws.String("/")})
+	if err != nil || len(rolled.CommonPrefixes) != 1 || aws.ToString(rolled.CommonPrefixes[0].Prefix) != "b/" || len(rolled.Versions) != 6 {
+		t.Errorf("with a delimiter: %d versions, prefixes %v, %v", len(rolled.Versions), rolled.CommonPrefixes, err)
+	}
+}
+
+func TestSuspendedVersioning(t *testing.T) {
+	name := newBucket(t)
+	enableVersioning(t, name, types.BucketVersioningStatusEnabled)
+	kept := aws.ToString(put(t, name, "k", []byte("kept")).VersionId)
+	enableVersioning(t, name, types.BucketVersioningStatusSuspended)
+	put(t, name, "k", []byte("null one"))
+	put(t, name, "k", []byte("null two"))
+	listed, err := client().ListObjectVersions(t.Context(), &s3.ListObjectVersionsInput{Bucket: aws.String(name)})
+	if err != nil || len(listed.Versions) != 2 {
+		t.Fatalf("ListObjectVersions: %d versions, %v; want the kept one and one null version", len(listed.Versions), err)
+	}
+	if got, err := getVersion(t, name, "k", "null"); err != nil || got != "null two" {
+		t.Errorf("the null version = %q, %v", got, err)
+	}
+	if got, err := getVersion(t, name, "k", kept); err != nil || got != "kept" {
+		t.Errorf("the version with an ID = %q, %v", got, err)
+	}
+}
+
+func TestDeleteObjects(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	for _, key := range []string{"a", "b", "dir/c", "kept"} {
+		put(t, name, key, []byte(key))
+	}
+	out, err := c.DeleteObjects(t.Context(), &s3.DeleteObjectsInput{
+		Bucket: aws.String(name),
+		Delete: &types.Delete{Objects: []types.ObjectIdentifier{
+			{Key: aws.String("a")}, {Key: aws.String("b")}, {Key: aws.String("dir/c")}, {Key: aws.String("never-there")},
+		}},
+	})
+	if err != nil || len(out.Deleted) != 4 || len(out.Errors) != 0 {
+		t.Fatalf("DeleteObjects = %d deleted, %d errors, %v", len(out.Deleted), len(out.Errors), err)
+	}
+	listed, err := c.ListObjectsV2(t.Context(), &s3.ListObjectsV2Input{Bucket: aws.String(name)})
+	if err != nil || len(listed.Contents) != 1 || aws.ToString(listed.Contents[0].Key) != "kept" {
+		t.Errorf("after DeleteObjects the bucket holds %d objects, %v", len(listed.Contents), err)
 	}
 }

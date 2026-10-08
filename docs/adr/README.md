@@ -43,4 +43,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0005](0005-cluster.md) | Cluster: replicated metadata, node RPC and distributed erasure sets | accepted |
 | [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted |
 | [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted |
-| [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted; versions are PLAN 6.2 |
+| [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted |

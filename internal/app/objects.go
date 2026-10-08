@@ -188,7 +188,7 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 
 	// ... then visible, through Raft. Nothing was acknowledged before this.
 	version.ModifiedAt = s.clock.Now().UTC()
-	replaced, err := s.index.PutVersion(ctx, version)
+	committed, err := s.index.PutVersion(ctx, version)
 	if err != nil {
 		// Remove the shard only when the version was definitely not
 		// committed. When the outcome is unknown the entry may still be
@@ -203,12 +203,15 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		}
 		return object.Version{}, err
 	}
-	if replaced != nil {
+	// What the put removed for good has no reader any more. A version that
+	// is merely no longer current keeps its data.
+	if replaced := committed.Removed; replaced != nil && !replaced.DeleteMarker {
 		s.storage.remove(ctx, replaced.DataID, replaced.Layout)
 	}
+	version = committed.Stored
 	if degraded {
 		// Committed on a quorum, but not on every drive: rebuild the rest.
-		s.healer.Enqueue(version.Bucket, version.Key)
+		s.healer.Enqueue(version)
 	}
 	return version, nil
 }
@@ -266,6 +269,9 @@ type GetInput struct {
 	Key    string
 	// Range, when not nil, asks for part of the object.
 	Range *object.RangeSpec
+	// Version, when not nil, names the version to read instead of the
+	// current one.
+	Version *object.VersionRef
 }
 
 // GetOutput is an object being read.
@@ -298,7 +304,7 @@ const getAttempts = 4
 func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in GetInput) (GetOutput, error) {
 	var lastData object.ID
 	for attempt := 1; ; attempt++ {
-		version, err := s.head(ctx, principal, in.Bucket, in.Key)
+		version, err := s.head(ctx, principal, in.Bucket, in.Key, in.Version)
 		if err != nil {
 			return GetOutput{}, err
 		}
@@ -393,49 +399,229 @@ type objectBody struct {
 // missing or damaged shard queues the object for healing.
 func (b *objectBody) Close() error {
 	if b.shards.Degraded() {
-		b.healer.Enqueue(b.shards.version.Bucket, b.shards.version.Key)
+		b.healer.Enqueue(b.shards.version)
 	}
 	return b.shards.Close()
 }
 
 // Head returns the current version of an object without reading its content.
 func (s *ObjectService) Head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error) {
-	version, err := s.head(ctx, principal, bucketName, key)
+	version, err := s.head(ctx, principal, bucketName, key, nil)
 	if err != nil {
 		return object.Version{}, fmt.Errorf("object.Head: %w", err)
 	}
 	return version, nil
 }
 
-func (s *ObjectService) head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error) {
-	resource := iam.Resource{Bucket: bucketName, Key: key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionGetObject, Resource: resource}); err != nil {
-		return object.Version{}, err
+// HeadVersion returns one named version of an object without reading its
+// content. Reading a version by name needs a permission of its own. The
+// error wraps domain.ErrVersionNotFound when there is no such version, and
+// domain.ErrMethodNotAllowed when it is a delete marker: a marker has no
+// content.
+func (s *ObjectService) HeadVersion(ctx context.Context, principal iam.Principal, bucketName, key string, ref object.VersionRef) (object.Version, error) {
+	version, err := s.head(ctx, principal, bucketName, key, &ref)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.HeadVersion: %w", err)
 	}
-	if err := object.ValidateKey(key); err != nil {
-		return object.Version{}, err
-	}
-	return s.index.GetObject(ctx, bucketName, key)
+	return version, nil
 }
 
-// Delete removes an object. Deleting an object that does not exist succeeds,
-// as S3 clients expect.
-func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, bucketName, key string) error {
+func (s *ObjectService) head(ctx context.Context, principal iam.Principal, bucketName, key string, ref *object.VersionRef) (object.Version, error) {
+	action := iam.ActionGetObject
+	if ref != nil {
+		action = iam.ActionGetObjectVersion
+	}
 	resource := iam.Resource{Bucket: bucketName, Key: key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionDeleteObject, Resource: resource}); err != nil {
-		return fmt.Errorf("object.Delete: %w", err)
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: action, Resource: resource}); err != nil {
+		return object.Version{}, err
 	}
 	if err := object.ValidateKey(key); err != nil {
-		return fmt.Errorf("object.Delete: %w", err)
+		return object.Version{}, err
 	}
-	removed, err := s.index.DeleteObject(ctx, bucketName, key)
+	if ref == nil {
+		return s.index.GetObject(ctx, bucketName, key)
+	}
+	version, err := s.index.GetVersion(ctx, bucketName, key, *ref)
 	if err != nil {
-		return fmt.Errorf("object.Delete: %w", err)
+		return object.Version{}, err
 	}
-	if removed != nil {
+	if version.DeleteMarker {
+		return object.Version{}, fmt.Errorf("%w: version %s of %s/%s is a delete marker", domain.ErrMethodNotAllowed, ref, bucketName, key)
+	}
+	return version, nil
+}
+
+// VersionListOptions select a page of the versions of a bucket.
+type VersionListOptions struct {
+	Prefix    string
+	Delimiter string
+	// KeyMarker and VersionMarker continue a listing: it resumes after
+	// that version of that key, or, without a version, after the key.
+	KeyMarker     string
+	VersionMarker *object.VersionRef
+	// MaxKeys bounds the number of versions plus common prefixes returned.
+	MaxKeys int
+}
+
+// ListedVersion is one entry of a version listing.
+type ListedVersion struct {
+	Version object.Version
+	// Latest says that this is the newest version of its key.
+	Latest bool
+}
+
+// VersionListPage is one page of the versions of a bucket: keys in order, the
+// versions of a key from the newest to the oldest, delete markers included.
+type VersionListPage struct {
+	Versions       []ListedVersion
+	CommonPrefixes []string
+	Truncated      bool
+	// NextKeyMarker and NextVersionMarker continue the listing.
+	NextKeyMarker     string
+	NextVersionMarker *object.VersionRef
+}
+
+// ListVersions returns one page of every version of the objects in a bucket.
+func (s *ObjectService) ListVersions(
+	ctx context.Context, principal iam.Principal, bucketName string, opts VersionListOptions,
+) (VersionListPage, error) {
+	resource := iam.Resource{Bucket: bucketName}
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucketVersions, Resource: resource}); err != nil {
+		return VersionListPage{}, fmt.Errorf("object.ListVersions: %w", err)
+	}
+	if opts.MaxKeys < 0 {
+		return VersionListPage{}, fmt.Errorf("object.ListVersions: %w: negative max-keys", domain.ErrInvalidArgument)
+	}
+	limit := min(opts.MaxKeys, object.MaxListKeys)
+	if limit == 0 {
+		// Still answer for a missing bucket.
+		if _, err := s.buckets.GetBucket(ctx, bucketName); err != nil {
+			return VersionListPage{}, fmt.Errorf("object.ListVersions: %w", err)
+		}
+		return VersionListPage{}, nil
+	}
+
+	var page VersionListPage
+	// Until the marker has been passed, entries are skipped: the versions
+	// of the marker's key up to and including the marker's version, or all
+	// of them when the marker names no version. A marker that is a common
+	// prefix skips everything under it.
+	passed := opts.KeyMarker == ""
+	lastPrefix := ""
+	count := 0
+	full := func(v object.Version) ports.ScanControl {
+		page.Truncated = true
+		_ = v
+		return ports.ScanControl{Stop: true}
+	}
+	err := s.index.ScanVersions(ctx, bucketName, max(opts.Prefix, opts.KeyMarker), func(v object.Version, latest bool) ports.ScanControl {
+		if !strings.HasPrefix(v.Key, opts.Prefix) {
+			if v.Key < opts.Prefix {
+				return ports.ScanControl{SeekTo: opts.Prefix}
+			}
+			// Keys are ordered: past the prefix nothing can match.
+			return ports.ScanControl{Stop: true}
+		}
+		if !passed {
+			switch {
+			case v.Key != opts.KeyMarker:
+				passed = true
+			case opts.VersionMarker == nil:
+				return ports.ScanControl{SeekTo: v.Key + "\x00"}
+			default:
+				if v.Is(*opts.VersionMarker) {
+					passed = true
+				}
+				return ports.ScanControl{}
+			}
+		}
+		if opts.Delimiter != "" {
+			if i := strings.Index(v.Key[len(opts.Prefix):], opts.Delimiter); i >= 0 {
+				prefix := v.Key[:len(opts.Prefix)+i+len(opts.Delimiter)]
+				// Everything under the prefix is one entry; go on
+				// with the first key past it.
+				past := prefix[:len(prefix)-1] + string(rune(prefix[len(prefix)-1])+1)
+				if prefix == lastPrefix || (opts.VersionMarker == nil && opts.KeyMarker == prefix) {
+					return ports.ScanControl{SeekTo: past}
+				}
+				if count == limit {
+					return full(v)
+				}
+				lastPrefix = prefix
+				page.CommonPrefixes = append(page.CommonPrefixes, prefix)
+				page.NextKeyMarker, page.NextVersionMarker = prefix, nil
+				count++
+				return ports.ScanControl{SeekTo: past}
+			}
+		}
+		if count == limit {
+			return full(v)
+		}
+		page.Versions = append(page.Versions, ListedVersion{Version: v, Latest: latest})
+		ref := v.Ref()
+		page.NextKeyMarker, page.NextVersionMarker = v.Key, &ref
+		count++
+		return ports.ScanControl{}
+	})
+	if err != nil {
+		return VersionListPage{}, fmt.Errorf("object.ListVersions: %w", err)
+	}
+	if !page.Truncated {
+		page.NextKeyMarker, page.NextVersionMarker = "", nil
+	}
+	return page, nil
+}
+
+// DeleteInput names what to delete.
+type DeleteInput struct {
+	Bucket string
+	Key    string
+	// Version, when not nil, names one version to remove for good.
+	Version *object.VersionRef
+}
+
+// DeleteOutput says what a delete did.
+type DeleteOutput struct {
+	// Marker is the delete marker that became the newest version, in a
+	// bucket that keeps versions.
+	Marker *object.Version
+	// Removed is the version that was removed for good, if one was.
+	Removed *object.Version
+}
+
+// Delete deletes an object, or one version of it. In a bucket that keeps
+// versions, deleting an object adds a delete marker and removes nothing;
+// naming a version removes that version for good, and needs the permission
+// to do so. Deleting what does not exist succeeds, as S3 clients expect.
+func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in DeleteInput) (DeleteOutput, error) {
+	action := iam.ActionDeleteObject
+	if in.Version != nil {
+		action = iam.ActionDeleteObjectVersion
+	}
+	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: action, Resource: resource}); err != nil {
+		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+	}
+	if err := object.ValidateKey(in.Key); err != nil {
+		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+	}
+	// Should the delete make a marker, this is its ID.
+	s.entropyMu.Lock()
+	markerID, err := object.NewID(s.entropy)
+	s.entropyMu.Unlock()
+	if err != nil {
+		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+	}
+	result, err := s.index.DeleteObject(ctx, in.Bucket, in.Key, ports.DeleteOptions{
+		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(),
+	})
+	if err != nil {
+		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+	}
+	if removed := result.Removed; removed != nil && !removed.DeleteMarker {
 		s.storage.remove(ctx, removed.DataID, removed.Layout)
 	}
-	return nil
+	return DeleteOutput{Marker: result.Marker, Removed: result.Removed}, nil
 }
 
 // List returns one page of a bucket listing.

@@ -47,9 +47,12 @@ const (
 	cmdPutObject    = "object.put"
 	cmdDeleteObject = "object.delete"
 	cmdSetRoot      = "root.set"
-	cmdSetTopology  = "topology.set"
-	cmdSetNode      = "node.set"
-	cmdRemoveNode   = "node.remove"
+	// Schema 2.
+	cmdSetVersioning = "bucket.versioning.put"
+	cmdDeleteVersion = "object.version.delete"
+	cmdSetTopology   = "topology.set"
+	cmdSetNode       = "node.set"
+	cmdRemoveNode    = "node.remove"
 )
 
 // entry is the decoded form of a Raft log entry. Exactly one of the command
@@ -68,6 +71,29 @@ type entry struct {
 	RemoveNode   *removeNodeCmd   `json:"remove_node,omitempty"`
 	// IAM is the payload of every identity, session and audit command.
 	IAM *iamCmd `json:"iam,omitempty"`
+	// Schema 2.
+	SetVersioning *versioningCmd    `json:"set_versioning,omitempty"`
+	DeleteVersion *deleteVersionCmd `json:"delete_version,omitempty"`
+}
+
+// versioningCmd changes the versioning state of a bucket.
+type versioningCmd struct {
+	Bucket string `json:"bucket"`
+	Status string `json:"status"`
+}
+
+// deleteVersionCmd deletes an object, or one of its versions. What a delete
+// without a version does is decided when it is applied.
+type deleteVersionCmd struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+	// VersionRef names the version to remove for good: "null" or an ID.
+	// Empty deletes the object as its bucket's versioning state says.
+	VersionRef string `json:"version,omitempty"`
+	// MarkerID and At are the ID and time of the delete marker, should one
+	// be made.
+	MarkerID string    `json:"marker_id"`
+	At       time.Time `json:"at"`
 }
 
 type removeNodeCmd struct {
@@ -124,6 +150,9 @@ type deleteObjectCmd struct {
 type bucketRecord struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	// Versioning is "", "Enabled" or "Suspended" (schema 2).
+	Versioning string `json:"versioning,omitempty"`
+	ObjectLock bool   `json:"object_lock,omitempty"`
 }
 
 // versionRecord is an object version as it is stored and replicated.
@@ -135,6 +164,11 @@ type versionRecord struct {
 	Size       int64     `json:"size"`
 	ETag       string    `json:"etag"`
 	ModifiedAt time.Time `json:"modified_at"`
+	// Versioned, Seq and DeleteMarker are schema 2. A record without them
+	// is the null version of its key, the oldest there can be.
+	Versioned    bool   `json:"versioned,omitempty"`
+	Seq          uint64 `json:"seq,omitempty"`
+	DeleteMarker bool   `json:"delete_marker,omitempty"`
 
 	ContentType        string            `json:"content_type,omitempty"`
 	ContentEncoding    string            `json:"content_encoding,omitempty"`
@@ -228,7 +262,7 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
-	if !e.At.IsZero() {
+	if !e.At.IsZero() || e.Type == cmdSetVersioning || e.Type == cmdDeleteVersion {
 		return entrySchemaTimed
 	}
 	return entrySchemaVersion
@@ -251,7 +285,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
-		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil,
+		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil,
 	} {
 		if present {
 			set++
@@ -275,6 +309,10 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.SetNode != nil
 	case cmdRemoveNode:
 		ok = ok && e.RemoveNode != nil
+	case cmdSetVersioning:
+		ok = ok && e.SetVersioning != nil && data[0] >= entrySchemaTimed
+	case cmdDeleteVersion:
+		ok = ok && e.DeleteVersion != nil && data[0] >= entrySchemaTimed
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -288,11 +326,11 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 }
 
 func bucketToRecord(b bucket.Bucket) *bucketRecord {
-	return &bucketRecord{Name: b.Name, CreatedAt: b.CreatedAt.UTC()}
+	return &bucketRecord{Name: b.Name, CreatedAt: b.CreatedAt.UTC(), Versioning: string(b.Versioning), ObjectLock: b.ObjectLock}
 }
 
 func (r bucketRecord) toDomain() bucket.Bucket {
-	return bucket.Bucket{Name: r.Name, CreatedAt: r.CreatedAt}
+	return bucket.Bucket{Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock}
 }
 
 func versionToRecord(v object.Version) *versionRecord {
@@ -308,6 +346,9 @@ func versionToRecord(v object.Version) *versionRecord {
 		Size:               v.Size,
 		ETag:               v.ETag,
 		ModifiedAt:         v.ModifiedAt.UTC(),
+		Versioned:          v.Versioned,
+		Seq:                v.Seq,
+		DeleteMarker:       v.DeleteMarker,
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -348,6 +389,9 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		Bucket:             r.Bucket,
 		Key:                r.Key,
 		VersionID:          versionID,
+		Versioned:          r.Versioned,
+		Seq:                r.Seq,
+		DeleteMarker:       r.DeleteMarker,
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,
@@ -404,10 +448,14 @@ type wireResult struct {
 	Codes    []string       `json:"codes,omitempty"`
 	Message  string         `json:"message,omitempty"`
 	Previous *versionRecord `json:"previous,omitempty"`
+	// Stored is the version a put committed, and Marker the delete marker
+	// a delete made (schema 2).
+	Stored *versionRecord `json:"stored,omitempty"`
+	Marker *versionRecord `json:"marker,omitempty"`
 }
 
 func encodeResult(r applyResult) ([]byte, error) {
-	w := wireResult{Previous: r.previous}
+	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker}
 	if r.err != nil {
 		w.Codes, w.Message = domain.Codes(r.err), r.err.Error()
 		if len(w.Codes) == 0 {
@@ -423,7 +471,7 @@ func decodeResult(data []byte) (applyResult, error) {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return applyResult{}, fmt.Errorf("malformed answer from the metadata leader: %w", err)
 	}
-	r := applyResult{previous: w.Previous}
+	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker}
 	if len(w.Codes) > 0 {
 		r.err = domain.FromCodes(w.Codes, w.Message)
 	}

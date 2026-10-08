@@ -95,7 +95,7 @@ func populate(t *testing.T, store *raftmeta.Store) {
 	if _, err := store.PutVersion(ctx, porttest.SampleVersion("alpha", "a", 50)); err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
-	if _, err := store.DeleteObject(ctx, "alpha", "c"); err != nil {
+	if _, err := store.DeleteObject(ctx, "alpha", "c", ports.DeleteOptions{}); err != nil {
 		t.Fatalf("DeleteObject: %v", err)
 	}
 	if err := store.DeleteBucket(ctx, "gone"); err != nil {
@@ -137,7 +137,8 @@ func TestStateSurvivesRestartAndEntriesApplyOnce(t *testing.T) {
 		// Replay must not re-apply: an overwrite replayed twice would
 		// report the wrong previous version, and the applied index only
 		// moves for the entries Raft itself adds on becoming leader.
-		replaced, err := store.PutVersion(context.Background(), porttest.SampleVersion("beta", "probe", byte(restart)))
+		put, err := store.PutVersion(context.Background(), porttest.SampleVersion("beta", "probe", byte(restart)))
+		replaced := put.Removed
 		if err != nil {
 			t.Fatalf("restart %d: PutVersion: %v", restart, err)
 		}
@@ -168,7 +169,7 @@ func TestStateSurvivesSnapshotAndRestart(t *testing.T) {
 	if _, err := store.PutVersion(context.Background(), porttest.SampleVersion("beta", "after-snapshot", 9)); err != nil {
 		t.Fatalf("PutVersion: %v", err)
 	}
-	if _, err := store.DeleteObject(context.Background(), "alpha", "a"); err != nil {
+	if _, err := store.DeleteObject(context.Background(), "alpha", "a", ports.DeleteOptions{}); err != nil {
 		t.Fatalf("DeleteObject: %v", err)
 	}
 	want := dump(t, store)
@@ -307,7 +308,7 @@ func TestStoreRefusesUseAfterClose(t *testing.T) {
 		"ListBuckets":  func() error { _, err := store.ListBuckets(ctx); return err },
 		"PutVersion":   func() error { _, err := store.PutVersion(ctx, porttest.SampleVersion("b", "k", 1)); return err },
 		"GetObject":    func() error { _, err := store.GetObject(ctx, "b", "k"); return err },
-		"DeleteObject": func() error { _, err := store.DeleteObject(ctx, "b", "k"); return err },
+		"DeleteObject": func() error { _, err := store.DeleteObject(ctx, "b", "k", ports.DeleteOptions{}); return err },
 		"ScanObjects": func() error {
 			return store.ScanObjects(ctx, "b", "", func(object.Version) ports.ScanControl { return ports.ScanControl{} })
 		},

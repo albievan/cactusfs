@@ -78,6 +78,35 @@ func (s *BucketService) Get(ctx context.Context, principal iam.Principal, name s
 	return b, nil
 }
 
+// Versioning returns whether a bucket keeps the versions of its objects.
+func (s *BucketService) Versioning(ctx context.Context, principal iam.Principal, name string) (bucket.Versioning, error) {
+	if err := s.authorize(ctx, principal, iam.ActionGetBucketVersioning, name); err != nil {
+		return "", fmt.Errorf("bucket.Versioning: %w", err)
+	}
+	b, err := s.buckets.GetBucket(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("bucket.Versioning: %w", err)
+	}
+	return b.Versioning, nil
+}
+
+// SetVersioning makes a bucket keep the versions of its objects, or stop
+// making new ones. Versions that exist stay. The change is audited: with
+// versioning suspended, an overwrite or a delete destroys data again.
+func (s *BucketService) SetVersioning(ctx context.Context, principal iam.Principal, name string, state bucket.Versioning) error {
+	if err := s.authorize(ctx, principal, iam.ActionPutBucketVersioning, name); err != nil {
+		return fmt.Errorf("bucket.SetVersioning: %w", err)
+	}
+	if err := s.buckets.SetBucketVersioning(ctx, name, state); err != nil {
+		return fmt.Errorf("bucket.SetVersioning: %w", err)
+	}
+	if s.auditor != nil {
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutBucketVersioning, iam.Resource{Bucket: name}, audit.Succeeded,
+			map[string]string{"status": string(state)}))
+	}
+	return nil
+}
+
 // Location proves that a bucket exists and that the principal may ask where
 // it is. A deployment has a single location.
 func (s *BucketService) Location(ctx context.Context, principal iam.Principal, name string) error {

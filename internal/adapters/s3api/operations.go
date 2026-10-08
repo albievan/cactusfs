@@ -194,6 +194,7 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 	header := req.w.Header()
 	header.Set("ETag", quote(version.ETag))
 	header.Set("X-Amz-Server-Side-Encryption", "AES256")
+	setVersionHeader(header, version, false)
 	for name, value := range body.checksums {
 		header.Set(name, value)
 	}
@@ -219,7 +220,7 @@ func userMetadata(header http.Header) map[string]string {
 }
 
 func (h *Handler) getObject(ctx context.Context, req *request) error {
-	in := app.GetInput{Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range"))}
+	in := app.GetInput{Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range")), Version: req.version}
 	out, err := h.cfg.Objects.Get(ctx, req.principal, in)
 	if err != nil {
 		return err
@@ -232,6 +233,7 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 
 	header := req.w.Header()
 	setObjectHeaders(header, out.Version)
+	setVersionHeader(header, out.Version, req.version != nil)
 	header.Set("Content-Length", strconv.FormatInt(out.Range.Length, 10))
 	status := http.StatusOK
 	if in.Range != nil {
@@ -251,20 +253,40 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) headObject(ctx context.Context, req *request) error {
-	version, err := h.cfg.Objects.Head(ctx, req.principal, req.bucket, req.key)
+	var version object.Version
+	var err error
+	if req.version != nil {
+		version, err = h.cfg.Objects.HeadVersion(ctx, req.principal, req.bucket, req.key, *req.version)
+	} else {
+		version, err = h.cfg.Objects.Head(ctx, req.principal, req.bucket, req.key)
+	}
 	if err != nil {
 		return err
 	}
 	header := req.w.Header()
 	setObjectHeaders(header, version)
+	setVersionHeader(header, version, req.version != nil)
 	header.Set("Content-Length", strconv.FormatInt(version.Size, 10))
 	req.w.WriteHeader(http.StatusOK)
 	return nil
 }
 
 func (h *Handler) deleteObject(ctx context.Context, req *request) error {
-	if err := h.cfg.Objects.Delete(ctx, req.principal, req.bucket, req.key); err != nil {
+	out, err := h.cfg.Objects.Delete(ctx, req.principal, app.DeleteInput{Bucket: req.bucket, Key: req.key, Version: req.version})
+	if err != nil {
 		return err
+	}
+	header := req.w.Header()
+	switch {
+	case out.Marker != nil:
+		// The object is deleted, and this is the version that says so.
+		header.Set(headerDeleteMarker, "true")
+		header.Set(headerVersionID, out.Marker.Ref().String())
+	case req.version != nil:
+		header.Set(headerVersionID, req.version.String())
+		if out.Removed != nil && out.Removed.DeleteMarker {
+			header.Set(headerDeleteMarker, "true")
+		}
 	}
 	req.w.WriteHeader(http.StatusNoContent)
 	return nil

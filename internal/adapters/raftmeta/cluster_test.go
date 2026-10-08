@@ -304,6 +304,9 @@ func TestEveryNodeOfAClusterHonoursTheContract(t *testing.T) {
 	porttest.MetadataContract(t, func(t *testing.T) porttest.Metadata {
 		c := newTestCluster(t)
 		c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+		// Every member says which schema it applies, as nodes do when
+		// they start: without that the cluster stays at the first.
+		c.register("m1", "m2", "m3", "s4")
 		return c.store("s4")
 	})
 }
@@ -342,7 +345,7 @@ func TestReadAfterWriteOnEveryNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	replaced, err := c.store("s4").PutVersion(ctx, porttest.SampleVersion("bkt", "answer", 2))
-	if err != nil || replaced == nil || replaced.DataID != first.DataID {
+	if err != nil || replaced.Removed == nil || replaced.Removed.DataID != first.DataID {
 		t.Errorf("forwarded overwrite: replaced = %+v, %v; want the first version", replaced, err)
 	}
 	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "bkt"}); !errors.Is(err, domain.ErrBucketAlreadyExists) ||
@@ -734,7 +737,7 @@ func TestEventsComeFromAppliedEntries(t *testing.T) {
 			return store.CreateBucket(ctx, bucket.Bucket{Name: "bkt", CreatedAt: time.Unix(1000, 0)})
 		},
 		func() error { _, err := store.PutVersion(ctx, version); return err },
-		func() error { _, err := store.DeleteObject(ctx, "bkt", "k"); return err },
+		func() error { _, err := store.DeleteObject(ctx, "bkt", "k", ports.DeleteOptions{}); return err },
 		func() error { return store.DeleteBucket(ctx, "bkt") },
 		func() error {
 			return store.SetNode(ctx, cluster.Node{ID: "s4", RPCAddr: "a:1", Roles: cluster.Roles{cluster.RoleStorage}, MetadataVersion: 1})
@@ -753,7 +756,7 @@ func TestEventsComeFromAppliedEntries(t *testing.T) {
 	if err := store.RemoveNode(ctx, "s4"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DeleteObject(ctx, "bkt", "k"); !errors.Is(err, domain.ErrBucketNotFound) {
+	if _, err := store.DeleteObject(ctx, "bkt", "k", ports.DeleteOptions{}); !errors.Is(err, domain.ErrBucketNotFound) {
 		t.Fatal(err)
 	}
 

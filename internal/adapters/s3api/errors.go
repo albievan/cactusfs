@@ -59,6 +59,9 @@ func errorMappings() []mapping {
 		{domain.ErrEntityTooLarge, apiError{http.StatusBadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size."}},
 
 		// Buckets and objects.
+		{domain.ErrVersionNotFound, apiError{http.StatusNotFound, "NoSuchVersion", "The version ID specified in the request does not match an existing version."}},
+		{domain.ErrMethodNotAllowed, apiError{http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource."}},
+		{domain.ErrInvalidBucketState, apiError{http.StatusConflict, "InvalidBucketState", "The request is not valid for the current state of the bucket."}},
 		{domain.ErrInvalidBucketName, apiError{http.StatusBadRequest, "InvalidBucketName", "The specified bucket is not valid."}},
 		{domain.ErrBucketNotFound, apiError{http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist."}},
 		{domain.ErrBucketAlreadyExists, apiError{http.StatusConflict, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded and you already own it."}},

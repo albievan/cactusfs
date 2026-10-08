@@ -80,6 +80,62 @@ type Version struct {
 	Encryption Encryption
 	// Layout describes how the encrypted bytes are spread over drives.
 	Layout Layout
+
+	// Versioned says that the version was written while its bucket kept
+	// versions: it has an ID of its own. A version that is not versioned is
+	// the null version of its key, of which there is at most one.
+	Versioned bool
+	// Seq orders the versions of a key: the newest has the greatest. It
+	// is given when the version is committed.
+	Seq uint64
+	// DeleteMarker says that this version stands for the object having
+	// been deleted: it has no content.
+	DeleteMarker bool
+}
+
+// NullVersion is how the null version is named to clients.
+const NullVersion = "null"
+
+// VersionRef names one version of a key: the null version, or the version
+// with an ID.
+type VersionRef struct {
+	Null bool
+	ID   ID
+}
+
+// ParseVersionRef parses a version as clients name it: "null", or the 32
+// lowercase hexadecimal characters of an ID. Anything else wraps
+// domain.ErrInvalidArgument.
+func ParseVersionRef(s string) (VersionRef, error) {
+	if s == NullVersion {
+		return VersionRef{Null: true}, nil
+	}
+	id, err := ParseID(s)
+	if err != nil || id.IsZero() {
+		return VersionRef{}, fmt.Errorf("%w: version ID %q", domain.ErrInvalidArgument, s)
+	}
+	return VersionRef{ID: id}, nil
+}
+
+// String returns the reference as clients name it.
+func (r VersionRef) String() string {
+	if r.Null {
+		return NullVersion
+	}
+	return r.ID.String()
+}
+
+// Ref returns the reference that names this version.
+func (v Version) Ref() VersionRef {
+	if !v.Versioned {
+		return VersionRef{Null: true}
+	}
+	return VersionRef{ID: v.VersionID}
+}
+
+// Is reports whether ref names this version.
+func (v Version) Is(ref VersionRef) bool {
+	return v.Ref() == ref
 }
 
 // Encryption describes the envelope encryption of one object version.

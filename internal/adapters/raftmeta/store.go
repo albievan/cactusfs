@@ -706,33 +706,193 @@ func (s *Store) ListBuckets(ctx context.Context) ([]bucket.Bucket, error) {
 }
 
 // PutVersion implements ports.ObjectIndex.
-func (s *Store) PutVersion(ctx context.Context, v object.Version) (*object.Version, error) {
+func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResult, error) {
 	result, err := s.propose(ctx, entry{Type: cmdPutObject, PutObject: versionToRecord(v)})
 	if err != nil {
-		return nil, fmt.Errorf("raftmeta.PutVersion: %w", err)
+		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
 	}
-	return previousVersion(result)
+	removed, err := versionOfRecord(result.previous)
+	if err != nil {
+		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
+	}
+	out := ports.PutResult{Stored: v, Removed: removed}
+	// A leader of the previous release does not say what it stored; then
+	// the bucket cannot keep versions, and what was proposed is it.
+	if stored, err := versionOfRecord(result.stored); err != nil {
+		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w", err)
+	} else if stored != nil {
+		out.Stored = *stored
+	}
+	return out, nil
 }
 
 // DeleteObject implements ports.ObjectIndex.
-func (s *Store) DeleteObject(ctx context.Context, bucketName, key string) (*object.Version, error) {
-	cmd := &deleteObjectCmd{Bucket: bucketName, Key: key}
-	result, err := s.propose(ctx, entry{Type: cmdDeleteObject, DeleteObject: cmd})
-	if err != nil {
-		return nil, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o ports.DeleteOptions) (ports.DeleteResult, error) {
+	e := entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
+		Bucket: bucketName, Key: key, MarkerID: o.MarkerID.String(), At: o.At.UTC(),
+	}}
+	if o.Version != nil {
+		e.DeleteVersion.VersionRef = o.Version.String()
 	}
-	return previousVersion(result)
+	result, err := s.propose(ctx, e)
+	if errors.Is(err, domain.ErrUnavailable) && o.Version == nil && s.versionOf(e) > entrySchemaVersion {
+		// While a member of the previous release holds the cluster at the
+		// first schema, no bucket keeps versions, and a delete is what it
+		// always was.
+		if level, levelErr := s.entryVersion(); levelErr == nil && level < entrySchemaTimed {
+			result, err = s.propose(ctx, entry{Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: bucketName, Key: key}})
+		}
+	}
+	if err != nil {
+		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+	}
+	removed, err := versionOfRecord(result.previous)
+	if err != nil {
+		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+	}
+	marker, err := versionOfRecord(result.marker)
+	if err != nil {
+		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w", err)
+	}
+	return ports.DeleteResult{Marker: marker, Removed: removed}, nil
 }
 
-func previousVersion(result applyResult) (*object.Version, error) {
-	if result.previous == nil {
+func versionOfRecord(record *versionRecord) (*object.Version, error) {
+	if record == nil {
 		return nil, nil
 	}
-	v, err := result.previous.toDomain()
+	v, err := record.toDomain()
 	if err != nil {
 		return nil, fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
 	}
 	return &v, nil
+}
+
+// SetBucketVersioning implements ports.BucketStore.
+func (s *Store) SetBucketVersioning(ctx context.Context, name string, state bucket.Versioning) error {
+	cmd := &versioningCmd{Bucket: name, Status: string(state)}
+	if _, err := s.propose(ctx, entry{Type: cmdSetVersioning, SetVersioning: cmd}); err != nil {
+		return fmt.Errorf("raftmeta.SetBucketVersioning: %w", err)
+	}
+	return nil
+}
+
+// GetVersion implements ports.ObjectIndex.
+func (s *Store) GetVersion(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Version, error) {
+	var version object.Version
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
+		if tx.Bucket(objectsBucket()).Bucket([]byte(bucketName)) == nil {
+			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+		}
+		h, err := openHistory(tx, bucketName, false)
+		if err != nil {
+			return err
+		}
+		record, _, err := h.find(key, ref.String())
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
+		}
+		if version, err = record.toDomain(); err != nil {
+			return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return object.Version{}, fmt.Errorf("raftmeta.GetVersion: %w", err)
+	}
+	return version, nil
+}
+
+// ScanVersions implements ports.ObjectIndex. The whole scan sees one
+// consistent state. The current versions and the others live in two indexes
+// in the same key order; the scan walks both and joins them key by key.
+func (s *Store) ScanVersions(
+	ctx context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+) error {
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
+		if tx.Bucket(objectsBucket()).Bucket([]byte(bucketName)) == nil {
+			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+		}
+		h, err := openHistory(tx, bucketName, false)
+		if err != nil {
+			return err
+		}
+		current := h.current.Cursor()
+		var older *bbolt.Cursor
+		if h.older != nil {
+			older = h.older.Cursor()
+		}
+		// nextKey returns the smallest object key at or after from that
+		// has any version.
+		nextKey := func(from string) (string, bool, error) {
+			best, found := "", false
+			if k, _ := current.Seek([]byte(from)); k != nil {
+				best, found = string(k), true
+			}
+			if older != nil {
+				// Encoded keys sort as the keys do; the bare
+				// encoding, without its terminator, is where every
+				// key from "from" on begins.
+				seek := encodeKey(from)
+				if k, _ := older.Seek(seek[:len(seek)-2]); k != nil {
+					key, _, ok := decodeKey(k)
+					if !ok {
+						return "", false, fmt.Errorf("%w: stored version key", domain.ErrIntegrity)
+					}
+					if !found || key < best {
+						best, found = key, true
+					}
+				}
+			}
+			return best, found, nil
+		}
+		from := start
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			key, found, err := nextKey(from)
+			if err != nil || !found {
+				return err
+			}
+			var versions []*versionRecord
+			if record, err := readVersion(h.current, key); err != nil {
+				return err
+			} else if record != nil {
+				versions = append(versions, record)
+			}
+			if err := h.each(key, func(_ []byte, v *versionRecord) (bool, error) {
+				versions = append(versions, v)
+				return true, nil
+			}); err != nil {
+				return err
+			}
+			// The first version after this key begins here: the key
+			// followed by the smallest byte there is.
+			from = key + "\x00"
+			for i, record := range versions {
+				version, err := record.toDomain()
+				if err != nil {
+					return fmt.Errorf("%w: stored object version: %w", domain.ErrIntegrity, err)
+				}
+				control := visit(version, i == 0)
+				if control.Stop {
+					return nil
+				}
+				if control.SeekTo > key {
+					from = control.SeekTo
+					break
+				}
+			}
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("raftmeta.ScanVersions: %w", err)
+	}
+	return nil
 }
 
 // GetObject implements ports.ObjectIndex.

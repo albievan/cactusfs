@@ -242,7 +242,7 @@ func (o *operations) PutObject(ctx context.Context, request api.PutObjectRequest
 
 // DeleteObject implements api.StrictServerInterface.
 func (o *operations) DeleteObject(ctx context.Context, request api.DeleteObjectRequestObject) (api.DeleteObjectResponseObject, error) {
-	if err := o.h.cfg.Objects.Delete(ctx, who(ctx), request.Bucket, request.Params.Key); err != nil {
+	if _, err := o.h.cfg.Objects.Delete(ctx, who(ctx), app.DeleteInput{Bucket: request.Bucket, Key: request.Params.Key}); err != nil {
 		return nil, err
 	}
 	return api.DeleteObject204Response{}, nil

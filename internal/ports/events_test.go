@@ -81,15 +81,17 @@ func TestEventsMatchTheContract(t *testing.T) {
 		payload any
 		schema  string
 	}{
-		ports.EventBucketCreated:   {ports.BucketEvent{}, "Bucket"},
-		ports.EventBucketDeleted:   {ports.BucketEvent{}, "Bucket"},
-		ports.EventObjectCreated:   {ports.ObjectEvent{}, "Object"},
-		ports.EventObjectDeleted:   {ports.ObjectEvent{}, "Object"},
-		ports.EventRootKeySet:      {ports.RootCredentialEvent{}, "RootCredential"},
-		ports.EventTopologyChanged: {ports.TopologyEvent{}, "Topology"},
-		ports.EventNodeRegistered:  {ports.NodeEvent{}, "Node"},
-		ports.EventNodeRemoved:     {ports.NodeEvent{}, "Node"},
-		ports.EventAuditRecorded:   {ports.AuditEvent{}, "Audit"},
+		ports.EventBucketCreated:             {ports.BucketEvent{}, "Bucket"},
+		ports.EventBucketDeleted:             {ports.BucketEvent{}, "Bucket"},
+		ports.EventObjectCreated:             {ports.ObjectEvent{}, "Object"},
+		ports.EventObjectDeleted:             {ports.ObjectEvent{}, "Object"},
+		ports.EventRootKeySet:                {ports.RootCredentialEvent{}, "RootCredential"},
+		ports.EventTopologyChanged:           {ports.TopologyEvent{}, "Topology"},
+		ports.EventNodeRegistered:            {ports.NodeEvent{}, "Node"},
+		ports.EventNodeRemoved:               {ports.NodeEvent{}, "Node"},
+		ports.EventAuditRecorded:             {ports.AuditEvent{}, "Audit"},
+		ports.EventBucketVersioningChanged:   {ports.BucketVersioningEvent{}, "BucketVersioning"},
+		ports.EventObjectDeleteMarkerCreated: {ports.ObjectEvent{}, "Object"},
 	}
 
 	var addresses []string

@@ -17,7 +17,21 @@ const (
 	EventNodeRegistered  = "cactusfs.cluster.node-registered.v1"
 	EventNodeRemoved     = "cactusfs.cluster.node-removed.v1"
 	EventAuditRecorded   = "cactusfs.audit.recorded.v1"
+	// EventBucketVersioningChanged tells that a bucket began or stopped
+	// keeping versions.
+	EventBucketVersioningChanged = "cactusfs.bucket.versioning-changed.v1"
+	// EventObjectDeleteMarkerCreated tells that an object in a bucket that
+	// keeps versions was deleted: a delete marker is now its newest
+	// version.
+	EventObjectDeleteMarkerCreated = "cactusfs.object.delete-marker-created.v1"
 )
+
+// BucketVersioningEvent is the payload of EventBucketVersioningChanged.
+type BucketVersioningEvent struct {
+	Bucket string `json:"bucket"`
+	// Status is "Enabled" or "Suspended".
+	Status string `json:"status"`
+}
 
 // Event is a fact: a change of state that was committed through Raft. Events
 // are derived from applied entries, so every node derives the same events

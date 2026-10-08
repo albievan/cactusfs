@@ -406,6 +406,20 @@ func (s *switchingIndex) GetObject(ctx context.Context, bucketName, key string) 
 	return s.ObjectIndex.GetObject(ctx, bucketName, key)
 }
 
+// GetVersion answers from the same script: healing looks a version up by
+// its name when it asks whether the version is still there.
+func (s *switchingIndex) GetVersion(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Version, error) {
+	s.mu.Lock()
+	if len(s.answers) > 0 {
+		answer := s.answers[0]
+		s.answers = s.answers[1:]
+		s.mu.Unlock()
+		return answer()
+	}
+	s.mu.Unlock()
+	return s.ObjectIndex.GetVersion(ctx, bucketName, key, ref)
+}
+
 // healerOver returns a healer that looks objects up through index.
 func (f *fixture) healerOver(t *testing.T, index ports.ObjectIndex) *app.Healer {
 	t.Helper()
@@ -776,7 +790,7 @@ func TestCollector(t *testing.T) {
 	for _, d := range f.drives {
 		d.FailDelete = errors.New("busy")
 	}
-	if err := f.objects.Delete(ctx, porttest.Root(), "b", "kept"); err != nil {
+	if _, err := f.objects.Delete(ctx, porttest.Root(), app.DeleteInput{Bucket: "b", Key: "kept"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range f.drives {
@@ -868,9 +882,9 @@ type blockingIndex struct {
 	fail    error
 }
 
-func (b *blockingIndex) PutVersion(ctx context.Context, v object.Version) (*object.Version, error) {
+func (b *blockingIndex) PutVersion(ctx context.Context, v object.Version) (ports.PutResult, error) {
 	if b.fail != nil {
-		return nil, b.fail
+		return ports.PutResult{}, b.fail
 	}
 	b.once.Do(func() {
 		close(b.reached)

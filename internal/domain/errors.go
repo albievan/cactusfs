@@ -63,6 +63,9 @@ var (
 	// ErrBucketAlreadyExists reports that a bucket of that name already
 	// exists.
 	ErrBucketAlreadyExists = errors.New("bucket already exists")
+	// ErrInvalidBucketState means that the state of the bucket does not
+	// allow the request.
+	ErrInvalidBucketState = errors.New("the state of the bucket does not allow this")
 	// ErrBucketNotEmpty reports an attempt to delete a bucket that still
 	// holds objects.
 	ErrBucketNotEmpty = errors.New("bucket is not empty")
@@ -74,6 +77,12 @@ var (
 	ErrInvalidObjectKey = errors.New("invalid object key")
 	// ErrObjectNotFound reports that the object does not exist.
 	ErrObjectNotFound = errors.New("object not found")
+	// ErrVersionNotFound means that an object has no version with the ID
+	// that was named.
+	ErrVersionNotFound = errors.New("version not found")
+	// ErrMethodNotAllowed means that what was asked cannot be done with
+	// what was named: reading a delete marker.
+	ErrMethodNotAllowed = errors.New("method not allowed")
 	// ErrInvalidRange reports a byte range that cannot be satisfied.
 	ErrInvalidRange = errors.New("requested range is not satisfiable")
 	// ErrInvalidID reports a malformed identifier.
@@ -170,6 +179,9 @@ func wireCodes() []struct {
 		{"entity_exists", ErrEntityExists},
 		{"entity_in_use", ErrEntityInUse},
 		{"credential_not_found", ErrCredentialNotFound},
+		{"version_not_found", ErrVersionNotFound},
+		{"method_not_allowed", ErrMethodNotAllowed},
+		{"invalid_bucket_state", ErrInvalidBucketState},
 	}
 }
 

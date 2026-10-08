@@ -1,7 +1,6 @@
 # ADR-0008: Entry schema 2, the leader's time, and object versions in the metadata state
 
-- **Status:** accepted; the schema and the time are implemented (PLAN 6.0), the version
-  history is PLAN 6.2
+- **Status:** accepted and implemented (PLAN 6.0, 6.2)
 - **Date:** 2026-10-08
 - **Milestone:** 6
 - **Supersedes:** the single-version object index of ADR-0003, in part
@@ -63,7 +62,7 @@ state machine must be deterministic.
   having passed, the earliest clock among a majority of voters - is not built. See open
   questions in PLAN.md.
 
-### Object versions (PLAN 6.2)
+### Object versions
 
 - `objects/<bucket>/<key>` keeps its key and its value. It holds the current version of
   a key whenever the newest version is not a delete marker. Listing and reading the
@@ -88,14 +87,35 @@ state machine must be deterministic.
   delete the shards of every noncurrent version; this has a test of its own.
 - Finding a version by its ID walks the versions of that one key. An index by version
   ID can be added later without changing anything stored.
+- Two commands are new: `bucket.versioning.put` and `object.version.delete`, which
+  deletes an object (making a delete marker where the bucket keeps versions) or removes
+  one named version for good. The `object.delete` of schema 1 stays for logs written
+  before, and is refused in a bucket that keeps versions. While a member of the
+  previous release holds a cluster at schema 1 no bucket can keep versions, and a
+  delete is written the old way.
+- A delete marker's ID and time come from the proposer, as every identifier does; its
+  place in the order of versions is the Raft index of the entry.
+- Removing a version for good is its own permission (`s3:DeleteObjectVersion`), and so
+  is reading one by name (`s3:GetObjectVersion`). The built-in `read-write` role can
+  delete objects and cannot remove versions: in a bucket that keeps versions, a holder
+  of that role, or of its stolen key, destroys nothing. Suspending versioning
+  (`s3:PutBucketVersioning`) is audited.
+- Scrubbing walks every version, and healing works on a named version: an old version
+  that rots is found like a current one.
 
 ## Upgrade
 
 - Rolling upgrade from the previous release: nodes are replaced one by one; schema 2 is
   not written until the last has registered. Tested with nodes of both levels side by
   side (`TestRollingUpgrade`, `TestTheLeaderStampsEntries`).
-- A state written by the previous release opens, and its objects are null versions
-  (tested from a metadata directory written by the previous release's binary, PLAN 6.2).
+- A state written by the previous release opens, and its objects are null versions.
+  `TestUpgradeFromThePreviousRelease` runs this binary on a deployment written by the
+  previous release's binary (committed under `test/integration/testdata`), reads every
+  object, turns versioning on and writes over them.
+- The state machine is held against an independent in-memory model over random
+  sequences of puts, deletes, version deletes and versioning changes
+  (`TestVersionsAgainstAModel`), with the index invariant and the reference counts
+  checked from the raw state after every step.
 
 ## Consequences
 

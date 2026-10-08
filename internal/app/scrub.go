@@ -144,15 +144,22 @@ func (s *Scrubber) RunOnce(ctx context.Context) (ScrubStats, error) {
 }
 
 func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *ScrubStats) error {
-	start, skip := "", ""
+	// Every version is checked, not only the current one of each key: an
+	// old version that rots unnoticed is gone on the day it is wanted. A
+	// batch ends between two keys.
+	start := ""
 	for {
 		var batch []object.Version
-		err := s.index.ScanObjects(ctx, bucketName, start, func(v object.Version) ports.ScanControl {
-			if v.Key == skip {
-				return ports.ScanControl{}
+		next, more := "", false
+		err := s.index.ScanVersions(ctx, bucketName, start, func(v object.Version, latest bool) ports.ScanControl {
+			if latest && len(batch) >= scrubBatch {
+				next, more = v.Key, true
+				return ports.ScanControl{Stop: true}
 			}
-			batch = append(batch, v)
-			return ports.ScanControl{Stop: len(batch) == scrubBatch}
+			if !v.DeleteMarker {
+				batch = append(batch, v)
+			}
+			return ports.ScanControl{}
 		})
 		if errors.Is(err, domain.ErrBucketNotFound) {
 			return nil // deleted while scrubbing
@@ -169,15 +176,16 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 			}
 			s.scrubObject(ctx, version, stats)
 		}
-		if len(batch) < scrubBatch {
+		if !more {
 			return nil
 		}
-		start, skip = batch[len(batch)-1].Key, batch[len(batch)-1].Key
+		start = next
 	}
 }
 
 func (s *Scrubber) scrubObject(ctx context.Context, version object.Version, stats *ScrubStats) {
-	result, err := s.healer.heal(ctx, version.Bucket, version.Key, s.throttle)
+	target := healTarget{bucket: version.Bucket, key: version.Key, named: true, ref: version.Ref()}
+	result, err := s.healer.heal(ctx, target, s.throttle)
 	stats.Objects++
 	stats.ShardsRebuilt += result.Rebuilt
 	stats.Bytes += result.Verified

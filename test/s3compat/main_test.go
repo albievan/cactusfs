@@ -282,14 +282,19 @@ func newBucket(t *testing.T) string {
 	}
 	t.Cleanup(func() {
 		ctx := context.Background()
-		pages := s3.NewListObjectsV2Paginator(c, &s3.ListObjectsV2Input{Bucket: aws.String(name)})
+		// Every version and every delete marker goes: a bucket that
+		// kept versions is empty only then.
+		pages := s3.NewListObjectVersionsPaginator(c, &s3.ListObjectVersionsInput{Bucket: aws.String(name)})
 		for pages.HasMorePages() {
 			page, err := pages.NextPage(ctx)
 			if err != nil {
 				return
 			}
-			for _, object := range page.Contents {
-				_, _ = c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(name), Key: object.Key})
+			for _, version := range page.Versions {
+				_, _ = c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(name), Key: version.Key, VersionId: version.VersionId})
+			}
+			for _, marker := range page.DeleteMarkers {
+				_, _ = c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(name), Key: marker.Key, VersionId: marker.VersionId})
 			}
 		}
 		_, _ = c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(name)})

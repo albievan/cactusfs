@@ -172,19 +172,45 @@ func (m *metadata) ListBuckets(ctx context.Context) ([]bucket.Bucket, error) {
 }
 
 // PutVersion implements ports.ObjectIndex.
-func (m *metadata) PutVersion(ctx context.Context, v object.Version) (*object.Version, error) {
+func (m *metadata) PutVersion(ctx context.Context, v object.Version) (ports.PutResult, error) {
 	ctx, done := m.t.call(ctx, portMetadata, "PutVersion")
-	replaced, err := m.next.PutVersion(ctx, v)
+	result, err := m.next.PutVersion(ctx, v)
 	done(err)
-	return replaced, err
+	return result, err
 }
 
 // DeleteObject implements ports.ObjectIndex.
-func (m *metadata) DeleteObject(ctx context.Context, bucketName, key string) (*object.Version, error) {
+func (m *metadata) DeleteObject(ctx context.Context, bucketName, key string, o ports.DeleteOptions) (ports.DeleteResult, error) {
 	ctx, done := m.t.call(ctx, portMetadata, "DeleteObject")
-	removed, err := m.next.DeleteObject(ctx, bucketName, key)
+	result, err := m.next.DeleteObject(ctx, bucketName, key, o)
 	done(err)
-	return removed, err
+	return result, err
+}
+
+// GetVersion implements ports.ObjectIndex.
+func (m *metadata) GetVersion(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Version, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "GetVersion")
+	v, err := m.next.GetVersion(ctx, bucketName, key, ref)
+	done(err)
+	return v, err
+}
+
+// ScanVersions implements ports.ObjectIndex.
+func (m *metadata) ScanVersions(
+	ctx context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+) error {
+	ctx, done := m.t.call(ctx, portMetadata, "ScanVersions")
+	err := m.next.ScanVersions(ctx, bucketName, start, visit)
+	done(err)
+	return err
+}
+
+// SetBucketVersioning implements ports.BucketStore.
+func (m *metadata) SetBucketVersioning(ctx context.Context, name string, state bucket.Versioning) error {
+	ctx, done := m.t.call(ctx, portMetadata, "SetBucketVersioning")
+	err := m.next.SetBucketVersioning(ctx, name, state)
+	done(err)
+	return err
 }
 
 // GetObject implements ports.ObjectIndex.

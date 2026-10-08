@@ -33,9 +33,12 @@ type Metadata interface {
 type MemMetadata struct {
 	mu      sync.Mutex
 	buckets map[string]bucket.Bucket
-	objects map[string]map[string]object.Version
-	root    *iam.RootCredential
-	topo    *cluster.Topology
+	// objects holds every version of every key, newest first.
+	objects map[string]map[string][]object.Version
+	// seq numbers the changes, as the Raft index does in the real store.
+	seq  uint64
+	root *iam.RootCredential
+	topo *cluster.Topology
 
 	// FailWrites, when set, is returned by every mutating call. Tests use
 	// it to simulate a failed Raft commit.
@@ -46,7 +49,7 @@ type MemMetadata struct {
 func NewMemMetadata() *MemMetadata {
 	return &MemMetadata{
 		buckets: map[string]bucket.Bucket{},
-		objects: map[string]map[string]object.Version{},
+		objects: map[string]map[string][]object.Version{},
 	}
 }
 
@@ -61,7 +64,7 @@ func (m *MemMetadata) CreateBucket(_ context.Context, b bucket.Bucket) error {
 		return fmt.Errorf("%w: %s", domain.ErrBucketAlreadyExists, b.Name)
 	}
 	m.buckets[b.Name] = b
-	m.objects[b.Name] = map[string]object.Version{}
+	m.objects[b.Name] = map[string][]object.Version{}
 	return nil
 }
 
@@ -105,42 +108,107 @@ func (m *MemMetadata) ListBuckets(context.Context) ([]bucket.Bucket, error) {
 	return out, nil
 }
 
+// take removes the version ref names from a key's versions and returns it.
+func take(versions []object.Version, ref object.VersionRef) ([]object.Version, *object.Version) {
+	for i, v := range versions {
+		if v.Is(ref) {
+			removed := CloneVersion(v)
+			return slices.Delete(slices.Clone(versions), i, i+1), &removed
+		}
+	}
+	return versions, nil
+}
+
+func (m *MemMetadata) store(bucketName, key string, versions []object.Version) {
+	if len(versions) == 0 {
+		delete(m.objects[bucketName], key)
+		return
+	}
+	m.objects[bucketName][key] = versions
+}
+
 // PutVersion implements ports.ObjectIndex.
-func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (*object.Version, error) {
+func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.PutResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
-		return nil, m.FailWrites
+		return ports.PutResult{}, m.FailWrites
 	}
-	objects, ok := m.objects[v.Bucket]
+	b, ok := m.buckets[v.Bucket]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, v.Bucket)
+		return ports.PutResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, v.Bucket)
 	}
-	var replaced *object.Version
-	if old, ok := objects[v.Key]; ok {
-		replaced = &old
+	m.seq++
+	stored := CloneVersion(v)
+	stored.DeleteMarker = false
+	versions := m.objects[v.Bucket][v.Key]
+	var removed *object.Version
+	switch b.Versioning {
+	case bucket.VersioningEnabled:
+		stored.Versioned, stored.Seq = true, m.seq
+	case bucket.VersioningSuspended:
+		stored.Versioned, stored.Seq = false, m.seq
+		versions, removed = take(versions, object.VersionRef{Null: true})
+	default:
+		stored.Versioned, stored.Seq = false, 0
+		versions, removed = take(versions, object.VersionRef{Null: true})
 	}
-	objects[v.Key] = CloneVersion(v)
-	return replaced, nil
+	m.store(v.Bucket, v.Key, append([]object.Version{stored}, versions...))
+	return ports.PutResult{Stored: CloneVersion(stored), Removed: removed}, nil
 }
 
 // DeleteObject implements ports.ObjectIndex.
-func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string) (*object.Version, error) {
+func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o ports.DeleteOptions) (ports.DeleteResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
-		return nil, m.FailWrites
+		return ports.DeleteResult{}, m.FailWrites
 	}
-	objects, ok := m.objects[bucketName]
+	b, ok := m.buckets[bucketName]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+		return ports.DeleteResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
 	}
-	old, ok := objects[key]
+	m.seq++
+	versions := m.objects[bucketName][key]
+	if o.Version != nil {
+		rest, removed := take(versions, *o.Version)
+		m.store(bucketName, key, rest)
+		return ports.DeleteResult{Removed: removed}, nil
+	}
+	if b.Versioning == bucket.Unversioned {
+		rest, removed := take(versions, object.VersionRef{Null: true})
+		m.store(bucketName, key, rest)
+		return ports.DeleteResult{Removed: removed}, nil
+	}
+	marker := object.Version{
+		Bucket: bucketName, Key: key, VersionID: o.MarkerID, ModifiedAt: o.At.UTC(), Seq: m.seq,
+		DeleteMarker: true, Versioned: b.Versioning == bucket.VersioningEnabled,
+	}
+	var removed *object.Version
+	if b.Versioning == bucket.VersioningSuspended {
+		versions, removed = take(versions, object.VersionRef{Null: true})
+	}
+	m.store(bucketName, key, append([]object.Version{marker}, versions...))
+	return ports.DeleteResult{Marker: &marker, Removed: removed}, nil
+}
+
+// SetBucketVersioning implements ports.BucketStore.
+func (m *MemMetadata) SetBucketVersioning(_ context.Context, name string, state bucket.Versioning) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailWrites != nil {
+		return m.FailWrites
+	}
+	b, ok := m.buckets[name]
 	if !ok {
-		return nil, nil
+		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
 	}
-	delete(objects, key)
-	return &old, nil
+	if err := bucket.ValidateVersioningChange(state, b.ObjectLock); err != nil {
+		return err
+	}
+	b.Versioning = state
+	m.buckets[name] = b
+	return nil
 }
 
 // GetObject implements ports.ObjectIndex.
@@ -151,11 +219,27 @@ func (m *MemMetadata) GetObject(_ context.Context, bucketName, key string) (obje
 	if !ok {
 		return object.Version{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
 	}
-	v, ok := objects[key]
-	if !ok {
+	versions := objects[key]
+	if len(versions) == 0 || versions[0].DeleteMarker {
 		return object.Version{}, fmt.Errorf("%w: %s/%s", domain.ErrObjectNotFound, bucketName, key)
 	}
-	return CloneVersion(v), nil
+	return CloneVersion(versions[0]), nil
+}
+
+// GetVersion implements ports.ObjectIndex.
+func (m *MemMetadata) GetVersion(_ context.Context, bucketName, key string, ref object.VersionRef) (object.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	objects, ok := m.objects[bucketName]
+	if !ok {
+		return object.Version{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	}
+	for _, v := range objects[key] {
+		if v.Is(ref) {
+			return CloneVersion(v), nil
+		}
+	}
+	return object.Version{}, fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
 }
 
 // IsDataReferenced implements ports.ObjectIndex.
@@ -163,9 +247,11 @@ func (m *MemMetadata) IsDataReferenced(_ context.Context, dataID object.ID) (boo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, objects := range m.objects {
-		for _, v := range objects {
-			if v.DataID == dataID {
-				return true, nil
+		for _, versions := range objects {
+			for _, v := range versions {
+				if !v.DeleteMarker && v.DataID == dataID {
+					return true, nil
+				}
 			}
 		}
 	}
@@ -205,25 +291,40 @@ func (m *MemMetadata) SetTopology(_ context.Context, t cluster.Topology) error {
 	return nil
 }
 
+// snapshot returns the keys of a bucket in order and a copy of their
+// versions.
+func (m *MemMetadata) snapshot(bucketName string) ([]string, map[string][]object.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	objects, ok := m.objects[bucketName]
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	}
+	keys := slices.Sorted(maps.Keys(objects))
+	copied := make(map[string][]object.Version, len(objects))
+	for key, versions := range objects {
+		for _, v := range versions {
+			copied[key] = append(copied[key], CloneVersion(v))
+		}
+	}
+	return keys, copied, nil
+}
+
 // ScanObjects implements ports.ObjectIndex.
 func (m *MemMetadata) ScanObjects(
 	_ context.Context, bucketName, start string, visit func(object.Version) ports.ScanControl,
 ) error {
-	m.mu.Lock()
-	objects, ok := m.objects[bucketName]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	keys, versions, err := m.snapshot(bucketName)
+	if err != nil {
+		return err
 	}
-	keys := slices.Sorted(maps.Keys(objects))
-	versions := make([]object.Version, len(keys))
-	for i, key := range keys {
-		versions[i] = CloneVersion(objects[key])
-	}
-	m.mu.Unlock()
-
 	for i := sort.SearchStrings(keys, start); i < len(keys); {
-		control := visit(versions[i])
+		current := versions[keys[i]][0]
+		if current.DeleteMarker {
+			i++
+			continue
+		}
+		control := visit(current)
 		switch {
 		case control.Stop:
 			return nil
@@ -232,6 +333,31 @@ func (m *MemMetadata) ScanObjects(
 		default:
 			i++
 		}
+	}
+	return nil
+}
+
+// ScanVersions implements ports.ObjectIndex.
+func (m *MemMetadata) ScanVersions(
+	_ context.Context, bucketName, start string, visit func(object.Version, bool) ports.ScanControl,
+) error {
+	keys, versions, err := m.snapshot(bucketName)
+	if err != nil {
+		return err
+	}
+	for i := sort.SearchStrings(keys, start); i < len(keys); {
+		next := i + 1
+		for n, v := range versions[keys[i]] {
+			control := visit(v, n == 0)
+			if control.Stop {
+				return nil
+			}
+			if control.SeekTo > keys[i] {
+				next = max(next, sort.SearchStrings(keys, control.SeekTo))
+				break
+			}
+		}
+		i = next
 	}
 	return nil
 }

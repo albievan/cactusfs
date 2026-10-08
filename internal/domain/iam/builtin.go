@@ -29,9 +29,14 @@ func BuiltInPolicies() map[string]Document {
 		RoleReadWrite: statement([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation",
 			"s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+			// Versions can be read. Removing one for good is not part of
+			// this role: deleting an object in a bucket that keeps
+			// versions leaves every version where it was.
+			"s3:GetObjectVersion", "s3:ListBucketVersions", "s3:GetBucketVersioning",
 		}, everything),
 		RoleReadOnly: statement([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject",
+			"s3:GetObjectVersion", "s3:ListBucketVersions", "s3:GetBucketVersioning",
 		}, everything),
 		// Look at how the deployment is run, change nothing, read no object.
 		RoleAuditor: statement([]string{"admin:Get*", "admin:List*"}, everything),

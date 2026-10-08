@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,7 +98,7 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		if err := store.DeleteBucket(ctx, "mango"); !errors.Is(err, domain.ErrBucketNotEmpty) {
 			t.Errorf("DeleteBucket(non-empty) error = %v, want %v", err, domain.ErrBucketNotEmpty)
 		}
-		if _, err := store.DeleteObject(ctx, "mango", "k"); err != nil {
+		if _, err := store.DeleteObject(ctx, "mango", "k", ports.DeleteOptions{}); err != nil {
 			t.Fatalf("DeleteObject: %v", err)
 		}
 		if err := store.DeleteBucket(ctx, "mango"); err != nil {
@@ -128,19 +130,19 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		if _, err := store.GetObject(ctx, "missing", "k"); !errors.Is(err, domain.ErrBucketNotFound) {
 			t.Errorf("GetObject(missing bucket) error = %v, want %v", err, domain.ErrBucketNotFound)
 		}
-		if _, err := store.DeleteObject(ctx, "missing", "k"); !errors.Is(err, domain.ErrBucketNotFound) {
+		if _, err := store.DeleteObject(ctx, "missing", "k", ports.DeleteOptions{}); !errors.Is(err, domain.ErrBucketNotFound) {
 			t.Errorf("DeleteObject(missing bucket) error = %v, want %v", err, domain.ErrBucketNotFound)
 		}
 		if _, err := store.GetObject(ctx, "one", "k"); !errors.Is(err, domain.ErrObjectNotFound) {
 			t.Errorf("GetObject(missing key) error = %v, want %v", err, domain.ErrObjectNotFound)
 		}
-		if removed, err := store.DeleteObject(ctx, "one", "k"); err != nil || removed != nil {
+		if removed, err := store.DeleteObject(ctx, "one", "k", ports.DeleteOptions{}); err != nil || removed.Removed != nil || removed.Marker != nil {
 			t.Errorf("DeleteObject(missing key) = %v, %v; want nil, nil", removed, err)
 		}
 
 		first := SampleVersion("one", "k", 1)
 		replaced, err := store.PutVersion(ctx, first)
-		if err != nil || replaced != nil {
+		if err != nil || replaced.Removed != nil || replaced.Stored.Versioned || replaced.Stored.DataID != first.DataID {
 			t.Fatalf("first PutVersion = %v, %v; want nil, nil", replaced, err)
 		}
 		got, err := store.GetObject(ctx, "one", "k")
@@ -153,7 +155,7 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 
 		second := SampleVersion("one", "k", 5)
 		replaced, err = store.PutVersion(ctx, second)
-		if err != nil || replaced == nil || replaced.DataID != first.DataID {
+		if err != nil || replaced.Removed == nil || replaced.Removed.DataID != first.DataID {
 			t.Fatalf("second PutVersion = %+v, %v; want the first version back", replaced, err)
 		}
 		if got, err := store.GetObject(ctx, "one", "k"); err != nil || got.DataID != second.DataID {
@@ -161,12 +163,12 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		}
 
 		// The same key in another bucket is another object.
-		if replaced, err := store.PutVersion(ctx, SampleVersion("two", "k", 9)); err != nil || replaced != nil {
+		if replaced, err := store.PutVersion(ctx, SampleVersion("two", "k", 9)); err != nil || replaced.Removed != nil {
 			t.Errorf("PutVersion in another bucket = %v, %v; want nil, nil", replaced, err)
 		}
 
-		removed, err := store.DeleteObject(ctx, "one", "k")
-		if err != nil || removed == nil || removed.DataID != second.DataID {
+		removed, err := store.DeleteObject(ctx, "one", "k", ports.DeleteOptions{})
+		if err != nil || removed.Removed == nil || removed.Removed.DataID != second.DataID || removed.Marker != nil {
 			t.Fatalf("DeleteObject = %+v, %v; want the current version back", removed, err)
 		}
 		if _, err := store.GetObject(ctx, "one", "k"); !errors.Is(err, domain.ErrObjectNotFound) {
@@ -300,19 +302,21 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		if _, err := store.PutVersion(ctx, other); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.DeleteObject(ctx, "b", "k"); err != nil {
+		if _, err := store.DeleteObject(ctx, "b", "k", ports.DeleteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if !referenced(second) {
 			t.Error("data still used by another object is reported as unreferenced")
 		}
-		if _, err := store.DeleteObject(ctx, "b", "other"); err != nil {
+		if _, err := store.DeleteObject(ctx, "b", "other", ports.DeleteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if referenced(second) {
 			t.Error("data is still referenced after its last version was deleted")
 		}
 	})
+
+	t.Run("versions", func(t *testing.T) { versionsContract(t, open(t)) })
 
 	t.Run("topology", func(t *testing.T) {
 		store := open(t)
@@ -728,4 +732,287 @@ func ShardStoreContract(t *testing.T, open func(t *testing.T) ports.ShardStore) 
 			t.Errorf("Open(missing) error = %v, want %v", err, domain.ErrShardNotFound)
 		}
 	})
+}
+
+// listing is what ScanVersions shows of a key: each version as "ref" or
+// "ref(marker)", newest first, the latest marked with a star.
+func listing(t *testing.T, store Metadata, bucketName, start string) []string {
+	t.Helper()
+	var out []string
+	err := store.ScanVersions(context.Background(), bucketName, start, func(v object.Version, latest bool) ports.ScanControl {
+		entry := v.Key + "@" + v.Ref().String()
+		if !v.Ref().Null {
+			entry = v.Key + "@" + v.Ref().String()[:2]
+		}
+		if v.DeleteMarker {
+			entry += "(marker)"
+		}
+		if latest {
+			entry += "*"
+		}
+		out = append(out, entry)
+		return ports.ScanControl{}
+	})
+	if err != nil {
+		t.Fatalf("ScanVersions: %v", err)
+	}
+	return out
+}
+
+// versionsContract is what a store must do with the versions of objects.
+func versionsContract(t *testing.T, store Metadata) {
+	t.Helper()
+	ctx := context.Background()
+	created := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "v", CreatedAt: created}); err != nil {
+		t.Fatal(err)
+	}
+	put := func(key string, fill byte) ports.PutResult {
+		t.Helper()
+		result, err := store.PutVersion(ctx, SampleVersion("v", key, fill))
+		if err != nil {
+			t.Fatalf("PutVersion(%s, %d): %v", key, fill, err)
+		}
+		return result
+	}
+	del := func(key string, ref *object.VersionRef, marker byte) ports.DeleteResult {
+		t.Helper()
+		result, err := store.DeleteObject(ctx, "v", key, ports.DeleteOptions{
+			Version: ref, MarkerID: object.ID(bytes.Repeat([]byte{marker}, object.IDSize)), At: created.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("DeleteObject(%s): %v", key, err)
+		}
+		return result
+	}
+	want := func(what string, wantList ...string) {
+		t.Helper()
+		if got := listing(t, store, "v", ""); !slices.Equal(got, wantList) {
+			t.Fatalf("%s: versions are\n  %v\nwant\n  %v", what, got, wantList)
+		}
+	}
+	current := func(key string) (object.Version, error) { return store.GetObject(ctx, "v", key) }
+	id := func(fill byte) *object.VersionRef {
+		return &object.VersionRef{ID: object.ID(bytes.Repeat([]byte{fill}, object.IDSize))}
+	}
+	null := &object.VersionRef{Null: true}
+	referenced := func(fill byte) bool {
+		t.Helper()
+		ok, err := store.IsDataReferenced(ctx, SampleVersion("v", "k", fill).DataID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+
+	// A bucket that never kept versions: one null version per key, and a
+	// delete removes it.
+	if r := put("k", 0x10); r.Stored.Versioned || r.Removed != nil {
+		t.Fatalf("put into an unversioned bucket = %+v", r)
+	}
+	want("unversioned", "k@null*")
+	for _, state := range []bucket.Versioning{bucket.Unversioned, "On", "enabled"} {
+		if err := store.SetBucketVersioning(ctx, "v", state); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("SetBucketVersioning(%q) = %v, want %v", state, err, domain.ErrInvalidArgument)
+		}
+	}
+	if err := store.SetBucketVersioning(ctx, "nope", bucket.VersioningEnabled); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Errorf("SetBucketVersioning of a missing bucket = %v", err)
+	}
+
+	// Enabled: what was there stays, as the null version; every put is a
+	// version of its own; nothing is removed.
+	if err := store.SetBucketVersioning(ctx, "v", bucket.VersioningEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := store.GetBucket(ctx, "v"); err != nil || b.Versioning != bucket.VersioningEnabled {
+		t.Fatalf("GetBucket after enabling = %+v, %v", b, err)
+	}
+	r := put("k", 0x20)
+	if !r.Stored.Versioned || r.Removed != nil || r.Stored.Seq == 0 || r.Stored.VersionID != id(0x20).ID {
+		t.Fatalf("put into a versioned bucket = %+v", r)
+	}
+	put("k", 0x30)
+	want("two versions over a null one", "k@30*", "k@20", "k@null")
+	if v, err := current("k"); err != nil || v.VersionID != id(0x30).ID {
+		t.Fatalf("current = %+v, %v", v, err)
+	}
+	for _, ref := range []*object.VersionRef{id(0x20), id(0x30), null} {
+		v, err := store.GetVersion(ctx, "v", "k", *ref)
+		if err != nil || !v.Is(*ref) || v.DeleteMarker {
+			t.Errorf("GetVersion(%s) = %+v, %v", ref, v, err)
+		}
+	}
+	if _, err := store.GetVersion(ctx, "v", "k", *id(0x99)); !errors.Is(err, domain.ErrVersionNotFound) {
+		t.Errorf("GetVersion of an unknown ID = %v", err)
+	}
+	if _, err := store.GetVersion(ctx, "nope", "k", *null); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Errorf("GetVersion in a missing bucket = %v", err)
+	}
+
+	// Deleting the object adds a marker and removes nothing.
+	d := del("k", nil, 0x40)
+	if d.Marker == nil || !d.Marker.DeleteMarker || !d.Marker.Versioned || d.Marker.VersionID != id(0x40).ID || d.Removed != nil {
+		t.Fatalf("delete in a versioned bucket = %+v", d)
+	}
+	want("after a delete", "k@40(marker)*", "k@30", "k@20", "k@null")
+	if _, err := current("k"); !errors.Is(err, domain.ErrObjectNotFound) {
+		t.Fatalf("current after a delete = %v", err)
+	}
+	if v, err := store.GetVersion(ctx, "v", "k", *id(0x40)); err != nil || !v.DeleteMarker {
+		t.Errorf("GetVersion of the marker = %+v, %v", v, err)
+	}
+	for _, fill := range []byte{0x10, 0x20, 0x30} {
+		if !referenced(fill) {
+			t.Fatalf("the data of version %x is not referenced any more, although the version is there", fill)
+		}
+	}
+	// The listing of current objects does not see the key.
+	seen := 0
+	if err := store.ScanObjects(ctx, "v", "", func(object.Version) ports.ScanControl { seen++; return ports.ScanControl{} }); err != nil || seen != 0 {
+		t.Errorf("ScanObjects sees %d objects behind a marker (%v)", seen, err)
+	}
+	// A bucket with nothing but history is not empty.
+	if err := store.DeleteBucket(ctx, "v"); !errors.Is(err, domain.ErrBucketNotEmpty) {
+		t.Fatalf("DeleteBucket with versions left = %v, want %v", err, domain.ErrBucketNotEmpty)
+	}
+
+	// Removing the marker brings the object back.
+	if d := del("k", id(0x40), 0x41); d.Removed == nil || !d.Removed.DeleteMarker || d.Marker != nil {
+		t.Fatalf("removing the marker = %+v", d)
+	}
+	want("marker removed", "k@30*", "k@20", "k@null")
+	if v, err := current("k"); err != nil || v.VersionID != id(0x30).ID {
+		t.Fatalf("current after removing the marker = %+v, %v", v, err)
+	}
+	// Removing a version that is not current changes nothing else.
+	if d := del("k", id(0x20), 0x42); d.Removed == nil || d.Removed.VersionID != id(0x20).ID {
+		t.Fatalf("removing version 20 = %+v", d)
+	}
+	if referenced(0x20) || !referenced(0x30) {
+		t.Fatal("data references after removing a version are wrong")
+	}
+	// Removing the current version makes the next one current.
+	del("k", id(0x30), 0x43)
+	want("current removed", "k@null*")
+	if v, err := current("k"); err != nil || v.Versioned || v.DataID != SampleVersion("v", "k", 0x10).DataID {
+		t.Fatalf("the null version did not become current: %+v, %v", v, err)
+	}
+	// Removing what is not there is not an error and removes nothing.
+	if d := del("k", id(0x77), 0x44); d.Removed != nil || d.Marker != nil {
+		t.Fatalf("removing an unknown version = %+v", d)
+	}
+
+	// Suspended: a put is the null version and replaces the one there is;
+	// versions with IDs stay.
+	put("k", 0x50)
+	if err := store.SetBucketVersioning(ctx, "v", bucket.VersioningSuspended); err != nil {
+		t.Fatal(err)
+	}
+	r = put("k", 0x60)
+	if r.Stored.Versioned || r.Removed == nil || r.Removed.DataID != SampleVersion("v", "k", 0x10).DataID {
+		t.Fatalf("put into a suspended bucket = %+v", r)
+	}
+	want("suspended put", "k@null*", "k@50")
+	if referenced(0x10) {
+		t.Fatal("the replaced null version is still referenced")
+	}
+	// A delete is a null marker, and replaces the null version.
+	d = del("k", nil, 0x70)
+	if d.Marker == nil || d.Marker.Versioned || d.Removed == nil || d.Removed.DataID != SampleVersion("v", "k", 0x60).DataID {
+		t.Fatalf("delete in a suspended bucket = %+v", d)
+	}
+	want("suspended delete", "k@null(marker)*", "k@50")
+	// And a put after that replaces the null marker.
+	if r := put("k", 0x61); r.Removed == nil || !r.Removed.DeleteMarker {
+		t.Fatalf("put over a null marker = %+v", r)
+	}
+	want("put over a null marker", "k@null*", "k@50")
+
+	// Keys keep apart, whatever bytes they are made of, and come in order.
+	if err := store.SetBucketVersioning(ctx, "v", bucket.VersioningEnabled); err != nil {
+		t.Fatal(err)
+	}
+	odd := []string{"a", "a\x00", "a\x00\x01", "a\x00\u00ff", "a\x01", "ab", "\x00", "a/b"}
+	for i, key := range odd {
+		put(key, byte(0x80+i))
+		del(key, nil, byte(0xa0+i))
+	}
+	var keys []string
+	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, latest bool) ports.ScanControl {
+		if latest {
+			keys = append(keys, v.Key)
+			if !v.DeleteMarker {
+				if v.Key != "k" {
+					t.Errorf("latest version of %q is not its marker", v.Key)
+				}
+			}
+		}
+		return ports.ScanControl{}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := append(slices.Clone(odd), "k")
+	slices.Sort(wantKeys)
+	if !slices.Equal(keys, wantKeys) {
+		t.Fatalf("keys in the version listing = %q, want %q", keys, wantKeys)
+	}
+	for i, key := range odd {
+		v, err := store.GetVersion(ctx, "v", key, *id(byte(0x80 + i)))
+		if err != nil || v.Key != key {
+			t.Errorf("GetVersion(%q) = %q, %v", key, v.Key, err)
+		}
+	}
+	// A scan can start in the middle, and can jump.
+	if got := listing(t, store, "v", "ab"); len(got) == 0 || !strings.HasPrefix(got[0], "ab@") {
+		t.Errorf("scan from ab begins with %v", got)
+	}
+	var jumped []string
+	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, _ bool) ports.ScanControl {
+		jumped = append(jumped, v.Key)
+		if v.Key < "ab" {
+			return ports.ScanControl{SeekTo: "ab"}
+		}
+		return ports.ScanControl{Stop: v.Key == "k"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(jumped) < 3 || jumped[0] != "\x00" || jumped[1] != "ab" || jumped[len(jumped)-1] != "k" {
+		t.Errorf("a scan that jumps to ab visited %q", jumped)
+	}
+	if err := store.ScanVersions(ctx, "nope", "", func(object.Version, bool) ports.ScanControl { return ports.ScanControl{} }); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Errorf("ScanVersions of a missing bucket = %v", err)
+	}
+
+	// Emptying the bucket means removing every version, markers included.
+	var all []object.Version
+	if err := store.ScanVersions(ctx, "v", "", func(v object.Version, _ bool) ports.ScanControl {
+		all = append(all, v)
+		return ports.ScanControl{}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range all {
+		ref := v.Ref()
+		if _, err := store.DeleteObject(ctx, "v", v.Key, ports.DeleteOptions{Version: &ref}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want("emptied")
+	for fill := range 256 {
+		if referenced(byte(fill)) {
+			t.Fatalf("data %x is still referenced in an empty bucket", fill)
+		}
+	}
+	if err := store.DeleteBucket(ctx, "v"); err != nil {
+		t.Fatalf("DeleteBucket of an emptied versioned bucket: %v", err)
+	}
+	// A bucket created again does not remember.
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "v", CreatedAt: created}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.GetBucket(ctx, "v"); b.Versioning != bucket.Unversioned {
+		t.Errorf("a recreated bucket is %q", b.Versioning)
+	}
+	want("recreated")
 }

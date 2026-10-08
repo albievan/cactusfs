@@ -49,6 +49,8 @@ type Buckets interface {
 	Get(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error)
 	Location(ctx context.Context, principal iam.Principal, name string) error
 	List(ctx context.Context, principal iam.Principal) ([]bucket.Bucket, error)
+	Versioning(ctx context.Context, principal iam.Principal, name string) (bucket.Versioning, error)
+	SetVersioning(ctx context.Context, principal iam.Principal, name string, state bucket.Versioning) error
 }
 
 // Objects is the object use cases the adapter calls. *app.ObjectService
@@ -57,7 +59,9 @@ type Objects interface {
 	Put(ctx context.Context, principal iam.Principal, in app.PutInput) (object.Version, error)
 	Get(ctx context.Context, principal iam.Principal, in app.GetInput) (app.GetOutput, error)
 	Head(ctx context.Context, principal iam.Principal, bucketName, key string) (object.Version, error)
-	Delete(ctx context.Context, principal iam.Principal, bucketName, key string) error
+	HeadVersion(ctx context.Context, principal iam.Principal, bucketName, key string, ref object.VersionRef) (object.Version, error)
+	ListVersions(ctx context.Context, principal iam.Principal, bucketName string, opts app.VersionListOptions) (app.VersionListPage, error)
+	Delete(ctx context.Context, principal iam.Principal, in app.DeleteInput) (app.DeleteOutput, error)
 	List(ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions) (object.ListPage, error)
 }
 
@@ -130,6 +134,8 @@ type request struct {
 	payloadHash string
 	// chunks verifies the chunk signatures of a signed streaming body.
 	chunks *chunkSigner
+	// version is the version the request names with versionId, if any.
+	version *object.VersionRef
 }
 
 // responseWriter records what was sent.
@@ -450,11 +456,30 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Values) error {
 	switch req.Method {
 	case http.MethodPut:
+		if query.Has("versioning") {
+			if err := allowQuery(query, "versioning"); err != nil {
+				return err
+			}
+			req.operation = "PutBucketVersioning"
+			return h.putBucketVersioning(ctx, req)
+		}
 		if err := allowQuery(query); err != nil {
 			return err
 		}
 		req.operation = "CreateBucket"
 		return h.createBucket(ctx, req)
+	case http.MethodPost:
+		if query.Has("delete") {
+			if err := allowQuery(query, "delete"); err != nil {
+				return err
+			}
+			req.operation = "DeleteObjects"
+			return h.deleteObjects(ctx, req)
+		}
+		if err := allowQuery(query); err != nil {
+			return err
+		}
+		return errMethodNotAllowed()
 	case http.MethodDelete:
 		if err := allowQuery(query); err != nil {
 			return err
@@ -469,6 +494,18 @@ func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Value
 		return h.headBucket(ctx, req)
 	case http.MethodGet:
 		switch {
+		case query.Has("versioning"):
+			if err := allowQuery(query, "versioning"); err != nil {
+				return err
+			}
+			req.operation = "GetBucketVersioning"
+			return h.getBucketVersioning(ctx, req)
+		case query.Has("versions"):
+			if err := allowQuery(query, listVersionsParameters()...); err != nil {
+				return err
+			}
+			req.operation = "ListObjectVersions"
+			return h.listObjectVersions(ctx, req, query)
 		case query.Has("location"):
 			if err := allowQuery(query, "location"); err != nil {
 				return err
@@ -499,10 +536,18 @@ func listObjectsV2Parameters() []string {
 }
 
 func (h *Handler) routeObject(ctx context.Context, req *request, query url.Values) error {
-	// None of the object operations implemented so far takes a query
-	// parameter: versionId, partNumber, uploadId, tagging, the response-*
-	// overrides and the rest all select features that do not exist yet.
-	if err := allowQuery(query); err != nil {
+	// Reading and deleting take versionId. partNumber, uploadId, tagging,
+	// the response-* overrides and the rest all select features that do
+	// not exist yet.
+	allowed := []string{}
+	if req.Method == http.MethodGet || req.Method == http.MethodHead || req.Method == http.MethodDelete {
+		allowed = append(allowed, "versionId")
+	}
+	if err := allowQuery(query, allowed...); err != nil {
+		return err
+	}
+	var err error
+	if req.version, err = versionOf(query); err != nil {
 		return err
 	}
 	switch req.Method {

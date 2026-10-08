@@ -133,7 +133,7 @@ type recordingIndex struct {
 	events *eventLog
 }
 
-func (i recordingIndex) PutVersion(ctx context.Context, v object.Version) (*object.Version, error) {
+func (i recordingIndex) PutVersion(ctx context.Context, v object.Version) (ports.PutResult, error) {
 	replaced, err := i.ObjectIndex.PutVersion(ctx, v)
 	if err == nil {
 		i.events.add("index.put")

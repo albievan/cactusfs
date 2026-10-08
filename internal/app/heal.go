@@ -37,9 +37,13 @@ type HealResult struct {
 	Offline int
 }
 
+// healTarget names what to heal: the current version of a key, or, with
+// named set, the version ref names.
 type healTarget struct {
 	bucket string
 	key    string
+	named  bool
+	ref    object.VersionRef
 }
 
 // Healer repairs objects whose shards are missing, truncated or corrupt, by
@@ -71,9 +75,10 @@ func newHealer(index ports.ObjectIndex, storage *shardStorage, logger *slog.Logg
 	}
 }
 
-// Enqueue asks for an object to be healed in the background. It never blocks.
-func (h *Healer) Enqueue(bucketName, key string) {
-	target := healTarget{bucket: bucketName, key: key}
+// Enqueue asks for a version of an object to be healed in the background. It
+// never blocks.
+func (h *Healer) Enqueue(v object.Version) {
+	target := healTarget{bucket: v.Bucket, key: v.Key, named: true, ref: v.Ref()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.queued[target] {
@@ -96,7 +101,7 @@ func (h *Healer) Run(ctx context.Context) {
 			h.mu.Lock()
 			delete(h.queued, target)
 			h.mu.Unlock()
-			if _, err := h.HealObject(ctx, target.bucket, target.key); err != nil && ctx.Err() == nil {
+			if _, err := h.heal(ctx, target, nil); err != nil && ctx.Err() == nil {
 				h.logger.ErrorContext(ctx, "heal failed", slog.String("bucket", target.bucket), slog.Any("error", err))
 			}
 		}
@@ -108,11 +113,17 @@ func (h *Healer) Run(ctx context.Context) {
 // is being healed already, is not an error. The error wraps
 // domain.ErrIntegrity when the object cannot be rebuilt.
 func (h *Healer) HealObject(ctx context.Context, bucketName, key string) (HealResult, error) {
-	return h.heal(ctx, bucketName, key, nil)
+	return h.heal(ctx, healTarget{bucket: bucketName, key: key}, nil)
 }
 
-func (h *Healer) heal(ctx context.Context, bucketName, key string, slow throttle) (HealResult, error) {
-	target := healTarget{bucket: bucketName, key: key}
+// HealVersion does what HealObject does for one named version of an object,
+// current or not.
+func (h *Healer) HealVersion(ctx context.Context, bucketName, key string, ref object.VersionRef) (HealResult, error) {
+	return h.heal(ctx, healTarget{bucket: bucketName, key: key, named: true, ref: ref}, nil)
+}
+
+func (h *Healer) heal(ctx context.Context, target healTarget, slow throttle) (HealResult, error) {
+	bucketName, key := target.bucket, target.key
 	result := HealResult{Bucket: bucketName, Key: key}
 
 	h.mu.Lock()
@@ -128,12 +139,22 @@ func (h *Healer) heal(ctx context.Context, bucketName, key string, slow throttle
 		h.mu.Unlock()
 	}()
 
-	version, err := h.index.GetObject(ctx, bucketName, key)
-	if errors.Is(err, domain.ErrObjectNotFound) || errors.Is(err, domain.ErrBucketNotFound) {
+	var version object.Version
+	var err error
+	if target.named {
+		version, err = h.index.GetVersion(ctx, bucketName, key, target.ref)
+	} else {
+		version, err = h.index.GetObject(ctx, bucketName, key)
+	}
+	if errors.Is(err, domain.ErrObjectNotFound) || errors.Is(err, domain.ErrVersionNotFound) || errors.Is(err, domain.ErrBucketNotFound) {
 		return result, nil
 	}
 	if err != nil {
 		return result, fmt.Errorf("heal.Object: %w", err)
+	}
+	if version.DeleteMarker {
+		// A marker has nothing stored.
+		return result, nil
 	}
 
 	outcome, healErr := h.storage.heal(ctx, version, slow)
@@ -171,18 +192,19 @@ func (h *Healer) heal(ctx context.Context, bucketName, key string, slow throttle
 	return result, nil
 }
 
-// replaced reports whether the object definitely has another current version
-// than v, or none. It answers false whenever it cannot tell: a lookup that
-// fails - because the node is shutting down, for one - is no evidence that
-// the version is gone, and nothing may be removed on the strength of it.
+// replaced reports whether the version v is definitely gone: removed, or, for
+// a null version, replaced by another. A version that is merely no longer
+// current is not gone. It answers false whenever it cannot tell: a lookup
+// that fails - because the node is shutting down, for one - is no evidence
+// that the version is gone, and nothing may be removed on the strength of it.
 func (h *Healer) replaced(ctx context.Context, v object.Version) bool {
 	// Shutdown cancels ctx; the answer is still needed to decide whether
 	// rebuilt shards are kept.
-	current, err := h.index.GetObject(context.WithoutCancel(ctx), v.Bucket, v.Key)
+	stored, err := h.index.GetVersion(context.WithoutCancel(ctx), v.Bucket, v.Key, v.Ref())
 	switch {
 	case err == nil:
-		return current.DataID != v.DataID
-	case errors.Is(err, domain.ErrObjectNotFound), errors.Is(err, domain.ErrBucketNotFound):
+		return stored.DataID != v.DataID
+	case errors.Is(err, domain.ErrVersionNotFound), errors.Is(err, domain.ErrObjectNotFound), errors.Is(err, domain.ErrBucketNotFound):
 		return true
 	default:
 		return false

@@ -550,12 +550,12 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 
 	notImplemented := []call{
 		{method: http.MethodGet, path: "/bkt?acl"},
-		{method: http.MethodPut, path: "/bkt?versioning"},
+		{method: http.MethodPut, path: "/bkt?versioning&mfa=1"},
+		{method: http.MethodPut, path: "/bkt/k?versionId=null", body: []byte("x")},
+		{method: http.MethodPost, path: "/bkt?delete&versionId=null"},
 		{method: http.MethodGet, path: "/bkt?uploads"},
-		{method: http.MethodPost, path: "/bkt?delete"},
 		{method: http.MethodGet, path: "/bkt"}, // ListObjects version 1
 		{method: http.MethodGet, path: "/bkt/k?tagging"},
-		{method: http.MethodGet, path: "/bkt/k?versionId=1"},
 		{method: http.MethodPut, path: "/bkt/k?partNumber=1&uploadId=u"},
 		{method: http.MethodDelete, path: "/bkt/k?uploadId=u"},
 		{method: http.MethodPut, path: "/bkt/copy", headers: map[string]string{"X-Amz-Copy-Source": "/bkt/k"}},
@@ -1258,4 +1258,228 @@ func TestChunkedReaderFraming(t *testing.T) {
 	if n, err := newChunkedReader(strings.NewReader("0\r\n\r\n")).Read(nil); n != 0 || err != nil {
 		t.Errorf("zero-length read = %d, %v", n, err)
 	}
+}
+
+func versioningBody(status string) []byte {
+	return []byte(`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>` + status + `</Status></VersioningConfiguration>`)
+}
+
+// TestVersioningThroughTheAPI: the versioning operations as an S3 client
+// uses them.
+func TestVersioningThroughTheAPI(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+
+	// A bucket that never kept versions says so with an empty element,
+	// and its objects have no version header.
+	state := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt?versioning"}), http.StatusOK)
+	if strings.Contains(string(state.body), "<Status>") || !strings.Contains(string(state.body), "<VersioningConfiguration") {
+		t.Errorf("versioning of a new bucket = %s", state.body)
+	}
+	if put := s.putObject("/bkt/k", []byte("before")); put.header.Get(headerVersionID) != "" {
+		t.Errorf("a put into an unversioned bucket has a version ID: %q", put.header.Get(headerVersionID))
+	}
+
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt?versioning", body: versioningBody("Enabled")}), http.StatusOK)
+	state = s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt?versioning"}), http.StatusOK)
+	if !strings.Contains(string(state.body), "<Status>Enabled</Status>") {
+		t.Errorf("versioning after enabling = %s", state.body)
+	}
+	first := s.putObject("/bkt/k", []byte("first")).header.Get(headerVersionID)
+	second := s.putObject("/bkt/k", []byte("second")).header.Get(headerVersionID)
+	if len(first) != 32 || len(second) != 32 || first == second {
+		t.Fatalf("version IDs %q and %q", first, second)
+	}
+	for id, want := range map[string]string{"null": "before", first: "first", second: "second"} {
+		got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k?versionId=" + id}), http.StatusOK)
+		if string(got.body) != want || got.header.Get(headerVersionID) != id {
+			t.Errorf("GET versionId=%s = %q, header %q", id, got.body, got.header.Get(headerVersionID))
+		}
+		head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/bkt/k?versionId=" + id}), http.StatusOK)
+		if head.header.Get(headerVersionID) != id || head.header.Get("Content-Length") != strconv.Itoa(len(want)) {
+			t.Errorf("HEAD versionId=%s: %v", id, head.header)
+		}
+	}
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusOK); string(got.body) != "second" || got.header.Get(headerVersionID) != second {
+		t.Errorf("GET of the current version = %q, %q", got.body, got.header.Get(headerVersionID))
+	}
+
+	// Deleting the object makes a marker; the versions stay.
+	deleted := s.mustStatus(s.do(call{method: http.MethodDelete, path: "/bkt/k"}), http.StatusNoContent)
+	marker := deleted.header.Get(headerVersionID)
+	if deleted.header.Get(headerDeleteMarker) != "true" || len(marker) != 32 {
+		t.Fatalf("DELETE in a versioned bucket: %v", deleted.header)
+	}
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k?versionId=" + marker}), http.StatusMethodNotAllowed, "MethodNotAllowed")
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k?versionId=" + strings.Repeat("ab", 16)}), http.StatusNotFound, "NoSuchVersion")
+	for _, bad := range []string{"", "1", "NULL", strings.Repeat("A", 32), strings.Repeat("0", 32), "../../etc"} {
+		s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k?versionId=" + url.QueryEscape(bad)}), http.StatusBadRequest, "InvalidArgument")
+	}
+
+	listing := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt?versions"}), http.StatusOK)
+	var listed struct {
+		Entries []struct {
+			XMLName   xml.Name
+			Key       string `xml:"Key"`
+			VersionID string `xml:"VersionId"`
+			IsLatest  bool   `xml:"IsLatest"`
+			Size      *int64 `xml:"Size"`
+		} `xml:",any"`
+	}
+	if err := xml.Unmarshal(listing.body, &listed); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, e := range listed.Entries {
+		if e.XMLName.Local != "Version" && e.XMLName.Local != "DeleteMarker" {
+			continue
+		}
+		entry := e.XMLName.Local + ":" + e.VersionID
+		if e.IsLatest {
+			entry += "*"
+		}
+		if (e.XMLName.Local == "DeleteMarker") != (e.Size == nil) {
+			t.Errorf("entry %s: a marker has no size and a version has one", entry)
+		}
+		order = append(order, entry)
+	}
+	if want := []string{"DeleteMarker:" + marker + "*", "Version:" + second, "Version:" + first, "Version:null"}; !slices.Equal(order, want) {
+		t.Fatalf("ListObjectVersions = %v, want %v\n%s", order, want, listing.body)
+	}
+	paged := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt?versions&max-keys=2"}), http.StatusOK)
+	if !strings.Contains(string(paged.body), "<IsTruncated>true</IsTruncated>") || !strings.Contains(string(paged.body), "<NextVersionIdMarker>"+second+"</NextVersionIdMarker>") {
+		t.Errorf("first page of two = %s", paged.body)
+	}
+	rest := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt?versions&key-marker=k&version-id-marker=" + second}), http.StatusOK)
+	if strings.Contains(string(rest.body), second+"</VersionId>") || !strings.Contains(string(rest.body), first+"</VersionId>") {
+		t.Errorf("the page after the marker = %s", rest.body)
+	}
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt?versions&version-id-marker=" + second}), http.StatusBadRequest, "InvalidArgument")
+
+	// Removing the marker restores the object; removing a version is final.
+	undone := s.mustStatus(s.do(call{method: http.MethodDelete, path: "/bkt/k?versionId=" + marker}), http.StatusNoContent)
+	if undone.header.Get(headerDeleteMarker) != "true" || undone.header.Get(headerVersionID) != marker {
+		t.Errorf("DELETE of a marker: %v", undone.header)
+	}
+	if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusOK); string(got.body) != "second" {
+		t.Errorf("after the marker was removed: %q", got.body)
+	}
+	s.mustStatus(s.do(call{method: http.MethodDelete, path: "/bkt/k?versionId=" + first}), http.StatusNoContent)
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k?versionId=" + first}), http.StatusNotFound, "NoSuchVersion")
+	// Deleting it again, or what never was, is not an error.
+	s.mustStatus(s.do(call{method: http.MethodDelete, path: "/bkt/k?versionId=" + first}), http.StatusNoContent)
+
+	// What is not understood is refused.
+	for name, body := range map[string][]byte{
+		"no status":         []byte(`<VersioningConfiguration/>`),
+		"unknown status":    versioningBody("On"),
+		"unknown element":   []byte(`<VersioningConfiguration><Status>Enabled</Status><Extra/></VersioningConfiguration>`),
+		"another document":  []byte(`<Tagging><Status>Enabled</Status></Tagging>`),
+		"a document type":   []byte(`<!DOCTYPE x [<!ENTITY a "Enabled">]><VersioningConfiguration><Status>&a;</Status></VersioningConfiguration>`),
+		"not XML":           []byte(`{"Status":"Enabled"}`),
+		"empty":             {},
+		"nested too deeply": []byte(`<VersioningConfiguration><Status><Status><Status><Status><Status><Status><Status><Status>Enabled</Status></Status></Status></Status></Status></Status></Status></Status></VersioningConfiguration>`),
+	} {
+		s.expectError(s.do(call{method: http.MethodPut, path: "/bkt?versioning", body: body}), http.StatusBadRequest, "MalformedXML")
+		_ = name
+	}
+	mfa := []byte(`<VersioningConfiguration><Status>Enabled</Status><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>`)
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt?versioning", body: mfa}), http.StatusNotImplemented, "NotImplemented")
+	s.expectError(s.do(call{method: http.MethodPut, path: "/no-such-bucket?versioning", body: versioningBody("Enabled")}), http.StatusNotFound, "NoSuchBucket")
+	// A bucket with versions left is not empty.
+	s.expectError(s.do(call{method: http.MethodDelete, path: "/bkt"}), http.StatusConflict, "BucketNotEmpty")
+}
+
+// TestDeleteObjects: many deletes in one request, each on its own merits.
+func TestDeleteObjects(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt?versioning", body: versioningBody("Enabled")}), http.StatusOK)
+	kept := s.putObject("/bkt/a", []byte("a")).header.Get(headerVersionID)
+	gone := s.putObject("/bkt/b", []byte("b")).header.Get(headerVersionID)
+	s.putObject("/bkt/c&lt;", []byte("c"))
+
+	body := []byte(`<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+		<Object><Key>a</Key></Object>
+		<Object><Key>b</Key><VersionId>` + gone + `</VersionId></Object>
+		<Object><Key>never-there</Key></Object>
+		<Object><Key>b</Key><VersionId>not-a-version</VersionId></Object>
+	</Delete>`)
+	result := s.mustStatus(s.do(call{method: http.MethodPost, path: "/bkt?delete", body: body}), http.StatusOK)
+	var parsed struct {
+		Deleted []struct {
+			Key, VersionID        string
+			DeleteMarker          bool
+			DeleteMarkerVersionID string `xml:"DeleteMarkerVersionId"`
+		} `xml:"Deleted"`
+		Errors []struct{ Key, Code string } `xml:"Error"`
+	}
+	if err := xml.Unmarshal(result.body, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Deleted) != 3 || len(parsed.Errors) != 1 || parsed.Errors[0].Code != "InvalidArgument" || parsed.Errors[0].Key != "b" {
+		t.Fatalf("DeleteObjects = %s", result.body)
+	}
+	if d := parsed.Deleted[0]; d.Key != "a" || !d.DeleteMarker || len(d.DeleteMarkerVersionID) != 32 {
+		t.Errorf("deleting a: %+v", d)
+	}
+	// "a" has a marker and keeps its version; "b" lost that version for good.
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/a"}), http.StatusNotFound, "NoSuchKey")
+	s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/a?versionId=" + kept}), http.StatusOK)
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/b?versionId=" + gone}), http.StatusNotFound, "NoSuchVersion")
+
+	quiet := []byte(`<Delete><Quiet>true</Quiet><Object><Key>c&amp;lt;</Key></Object></Delete>`)
+	if r := s.mustStatus(s.do(call{method: http.MethodPost, path: "/bkt?delete", body: quiet}), http.StatusOK); strings.Contains(string(r.body), "<Deleted>") {
+		t.Errorf("a quiet delete reported what it deleted: %s", r.body)
+	}
+
+	var many strings.Builder
+	many.WriteString("<Delete>")
+	for i := range 1001 {
+		fmt.Fprintf(&many, "<Object><Key>k%d</Key></Object>", i)
+	}
+	many.WriteString("</Delete>")
+	for name, bad := range map[string][]byte{
+		"too many keys":   []byte(many.String()),
+		"no keys":         []byte(`<Delete></Delete>`),
+		"unknown element": []byte(`<Delete><Object><Key>a</Key><Bypass>true</Bypass></Object></Delete>`),
+		"not XML":         []byte(`a,b,c`),
+	} {
+		r := s.do(call{method: http.MethodPost, path: "/bkt?delete", body: bad})
+		if code := s.errorCode(r); r.status != http.StatusBadRequest || code != "MalformedXML" {
+			t.Errorf("%s: %d %s", name, r.status, code)
+		}
+	}
+	// A body that is not the one that was signed deletes nothing.
+	tampered := s.do(call{
+		method: http.MethodPost, path: "/bkt?delete", body: []byte(`<Delete><Object><Key>b</Key></Object></Delete>`),
+		payloadHash: strings.Repeat("0", 64),
+	})
+	s.expectError(tampered, http.StatusBadRequest, "XAmzContentSHA256Mismatch")
+	s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/b"}), http.StatusNotFound)
+	s.expectError(s.do(call{method: http.MethodPost, path: "/no-such-bucket?delete", body: quiet}), http.StatusNotFound, "NoSuchBucket")
+}
+
+func FuzzStrictXML(f *testing.F) {
+	f.Add(versioningBody("Enabled"))
+	f.Add([]byte(`<Delete><Quiet>true</Quiet><Object><Key>a</Key><VersionId>null</VersionId></Object></Delete>`))
+	f.Add([]byte(`<!DOCTYPE a [<!ENTITY b "c">]><Delete/>`))
+	f.Add([]byte(`<?xml version="1.0"?><?php x?><Delete/>`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var cfg versioningConfiguration
+		if err := decodeStrictXML(bytes.NewReader(data), maxRequestXML, &cfg, "VersioningConfiguration", "Status", "MfaDelete"); err == nil {
+			if bytes.Contains(data, []byte("<!DOCTYPE")) || bytes.Contains(data, []byte("<!ENTITY")) {
+				t.Fatalf("a document with a document type was accepted: %q", data)
+			}
+		}
+		var del deleteRequest
+		if err := decodeStrictXML(bytes.NewReader(data), maxDeleteXML, &del, "Delete", "Quiet", "Object", "Key", "VersionId"); err == nil {
+			if len(del.Objects) > 0 && bytes.Count(data, []byte("<Object")) < len(del.Objects) {
+				t.Fatalf("more objects decoded than the document names: %q", data)
+			}
+		}
+	})
 }

@@ -38,3 +38,8 @@ github.com/albievan/cactusfs/test/s3compat TestWrongSecretIsRejected
 github.com/albievan/cactusfs/test/s3compat TestPresignedPutObject
 github.com/albievan/cactusfs/test/s3compat TestPresignedGetObject
 github.com/albievan/cactusfs/test/s3compat TestPresignedURLExpires
+github.com/albievan/cactusfs/test/s3compat TestBucketVersioning
+github.com/albievan/cactusfs/test/s3compat TestDeleteObjects
+github.com/albievan/cactusfs/test/s3compat TestListObjectVersionsPagination
+github.com/albievan/cactusfs/test/s3compat TestObjectVersions
+github.com/albievan/cactusfs/test/s3compat TestSuspendedVersioning

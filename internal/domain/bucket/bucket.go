@@ -23,6 +23,36 @@ type Bucket struct {
 	Name string
 	// CreatedAt is when the bucket was created.
 	CreatedAt time.Time
+	// Versioning says whether the bucket keeps the versions of its objects.
+	Versioning Versioning
+	// ObjectLock says that the versions of the bucket can be locked. It is
+	// decided when the bucket is created and never changes.
+	ObjectLock bool
+}
+
+// Versioning is the versioning state of a bucket.
+type Versioning string
+
+// The versioning states. A bucket begins unversioned; once it has kept
+// versions it can stop making new ones, but it never forgets that it did.
+const (
+	Unversioned         Versioning = ""
+	VersioningEnabled   Versioning = "Enabled"
+	VersioningSuspended Versioning = "Suspended"
+)
+
+// ValidateVersioningChange checks a change of the versioning state. A bucket
+// cannot go back to never having been versioned, and a bucket whose versions
+// can be locked cannot stop keeping them. A refusal wraps
+// domain.ErrInvalidArgument or domain.ErrInvalidBucketState.
+func ValidateVersioningChange(to Versioning, objectLock bool) error {
+	switch {
+	case to != VersioningEnabled && to != VersioningSuspended:
+		return fmt.Errorf("%w: versioning status %q", domain.ErrInvalidArgument, to)
+	case to == VersioningSuspended && objectLock:
+		return fmt.Errorf("%w: versioning cannot be suspended on a bucket with Object Lock", domain.ErrInvalidBucketState)
+	}
+	return nil
 }
 
 // reservedPrefixes and reservedSuffixes are reserved by the S3 naming rules.

@@ -46,6 +46,16 @@ channels:
     messages:
       event:
         $ref: '#/components/messages/ObjectDeleted'
+  bucketVersioningChanged:
+    address: cactusfs.bucket.versioning-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketVersioningChanged'
+  objectDeleteMarkerCreated:
+    address: cactusfs.object.delete-marker-created.v1
+    messages:
+      event:
+        $ref: '#/components/messages/ObjectDeleteMarkerCreated'
   rootCredentialSet:
     address: cactusfs.iam.root-credential-set.v1
     messages:
@@ -89,6 +99,14 @@ operations:
     action: send
     channel:
       $ref: '#/channels/objectDeleted'
+  publishBucketVersioningChanged:
+    action: send
+    channel:
+      $ref: '#/channels/bucketVersioningChanged'
+  publishObjectDeleteMarkerCreated:
+    action: send
+    channel:
+      $ref: '#/channels/objectDeleteMarkerCreated'
   publishRootCredentialSet:
     action: send
     channel:
@@ -150,7 +168,7 @@ components:
                 $ref: '#/components/schemas/Object'
     ObjectDeleted:
       name: cactusfs.object.deleted.v1
-      title: An object was deleted; the payload describes the version that was current
+      title: A version of an object was removed for good; the payload describes it
       payload:
         allOf:
           - $ref: '#/components/schemas/Envelope'
@@ -158,6 +176,30 @@ components:
             properties:
               type:
                 const: cactusfs.object.deleted.v1
+              data:
+                $ref: '#/components/schemas/Object'
+    BucketVersioningChanged:
+      name: cactusfs.bucket.versioning-changed.v1
+      title: A bucket began or stopped keeping the versions of its objects
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.versioning-changed.v1
+              data:
+                $ref: '#/components/schemas/BucketVersioning'
+    ObjectDeleteMarkerCreated:
+      name: cactusfs.object.delete-marker-created.v1
+      title: An object in a bucket that keeps versions was deleted; the payload describes the delete marker that is now its newest version
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.object.delete-marker-created.v1
               data:
                 $ref: '#/components/schemas/Object'
     RootCredentialSet:
@@ -249,6 +291,16 @@ components:
       properties:
         bucket:
           type: string
+    BucketVersioning:
+      type: object
+      required: [bucket, status]
+      additionalProperties: false
+      properties:
+        bucket:
+          type: string
+        status:
+          type: string
+          enum: [Enabled, Suspended]
     Object:
       type: object
       required: [bucket, key, version_id, size, etag]

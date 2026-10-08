@@ -20,6 +20,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
@@ -509,13 +510,13 @@ func TestDataIndexIsRebuiltForAnOlderState(t *testing.T) {
 		}
 	}
 	// The rebuilt counts are right: data used twice survives one delete.
-	if _, err := reopened.DeleteObject(ctx, "bkt", "b"); err != nil {
+	if _, err := reopened.DeleteObject(ctx, "bkt", "b", ports.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); !ok {
 		t.Error("data still used by another object is reported as unreferenced")
 	}
-	if _, err := reopened.DeleteObject(ctx, "bkt", "c"); err != nil {
+	if _, err := reopened.DeleteObject(ctx, "bkt", "c", ports.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := reopened.IsDataReferenced(ctx, shared.DataID); ok {

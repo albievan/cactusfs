@@ -130,7 +130,7 @@ func TestEveryPortCallIsCountedAndTraced(t *testing.T) {
 	if err := meta.ScanObjects(ctx, "bkt", "", func(object.Version) ports.ScanControl { return ports.ScanControl{} }); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := meta.DeleteObject(ctx, "bkt", "k"); err != nil {
+	if _, err := meta.DeleteObject(ctx, "bkt", "k", ports.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := meta.DeleteBucket(ctx, "bkt"); err != nil {

@@ -242,7 +242,7 @@ func TestShardCleanupFailureIsLoggedNotReturned(t *testing.T) {
 
 	// The overwrite and the delete are committed; only the cleanup failed.
 	f.put(t, "b", "k", []byte("replacement"))
-	if err := f.objects.Delete(context.Background(), porttest.Root(), "b", "k"); err != nil {
+	if _, err := f.objects.Delete(context.Background(), porttest.Root(), app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
 		t.Fatalf("Delete = %v, want nil: the object is gone from the index", err)
 	}
 	if _, _, err := f.get("b", "k", nil); !errors.Is(err, domain.ErrObjectNotFound) {
@@ -510,7 +510,7 @@ func TestHeadAndDelete(t *testing.T) {
 		t.Errorf("Get(missing bucket) error = %v", err)
 	}
 
-	if err := f.objects.Delete(ctx, root, "b", "k"); err != nil {
+	if _, err := f.objects.Delete(ctx, root, app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if _, err := f.objects.Head(ctx, root, "b", "k"); !errors.Is(err, domain.ErrObjectNotFound) {
@@ -520,18 +520,18 @@ func TestHeadAndDelete(t *testing.T) {
 		t.Errorf("%d shards after Delete, want 0", f.shardCount())
 	}
 	// Deleting what is not there succeeds, as S3 clients expect.
-	if err := f.objects.Delete(ctx, root, "b", "k"); err != nil {
+	if _, err := f.objects.Delete(ctx, root, app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
 		t.Errorf("second Delete = %v, want nil", err)
 	}
-	if err := f.objects.Delete(ctx, root, "nope", "k"); !errors.Is(err, domain.ErrBucketNotFound) {
+	if _, err := f.objects.Delete(ctx, root, app.DeleteInput{Bucket: "nope", Key: "k"}); !errors.Is(err, domain.ErrBucketNotFound) {
 		t.Errorf("Delete(missing bucket) error = %v", err)
 	}
-	if err := f.objects.Delete(ctx, root, "b", ""); !errors.Is(err, domain.ErrInvalidObjectKey) {
+	if _, err := f.objects.Delete(ctx, root, app.DeleteInput{Bucket: "b", Key: ""}); !errors.Is(err, domain.ErrInvalidObjectKey) {
 		t.Errorf("Delete(empty key) error = %v", err)
 	}
 	f.put(t, "b", "k2", []byte("data"))
 	f.meta.FailWrites = errBoom
-	if err := f.objects.Delete(ctx, root, "b", "k2"); !errors.Is(err, errBoom) {
+	if _, err := f.objects.Delete(ctx, root, app.DeleteInput{Bucket: "b", Key: "k2"}); !errors.Is(err, errBoom) {
 		t.Errorf("Delete with a failing commit = %v", err)
 	}
 	if f.shardCount() != 1 {
@@ -553,7 +553,10 @@ func TestObjectServiceAuthorizesEveryCall(t *testing.T) {
 			_, err := f.objects.Get(ctx, p, app.GetInput{Bucket: "b", Key: "k"})
 			return err
 		},
-		iam.ActionDeleteObject: func(f *fixture, p iam.Principal, _ io.Reader) error { return f.objects.Delete(ctx, p, "b", "k") },
+		iam.ActionDeleteObject: func(f *fixture, p iam.Principal, _ io.Reader) error {
+			_, err := f.objects.Delete(ctx, p, app.DeleteInput{Bucket: "b", Key: "k"})
+			return err
+		},
 		iam.ActionListBucket: func(f *fixture, p iam.Principal, _ io.Reader) error {
 			_, err := f.objects.List(ctx, p, "b", object.ListOptions{MaxKeys: 10})
 			return err
@@ -706,7 +709,7 @@ func TestShardIsKeptWhenTheCommitOutcomeIsUnknown(t *testing.T) {
 	}
 
 	// The same for a delete: nothing is removed from the drives.
-	if err := f.objects.Delete(context.Background(), porttest.Root(), "b", "k"); !errors.Is(err, domain.ErrOutcomeUnknown) {
+	if _, err := f.objects.Delete(context.Background(), porttest.Root(), app.DeleteInput{Bucket: "b", Key: "k"}); !errors.Is(err, domain.ErrOutcomeUnknown) {
 		t.Fatalf("Delete error = %v, want %v", err, domain.ErrOutcomeUnknown)
 	}
 	if f.shardCount() != 2 {
@@ -741,7 +744,7 @@ func TestGetDuringOverwriteAndDelete(t *testing.T) {
 				return
 			}
 			if i%5 == 0 {
-				if err := f.objects.Delete(context.Background(), porttest.Root(), "b", "k"); err != nil {
+				if _, err := f.objects.Delete(context.Background(), porttest.Root(), app.DeleteInput{Bucket: "b", Key: "k"}); err != nil {
 					t.Errorf("Delete: %v", err)
 					return
 				}
