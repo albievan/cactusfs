@@ -1024,3 +1024,165 @@ func TestObjectLockGovernanceAndLegalHold(t *testing.T) {
 		t.Errorf("a locked put into a bucket without Object Lock: %v", err)
 	}
 }
+
+// minPart is the smallest part a multipart upload may have before its last.
+const minPart = 5 << 20
+
+// sendParts uploads the given parts of a new multipart upload with the SDK
+// and returns the upload ID and what a completion lists.
+func sendParts(t *testing.T, bucket, key string, in *s3.CreateMultipartUploadInput, parts ...[]byte) (string, []types.CompletedPart) {
+	t.Helper()
+	c := client()
+	in.Bucket, in.Key = aws.String(bucket), aws.String(key)
+	created, err := c.CreateMultipartUpload(t.Context(), in)
+	if err != nil || aws.ToString(created.UploadId) == "" {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	var listed []types.CompletedPart
+	var number int32
+	for _, data := range parts {
+		number++
+		out, err := c.UploadPart(t.Context(), &s3.UploadPartInput{
+			Bucket: aws.String(bucket), Key: aws.String(key), UploadId: created.UploadId, PartNumber: aws.Int32(number), Body: bytes.NewReader(data),
+		})
+		if err != nil || aws.ToString(out.ETag) == "" {
+			t.Fatalf("UploadPart %d: %v", number, err)
+		}
+		// Whatever checksum the SDK sent and the server verified goes
+		// into the completion, as the SDK's own upload manager does it.
+		listed = append(listed, types.CompletedPart{PartNumber: aws.Int32(number), ETag: out.ETag, ChecksumCRC32: out.ChecksumCRC32})
+	}
+	return aws.ToString(created.UploadId), listed
+}
+
+func TestMultipartUpload(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	first, second := randomBytes(t, minPart+11), randomBytes(t, 70_000)
+	id, parts := sendParts(t, name, "films/one.mp4", &s3.CreateMultipartUploadInput{
+		ContentType: aws.String("video/mp4"), Metadata: map[string]string{"take": "3"},
+	}, first, second)
+
+	listedParts, err := c.ListParts(t.Context(), &s3.ListPartsInput{Bucket: aws.String(name), Key: aws.String("films/one.mp4"), UploadId: aws.String(id)})
+	if err != nil || len(listedParts.Parts) != 2 || aws.ToInt64(listedParts.Parts[0].Size) != minPart+11 ||
+		aws.ToString(listedParts.Parts[1].ETag) != aws.ToString(parts[1].ETag) || aws.ToBool(listedParts.IsTruncated) {
+		t.Fatalf("ListParts = %+v, %v", listedParts, err)
+	}
+	uploads, err := c.ListMultipartUploads(t.Context(), &s3.ListMultipartUploadsInput{Bucket: aws.String(name), Prefix: aws.String("films/")})
+	if err != nil || len(uploads.Uploads) != 1 || aws.ToString(uploads.Uploads[0].UploadId) != id || aws.ToString(uploads.Uploads[0].Key) != "films/one.mp4" {
+		t.Fatalf("ListMultipartUploads = %+v, %v", uploads, err)
+	}
+	if _, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("films/one.mp4")}); err == nil {
+		t.Fatal("the object exists before its upload is completed")
+	}
+
+	done, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("films/one.mp4"), UploadId: aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	if etag := aws.ToString(done.ETag); !strings.HasSuffix(etag, `-2"`) || aws.ToString(done.Key) != "films/one.mp4" {
+		t.Errorf("CompleteMultipartUpload = ETag %s, key %s", etag, aws.ToString(done.Key))
+	}
+	got, out := get(t, name, "films/one.mp4")
+	if !bytes.Equal(got, slices.Concat(first, second)) {
+		t.Errorf("GetObject returned %d bytes, want the two parts in order", len(got))
+	}
+	if aws.ToString(out.ETag) != aws.ToString(done.ETag) || aws.ToString(out.ContentType) != "video/mp4" || out.Metadata["take"] != "3" {
+		t.Errorf("GetObject: ETag %s, type %s, metadata %v", aws.ToString(out.ETag), aws.ToString(out.ContentType), out.Metadata)
+	}
+	// A range across the boundary of the parts.
+	ranged, err := c.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(name), Key: aws.String("films/one.mp4"), Range: aws.String(fmt.Sprintf("bytes=%d-%d", minPart+1, minPart+20)),
+	})
+	if err != nil {
+		t.Fatalf("GetObject with a range: %v", err)
+	}
+	across, _ := io.ReadAll(ranged.Body)
+	_ = ranged.Body.Close()
+	if !bytes.Equal(across, slices.Concat(first[minPart+1:], second[:10])) {
+		t.Errorf("a range across the parts = %d bytes", len(across))
+	}
+	// The upload is over.
+	if _, err := c.ListParts(t.Context(), &s3.ListPartsInput{Bucket: aws.String(name), Key: aws.String("films/one.mp4"), UploadId: aws.String(id)}); errorCode(err) != "NoSuchUpload" {
+		t.Errorf("ListParts after completion: code %q (%v), want NoSuchUpload", errorCode(err), err)
+	}
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("films/one.mp4")}); err != nil {
+		t.Errorf("DeleteObject: %v", err)
+	}
+}
+
+func TestAbortMultipartUpload(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	put(t, name, "k", []byte("the object"))
+	id, _ := sendParts(t, name, "k", &s3.CreateMultipartUploadInput{}, []byte("a part"))
+	ref := &s3.AbortMultipartUploadInput{Bucket: aws.String(name), Key: aws.String("k"), UploadId: aws.String(id)}
+	if _, err := c.AbortMultipartUpload(t.Context(), ref); err != nil {
+		t.Fatalf("AbortMultipartUpload: %v", err)
+	}
+	if _, err := c.AbortMultipartUpload(t.Context(), ref); errorCode(err) != "NoSuchUpload" {
+		t.Errorf("aborting twice: code %q (%v), want NoSuchUpload", errorCode(err), err)
+	}
+	_, err := c.UploadPart(t.Context(), &s3.UploadPartInput{
+		Bucket: aws.String(name), Key: aws.String("k"), UploadId: aws.String(id), PartNumber: aws.Int32(1), Body: bytes.NewReader([]byte("x")),
+	})
+	if errorCode(err) != "NoSuchUpload" {
+		t.Errorf("UploadPart after abort: code %q (%v), want NoSuchUpload", errorCode(err), err)
+	}
+	uploads, err := c.ListMultipartUploads(t.Context(), &s3.ListMultipartUploadsInput{Bucket: aws.String(name)})
+	if err != nil || len(uploads.Uploads) != 0 {
+		t.Errorf("uploads after abort = %d, %v", len(uploads.Uploads), err)
+	}
+	if got, _ := get(t, name, "k"); string(got) != "the object" {
+		t.Errorf("aborting an upload changed the object: %q", got)
+	}
+	// A bucket with an upload still in progress can be deleted: an upload
+	// is not an object.
+	sendParts(t, name, "left-behind", &s3.CreateMultipartUploadInput{}, []byte("a part"))
+	if _, err := c.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("k")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteBucket(t.Context(), &s3.DeleteBucketInput{Bucket: aws.String(name)}); err != nil {
+		t.Errorf("DeleteBucket with an upload in progress: %v", err)
+	}
+}
+
+func TestCompleteMultipartUploadRefusals(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	id, parts := sendParts(t, name, "k", &s3.CreateMultipartUploadInput{}, []byte("small"), randomBytes(t, minPart), []byte("tail"))
+	complete := func(listed ...types.CompletedPart) error {
+		_, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+			Bucket: aws.String(name), Key: aws.String("k"), UploadId: aws.String(id),
+			MultipartUpload: &types.CompletedMultipartUpload{Parts: listed},
+		})
+		return err
+	}
+	wrongTag := types.CompletedPart{PartNumber: aws.Int32(2), ETag: parts[0].ETag}
+	missing := types.CompletedPart{PartNumber: aws.Int32(7), ETag: parts[0].ETag}
+	for want, listed := range map[string][]types.CompletedPart{
+		"InvalidPartOrder": {parts[1], parts[0]},
+		"EntityTooSmall":   {parts[0], parts[1]},
+		"InvalidPart":      {wrongTag},
+	} {
+		if err := complete(listed...); errorCode(err) != want {
+			t.Errorf("code = %q (%v), want %s", errorCode(err), err, want)
+		}
+	}
+	if err := complete(parts[1], missing); errorCode(err) != "InvalidPart" {
+		t.Errorf("a part that was not uploaded: code %q (%v), want InvalidPart", errorCode(err), err)
+	}
+	if _, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("k")}); err == nil {
+		t.Error("a refused completion made an object")
+	}
+	// Some of the parts, in order, with the last one small: an object.
+	if err := complete(parts[1], parts[2]); err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	if got, _ := get(t, name, "k"); len(got) != minPart+4 || string(got[minPart:]) != "tail" {
+		t.Errorf("the object is %d bytes", len(got))
+	}
+}

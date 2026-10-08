@@ -721,7 +721,7 @@ func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResu
 	if err != nil {
 		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w: %w", domain.ErrOutcomeUnknown, err)
 	}
-	out := ports.PutResult{Stored: v, Removed: removed}
+	out := ports.PutResult{Stored: v, Removed: removed, RemovedParts: removedParts(result.previous)}
 	// A leader of the previous release does not say what it stored; then
 	// the bucket cannot keep versions, and what was proposed is it.
 	if stored, err := versionOfRecord(result.stored); err != nil {
@@ -766,7 +766,7 @@ func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o port
 	if err != nil {
 		return ports.DeleteResult{}, fmt.Errorf("raftmeta.DeleteObject: %w: %w", domain.ErrOutcomeUnknown, err)
 	}
-	return ports.DeleteResult{Marker: marker, Removed: removed}, nil
+	return ports.DeleteResult{Marker: marker, Removed: removed, RemovedParts: removedParts(result.previous)}, nil
 }
 
 func versionOfRecord(record *versionRecord) (*object.Version, error) {

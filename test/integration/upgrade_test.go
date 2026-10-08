@@ -167,6 +167,41 @@ func TestUpgradeFromThePreviousRelease(t *testing.T) {
 	if err != nil || len(listed.Versions) != 3 || len(listed.DeleteMarkers) != 1 {
 		t.Errorf("versions under dir/: %d and %d markers, %v; want 3 and 1", len(listed.Versions), len(listed.DeleteMarkers), err)
 	}
+	// What this release adds works on the deployment the previous one
+	// made: a multipart upload, beside what was there.
+	created, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(fixtureBucket), Key: aws.String("multipart/film")})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload on the upgraded deployment: %v", err)
+	}
+	film := [][]byte{bytes.Repeat([]byte("reel one "), 600_000), []byte("the end")}
+	var parts []types.CompletedPart
+	for i, data := range film {
+		number := aws.Int32(1)
+		if i == 1 {
+			number = aws.Int32(2)
+		}
+		sent, err := client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket: aws.String(fixtureBucket), Key: aws.String("multipart/film"), UploadId: created.UploadId, PartNumber: number, Body: bytes.NewReader(data),
+		})
+		if err != nil {
+			t.Fatalf("UploadPart %d: %v", i+1, err)
+		}
+		parts = append(parts, types.CompletedPart{PartNumber: number, ETag: sent.ETag, ChecksumCRC32: sent.ChecksumCRC32})
+	}
+	if _, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(fixtureBucket), Key: aws.String("multipart/film"), UploadId: created.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	}); err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	srv.stop(t)
+	srv, client = start()
+	if got, _, err := read(client, "multipart/film", nil); err != nil || got != string(film[0])+string(film[1]) {
+		t.Errorf("the multipart object after a restart: %d bytes, %v", len(got), err)
+	}
+	if got, _, err := read(client, "dir/small.txt", aws.String("null")); err != nil || got != want["dir/small.txt"] {
+		t.Errorf("the previous release's version, beside a multipart object: %q, %v", got, err)
+	}
 	srv.stop(t)
 	if out := srv.stderr.String(); bytes.Contains([]byte(out), []byte(fixtureSecretKey)) {
 		t.Fatal("a secret was written to standard error")

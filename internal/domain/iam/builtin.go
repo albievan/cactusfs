@@ -33,6 +33,10 @@ func BuiltInPolicies() map[string]Document {
 			// this role: deleting an object in a bucket that keeps
 			// versions leaves every version where it was.
 			"s3:GetObjectVersion", "s3:ListBucketVersions", "s3:GetBucketVersioning",
+			// Who may begin a multipart upload may also see and end
+			// what it began: an interrupted transfer is cleaned up by
+			// the client that made it.
+			"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
 		}, everything),
 		RoleReadOnly: statement([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject",

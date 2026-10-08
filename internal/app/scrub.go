@@ -28,6 +28,9 @@ type ScrubStats struct {
 	Unrecoverable int
 	// Bytes is the amount of stored data that was verified.
 	Bytes int64
+	// Parts is the number of parts of multipart uploads in progress that
+	// were checked; they count in the other numbers as objects do.
+	Parts int
 }
 
 // Scrubber walks every object, verifies every block of every shard and heals
@@ -35,6 +38,7 @@ type ScrubStats struct {
 type Scrubber struct {
 	buckets ports.BucketStore
 	index   ports.ObjectIndex
+	uploads ports.UploadStore
 	healer  *Healer
 	logger  *slog.Logger
 	// bytesPerSecond limits how fast stored data is read; zero is no limit.
@@ -49,6 +53,9 @@ type Scrubber struct {
 type ScrubberConfig struct {
 	Buckets ports.BucketStore
 	Index   ports.ObjectIndex
+	// Uploads, when not nil, is walked too: the parts of multipart
+	// uploads in progress.
+	Uploads ports.UploadStore
 	Healer  *Healer
 	Logger  *slog.Logger
 	// BytesPerSecond limits how fast stored data is read, so that scrubbing
@@ -72,7 +79,7 @@ func NewScrubber(cfg ScrubberConfig) *Scrubber {
 		pause = sleep
 	}
 	return &Scrubber{
-		buckets: cfg.Buckets, index: cfg.Index, healer: cfg.Healer, logger: cfg.Logger,
+		buckets: cfg.Buckets, index: cfg.Index, uploads: cfg.Uploads, healer: cfg.Healer, logger: cfg.Logger,
 		bytesPerSecond: cfg.BytesPerSecond, pause: pause, onPass: cfg.OnPass, active: cfg.Active,
 	}
 }
@@ -139,6 +146,9 @@ func (s *Scrubber) RunOnce(ctx context.Context) (ScrubStats, error) {
 		if err := s.scrubBucket(ctx, b.Name, &stats); err != nil {
 			return stats, fmt.Errorf("scrub.RunOnce: %w", err)
 		}
+		if err := s.scrubUploads(ctx, b.Name, &stats); err != nil {
+			return stats, fmt.Errorf("scrub.RunOnce: %w", err)
+		}
 	}
 	return stats, nil
 }
@@ -186,10 +196,71 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 	}
 }
 
+// scrubUploads checks the parts of the multipart uploads in progress in a
+// bucket: they are acknowledged data like any other, and an upload can take
+// days.
+func (s *Scrubber) scrubUploads(ctx context.Context, bucketName string, stats *ScrubStats) error {
+	if s.uploads == nil {
+		return nil
+	}
+	var start ports.UploadCursor
+	for {
+		var batch []object.Upload
+		more := false
+		err := s.uploads.ScanUploads(ctx, bucketName, start, func(u object.Upload) ports.ScanControl {
+			if len(batch) == scrubBatch {
+				more = true
+				return ports.ScanControl{Stop: true}
+			}
+			batch = append(batch, u)
+			return ports.ScanControl{}
+		})
+		if errors.Is(err, domain.ErrBucketNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, upload := range batch {
+			for after := 0; ; {
+				parts, err := s.uploads.ListParts(ctx, bucketName, upload.Key, upload.ID, after, scrubBatch)
+				if errors.Is(err, domain.ErrUploadNotFound) || errors.Is(err, domain.ErrBucketNotFound) {
+					break // completed or aborted while scrubbing
+				}
+				if err != nil {
+					return err
+				}
+				for _, part := range parts {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if !s.isActive() {
+						return errStandby
+					}
+					stats.Parts++
+					s.scrubTarget(ctx, healTarget{bucket: bucketName, key: upload.Key, upload: upload.ID, part: part.Number}, stats)
+					after = part.Number
+				}
+				if len(parts) < scrubBatch {
+					break
+				}
+			}
+		}
+		if !more {
+			return nil
+		}
+		last := batch[len(batch)-1]
+		start = ports.UploadCursor{Key: last.Key, After: last.ID}
+	}
+}
+
 func (s *Scrubber) scrubObject(ctx context.Context, version object.Version, stats *ScrubStats) {
-	target := healTarget{bucket: version.Bucket, key: version.Key, named: true, ref: version.Ref()}
-	result, err := s.healer.heal(ctx, target, s.throttle)
 	stats.Objects++
+	s.scrubTarget(ctx, healTarget{bucket: version.Bucket, key: version.Key, named: true, ref: version.Ref()}, stats)
+}
+
+func (s *Scrubber) scrubTarget(ctx context.Context, target healTarget, stats *ScrubStats) {
+	result, err := s.healer.heal(ctx, target, s.throttle)
 	stats.ShardsRebuilt += result.Rebuilt
 	stats.Bytes += result.Verified
 	if result.Damaged > 0 {
@@ -199,7 +270,7 @@ func (s *Scrubber) scrubObject(ctx context.Context, version object.Version, stat
 		stats.Unrecoverable++
 	}
 	if err != nil && !result.Unrecoverable && ctx.Err() == nil {
-		s.logger.ErrorContext(ctx, "scrub could not check an object", slog.String("bucket", version.Bucket), slog.Any("error", err))
+		s.logger.ErrorContext(ctx, "scrub could not check an object", slog.String("bucket", target.bucket), slog.Any("error", err))
 	}
 }
 

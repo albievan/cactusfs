@@ -93,6 +93,16 @@ type Version struct {
 	DeleteMarker bool
 	// Lock is what keeps the version from being removed, if anything.
 	Lock Lock
+	// Parts, when not zero, says that the version was made by a multipart
+	// upload and consists of that many parts. Its bytes are then those of
+	// its parts, in order: DataID names the parts (it was the upload's ID)
+	// and addresses no stored data of its own, and Layout is empty.
+	Parts int
+}
+
+// Multipart reports whether the version consists of parts.
+func (v Version) Multipart() bool {
+	return v.Parts > 0
 }
 
 // NullVersion is how the null version is named to clients.
@@ -152,6 +162,9 @@ type Encryption struct {
 	NoncePrefix []byte
 	// SegmentSize is the plaintext size of every segment but the last.
 	SegmentSize int
+	// KeyMode says how the data key is used: "" encrypts the version's
+	// stream with it; KeyModePartHKDF derives a key per part from it.
+	KeyMode string
 }
 
 // Layout describes how the encrypted bytes of one object version are stored.

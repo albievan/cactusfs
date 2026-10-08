@@ -175,7 +175,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	drives := n.driveSource(stores)
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: meta, Buckets: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
+		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
 		OnHeal: func(r app.HealResult) {
 			n.telemetry.ObserveHeal(r)
 			n.maintenance.ObserveHeal(r)
@@ -216,7 +216,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(n.meta, n.auditOut, logger).Handle))
 	}
 	n.scrubber = app.NewScrubber(app.ScrubberConfig{
-		Buckets: meta, Index: meta, Healer: n.objects.Healer(), Logger: logger,
+		Buckets: meta, Index: meta, Uploads: meta, Healer: n.objects.Healer(), Logger: logger,
 		BytesPerSecond: int64(cfg.ScrubRateMiB) << 20,
 		OnPass: func(s app.ScrubStats) {
 			n.telemetry.ObserveScrub(s)

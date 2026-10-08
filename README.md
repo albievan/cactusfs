@@ -120,10 +120,12 @@ Operations:
   for the drain delay, closes its listeners, lets in-flight requests finish and exits 0.
 
 Supported S3 operations: ListBuckets, CreateBucket, HeadBucket, DeleteBucket,
-GetBucketLocation, PutObject, GetObject (with a byte range), HeadObject, DeleteObject and
-ListObjectsV2, by path or (with `--s3-domain`) by virtual host. Multipart uploads,
-versioning, presigned URLs, copies, multi-object delete and the rest answer
-`501 NotImplemented` for now.
+GetBucketLocation, PutObject, GetObject (with a byte range), HeadObject, DeleteObject,
+DeleteObjects, ListObjectsV2, bucket versioning and object versions, Object Lock
+(retention, legal hold, default retention), multipart uploads (create, upload part,
+complete, abort, list parts, list uploads) and presigned URLs, by path or (with
+`--s3-domain`) by virtual host. Copies, bucket policies, tagging, lifecycle and the rest
+answer `501 NotImplemented` for now.
 
 In a container, mount the drives and the certificate and run hardened:
 

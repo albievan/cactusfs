@@ -27,6 +27,7 @@ type Metadata interface {
 	ports.ObjectIndex
 	ports.RootCredentialStore
 	ports.TopologyStore
+	ports.UploadStore
 }
 
 // MemMetadata is an in-memory Metadata. The zero value is not usable; call
@@ -40,6 +41,11 @@ type MemMetadata struct {
 	seq  uint64
 	root *iam.RootCredential
 	topo *cluster.Topology
+	// uploads holds the multipart uploads in progress of every bucket,
+	// and extents the parts of the versions that uploads made, by the
+	// data ID of the version.
+	uploads map[string]map[object.ID]*memUpload
+	extents map[object.ID][]object.Part
 
 	// Now, when set, is the store's time: what Object Lock is judged on.
 	// The real store uses the time its leader stamps entries with.
@@ -47,6 +53,8 @@ type MemMetadata struct {
 	// FailWrites, when set, is returned by every mutating call. Tests use
 	// it to simulate a failed Raft commit.
 	FailWrites error
+	// FailParts, when set, is returned by PutPart.
+	FailParts error
 }
 
 // NewMemMetadata returns an empty MemMetadata.
@@ -54,6 +62,8 @@ func NewMemMetadata() *MemMetadata {
 	return &MemMetadata{
 		buckets: map[string]bucket.Bucket{},
 		objects: map[string]map[string][]object.Version{},
+		uploads: map[string]map[object.ID]*memUpload{},
+		extents: map[object.ID][]object.Part{},
 	}
 }
 
@@ -93,6 +103,8 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	}
 	delete(m.buckets, name)
 	delete(m.objects, name)
+	// Uploads that were never completed go with the bucket.
+	delete(m.uploads, name)
 	return nil
 }
 
@@ -154,15 +166,18 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	if v.VersionID.IsZero() || v.DataID.IsZero() {
 		return ports.PutResult{}, fmt.Errorf("%w: version or data ID of the put", domain.ErrInvalidArgument)
 	}
-	for _, objects := range m.objects {
-		for _, versions := range objects {
-			for _, existing := range versions {
-				if !existing.DeleteMarker && existing.DataID == v.DataID {
-					return ports.PutResult{}, fmt.Errorf("%w: data %s belongs to a version already", domain.ErrConflict, v.DataID)
-				}
-			}
-		}
+	if m.inUse(v.DataID) {
+		return ports.PutResult{}, fmt.Errorf("%w: data %s belongs to a version already", domain.ErrConflict, v.DataID)
 	}
+	if v.Parts != 0 || v.Encryption.KeyMode != "" {
+		return ports.PutResult{}, fmt.Errorf("%w: a put does not make a version of parts", domain.ErrInvalidArgument)
+	}
+	return m.commit(b, v)
+}
+
+// commit puts a new version of a key into the store, as the bucket keeps
+// versions. When it refuses, nothing was changed.
+func (m *MemMetadata) commit(b bucket.Bucket, v object.Version) (ports.PutResult, error) {
 	lock := v.Lock
 	switch {
 	case !b.ObjectLock && !lock.IsZero():
@@ -194,8 +209,9 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 		stored.Versioned, stored.Seq = false, 0
 		versions, removed = take(versions, object.VersionRef{Null: true})
 	}
+	parts := m.forget(removed)
 	m.store(v.Bucket, v.Key, append([]object.Version{stored}, versions...))
-	return ports.PutResult{Stored: CloneVersion(stored), Removed: removed}, nil
+	return ports.PutResult{Stored: CloneVersion(stored), Removed: removed, RemovedParts: parts}, nil
 }
 
 // DeleteObject implements ports.ObjectIndex.
@@ -221,20 +237,22 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		}
 		rest, removed := take(versions, *o.Version)
 		m.store(bucketName, key, rest)
-		return ports.DeleteResult{Removed: removed}, nil
+		return ports.DeleteResult{Removed: removed, RemovedParts: m.forget(removed)}, nil
 	}
 	if b.Versioning == bucket.Unversioned {
 		rest, removed := take(versions, object.VersionRef{Null: true})
 		m.store(bucketName, key, rest)
-		return ports.DeleteResult{Removed: removed}, nil
+		return ports.DeleteResult{Removed: removed, RemovedParts: m.forget(removed)}, nil
 	}
 	marker := object.Version{
 		Bucket: bucketName, Key: key, VersionID: o.MarkerID, ModifiedAt: o.At.UTC(), Seq: m.seq,
 		DeleteMarker: true, Versioned: b.Versioning == bucket.VersioningEnabled,
 	}
 	var removed *object.Version
+	var parts []object.Part
 	if b.Versioning == bucket.VersioningSuspended {
 		versions, removed = take(versions, object.VersionRef{Null: true})
+		parts = m.forget(removed)
 	} else {
 		for _, existing := range versions {
 			if existing.Versioned && existing.VersionID == marker.VersionID {
@@ -243,7 +261,7 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		}
 	}
 	m.store(bucketName, key, append([]object.Version{marker}, versions...))
-	return ports.DeleteResult{Marker: &marker, Removed: removed}, nil
+	return ports.DeleteResult{Marker: &marker, Removed: removed, RemovedParts: parts}, nil
 }
 
 // SetBucketVersioning implements ports.BucketStore.
@@ -389,16 +407,52 @@ func (m *MemMetadata) GetVersion(_ context.Context, bucketName, key string, ref 
 func (m *MemMetadata) IsDataReferenced(_ context.Context, dataID object.ID) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.inUse(dataID), nil
+}
+
+// inUse reports whether anything owns an ID: a version, a part of an upload
+// or of a completed object, or an upload.
+func (m *MemMetadata) inUse(id object.ID) bool {
 	for _, objects := range m.objects {
 		for _, versions := range objects {
 			for _, v := range versions {
-				if !v.DeleteMarker && v.DataID == dataID {
-					return true, nil
+				if !v.DeleteMarker && v.DataID == id {
+					return true
 				}
 			}
 		}
 	}
-	return false, nil
+	for _, uploads := range m.uploads {
+		for uploadID, upload := range uploads {
+			if uploadID == id {
+				return true
+			}
+			for _, part := range upload.parts {
+				if part.DataID == id {
+					return true
+				}
+			}
+		}
+	}
+	for _, parts := range m.extents {
+		for _, part := range parts {
+			if part.DataID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// forget drops what a version that was removed for good leaves behind, and
+// returns the parts it was made of.
+func (m *MemMetadata) forget(removed *object.Version) []object.Part {
+	if removed == nil || !removed.Multipart() {
+		return nil
+	}
+	parts := m.extents[removed.DataID]
+	delete(m.extents, removed.DataID)
+	return parts
 }
 
 // GetTopology implements ports.TopologyStore.

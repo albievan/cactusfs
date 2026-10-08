@@ -45,3 +45,5 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted |
 | [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted |
 | [0009](0009-object-lock.md) | Object Lock: where it is enforced, and the clock that decides | accepted |
+| [0010](0010-key-hierarchy.md) | Key hierarchy: one data key, several uses | accepted; SSE-KMS and SSE-C to be added (PLAN 6.5) |
+| [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |

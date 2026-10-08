@@ -338,7 +338,7 @@ func (w *streamWriter) abort() {
 type streamReader struct {
 	storage  *shardStorage
 	geometry erasure.Geometry
-	version  object.Version
+	extent   object.Extent
 
 	mu sync.Mutex
 	// readers is indexed by shard; nil is a shard that cannot be used.
@@ -352,7 +352,7 @@ type streamReader struct {
 	stripe []byte
 }
 
-// open returns a reader over the encrypted stream of a version.
+// open returns a reader over the encrypted stream of stored data.
 //
 // When no shard can be found at all the error wraps domain.ErrShardNotFound,
 // which is what a version looks like just after it was replaced or deleted.
@@ -360,7 +360,7 @@ type streamReader struct {
 // domain.ErrUnavailable: nothing is known to be wrong with the object. When
 // shards are missing or bad beyond what parity covers it wraps
 // domain.ErrIntegrity: the object cannot be read.
-func (s *shardStorage) open(ctx context.Context, v object.Version) (*streamReader, error) {
+func (s *shardStorage) open(ctx context.Context, v object.Extent) (*streamReader, error) {
 	geometry, err := geometryOf(v.Layout)
 	if err != nil {
 		return nil, err
@@ -371,7 +371,7 @@ func (s *shardStorage) open(ctx context.Context, v object.Version) (*streamReade
 	}
 	shardSize := geometry.ShardSize(v.Layout.StoredSize)
 	r := &streamReader{
-		storage: s, geometry: geometry, version: v,
+		storage: s, geometry: geometry, extent: v,
 		readers: make([]ports.ShardReader, geometry.Total()), cached: -1,
 	}
 	usable, found := 0, 0
@@ -459,7 +459,7 @@ func (r *streamReader) ReadAt(p []byte, off int64) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	size := r.version.Layout.StoredSize
+	size := r.extent.Layout.StoredSize
 	read := 0
 	for read < len(p) {
 		pos := off + int64(read)
@@ -486,7 +486,7 @@ func (r *streamReader) stripeData(stripe int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	length := r.geometry.StripeLen(r.version.Layout.StoredSize, stripe)
+	length := r.geometry.StripeLen(r.extent.Layout.StoredSize, stripe)
 	r.stripe = r.stripe[:0]
 	for i := 0; i < r.geometry.Data; i++ {
 		r.stripe = append(r.stripe, chunks[i]...)
@@ -502,7 +502,7 @@ func (r *streamReader) stripeData(stripe int64) ([]byte, error) {
 // returns; a shard that fails is dropped for the rest of the read.
 func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 	g := r.geometry
-	chunk := g.Chunk(g.StripeLen(r.version.Layout.StoredSize, stripe))
+	chunk := g.Chunk(g.StripeLen(r.extent.Layout.StoredSize, stripe))
 	offset := g.ShardOffset(stripe)
 	chunks := make([][]byte, g.Total())
 
@@ -514,7 +514,7 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 		if _, err := r.readers[i].ReadAt(buf, offset); err != nil {
 			// Missing, truncated or damaged: use the other shards.
 			r.storage.logger.Warn("shard read failed; reading from the remaining shards",
-				slog.String("shard", object.ShardID{DataID: r.version.DataID, Index: i}.String()), slog.Any("error", err))
+				slog.String("shard", object.ShardID{DataID: r.extent.DataID, Index: i}.String()), slog.Any("error", err))
 			_ = r.readers[i].Close()
 			r.readers[i] = nil
 			r.degraded = true
@@ -552,9 +552,9 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 		if usable+r.offline >= g.ReadQuorum() {
 			// Enough shards would be there if their drives could be reached.
 			return nil, fmt.Errorf("%w: stripe %d of %s: %d shards are on drives that cannot be reached",
-				domain.ErrUnavailable, stripe, r.version.DataID, r.offline)
+				domain.ErrUnavailable, stripe, r.extent.DataID, r.offline)
 		}
-		return nil, fmt.Errorf("%w: stripe %d of %s cannot be rebuilt: %w", domain.ErrIntegrity, stripe, r.version.DataID, err)
+		return nil, fmt.Errorf("%w: stripe %d of %s cannot be rebuilt: %w", domain.ErrIntegrity, stripe, r.extent.DataID, err)
 	}
 	return chunks, nil
 }
@@ -651,7 +651,7 @@ type repair struct {
 // It returns an error wrapping domain.ErrIntegrity when too few shards are
 // left to rebuild from, and one wrapping domain.ErrUnavailable when enough
 // might be left but cannot be reached now.
-func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle) (repair, error) {
+func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle) (repair, error) {
 	geometry, err := geometryOf(v.Layout)
 	if err != nil {
 		return repair{}, err
@@ -664,7 +664,7 @@ func (s *shardStorage) heal(ctx context.Context, v object.Version, slow throttle
 	result := repair{shards: geometry.Total()}
 
 	reader := &streamReader{
-		storage: s, geometry: geometry, version: v,
+		storage: s, geometry: geometry, extent: v,
 		readers: make([]ports.ShardReader, geometry.Total()), cached: -1,
 	}
 	defer func() { _ = reader.Close() }()

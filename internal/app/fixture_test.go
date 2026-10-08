@@ -193,6 +193,7 @@ func (f *fixture) objectService(t *testing.T, kms ports.KMS) *app.ObjectService 
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
 		Index:   recordingIndex{ObjectIndex: f.meta, events: f.events},
 		Buckets: f.meta,
+		Uploads: f.meta,
 		Drives:  fixed(t, f.topology, drives),
 		Codec:   porttest.NewCodec(),
 		OnHeal:  f.heals.add,

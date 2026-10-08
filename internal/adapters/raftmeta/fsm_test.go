@@ -300,7 +300,28 @@ func FuzzDecodeEntry(f *testing.F) {
 	f.Add([]byte{1})
 	f.Add(append([]byte{1}, `{"type":"bucket.delete","delete_bucket":{"name":"x"}}`...))
 	f.Add(append([]byte{2}, `{}`...))
+	f.Add(append([]byte{2}, `{"type":"upload.abort","abort_upload":{"bucket":"b","key":"k","upload_id":"00"}}`...))
+	f.Add(append([]byte{2}, `{"type":"upload.complete","complete_upload":{"bucket":"b","parts":[{"number":1}]},"put_part":{}}`...))
 	f.Fuzz(func(t *testing.T, data []byte) {
+		// A binary of the newest schema: what it decodes has one payload,
+		// the one its type names.
+		if e, err := decodeEntry(data, entrySchemaTimed); err == nil {
+			payloads := 0
+			for _, set := range []bool{
+				e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
+				e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil, e.SetBucketLock != nil,
+				e.SetRetention != nil, e.SetLegalHold != nil, e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
+			} {
+				if set {
+					payloads++
+				}
+			}
+			if payloads != 1 {
+				t.Fatalf("decoded entry %q has %d payloads", e.Type, payloads)
+			}
+		} else if !errors.Is(err, domain.ErrUnsupportedFormat) {
+			t.Fatalf("untyped error: %v", err)
+		}
 		e, err := decodeEntry(data, entrySchemaVersion)
 		if err != nil {
 			if !errors.Is(err, domain.ErrUnsupportedFormat) {

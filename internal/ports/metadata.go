@@ -78,6 +78,11 @@ type ObjectIndex interface {
 	// GetObject returns the current version of an object. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrObjectNotFound.
 	GetObject(ctx context.Context, bucketName, key string) (object.Version, error)
+	// ObjectParts returns up to limit parts of a version that is made of
+	// parts, in order, beginning with the part that holds the byte at
+	// offset. dataID is the version's. It returns none when the version
+	// has no part there - or is gone.
+	ObjectParts(ctx context.Context, bucketName string, dataID object.ID, offset int64, limit int) ([]object.Part, error)
 	// IsDataReferenced reports whether any object version refers to the
 	// stored data with this ID. The garbage collector asks before it
 	// removes a shard.
@@ -108,6 +113,10 @@ type PutResult struct {
 	// Removed is the version the put removed for good, if any. Its stored
 	// data is no longer referred to.
 	Removed *object.Version
+	// RemovedParts are parts whose data nothing refers to any more: those
+	// of Removed, when it was made of parts, and those a completion did
+	// not use. The list may be cut short; the collector finds the rest.
+	RemovedParts []object.Part
 }
 
 // DeleteOptions say what to delete, and carry what a delete marker needs.
@@ -132,6 +141,9 @@ type DeleteResult struct {
 	// Removed is the version that was removed for good, if one was. Its
 	// stored data is no longer referred to.
 	Removed *object.Version
+	// RemovedParts are the parts of Removed, when it was made of parts.
+	// The list may be cut short; the collector finds the rest.
+	RemovedParts []object.Part
 }
 
 // ScanControl tells ObjectIndex.ScanObjects what to do after a visit. The
@@ -167,4 +179,59 @@ type TopologyStore interface {
 	// first topology. The stored version is then one higher. The error
 	// wraps domain.ErrConflict when the stored topology has changed.
 	SetTopology(ctx context.Context, t cluster.Topology) error
+}
+
+// UploadStore keeps multipart uploads in progress. Like the object index it
+// is strongly consistent: a part that was acknowledged is seen by the
+// completion that follows.
+type UploadStore interface {
+	// CreateUpload records a new upload. The error wraps
+	// domain.ErrBucketNotFound when the bucket does not exist and
+	// domain.ErrConflict when the ID is in use.
+	CreateUpload(ctx context.Context, u object.Upload) error
+	// GetUpload returns an upload in progress. The error wraps
+	// domain.ErrUploadNotFound when there is none with that ID for the key.
+	GetUpload(ctx context.Context, bucketName, key string, id object.ID) (object.Upload, error)
+	// PutPart records a part of an upload, in place of the part that had
+	// its number, which it returns: nothing refers to that one any more.
+	PutPart(ctx context.Context, bucketName, key string, id object.ID, p object.Part) (replaced *object.Part, err error)
+	// ListParts returns up to limit parts of an upload with a number
+	// greater than after, in ascending order of number.
+	ListParts(ctx context.Context, bucketName, key string, id object.ID, after, limit int) ([]object.Part, error)
+	// CompleteUpload turns an upload into a version of its key, in one
+	// step: the version appears, and the upload and the parts that were
+	// not listed are gone. Whether the listed parts make an object is
+	// decided against the parts as they are stored at that moment
+	// (object.CheckCompletion). The error wraps domain.ErrConflict when a
+	// listed part is no longer the one that was sealed.
+	CompleteUpload(ctx context.Context, c Completion) (PutResult, error)
+	// AbortUpload removes an upload and its parts, and returns the parts:
+	// nothing refers to their data any more. The list may be cut short.
+	AbortUpload(ctx context.Context, bucketName, key string, id object.ID) ([]object.Part, error)
+	// ScanUploads calls visit for the uploads in progress in a bucket, in
+	// ascending order of key and then of ID, beginning after start.
+	ScanUploads(ctx context.Context, bucketName string, start UploadCursor, visit func(object.Upload) ScanControl) error
+}
+
+// UploadCursor says where a scan of uploads begins: at the first upload of
+// Key, or, when After is not zero, after the upload of Key with that ID.
+type UploadCursor struct {
+	Key   string
+	After object.ID
+}
+
+// Completion is the request to complete a multipart upload.
+type Completion struct {
+	Bucket string
+	Key    string
+	ID     object.ID
+	// VersionID is the ID of the version to be.
+	VersionID object.ID
+	// ETag is the entity tag of the object the listed parts make.
+	ETag string
+	At   time.Time
+	// Parts are the listed parts in order: for each its Number, ETag and
+	// Checksums as the client named them, the DataID of the stored part
+	// that was sealed, and the Seal of its place.
+	Parts []object.Part
 }

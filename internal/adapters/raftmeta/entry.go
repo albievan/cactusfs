@@ -80,6 +80,11 @@ type entry struct {
 	SetBucketLock *bucketLockCmd    `json:"set_bucket_lock,omitempty"`
 	SetRetention  *retentionCmd     `json:"set_retention,omitempty"`
 	SetLegalHold  *legalHoldCmd     `json:"set_legal_hold,omitempty"`
+	// Multipart uploads (schema 2).
+	CreateUpload   *uploadRecord      `json:"create_upload,omitempty"`
+	PutPart        *putPartCmd        `json:"put_part,omitempty"`
+	CompleteUpload *completeUploadCmd `json:"complete_upload,omitempty"`
+	AbortUpload    *uploadRefCmd      `json:"abort_upload,omitempty"`
 }
 
 // versioningCmd changes the versioning state of a bucket.
@@ -246,6 +251,13 @@ type versionRecord struct {
 	DeleteMarker bool   `json:"delete_marker,omitempty"`
 	// Lock is what keeps the version from being removed (schema 2).
 	Lock *lockRecord `json:"lock,omitempty"`
+	// Parts is the number of parts of a version a multipart upload made;
+	// its data is then in "extents" under DataID (schema 2).
+	Parts int `json:"parts,omitempty"`
+	// Dropped is set only in the answer to an entry that removed this
+	// version, never in the state: the parts that went with it, whose
+	// data the proposer may now remove.
+	Dropped []partRecord `json:"dropped,omitempty"`
 
 	ContentType        string            `json:"content_type,omitempty"`
 	ContentEncoding    string            `json:"content_encoding,omitempty"`
@@ -264,6 +276,9 @@ type encryptionRecord struct {
 	WrappedKey  []byte `json:"wrapped_key"`
 	NoncePrefix []byte `json:"nonce_prefix"`
 	SegmentSize int    `json:"segment_size"`
+	// KeyMode says how the data key is used; empty for the key of one
+	// stream (schema 2).
+	KeyMode string `json:"key_mode,omitempty"`
 }
 
 type layoutRecord struct {
@@ -340,7 +355,8 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
 	switch e.Type {
-	case cmdSetVersioning, cmdDeleteVersion, cmdSetBucketLock, cmdSetRetention, cmdSetLegalHold:
+	case cmdSetVersioning, cmdDeleteVersion, cmdSetBucketLock, cmdSetRetention, cmdSetLegalHold,
+		cmdCreateUpload, cmdPutPart, cmdCompleteUpload, cmdAbortUpload:
 		return entrySchemaTimed
 	}
 	if !e.At.IsZero() || (e.PutObject != nil && e.PutObject.Lock != nil) {
@@ -373,6 +389,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
 		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil,
 		e.SetBucketLock != nil, e.SetRetention != nil, e.SetLegalHold != nil,
+		e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
 	} {
 		if present {
 			set++
@@ -406,6 +423,14 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.SetRetention != nil && data[0] >= entrySchemaTimed
 	case cmdSetLegalHold:
 		ok = ok && e.SetLegalHold != nil && data[0] >= entrySchemaTimed
+	case cmdCreateUpload:
+		ok = ok && e.CreateUpload != nil && data[0] >= entrySchemaTimed
+	case cmdPutPart:
+		ok = ok && e.PutPart != nil && data[0] >= entrySchemaTimed
+	case cmdCompleteUpload:
+		ok = ok && e.CompleteUpload != nil && data[0] >= entrySchemaTimed
+	case cmdAbortUpload:
+		ok = ok && e.AbortUpload != nil && data[0] >= entrySchemaTimed
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -451,6 +476,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		Seq:                v.Seq,
 		DeleteMarker:       v.DeleteMarker,
 		Lock:               lockToRecord(v.Lock),
+		Parts:              v.Parts,
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -463,6 +489,7 @@ func versionToRecord(v object.Version) *versionRecord {
 			WrappedKey:  v.Encryption.WrappedKey,
 			NoncePrefix: v.Encryption.NoncePrefix,
 			SegmentSize: v.Encryption.SegmentSize,
+			KeyMode:     v.Encryption.KeyMode,
 		},
 		Layout: layoutRecord{
 			DataShards:   v.Layout.DataShards,
@@ -495,6 +522,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		Seq:                r.Seq,
 		DeleteMarker:       r.DeleteMarker,
 		Lock:               r.Lock.toDomain(),
+		Parts:              r.Parts,
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,
@@ -511,6 +539,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 			WrappedKey:  r.Encryption.WrappedKey,
 			NoncePrefix: r.Encryption.NoncePrefix,
 			SegmentSize: r.Encryption.SegmentSize,
+			KeyMode:     r.Encryption.KeyMode,
 		},
 		Layout: object.Layout{
 			DataShards:   r.Layout.DataShards,
@@ -555,10 +584,12 @@ type wireResult struct {
 	// a delete made (schema 2).
 	Stored *versionRecord `json:"stored,omitempty"`
 	Marker *versionRecord `json:"marker,omitempty"`
+	// Parts are parts of an upload that the entry removed.
+	Parts []partRecord `json:"parts,omitempty"`
 }
 
 func encodeResult(r applyResult) ([]byte, error) {
-	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker}
+	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker, Parts: r.parts}
 	if r.err != nil {
 		w.Codes, w.Message = domain.Codes(r.err), r.err.Error()
 		if len(w.Codes) == 0 {
@@ -574,7 +605,7 @@ func decodeResult(data []byte) (applyResult, error) {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return applyResult{}, fmt.Errorf("malformed answer from the metadata leader: %w", err)
 	}
-	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker}
+	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker, parts: w.Parts}
 	if len(w.Codes) > 0 {
 		r.err = domain.FromCodes(w.Codes, w.Message)
 	}

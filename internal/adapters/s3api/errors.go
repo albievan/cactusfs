@@ -62,6 +62,10 @@ func errorMappings() []mapping {
 		// Buckets and objects.
 		{domain.ErrObjectLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied because object protected by object lock."}},
 		{domain.ErrLockNotConfigured, apiError{http.StatusBadRequest, "InvalidRequest", "Bucket is missing Object Lock Configuration."}},
+		{domain.ErrUploadNotFound, apiError{http.StatusNotFound, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed."}},
+		{domain.ErrPartNotFound, apiError{http.StatusBadRequest, "InvalidPart", "One or more of the specified parts could not be found. The part might not have been uploaded, or the specified entity tag or checksum might not have matched the part's."}},
+		{domain.ErrPartOrder, apiError{http.StatusBadRequest, "InvalidPartOrder", "The list of parts was not in ascending order. The parts list must be specified in order by part number."}},
+		{domain.ErrPartTooSmall, apiError{http.StatusBadRequest, "EntityTooSmall", "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part."}},
 		{domain.ErrVersionNotFound, apiError{http.StatusNotFound, "NoSuchVersion", "The version ID specified in the request does not match an existing version."}},
 		{domain.ErrMethodNotAllowed, apiError{http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource."}},
 		{domain.ErrInvalidBucketState, apiError{http.StatusConflict, "InvalidBucketState", "The request is not valid for the current state of the bucket."}},
@@ -73,6 +77,7 @@ func errorMappings() []mapping {
 		{domain.ErrObjectNotFound, apiError{http.StatusNotFound, "NoSuchKey", "The specified key does not exist."}},
 		{domain.ErrInvalidRange, apiError{http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable."}},
 		{domain.ErrInvalidArgument, apiError{http.StatusBadRequest, "InvalidArgument", "Invalid argument."}},
+		{domain.ErrConflict, apiError{http.StatusConflict, "OperationAborted", "A conflicting operation is currently in progress against this resource. Please try again."}},
 
 		// Availability.
 		{domain.ErrInsufficientDrives, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},

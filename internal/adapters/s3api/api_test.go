@@ -553,17 +553,22 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 		{method: http.MethodPut, path: "/bkt?versioning&mfa=1"},
 		{method: http.MethodPut, path: "/bkt/k?versionId=null", body: []byte("x")},
 		{method: http.MethodPost, path: "/bkt?delete&versionId=null"},
-		{method: http.MethodGet, path: "/bkt?uploads"},
+		{method: http.MethodGet, path: "/bkt?uploads&acl"},
 		{method: http.MethodGet, path: "/bkt"}, // ListObjects version 1
 		{method: http.MethodGet, path: "/bkt/k?tagging"},
-		{method: http.MethodPut, path: "/bkt/k?partNumber=1&uploadId=u"},
-		{method: http.MethodDelete, path: "/bkt/k?uploadId=u"},
+		{method: http.MethodPut, path: "/bkt/k?partNumber=1&uploadId=u&tagging"},
+		{method: http.MethodDelete, path: "/bkt/k?uploadId=u&versionId=null"},
+		{method: http.MethodGet, path: "/bkt/k?partNumber=1"},
 		{method: http.MethodPut, path: "/bkt/copy", headers: map[string]string{"X-Amz-Copy-Source": "/bkt/k"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("x"), payloadHash: "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD"},
 	}
 	for _, c := range notImplemented {
 		s.expectError(s.do(c), http.StatusNotImplemented, "NotImplemented")
 	}
+	// A request about an upload is about the upload, never about the
+	// object of the same key: this one deletes nothing.
+	s.expectError(s.do(call{method: http.MethodDelete, path: "/bkt/k?uploadId=u"}), http.StatusNotFound, "NoSuchUpload")
+	s.mustStatus(s.do(call{method: http.MethodHead, path: "/bkt/k"}), http.StatusOK)
 	for _, c := range []call{
 		{method: http.MethodPost, path: "/bkt/k"},
 		{method: http.MethodPost, path: "/bkt"},

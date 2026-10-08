@@ -38,6 +38,11 @@ const (
 	ActionGetObjectLegalHold  Action = "s3:GetObjectLegalHold"
 	ActionGetBucketObjectLock Action = "s3:GetBucketObjectLockConfiguration"
 	ActionPutBucketObjectLock Action = "s3:PutBucketObjectLockConfiguration"
+	// Multipart uploads. Beginning one, uploading its parts and completing
+	// it are s3:PutObject.
+	ActionAbortMultipartUpload       Action = "s3:AbortMultipartUpload"
+	ActionListMultipartUploadParts   Action = "s3:ListMultipartUploadParts"
+	ActionListBucketMultipartUploads Action = "s3:ListBucketMultipartUploads"
 	// ActionOverrideGovernance (s3:BypassGovernanceRetention) lifts a
 	// governance retention. It is granted
 	// only by a statement that names it: no wildcard includes it, so that

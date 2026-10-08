@@ -115,6 +115,10 @@ type applyResult struct {
 	// delete made.
 	stored *versionRecord
 	marker *versionRecord
+	// parts are parts of an upload that the entry removed: one that was
+	// uploaded again, those a completion did not list, those of an upload
+	// that was aborted. The proposer may remove their data.
+	parts []partRecord
 	// events describe what the entry changed; none when it was refused.
 	events []ports.Event
 	// fatal marks err as a failure to apply, as opposed to a refusal: the
@@ -192,7 +196,10 @@ func openState(path string) (*bbolt.DB, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range append([][]byte{metaBucket(), bucketsBucket(), objectsBucket(), versionsBucket(), iamBucket(), clusterBucket(), nodesBucket()}, iamBuckets()...) {
+		for _, name := range append([][]byte{
+			metaBucket(), bucketsBucket(), objectsBucket(), versionsBucket(), iamBucket(), clusterBucket(), nodesBucket(),
+			uploadsBucket(), uploadKeysBucket(), partsBucket(), extentsBucket(),
+		}, iamBuckets()...) {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -249,6 +256,36 @@ func ensureDataIndex(tx *bbolt.Tx) error {
 		if err != nil {
 			return err
 		}
+	}
+	// A state from before the index has no uploads; one that has them is
+	// counted all the same, so that this function is right whenever it runs.
+	for _, parent := range [][]byte{partsBucket(), extentsBucket()} {
+		holder := tx.Bucket(parent)
+		if holder == nil {
+			continue
+		}
+		err := holder.ForEachBucket(func(name []byte) error {
+			return holder.Bucket(name).ForEach(func(_, raw []byte) error {
+				p, err := decodePart(raw)
+				if err != nil {
+					return err
+				}
+				return addDataReference(index, p.DataID, 1)
+			})
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if holder := tx.Bucket(uploadsBucket()); holder != nil {
+		return holder.ForEachBucket(func(name []byte) error {
+			return holder.Bucket(name).ForEach(func(id, _ []byte) error {
+				if len(id) != object.IDSize {
+					return fmt.Errorf("%w: stored upload ID", domain.ErrIntegrity)
+				}
+				return addDataReference(index, object.ID(id).String(), 1)
+			})
+		})
 	}
 	return nil
 }
@@ -417,6 +454,14 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return applySetRetention(tx, *e.SetRetention, now)
 	case cmdSetLegalHold:
 		return applySetLegalHold(tx, *e.SetLegalHold, now)
+	case cmdCreateUpload:
+		return applyCreateUpload(tx, *e.CreateUpload)
+	case cmdPutPart:
+		return applyPutPart(tx, *e.PutPart)
+	case cmdCompleteUpload:
+		return applyCompleteUpload(tx, *e.CompleteUpload, now)
+	case cmdAbortUpload:
+		return applyAbortUpload(tx, *e.AbortUpload)
 	case cmdDeleteObject:
 		return applyDeleteObject(tx, *e.DeleteObject)
 	case cmdSetRoot:
@@ -479,6 +524,11 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 				return refuse(domain.ErrBucketNotEmpty, "%s", name)
 			}
 		}
+	}
+	// Uploads that were never completed go with the bucket: they are
+	// not objects, and nothing else could ever remove them.
+	if err := dropUploads(tx, name); err != nil {
+		return applyResult{}, err
 	}
 	for _, parent := range [][]byte{objectsBucket(), versionsBucket(), versionIDsBucket()} {
 		holder := tx.Bucket(parent)

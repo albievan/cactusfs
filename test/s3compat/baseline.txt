@@ -46,3 +46,6 @@ github.com/albievan/cactusfs/test/s3compat TestSuspendedVersioning
 github.com/albievan/cactusfs/test/s3compat TestObjectLockCompliance
 github.com/albievan/cactusfs/test/s3compat TestObjectLockConfiguration
 github.com/albievan/cactusfs/test/s3compat TestObjectLockGovernanceAndLegalHold
+github.com/albievan/cactusfs/test/s3compat TestAbortMultipartUpload
+github.com/albievan/cactusfs/test/s3compat TestCompleteMultipartUploadRefusals
+github.com/albievan/cactusfs/test/s3compat TestMultipartUpload

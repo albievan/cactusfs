@@ -115,7 +115,7 @@ func newClusterFixture(t *testing.T) *clusterFixture {
 		stores[i] = nodeDrive{ShardStore: drive, down: c.down[i]}
 	}
 	service, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: c.meta, Buckets: c.meta, Drives: fixed(t, c.topology, stores), Codec: porttest.NewCodec(),
+		Index: c.meta, Buckets: c.meta, Uploads: c.meta, Drives: fixed(t, c.topology, stores), Codec: porttest.NewCodec(),
 		OnHeal: c.heals.add, KMS: c.kms, Authz: c.authz, Clock: c.clock, Entropy: porttest.Entropy(),
 		Logger: slog.New(slog.DiscardHandler),
 	})

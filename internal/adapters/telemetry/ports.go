@@ -14,6 +14,7 @@ import (
 type Metadata interface {
 	ports.BucketStore
 	ports.ObjectIndex
+	ports.UploadStore
 	ports.RootCredentialStore
 	ports.TopologyStore
 }
@@ -293,6 +294,70 @@ func (m *metadata) GetRootCredential(ctx context.Context) (iam.RootCredential, e
 func (m *metadata) SetRootCredential(ctx context.Context, c iam.RootCredential) error {
 	ctx, done := m.t.call(ctx, portMetadata, "SetRootCredential")
 	err := m.next.SetRootCredential(ctx, c)
+	done(err)
+	return err
+}
+
+// ObjectParts implements ports.ObjectIndex.
+func (m *metadata) ObjectParts(ctx context.Context, bucketName string, dataID object.ID, offset int64, limit int) ([]object.Part, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "ObjectParts")
+	parts, err := m.next.ObjectParts(ctx, bucketName, dataID, offset, limit)
+	done(err)
+	return parts, err
+}
+
+// CreateUpload implements ports.UploadStore.
+func (m *metadata) CreateUpload(ctx context.Context, u object.Upload) error {
+	ctx, done := m.t.call(ctx, portMetadata, "CreateUpload")
+	err := m.next.CreateUpload(ctx, u)
+	done(err)
+	return err
+}
+
+// GetUpload implements ports.UploadStore.
+func (m *metadata) GetUpload(ctx context.Context, bucketName, key string, id object.ID) (object.Upload, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "GetUpload")
+	upload, err := m.next.GetUpload(ctx, bucketName, key, id)
+	done(err)
+	return upload, err
+}
+
+// PutPart implements ports.UploadStore.
+func (m *metadata) PutPart(ctx context.Context, bucketName, key string, id object.ID, p object.Part) (*object.Part, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "PutPart")
+	replaced, err := m.next.PutPart(ctx, bucketName, key, id, p)
+	done(err)
+	return replaced, err
+}
+
+// ListParts implements ports.UploadStore.
+func (m *metadata) ListParts(ctx context.Context, bucketName, key string, id object.ID, after, limit int) ([]object.Part, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "ListParts")
+	parts, err := m.next.ListParts(ctx, bucketName, key, id, after, limit)
+	done(err)
+	return parts, err
+}
+
+// CompleteUpload implements ports.UploadStore.
+func (m *metadata) CompleteUpload(ctx context.Context, c ports.Completion) (ports.PutResult, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "CompleteUpload")
+	result, err := m.next.CompleteUpload(ctx, c)
+	done(err)
+	return result, err
+}
+
+// AbortUpload implements ports.UploadStore.
+func (m *metadata) AbortUpload(ctx context.Context, bucketName, key string, id object.ID) ([]object.Part, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "AbortUpload")
+	parts, err := m.next.AbortUpload(ctx, bucketName, key, id)
+	done(err)
+	return parts, err
+}
+
+// ScanUploads implements ports.UploadStore.
+func (m *metadata) ScanUploads(ctx context.Context, bucketName string, start ports.UploadCursor, visit func(object.Upload) ports.ScanControl) error {
+	ctx, done := m.t.call(ctx, portMetadata, "ScanUploads")
+	err := m.next.ScanUploads(ctx, bucketName, start, visit)
 	done(err)
 	return err
 }

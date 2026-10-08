@@ -118,7 +118,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	objects, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: meta, Buckets: meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
+		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: f.clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {

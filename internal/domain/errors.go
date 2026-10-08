@@ -86,6 +86,18 @@ var (
 	// ErrLockNotConfigured means that a bucket was not created with Object
 	// Lock, or that a version has no retention to report.
 	ErrLockNotConfigured = errors.New("object lock is not configured")
+	// ErrUploadNotFound means that there is no multipart upload with the
+	// ID that was named: it never was, or it was completed or aborted.
+	ErrUploadNotFound = errors.New("no such multipart upload")
+	// ErrPartNotFound means that a completion lists a part that was not
+	// uploaded, or with another entity tag than the stored part has.
+	ErrPartNotFound = errors.New("part not found, or its entity tag does not match")
+	// ErrPartOrder means that a completion does not list its parts in
+	// ascending order of number.
+	ErrPartOrder = errors.New("parts are not listed in ascending order")
+	// ErrPartTooSmall means that a part other than the last is smaller
+	// than the minimum.
+	ErrPartTooSmall = errors.New("part is smaller than the minimum")
 	// ErrMethodNotAllowed means that what was asked cannot be done with
 	// what was named: reading a delete marker.
 	ErrMethodNotAllowed = errors.New("method not allowed")
@@ -189,6 +201,11 @@ func wireCodes() []struct {
 		{"method_not_allowed", ErrMethodNotAllowed},
 		{"invalid_bucket_state", ErrInvalidBucketState},
 		{"object_locked", ErrObjectLocked},
+		{"entity_too_large", ErrEntityTooLarge},
+		{"upload_not_found", ErrUploadNotFound},
+		{"part_not_found", ErrPartNotFound},
+		{"part_order", ErrPartOrder},
+		{"part_too_small", ErrPartTooSmall},
 		{"lock_not_configured", ErrLockNotConfigured},
 	}
 }

@@ -122,7 +122,7 @@ func newTestServer(t *testing.T, domainName string) *testServer {
 		t.Fatalf("FixedDrives: %v", err)
 	}
 	s.objects, err = app.NewObjectService(app.ObjectServiceConfig{
-		Index: s.meta, Buckets: s.meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
+		Index: s.meta, Buckets: s.meta, Uploads: s.meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: clock, Entropy: rand.Reader, Logger: logger,
 	})
 	if err != nil {

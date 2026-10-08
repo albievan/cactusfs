@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/albievan/cactusfs/test/clustertest"
 )
@@ -147,6 +148,67 @@ func TestClusterOfContainers(t *testing.T) {
 	names := c.Shell("node1", "find /data1 /data2 | grep -ci 'object\\|photos' || true")
 	if strings.TrimSpace(names) != "0" {
 		t.Errorf("a bucket or key name appears in a path on a drive: %s", names)
+	}
+
+	// A multipart upload, every step through another node: begun on one,
+	// its parts sent to two others, completed on the fourth.
+	shardFiles := func(id string) string {
+		return strings.TrimSpace(c.Shell(id, "find /data1/shards /data2/shards -type f | wc -l"))
+	}
+	created, err := c.S3("node1").CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String("photos"), Key: aws.String("dir/film")})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload through node1: %v", err)
+	}
+	film := [][]byte{randomBytes(t, 5<<20+7), randomBytes(t, 123_456)}
+	var listed []types.CompletedPart
+	for i, data := range film {
+		number := aws.Int32(1)
+		if i == 1 {
+			number = aws.Int32(2)
+		}
+		sent, err := c.S3(nodes[i+1]).UploadPart(ctx, &s3.UploadPartInput{
+			Bucket: aws.String("photos"), Key: aws.String("dir/film"), UploadId: created.UploadId, PartNumber: number, Body: bytes.NewReader(data),
+		})
+		if err != nil {
+			t.Fatalf("UploadPart %d through %s: %v", i+1, nodes[i+1], err)
+		}
+		listed = append(listed, types.CompletedPart{PartNumber: number, ETag: sent.ETag, ChecksumCRC32: sent.ChecksumCRC32})
+	}
+	// A second upload of the same key is sent and aborted: its part is
+	// stored, and then it is not.
+	aborted, err := c.S3("node3").CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String("photos"), Key: aws.String("dir/film")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.S3("node4").UploadPart(ctx, &s3.UploadPartInput{
+		Bucket: aws.String("photos"), Key: aws.String("dir/film"), UploadId: aborted.UploadId, PartNumber: aws.Int32(1), Body: bytes.NewReader(randomBytes(t, 9000)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := shardFiles("node1"), fmt.Sprint(2*len(objects)+6); got != want {
+		t.Errorf("node1 holds %s shard files with three parts in progress, want %s", got, want)
+	}
+	if _, err := c.S3("node2").AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket: aws.String("photos"), Key: aws.String("dir/film"), UploadId: aborted.UploadId,
+	}); err != nil {
+		t.Fatalf("AbortMultipartUpload through node2: %v", err)
+	}
+	if _, err := c.S3("node4").CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String("photos"), Key: aws.String("dir/film"), UploadId: created.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: listed},
+	}); err != nil {
+		t.Fatalf("CompleteMultipartUpload through node4: %v", err)
+	}
+	objects["dir/film"] = append(append([]byte{}, film[0]...), film[1]...)
+	for _, id := range nodes {
+		if got, err := c.Get(ctx, id, "photos", "dir/film"); err != nil || !bytes.Equal(got, objects["dir/film"]) {
+			t.Fatalf("Get of the multipart object through %s: %d bytes, %v", id, len(got), err)
+		}
+		// Two parts, two shards of each on every node; the aborted
+		// upload left nothing.
+		if got, want := shardFiles(id), fmt.Sprint(2*(len(objects)-1)+4); got != want {
+			t.Errorf("node %s holds %s shard files after the upload, want %s", id, got, want)
+		}
 	}
 
 	// A node is stopped as an orchestrator stops it. The cluster serves on;

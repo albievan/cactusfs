@@ -3,6 +3,7 @@ package raftmeta
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -534,7 +535,9 @@ func TestAKeyWithManyVersions(t *testing.T) {
 // reaching the date changes that; the state machine reads no clock.
 func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 	t.Parallel()
-	for seed := range uint64(4) {
+	for seed := range uint64(8) {
+		// Every other run, the locked version is one made of parts.
+		multipart := seed%2 == 1
 		f := newFSM(t)
 		random := &choices{state: seed*7919 + 1}
 		start := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
@@ -559,7 +562,33 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 		if r := apply(start, entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "vault", ObjectLock: true}}); r.err != nil {
 			t.Fatal(r.err)
 		}
-		if r := apply(start, entry{Type: cmdPutObject, PutObject: versionToRecord(locked)}); r.err != nil {
+		// owned are the IDs that belong to the locked version: its data,
+		// or, when it is made of parts, its own ID and the data of each.
+		owned := []object.ID{locked.DataID}
+		if multipart {
+			u := porttest.SampleUpload("vault", "ledger", 1)
+			u.Lock = locked.Lock
+			one, two := porttest.SamplePart(u, 1, object.MinPartSize, 0), porttest.SamplePart(u, 2, 10, 0)
+			seal := bytes.Repeat([]byte{7}, sha256.Size)
+			for _, e := range []entry{
+				{Type: cmdCreateUpload, CreateUpload: uploadToRecord(u)},
+				{Type: cmdPutPart, PutPart: &putPartCmd{Bucket: "vault", Key: "ledger", UploadID: u.ID.String(), Part: partToRecord(one)}},
+				{Type: cmdPutPart, PutPart: &putPartCmd{Bucket: "vault", Key: "ledger", UploadID: u.ID.String(), Part: partToRecord(two)}},
+				{Type: cmdCompleteUpload, CompleteUpload: &completeUploadCmd{
+					Bucket: "vault", Key: "ledger", UploadID: u.ID.String(), VersionID: locked.VersionID.String(), ETag: "e-2", ModifiedAt: start,
+					Parts: []listedPart{
+						{Number: 1, ETag: one.ETag, DataID: one.DataID.String(), Seal: seal},
+						{Number: 2, ETag: two.ETag, DataID: two.DataID.String(), Seal: seal},
+					},
+				}},
+			} {
+				if r := apply(start, e); r.err != nil {
+					t.Fatalf("%s: %v", e.Type, r.err)
+				}
+			}
+			locked.DataID = u.ID
+			owned = []object.ID{u.ID, one.DataID, two.DataID}
+		} else if r := apply(start, entry{Type: cmdPutObject, PutObject: versionToRecord(locked)}); r.err != nil {
 			t.Fatal(r.err)
 		}
 		ref := locked.VersionID.String()
@@ -583,18 +612,43 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 			if lock.Retention == nil || lock.Retention.Mode != object.Compliance || lock.Retention.Until.Before(until) {
 				t.Fatalf("seed %d: after %s the version is retained as %+v, was compliance until %v", seed, what, lock.Retention, until)
 			}
-			// Its data is still its own: referred to once, by it.
-			var references uint64
+			// Its data is still its own: every ID that belongs to it is
+			// referred to once, by it, and its parts are all there.
 			if err := f.view(func(tx *bbolt.Tx) error {
-				if raw := tx.Bucket(dataBucket()).Get(locked.DataID[:]); len(raw) == 8 {
-					references = binary.BigEndian.Uint64(raw)
+				for _, id := range owned {
+					var references uint64
+					if raw := tx.Bucket(dataBucket()).Get(id[:]); len(raw) == 8 {
+						references = binary.BigEndian.Uint64(raw)
+					}
+					if references != 1 {
+						t.Fatalf("seed %d: after %s, %s of the locked version is referred to %d times", seed, what, id, references)
+					}
+				}
+				if !multipart {
+					return nil
+				}
+				extents, err := nested(tx, extentsBucket(), "vault", false)
+				if err != nil || extents == nil {
+					t.Fatalf("seed %d: after %s the parts of the locked version are gone: %v", seed, what, err)
+				}
+				c := extents.Cursor()
+				var found []string
+				for k, raw := c.Seek(locked.DataID[:]); k != nil && bytes.HasPrefix(k, locked.DataID[:]); k, raw = c.Next() {
+					part, err := decodePart(raw)
+					if err != nil {
+						return err
+					}
+					found = append(found, part.DataID)
+				}
+				if len(found) != 2 || found[0] != owned[1].String() || found[1] != owned[2].String() || record.Parts != 2 {
+					t.Fatalf("seed %d: after %s the locked version has parts %v (says %d)", seed, what, found, record.Parts)
 				}
 				return nil
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if references != 1 || record.DataID != locked.DataID.String() {
-				t.Fatalf("seed %d: after %s the data of the locked version is referred to %d times (record names %s)", seed, what, references, record.DataID)
+			if record.DataID != locked.DataID.String() {
+				t.Fatalf("seed %d: after %s the locked version names data %s", seed, what, record.DataID)
 			}
 			return lock.Retention.Until
 		}
@@ -638,7 +692,7 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 				e = entry{Type: cmdPutObject, PutObject: versionToRecord(other)}
 			default:
 				serial++
-				e = hostile(random, serial, locked)
+				e = hostile(random, serial, locked, owned)
 			}
 			apply(stamp, e)
 			// An extension that was accepted is the new floor.
@@ -682,7 +736,7 @@ func TestNoEntryRemovesAComplianceLockedVersion(t *testing.T) {
 // hostile returns an entry as a node that means harm could propose it:
 // well-formed, of a command that exists, and saying something no honest
 // proposer says.
-func hostile(random *choices, serial uint64, locked object.Version) entry {
+func hostile(random *choices, serial uint64, locked object.Version, owned []object.ID) entry {
 	fresh := func() object.Version {
 		v := porttest.SampleVersion("vault", "ledger", 5)
 		binary.BigEndian.PutUint64(v.VersionID[:8], serial)
@@ -695,7 +749,56 @@ func hostile(random *choices, serial uint64, locked object.Version) entry {
 		return entry{Type: cmdPutObject, PutObject: record}
 	}
 	far := time.Date(9999, 12, 31, 23, 59, 59, 0, time.FixedZone("west", -10*3600))
-	switch random.IntN(16) {
+	// An upload the hostile node runs beside the locked version, under
+	// the same key, and the IDs it may put where another belongs.
+	live := porttest.SampleUpload("vault", "ledger", 77)
+	pick := func() object.ID {
+		if random.IntN(3) == 0 {
+			return fresh().DataID
+		}
+		return owned[random.IntN(len(owned))]
+	}
+	seal := bytes.Repeat([]byte{9}, sha256.Size)
+	switch random.IntN(26) {
+	case 16: // an upload under an ID that belongs to the locked version
+		u := live
+		u.ID = pick()
+		return entry{Type: cmdCreateUpload, CreateUpload: uploadToRecord(u)}
+	case 17:
+		return entry{Type: cmdCreateUpload, CreateUpload: uploadToRecord(live)}
+	case 18, 19: // a part whose data is the locked version's
+		part := porttest.SamplePart(live, 1+random.IntN(3), int64(random.IntN(20)), 0)
+		part.DataID = pick()
+		target := live.ID
+		if random.IntN(4) == 0 {
+			target = locked.DataID
+		}
+		return entry{Type: cmdPutPart, PutPart: &putPartCmd{Bucket: "vault", Key: "ledger", UploadID: target.String(), Part: partToRecord(part)}}
+	case 20, 21: // an upload completed over the locked version, or the locked version completed again
+		target := live.ID
+		if random.IntN(3) == 0 {
+			target = locked.DataID
+		}
+		part := porttest.SamplePart(live, 1, 0, 0)
+		return entry{Type: cmdCompleteUpload, CompleteUpload: &completeUploadCmd{
+			Bucket: "vault", Key: "ledger", UploadID: target.String(), VersionID: fresh().VersionID.String(), ETag: "e-1",
+			Parts: []listedPart{{Number: 1 + random.IntN(3), ETag: part.ETag, DataID: pick().String(), Seal: seal}},
+		}}
+	case 22, 23: // the locked version aborted as if it were still an upload
+		target := live.ID
+		if random.IntN(2) == 0 {
+			target = locked.DataID
+		}
+		return entry{Type: cmdAbortUpload, AbortUpload: &uploadRefCmd{Bucket: "vault", Key: "ledger", UploadID: target.String()}}
+	case 24: // a put that says it is made of the locked version's parts
+		return put(func(r *versionRecord) { r.Parts, r.DataID = 2, locked.DataID.String() })
+	case 25:
+		// A put that brings its own list of parts "it removed".
+		return put(func(r *versionRecord) {
+			for _, id := range owned {
+				r.Dropped = append(r.Dropped, partRecord{Number: 1, DataID: id.String()})
+			}
+		})
 	case 0:
 		return entry{Type: cmdDeleteBucket, DeleteBucket: &deleteBucketCmd{Name: "vault"}}
 	case 1:
@@ -782,5 +885,45 @@ func TestAnEntryOfTheFirstSchemaSaysNothingAboutTimeOrLocks(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMultipartNeedsTheSecondSchema: a binary of the first schema does not
+// know uploads. Their entries are written in the second, which it refuses to
+// apply, and never in the first, where it could not tell what it was missing.
+func TestMultipartNeedsTheSecondSchema(t *testing.T) {
+	t.Parallel()
+	u := porttest.SampleUpload("b", "k", 1)
+	for _, e := range []entry{
+		{Type: cmdCreateUpload, CreateUpload: uploadToRecord(u)},
+		{Type: cmdPutPart, PutPart: &putPartCmd{Bucket: "b", Key: "k", UploadID: u.ID.String(), Part: partToRecord(porttest.SamplePart(u, 1, 5, 0))}},
+		{Type: cmdCompleteUpload, CompleteUpload: &completeUploadCmd{Bucket: "b", Key: "k", UploadID: u.ID.String()}},
+		{Type: cmdAbortUpload, AbortUpload: &uploadRefCmd{Bucket: "b", Key: "k", UploadID: u.ID.String()}},
+	} {
+		if got := versionOf(e); got != entrySchemaTimed {
+			t.Errorf("%s is written in schema %d, want %d", e.Type, got, entrySchemaTimed)
+		}
+		old, err := encodeEntry(e, entrySchemaVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeEntry(old, entrySchemaTimed); !errors.Is(err, domain.ErrUnsupportedFormat) {
+			t.Errorf("%s in an entry of the first schema = %v, want %v", e.Type, err, domain.ErrUnsupportedFormat)
+		}
+		current, err := encodeEntry(e, entrySchemaTimed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeEntry(current, entrySchemaVersion); !errors.Is(err, domain.ErrUnsupportedFormat) {
+			t.Errorf("%s read by a binary of the first schema = %v, want %v", e.Type, err, domain.ErrUnsupportedFormat)
+		}
+		if decoded, err := decodeEntry(current, entrySchemaTimed); err != nil || decoded.Type != e.Type {
+			t.Errorf("%s does not round-trip: %v", e.Type, err)
+		}
+		// A command without its payload, or with another's, is no command.
+		bare, _ := encodeEntry(entry{Type: e.Type}, entrySchemaTimed)
+		if _, err := decodeEntry(bare, entrySchemaTimed); !errors.Is(err, domain.ErrUnsupportedFormat) {
+			t.Errorf("%s without a payload = %v", e.Type, err)
+		}
 	}
 }

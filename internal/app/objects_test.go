@@ -641,7 +641,7 @@ func TestPutWithoutEntropyFails(t *testing.T) {
 	f := newFixture(t)
 	f.createBucket(t, "b")
 	svc, err := app.NewObjectService(app.ObjectServiceConfig{
-		Index: f.meta, Buckets: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)),
+		Index: f.meta, Buckets: f.meta, Uploads: f.meta, Drives: fixed(t, f.topology, asStores(f.drives)),
 		Codec: porttest.NewCodec(), KMS: f.kms,
 		Authz: f.authz, Clock: f.clock, Entropy: iotest.ErrReader(errBoom),
 	})

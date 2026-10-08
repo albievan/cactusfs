@@ -70,6 +70,12 @@ type Objects interface {
 	SetLegalHold(ctx context.Context, principal iam.Principal, in app.LockInput, on bool) (object.Version, error)
 	Delete(ctx context.Context, principal iam.Principal, in app.DeleteInput) (app.DeleteOutput, error)
 	List(ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions) (object.ListPage, error)
+	CreateUpload(ctx context.Context, principal iam.Principal, in app.CreateUploadInput) (object.Upload, error)
+	UploadPart(ctx context.Context, principal iam.Principal, in app.UploadPartInput) (object.Part, error)
+	CompleteUpload(ctx context.Context, principal iam.Principal, in app.CompleteUploadInput) (object.Version, error)
+	AbortUpload(ctx context.Context, principal iam.Principal, in app.UploadRef) error
+	ListParts(ctx context.Context, principal iam.Principal, in app.ListPartsInput) (app.ListPartsOutput, error)
+	ListUploads(ctx context.Context, principal iam.Principal, in app.ListUploadsInput) (app.ListUploadsOutput, error)
 }
 
 // Identities resolves an access key to its secret and principal.
@@ -520,6 +526,12 @@ func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Value
 			}
 			req.operation = "GetObjectLockConfiguration"
 			return h.getObjectLockConfiguration(ctx, req)
+		case query.Has("uploads"):
+			if err := allowQuery(query, listUploadsParameters()...); err != nil {
+				return err
+			}
+			req.operation = "ListMultipartUploads"
+			return h.listMultipartUploads(ctx, req, query)
 		case query.Has("versions"):
 			if err := allowQuery(query, listVersionsParameters()...); err != nil {
 				return err
@@ -555,7 +567,57 @@ func listObjectsV2Parameters() []string {
 	return []string{"list-type", "prefix", "delimiter", "max-keys", "start-after", "continuation-token", "encoding-type", "fetch-owner"}
 }
 
+// routeUpload routes the operations of a multipart upload, which the
+// uploads and uploadId parameters select. handled is false for a request
+// that is none of them.
+func (h *Handler) routeUpload(ctx context.Context, req *request, query url.Values) (handled bool, err error) {
+	switch {
+	case query.Has("uploads"):
+		if req.Method != http.MethodPost {
+			return true, errMethodNotAllowed()
+		}
+		if err := allowQuery(query, "uploads"); err != nil {
+			return true, err
+		}
+		req.operation = "CreateMultipartUpload"
+		return true, h.createMultipartUpload(ctx, req)
+	case !query.Has("uploadId"):
+		return false, nil
+	}
+	switch req.Method {
+	case http.MethodPut:
+		if err := allowQuery(query, "uploadId", "partNumber"); err != nil {
+			return true, err
+		}
+		req.operation = "UploadPart"
+		return true, h.uploadPart(ctx, req, query)
+	case http.MethodPost:
+		if err := allowQuery(query, "uploadId"); err != nil {
+			return true, err
+		}
+		req.operation = "CompleteMultipartUpload"
+		return true, h.completeMultipartUpload(ctx, req, query)
+	case http.MethodDelete:
+		if err := allowQuery(query, "uploadId"); err != nil {
+			return true, err
+		}
+		req.operation = "AbortMultipartUpload"
+		return true, h.abortMultipartUpload(ctx, req, query)
+	case http.MethodGet:
+		if err := allowQuery(query, listPartsParameters()...); err != nil {
+			return true, err
+		}
+		req.operation = "ListParts"
+		return true, h.listParts(ctx, req, query)
+	default:
+		return true, errMethodNotAllowed()
+	}
+}
+
 func (h *Handler) routeObject(ctx context.Context, req *request, query url.Values) error {
+	if handled, err := h.routeUpload(ctx, req, query); handled {
+		return err
+	}
 	// Reading and deleting take versionId. partNumber, uploadId, tagging,
 	// the response-* overrides and the rest all select features that do
 	// not exist yet.

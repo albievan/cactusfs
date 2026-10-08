@@ -44,6 +44,10 @@ type healTarget struct {
 	key    string
 	named  bool
 	ref    object.VersionRef
+	// upload and part, when part is not zero, name a part of a multipart
+	// upload in progress instead of a version.
+	upload object.ID
+	part   int
 }
 
 // Healer repairs objects whose shards are missing, truncated or corrupt, by
@@ -51,6 +55,7 @@ type healTarget struct {
 // object degraded queue it; the scrubber checks every object in turn.
 type Healer struct {
 	index   ports.ObjectIndex
+	uploads ports.UploadStore
 	storage *shardStorage
 	logger  *slog.Logger
 	observe func(HealResult)
@@ -65,12 +70,12 @@ type Healer struct {
 	active map[healTarget]bool
 }
 
-func newHealer(index ports.ObjectIndex, storage *shardStorage, logger *slog.Logger, observe func(HealResult)) *Healer {
+func newHealer(index ports.ObjectIndex, uploads ports.UploadStore, storage *shardStorage, logger *slog.Logger, observe func(HealResult)) *Healer {
 	if observe == nil {
 		observe = func(HealResult) {}
 	}
 	return &Healer{
-		index: index, storage: storage, logger: logger, observe: observe,
+		index: index, uploads: uploads, storage: storage, logger: logger, observe: observe,
 		queue: make(chan healTarget, healQueueSize), queued: map[healTarget]bool{}, active: map[healTarget]bool{},
 	}
 }
@@ -78,7 +83,16 @@ func newHealer(index ports.ObjectIndex, storage *shardStorage, logger *slog.Logg
 // Enqueue asks for a version of an object to be healed in the background. It
 // never blocks.
 func (h *Healer) Enqueue(v object.Version) {
-	target := healTarget{bucket: v.Bucket, key: v.Key, named: true, ref: v.Ref()}
+	h.enqueue(healTarget{bucket: v.Bucket, key: v.Key, named: true, ref: v.Ref()})
+}
+
+// EnqueuePart asks for a part of a multipart upload in progress to be healed
+// in the background. It never blocks.
+func (h *Healer) EnqueuePart(bucketName, key string, uploadID object.ID, number int) {
+	h.enqueue(healTarget{bucket: bucketName, key: key, upload: uploadID, part: number})
+}
+
+func (h *Healer) enqueue(target healTarget) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.queued[target] {
@@ -138,6 +152,9 @@ func (h *Healer) heal(ctx context.Context, target healTarget, slow throttle) (He
 		delete(h.active, target)
 		h.mu.Unlock()
 	}()
+	if target.part != 0 {
+		return h.healPart(ctx, target, slow)
+	}
 
 	var version object.Version
 	var err error
@@ -157,22 +174,48 @@ func (h *Healer) heal(ctx context.Context, target healTarget, slow throttle) (He
 		return result, nil
 	}
 
-	outcome, healErr := h.storage.heal(ctx, version, slow)
-	result.Shards, result.Damaged, result.Rebuilt, result.Verified = outcome.shards, outcome.damaged, len(outcome.rebuilt), outcome.verified
-	result.Offline = outcome.offline
+	// A version made of parts is healed part by part. Every part is
+	// looked at even when one cannot be repaired: the first failure is
+	// what the heal reports.
+	type healed struct {
+		extent  object.Extent
+		rebuilt []int
+	}
+	var done []healed
+	var healErr error
+	walkErr := eachExtent(ctx, h.index, version, func(extent object.Extent) error {
+		outcome, err := h.storage.heal(ctx, extent, slow)
+		result.Shards += outcome.shards
+		result.Damaged += outcome.damaged
+		result.Rebuilt += len(outcome.rebuilt)
+		result.Verified += outcome.verified
+		result.Offline += outcome.offline
+		if len(outcome.rebuilt) > 0 {
+			done = append(done, healed{extent: extent, rebuilt: outcome.rebuilt})
+		}
+		if err != nil && healErr == nil {
+			healErr = err
+		}
+		return ctx.Err()
+	})
+	if healErr == nil {
+		healErr = walkErr
+	}
 	if healErr == nil && result.Damaged == 0 {
 		h.observe(result)
 		return result, nil
 	}
 
 	// Something was found or done. Before acting on it, see whether the
-	// version is still the object's current one: it may have been replaced
-	// or deleted while it was being checked, and its shards disappearing is
-	// then not damage.
+	// version is still there: it may have been replaced or deleted while
+	// it was being checked, and its shards disappearing is then not
+	// damage.
 	if h.replaced(ctx, version) {
 		// What was rebuilt belongs to nothing any more. Only that is
 		// removed; a shard this heal did not write is never touched.
-		h.storage.removeShards(ctx, version.DataID, version.Layout, outcome.rebuilt)
+		for _, d := range done {
+			h.storage.removeShards(ctx, d.extent.DataID, d.extent.Layout, d.rebuilt)
+		}
 		return HealResult{Bucket: bucketName, Key: key}, nil
 	}
 	if healErr != nil {
@@ -190,6 +233,86 @@ func (h *Healer) heal(ctx context.Context, target healTarget, slow throttle) (He
 		slog.Int("damaged_shards", result.Damaged), slog.Int("rebuilt_shards", result.Rebuilt))
 	h.observe(result)
 	return result, nil
+}
+
+// healPart verifies and repairs one part of a multipart upload in progress.
+// A part that is gone - replaced, or its upload completed or aborted - is
+// not an error: what became of its data is the business of whatever has it.
+func (h *Healer) healPart(ctx context.Context, target healTarget, slow throttle) (HealResult, error) {
+	result := HealResult{Bucket: target.bucket, Key: target.key}
+	if h.uploads == nil {
+		return result, nil
+	}
+	parts, err := h.uploads.ListParts(ctx, target.bucket, target.key, target.upload, target.part-1, 1)
+	if errors.Is(err, domain.ErrUploadNotFound) || errors.Is(err, domain.ErrBucketNotFound) {
+		return result, nil
+	}
+	if err != nil {
+		return result, fmt.Errorf("heal.Part: %w", err)
+	}
+	if len(parts) == 0 || parts[0].Number != target.part {
+		return result, nil
+	}
+	extent := parts[0].Extent()
+	outcome, healErr := h.storage.heal(ctx, extent, slow)
+	result.Shards, result.Damaged, result.Rebuilt, result.Verified, result.Offline = outcome.shards, outcome.damaged, len(outcome.rebuilt), outcome.verified, outcome.offline
+	if healErr == nil && result.Damaged == 0 {
+		return result, nil
+	}
+	// The part may have been sent again, or its upload aborted, while it
+	// was being checked. Then nothing refers to its data, and what was
+	// rebuilt is removed. When the index cannot say, it stays.
+	if referenced, err := h.index.IsDataReferenced(context.WithoutCancel(ctx), extent.DataID); err == nil && !referenced {
+		h.storage.removeShards(ctx, extent.DataID, extent.Layout, outcome.rebuilt)
+		return HealResult{Bucket: target.bucket, Key: target.key}, nil
+	}
+	if healErr != nil {
+		if errors.Is(healErr, domain.ErrIntegrity) {
+			result.Unrecoverable = true
+			h.logger.ErrorContext(ctx, "part of an upload is damaged beyond repair",
+				slog.String("bucket", target.bucket), slog.String("data_id", extent.DataID.String()), slog.Int("part", target.part))
+			h.observe(result)
+		}
+		return result, fmt.Errorf("heal.Part: %w", healErr)
+	}
+	h.logger.WarnContext(ctx, "part of an upload healed",
+		slog.String("bucket", target.bucket), slog.String("data_id", extent.DataID.String()), slog.Int("rebuilt_shards", result.Rebuilt))
+	h.observe(result)
+	return result, nil
+}
+
+// eachExtent calls visit for every piece of stored data of a version: the
+// version's own, or, for a version made of parts, that of each part in
+// order. A version whose parts are gone has none.
+func eachExtent(ctx context.Context, index ports.ObjectIndex, v object.Version, visit func(object.Extent) error) error {
+	if !v.Multipart() {
+		return visit(v.Extent())
+	}
+	next := 0
+	var offset int64
+	for next < v.Parts {
+		parts, err := index.ObjectParts(ctx, v.Bucket, v.DataID, offset, partPage)
+		if err != nil {
+			return err
+		}
+		if len(parts) == 0 {
+			// Its parts end before the version says they do. If the
+			// version was removed meanwhile, the caller finds that out;
+			// if not, the object cannot be read.
+			return fmt.Errorf("%w: %s has %d of %d parts", domain.ErrIntegrity, v.DataID, next, v.Parts)
+		}
+		for _, part := range parts {
+			if part.Index != next {
+				return fmt.Errorf("%w: part %d of %s is where part %d should be", domain.ErrIntegrity, part.Index+1, v.DataID, next+1)
+			}
+			if err := visit(part.Extent()); err != nil {
+				return err
+			}
+			next++
+			offset = part.Offset + part.Size
+		}
+	}
+	return nil
 }
 
 // replaced reports whether the version v is definitely gone: removed, or, for

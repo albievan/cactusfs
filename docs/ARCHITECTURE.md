@@ -269,7 +269,9 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   DeleteObjects, PutBucketVersioning, GetBucketVersioning, ListObjectVersions, and
   `versionId` on GetObject, HeadObject and DeleteObject (ADR-0008), Object Lock
   (buckets created with it, default retention, retention and legal hold of versions,
-  governance bypass; ADR-0009),
+  governance bypass; ADR-0009), multipart uploads (CreateMultipartUpload, UploadPart,
+  CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads;
+  ADR-0012, with a key per part and a sealed part list, ADR-0010),
   ListObjectsV2; SigV4 in the Authorization header and in the query string (presigned
   URLs, valid for at most seven days); signed aws-chunked uploads; literal, `UNSIGNED-PAYLOAD` and
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` payloads with CRC32, CRC32C, CRC64NVME and SHA-256

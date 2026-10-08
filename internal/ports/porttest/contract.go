@@ -351,6 +351,7 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 
 	t.Run("versions", func(t *testing.T) { versionsContract(t, open(t)) })
 	t.Run("object lock", func(t *testing.T) { lockContract(t, open(t)) })
+	t.Run("multipart uploads", func(t *testing.T) { uploadsContract(t, open) })
 
 	t.Run("topology", func(t *testing.T) {
 		store := open(t)

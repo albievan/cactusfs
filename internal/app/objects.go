@@ -22,6 +22,7 @@ import (
 type ObjectService struct {
 	index   ports.ObjectIndex
 	buckets ports.BucketStore
+	uploads ports.UploadStore
 	storage *shardStorage
 	kms     ports.KMS
 	authz   ports.Authorizer
@@ -40,6 +41,8 @@ type ObjectService struct {
 type ObjectServiceConfig struct {
 	Index   ports.ObjectIndex
 	Buckets ports.BucketStore
+	// Uploads keeps the multipart uploads in progress.
+	Uploads ports.UploadStore
 	// Drives finds the drive topology and the drives, wherever they are.
 	Drives ports.DriveSource
 	// Codec computes parity.
@@ -64,9 +67,9 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 		return nil, fmt.Errorf("app.NewObjectService: %w", err)
 	}
 	return &ObjectService{
-		index: cfg.Index, buckets: cfg.Buckets, storage: storage, kms: cfg.KMS,
+		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
-		healer: newHealer(cfg.Index, storage, cfg.Logger, cfg.OnHeal),
+		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
 
@@ -127,42 +130,11 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
 		return object.Version{}, err
 	}
-	if err := object.ValidateKey(in.Key); err != nil {
-		return object.Version{}, err
-	}
-	if err := object.ValidateUserMetadata(in.UserMetadata); err != nil {
-		return object.Version{}, err
-	}
 	if in.Size > object.MaxSize {
 		return object.Version{}, fmt.Errorf("%w: %d bytes declared", domain.ErrEntityTooLarge, in.Size)
 	}
-	// Locking a version is a permission of its own, on top of writing it.
-	if in.Lock.Retention != nil {
-		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectRetention, Resource: resource}); err != nil {
-			return object.Version{}, err
-		}
-	}
-	if in.Lock.LegalHold {
-		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectLegalHold, Resource: resource}); err != nil {
-			return object.Version{}, err
-		}
-	}
-	// Fail before any byte is written when the bucket does not exist, or
-	// cannot hold the lock that is asked for. The state machine checks
-	// again at commit, which is what makes it atomic.
-	target, err := s.buckets.GetBucket(ctx, in.Bucket)
-	if err != nil {
+	if err := s.admit(ctx, principal, resource, in.UserMetadata, in.Lock); err != nil {
 		return object.Version{}, err
-	}
-	if !in.Lock.IsZero() {
-		if !target.ObjectLock {
-			return object.Version{}, fmt.Errorf("%w: bucket %s was not created with Object Lock", domain.ErrLockNotConfigured, in.Bucket)
-		}
-		if in.Lock.Retention != nil {
-			if err := in.Lock.Retention.Validate(s.clock.Now()); err != nil {
-				return object.Version{}, err
-			}
-		}
 	}
 
 	version := object.Version{
@@ -174,88 +146,128 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if err != nil {
 		return object.Version{}, err
 	}
-
-	writer, err := s.storage.create(ctx, version.DataID)
+	err = s.write(ctx, version.DataID, stream, in.Body, in.Size, in.Verify, func(w written) (object.Extent, error) {
+		version.Size, version.ETag, version.Layout = w.size, w.etag, w.layout
+		// ... then visible, through Raft. Nothing was acknowledged before this.
+		version.ModifiedAt = s.clock.Now().UTC()
+		committed, err := s.index.PutVersion(ctx, version)
+		if err != nil {
+			return version.Extent(), err
+		}
+		// What the put removed for good has no reader any more. A version
+		// that is merely no longer current keeps its data.
+		s.discard(ctx, committed.Removed, committed.RemovedParts)
+		version = committed.Stored
+		if w.degraded {
+			// Committed on a quorum, but not on every drive: rebuild the rest.
+			s.healer.Enqueue(version)
+		}
+		return version.Extent(), nil
+	})
 	if err != nil {
 		return object.Version{}, err
 	}
-	// From here until the version is committed or definitely refused, the
+	return version, nil
+}
+
+// written is what the write path stored of one stream.
+type written struct {
+	size     int64
+	etag     string
+	layout   object.Layout
+	degraded bool
+}
+
+// write is the write path of one stream, a whole object or a part of one:
+// encrypt body with stream, write the shards under dataID and flush them to
+// stable storage on a write quorum, and only then call commit, which makes
+// them visible through Raft. Nothing is acknowledged before commit returns.
+//
+// declared is the length the client declared, or -1. verify is called once
+// the body has been read to its end and before anything becomes durable.
+// When commit fails, it returns what was written so that it can be removed.
+func (s *ObjectService) write(
+	ctx context.Context, dataID object.ID, stream *object.Stream, source io.Reader, declared int64,
+	verify func() (string, error), commit func(w written) (object.Extent, error),
+) error {
+	writer, err := s.storage.create(ctx, dataID)
+	if err != nil {
+		return err
+	}
+	// From here until the data is committed or definitely refused, the
 	// shards are unreferenced and must be kept from the collector.
-	s.storage.pin(version.DataID)
+	s.storage.pin(dataID)
 	resolved := true
 	defer func() {
 		writer.abort()
 		if resolved {
-			s.storage.unpin(version.DataID)
+			s.storage.unpin(dataID)
 		}
 	}()
 
-	body := &countingReader{reader: io.LimitReader(in.Body, object.MaxSize+1)}
+	body := &countingReader{reader: io.LimitReader(source, object.MaxSize+1)}
 	if _, err := io.Copy(writer, stream.Encrypt(body)); err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			// The transport reports a body that was cut short.
-			return object.Version{}, fmt.Errorf("%w: %w", domain.ErrIncompleteBody, err)
+			return fmt.Errorf("%w: %w", domain.ErrIncompleteBody, err)
 		}
-		return object.Version{}, err
+		return err
 	}
 	switch {
 	case body.count > object.MaxSize:
-		return object.Version{}, fmt.Errorf("%w: more than %d bytes", domain.ErrEntityTooLarge, int64(object.MaxSize))
-	case in.Size >= 0 && body.count < in.Size:
-		return object.Version{}, fmt.Errorf("%w: got %d of %d bytes", domain.ErrIncompleteBody, body.count, in.Size)
-	case in.Size >= 0 && body.count > in.Size:
-		return object.Version{}, fmt.Errorf("%w: got %d bytes, %d declared", domain.ErrInvalidArgument, body.count, in.Size)
+		return fmt.Errorf("%w: more than %d bytes", domain.ErrEntityTooLarge, int64(object.MaxSize))
+	case declared >= 0 && body.count < declared:
+		return fmt.Errorf("%w: got %d of %d bytes", domain.ErrIncompleteBody, body.count, declared)
+	case declared >= 0 && body.count > declared:
+		return fmt.Errorf("%w: got %d bytes, %d declared", domain.ErrInvalidArgument, body.count, declared)
 	}
-	version.Size = body.count
-	if in.Verify != nil {
-		if version.ETag, err = in.Verify(); err != nil {
-			return object.Version{}, err
+	w := written{size: body.count}
+	if verify != nil {
+		if w.etag, err = verify(); err != nil {
+			return err
 		}
 	}
 
 	// Durable on a write quorum of drives first ...
-	var degraded bool
-	if version.Layout, degraded, err = writer.commit(ctx); err != nil {
-		return object.Version{}, err
+	if w.layout, w.degraded, err = writer.commit(ctx); err != nil {
+		return err
 	}
-
-	// ... then visible, through Raft. Nothing was acknowledged before this.
-	version.ModifiedAt = s.clock.Now().UTC()
-	committed, err := s.index.PutVersion(ctx, version)
+	extent, err := commit(w)
 	if err != nil {
-		// Remove the shard only when the version was definitely not
+		// Remove the shards only when the data was definitely not
 		// committed. When the outcome is unknown the entry may still be
 		// applied, after a restart for example, and would then point at
-		// data that is gone; the unreferenced shard of a version that
-		// never appears is left to the collector instead.
+		// data that is gone; the unreferenced shards of data that never
+		// appears are left to the collector instead.
 		if errors.Is(err, domain.ErrOutcomeUnknown) {
 			// Stays pinned for as long as this process lives.
 			resolved = false
 		} else {
-			s.storage.remove(ctx, version.DataID, version.Layout)
+			s.storage.remove(ctx, extent.DataID, extent.Layout)
 		}
-		return object.Version{}, err
+		return err
 	}
-	// What the put removed for good has no reader any more. A version that
-	// is merely no longer current keeps its data.
-	s.discard(ctx, committed.Removed)
-	version = committed.Stored
-	if degraded {
-		// Committed on a quorum, but not on every drive: rebuild the rest.
-		s.healer.Enqueue(version)
+	return nil
+}
+
+// random returns n bytes from the service's source of randomness.
+func (s *ObjectService) random(n int) ([]byte, error) {
+	out := make([]byte, n)
+	s.entropyMu.Lock()
+	_, err := io.ReadFull(s.entropy, out)
+	s.entropyMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("read randomness: %w", err)
 	}
-	return version, nil
+	return out, nil
 }
 
 // newVersionKeys fills in the identifiers and the encryption parameters of a
 // new version and returns the stream that encrypts it.
 func (s *ObjectService) newVersionKeys(ctx context.Context, version *object.Version) (*object.Stream, error) {
-	random := make([]byte, 2*object.IDSize+object.NoncePrefixSize)
-	s.entropyMu.Lock()
-	_, err := io.ReadFull(s.entropy, random)
-	s.entropyMu.Unlock()
+	random, err := s.random(2*object.IDSize + object.NoncePrefixSize)
 	if err != nil {
-		return nil, fmt.Errorf("read randomness: %w", err)
+		return nil, err
 	}
 	copy(version.VersionID[:], random[:object.IDSize])
 	copy(version.DataID[:], random[object.IDSize:2*object.IDSize])
@@ -365,6 +377,14 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 		}
 	}
 
+	if version.Multipart() {
+		body, err := s.openParts(ctx, version, span)
+		if err != nil {
+			return GetOutput{}, err
+		}
+		return GetOutput{Version: version, Range: span, Body: body}, nil
+	}
+
 	stream, err := s.openVersionKeys(ctx, version)
 	if err != nil {
 		return GetOutput{}, err
@@ -373,7 +393,7 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 		return GetOutput{}, fmt.Errorf("%w: stored size %d does not match object size %d",
 			domain.ErrIntegrity, version.Layout.StoredSize, version.Size)
 	}
-	shard, err := s.storage.open(ctx, version)
+	shard, err := s.storage.open(ctx, version.Extent())
 	if err != nil {
 		return GetOutput{}, err
 	}
@@ -398,21 +418,18 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 	if span.Length > 0 {
 		body = io.LimitReader(plain, span.Length)
 	}
-	return GetOutput{Version: version, Range: span, Body: &objectBody{Reader: body, shards: shard, healer: s.healer}}, nil
+	return GetOutput{Version: version, Range: span, Body: &objectBody{Reader: body, shards: shard, healer: s.healer, version: version}}, nil
 }
 
 // openVersionKeys unwraps the data key of a stored version and returns the
 // stream that decrypts it.
 func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Version) (*object.Stream, error) {
 	enc := version.Encryption
-	if enc.Scheme != object.StreamSchemeV1 {
-		return nil, fmt.Errorf("%w: encryption scheme %q", domain.ErrUnsupportedFormat, enc.Scheme)
+	if enc.KeyMode != "" {
+		// The key of a version made of parts encrypts no stream.
+		return nil, fmt.Errorf("%w: key mode %q of a version that is not made of parts", domain.ErrUnsupportedFormat, enc.KeyMode)
 	}
-	if enc.KMSKeyID != s.kms.KeyID() {
-		return nil, fmt.Errorf("%w: object is encrypted under KMS key %s, this node uses %s",
-			domain.ErrKeyUnavailable, enc.KMSKeyID, s.kms.KeyID())
-	}
-	key, err := s.kms.UnwrapDataKey(ctx, enc.WrappedKey, version.DataID[:])
+	key, err := s.unwrap(ctx, enc, version.DataID[:])
 	if err != nil {
 		return nil, err
 	}
@@ -420,17 +437,31 @@ func (s *ObjectService) openVersionKeys(ctx context.Context, version object.Vers
 	return object.NewStream(key, enc.NoncePrefix, version.DataID[:], enc.SegmentSize)
 }
 
+// unwrap returns the data key that was wrapped under the given context. The
+// caller clears it.
+func (s *ObjectService) unwrap(ctx context.Context, enc object.Encryption, context []byte) ([]byte, error) {
+	if enc.Scheme != object.StreamSchemeV1 {
+		return nil, fmt.Errorf("%w: encryption scheme %q", domain.ErrUnsupportedFormat, enc.Scheme)
+	}
+	if enc.KMSKeyID != s.kms.KeyID() {
+		return nil, fmt.Errorf("%w: object is encrypted under KMS key %s, this node uses %s",
+			domain.ErrKeyUnavailable, enc.KMSKeyID, s.kms.KeyID())
+	}
+	return s.kms.UnwrapDataKey(ctx, enc.WrappedKey, context)
+}
+
 type objectBody struct {
 	io.Reader
-	shards *streamReader
-	healer *Healer
+	shards  *streamReader
+	healer  *Healer
+	version object.Version
 }
 
 // Close releases the underlying shards. A read that had to work around a
 // missing or damaged shard queues the object for healing.
 func (b *objectBody) Close() error {
 	if b.shards.Degraded() {
-		b.healer.Enqueue(b.shards.version)
+		b.healer.Enqueue(b.version)
 	}
 	return b.shards.Close()
 }
@@ -709,15 +740,23 @@ func (s *ObjectService) ListVersions(
 // the last word, and data that is still referred to, or about which the
 // index cannot be asked, is left where it is. What is left behind without a
 // reference is the collector's.
-func (s *ObjectService) discard(ctx context.Context, removed *object.Version) {
-	if removed == nil || removed.DeleteMarker {
-		return
+func (s *ObjectService) discard(ctx context.Context, removed *object.Version, parts []object.Part) {
+	if removed != nil && !removed.DeleteMarker && !removed.Multipart() {
+		s.discardData(ctx, removed.Extent())
 	}
-	referenced, err := s.index.IsDataReferenced(context.WithoutCancel(ctx), removed.DataID)
+	for _, part := range parts {
+		s.discardData(ctx, part.Extent())
+	}
+}
+
+// discardData removes stored data that nothing refers to. The index is asked
+// first; when it says otherwise, or cannot say, the data stays.
+func (s *ObjectService) discardData(ctx context.Context, extent object.Extent) {
+	referenced, err := s.index.IsDataReferenced(context.WithoutCancel(ctx), extent.DataID)
 	if err != nil || referenced {
 		return
 	}
-	s.storage.remove(ctx, removed.DataID, removed.Layout)
+	s.storage.remove(ctx, extent.DataID, extent.Layout)
 }
 
 // DeleteInput names what to delete.
@@ -775,7 +814,7 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
-	s.discard(ctx, result.Removed)
+	s.discard(ctx, result.Removed, result.RemovedParts)
 	if in.BypassGovernance && result.Removed != nil && s.auditor != nil {
 		// A retention was lifted to remove this: that is said in the trail.
 		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionOverrideGovernance, resource, audit.Succeeded, map[string]string{
