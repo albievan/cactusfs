@@ -107,6 +107,12 @@ var (
 	// ErrCustomerKeyUnexpected means that a customer key came with a
 	// request for an object that is not encrypted with one.
 	ErrCustomerKeyUnexpected = errors.New("the object is not encrypted with a customer key")
+	// ErrPreconditionFailed means that a version is not what a condition
+	// of the request says it must be.
+	ErrPreconditionFailed = errors.New("a precondition of the request does not hold")
+	// ErrNotModified means that the caller already has the version it
+	// asked for, by the conditions it sent. It is an answer, not a fault.
+	ErrNotModified = errors.New("not modified")
 	// ErrMethodNotAllowed means that what was asked cannot be done with
 	// what was named: reading a delete marker.
 	ErrMethodNotAllowed = errors.New("method not allowed")
@@ -214,6 +220,8 @@ func wireCodes() []struct {
 		{"customer_key_required", ErrCustomerKeyRequired},
 		{"customer_key_mismatch", ErrCustomerKeyMismatch},
 		{"customer_key_unexpected", ErrCustomerKeyUnexpected},
+		{"precondition_failed", ErrPreconditionFailed},
+		{"not_modified", ErrNotModified},
 		{"upload_not_found", ErrUploadNotFound},
 		{"part_not_found", ErrPartNotFound},
 		{"part_order", ErrPartOrder},

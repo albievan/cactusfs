@@ -75,6 +75,7 @@ func errorMappings() []mapping {
 		{domain.ErrCustomerKeyRequired, apiError{http.StatusBadRequest, "InvalidRequest", "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."}},
 		{domain.ErrCustomerKeyUnexpected, apiError{http.StatusBadRequest, "InvalidRequest", "The encryption parameters are not applicable to this object."}},
 		{domain.ErrCustomerKeyMismatch, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},
+		{domain.ErrPreconditionFailed, apiError{http.StatusPreconditionFailed, "PreconditionFailed", "At least one of the preconditions that you specified did not hold."}},
 		{domain.ErrUploadNotFound, apiError{http.StatusNotFound, "NoSuchUpload", "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed."}},
 		{domain.ErrPartNotFound, apiError{http.StatusBadRequest, "InvalidPart", "One or more of the specified parts could not be found. The part might not have been uploaded, or the specified entity tag or checksum might not have matched the part's."}},
 		{domain.ErrPartOrder, apiError{http.StatusBadRequest, "InvalidPartOrder", "The list of parts was not in ascending order. The parts list must be specified in order by part number."}},

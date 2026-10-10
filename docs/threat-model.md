@@ -130,7 +130,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | A handler forgets an authorization check | Every use case calls the single `ports.Authorizer`, which decides on the policies resolved at authentication; no authorization logic in handlers; default deny; explicit deny wins | **implemented** |
-| An unimplemented S3 feature is served as a different operation | Allow-list: any query parameter, `x-amz-*` header or conditional header the routed operation does not implement answers `501`; an unparseable query answers `400` | **implemented** |
+| An unimplemented S3 feature is served as a different operation | Allow-list: any query parameter or `x-amz-*` header the routed operation does not implement, and a conditional header anywhere but on a plain read of an object, answers `501`; headers that belong to a copy answer `400` on a request that is not routed to a copy; an unparseable query answers `400` | **implemented** |
+| A copy is used to read or write what the caller may not (confused deputy) | A copy is the use cases of reading and of writing in sequence, each authorized as itself against the caller's policies and the bucket's: `s3:GetObject` (or `GetObjectVersion`) on the source, `s3:PutObject` on the destination, the tag and lock permissions for what travels or is set; an SSE-C source takes its key, in signed headers, never in a query string; the destination inherits no lock and shares no data or key with the source; every `x-amz-*` header must be covered by the signature, so the holder of a presigned PUT cannot turn it into a copy | **implemented** |
 | An API key exceeds its owner | A request with a key must be allowed by the owner's policies and, when the key has one, by its inline policy too | **implemented** |
 | An administrator of users makes themselves an administrator of everything | Whoever may put users, groups, roles or policies, or make keys for an administrator, in effect holds every permission: by design, as in IAM. Of the built-in roles only `cluster-admin` can; a custom policy granting one of these grants the deployment. Every such change, and what it granted, is in the audit trail; a narrowed key cannot make keys | **accepted** |
 | Anonymous access | Only when a bucket policy explicitly grants it | M6 |
@@ -197,7 +198,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 12. **Local KMS wrap bound.** The local KMS wraps every data key under one master key
     with a random 96-bit nonce, which is safe for about 2^32 wraps. There is no key
     rotation yet; Vault Transit (milestone 4) does not have this bound.
-13. **Conditional requests** (`If-Match`, `If-None-Match`, `If-Modified-Since`,
-    `If-Unmodified-Since`) answer `501` rather than being ignored. Caching clients and
-    "create only if absent" uploads need them; they are not planned in a specific step
-    yet.
+13. **Conditional writes** (`If-None-Match: *` and `If-Match` on a PUT, "create only
+    if absent") answer `501` rather than being ignored: the condition would have to be
+    part of the Raft entry, and that is not built. Conditional *reads* are implemented
+    on GET and HEAD of an object and on the source of a copy; they are judged after
+    authorization and, for an object under a customer key, after the key was shown.

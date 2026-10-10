@@ -554,12 +554,12 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 		{method: http.MethodPut, path: "/bkt/k?versionId=null", body: []byte("x")},
 		{method: http.MethodPost, path: "/bkt?delete&versionId=null"},
 		{method: http.MethodGet, path: "/bkt?uploads&acl"},
-		{method: http.MethodGet, path: "/bkt"}, // ListObjects version 1
+		{method: http.MethodGet, path: "/bkt?marker=a&acl"}, // ListObjects version 1, with what is not
 		{method: http.MethodGet, path: "/bkt/k?tagging&acl"},
 		{method: http.MethodPut, path: "/bkt/k?partNumber=1&uploadId=u&tagging"},
 		{method: http.MethodDelete, path: "/bkt/k?uploadId=u&versionId=null"},
 		{method: http.MethodGet, path: "/bkt/k?partNumber=1"},
-		{method: http.MethodPut, path: "/bkt/copy", headers: map[string]string{"X-Amz-Copy-Source": "/bkt/k"}},
+		{method: http.MethodPut, path: "/bkt/copy", headers: map[string]string{"X-Amz-Copy-Source": "/bkt/k", "X-Amz-Website-Redirect-Location": "/x"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("x"), payloadHash: "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD"},
 	}
 	for _, c := range notImplemented {
@@ -589,12 +589,12 @@ func TestUnsupportedOperationsAreRefusedNotMisrouted(t *testing.T) {
 		{method: http.MethodGet, path: "/?max-buckets=1"},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"If-None-Match": "*"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"If-Match": `"abc"`}},
-		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-None-Match": `"abc"`}},
-		{method: http.MethodGet, path: "/bkt/k", headers: map[string]string{"If-Modified-Since": "Wed, 07 Oct 2026 12:00:00 GMT"}},
+		{method: http.MethodDelete, path: "/bkt/k", headers: map[string]string{"If-Match": `"abc"`}},
+		{method: http.MethodGet, path: "/bkt/k?tagging", headers: map[string]string{"If-None-Match": `"abc"`}},
+		{method: http.MethodGet, path: "/bkt?list-type=2", headers: map[string]string{"If-Modified-Since": "Wed, 07 Oct 2026 12:00:00 GMT"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Website-Redirect-Location": "/elsewhere"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption": "aws:kms:dsse"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Server-Side-Encryption-Bucket-Key-Enabled": "true"}},
-		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Tagging-Directive": "REPLACE"}},
 		{method: http.MethodDelete, path: "/bkt/k", headers: map[string]string{"X-Amz-Tagging": "a=b"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Acl": "public-read"}},
 		{method: http.MethodPut, path: "/bkt/k", body: []byte("y"), headers: map[string]string{"X-Amz-Storage-Class": "GLACIER"}},

@@ -56,3 +56,7 @@ github.com/albievan/cactusfs/test/s3compat TestBucketCors
 github.com/albievan/cactusfs/test/s3compat TestBucketPolicyPublicRead
 github.com/albievan/cactusfs/test/s3compat TestTagging
 github.com/albievan/cactusfs/test/s3compat TestBucketLifecycleConfiguration
+github.com/albievan/cactusfs/test/s3compat TestConditionalGet
+github.com/albievan/cactusfs/test/s3compat TestCopyObject
+github.com/albievan/cactusfs/test/s3compat TestListObjectsV1
+github.com/albievan/cactusfs/test/s3compat TestUploadPartCopy

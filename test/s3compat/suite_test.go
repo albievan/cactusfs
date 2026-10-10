@@ -4,6 +4,7 @@ package s3compat_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1547,5 +1548,140 @@ func TestBucketLifecycleConfiguration(t *testing.T) {
 	}
 	if _, err := c.GetBucketLifecycleConfiguration(t.Context(), &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchLifecycleConfiguration" {
 		t.Errorf("after removal: code %q (%v)", errorCode(err), err)
+	}
+}
+
+func TestCopyObject(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	data := randomBytes(t, 150_000)
+	if _, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("dir/source file"), Body: bytes.NewReader(data),
+		ContentType: aws.String("image/png"), Metadata: map[string]string{"owner": "albie"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := aws.String(name + "/dir/source%20file")
+	out, err := c.CopyObject(t.Context(), &s3.CopyObjectInput{Bucket: aws.String(name), Key: aws.String("copy"), CopySource: source})
+	if err != nil || out.CopyObjectResult == nil || aws.ToString(out.CopyObjectResult.ETag) == "" {
+		t.Fatalf("CopyObject = %+v, %v", out, err)
+	}
+	got, head := get(t, name, "copy")
+	if !bytes.Equal(got, data) || aws.ToString(head.ContentType) != "image/png" || head.Metadata["owner"] != "albie" ||
+		aws.ToString(head.ETag) != aws.ToString(out.CopyObjectResult.ETag) {
+		t.Errorf("the copy: %d bytes, type %s, metadata %v", len(got), aws.ToString(head.ContentType), head.Metadata)
+	}
+	if _, err := c.CopyObject(t.Context(), &s3.CopyObjectInput{
+		Bucket: aws.String(name), Key: aws.String("replaced"), CopySource: source,
+		MetadataDirective: types.MetadataDirectiveReplace, ContentType: aws.String("text/plain"), Metadata: map[string]string{"stage": "final"},
+	}); err != nil {
+		t.Fatalf("CopyObject with REPLACE: %v", err)
+	}
+	if _, head := get(t, name, "replaced"); aws.ToString(head.ContentType) != "text/plain" || head.Metadata["stage"] != "final" || head.Metadata["owner"] != "" {
+		t.Errorf("the copy with replaced metadata: type %s, metadata %v", aws.ToString(head.ContentType), head.Metadata)
+	}
+	_, err = c.CopyObject(t.Context(), &s3.CopyObjectInput{
+		Bucket: aws.String(name), Key: aws.String("never"), CopySource: source, CopySourceIfMatch: aws.String(`"0123456789abcdef0123456789abcdef"`),
+	})
+	if errorCode(err) != "PreconditionFailed" {
+		t.Errorf("CopyObject whose condition fails: code %q (%v)", errorCode(err), err)
+	}
+	if _, err := c.CopyObject(t.Context(), &s3.CopyObjectInput{Bucket: aws.String(name), Key: aws.String("never"), CopySource: aws.String(name + "/missing")}); errorCode(err) != "NoSuchKey" {
+		t.Errorf("CopyObject of a missing source: code %q (%v)", errorCode(err), err)
+	}
+}
+
+func TestUploadPartCopy(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	data := randomBytes(t, minPart+5000)
+	put(t, name, "source", data)
+	created, err := c.CreateMultipartUpload(t.Context(), &s3.CreateMultipartUploadInput{Bucket: aws.String(name), Key: aws.String("assembled")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parts []types.CompletedPart
+	var number int32
+	for _, span := range []string{fmt.Sprintf("bytes=0-%d", minPart-1), fmt.Sprintf("bytes=%d-%d", minPart, minPart+4999)} {
+		number++
+		out, err := c.UploadPartCopy(t.Context(), &s3.UploadPartCopyInput{
+			Bucket: aws.String(name), Key: aws.String("assembled"), UploadId: created.UploadId, PartNumber: aws.Int32(number),
+			CopySource: aws.String(name + "/source"), CopySourceRange: aws.String(span),
+		})
+		if err != nil || out.CopyPartResult == nil {
+			t.Fatalf("UploadPartCopy %d: %v", number, err)
+		}
+		parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(number), ETag: out.CopyPartResult.ETag})
+	}
+	if _, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("assembled"), UploadId: created.UploadId, MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	}); err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	if got, _ := get(t, name, "assembled"); !bytes.Equal(got, data) {
+		t.Errorf("the object assembled from copied parts is %d bytes", len(got))
+	}
+}
+
+func TestConditionalGet(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	etag := aws.ToString(put(t, name, "k", []byte("hello")).ETag)
+	if etag != helloETag {
+		t.Fatalf("ETag = %s", etag)
+	}
+	status := func(err error) int {
+		var failed interface{ HTTPStatusCode() int }
+		if errors.As(err, &failed) {
+			return failed.HTTPStatusCode()
+		}
+		return 0
+	}
+	_, err := c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("k"), IfNoneMatch: aws.String(etag)})
+	if status(err) != http.StatusNotModified {
+		t.Errorf("GetObject with If-None-Match of its own tag: %v", err)
+	}
+	_, err = c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("k"), IfMatch: aws.String(`"another"`)})
+	if errorCode(err) != "PreconditionFailed" {
+		t.Errorf("GetObject with If-Match of another tag: code %q (%v)", errorCode(err), err)
+	}
+	out, err := c.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("k"), IfMatch: aws.String(etag)})
+	if err != nil {
+		t.Fatalf("GetObject with If-Match of its own tag: %v", err)
+	}
+	_ = out.Body.Close()
+	_, err = c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("k"), IfModifiedSince: aws.Time(time.Now().Add(time.Hour))})
+	if status(err) != http.StatusNotModified {
+		t.Errorf("HeadObject with If-Modified-Since in the future: %v", err)
+	}
+}
+
+func TestListObjectsV1(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	for _, key := range []string{"a", "b", "dir/1", "dir/2", "e"} {
+		put(t, name, key, []byte(key))
+	}
+	var seen []string
+	var marker *string
+	for range 10 {
+		page, err := c.ListObjects(t.Context(), &s3.ListObjectsInput{Bucket: aws.String(name), Delimiter: aws.String("/"), MaxKeys: aws.Int32(2), Marker: marker})
+		if err != nil {
+			t.Fatalf("ListObjects: %v", err)
+		}
+		for _, entry := range page.Contents {
+			seen = append(seen, aws.ToString(entry.Key))
+		}
+		for _, prefix := range page.CommonPrefixes {
+			seen = append(seen, aws.ToString(prefix.Prefix))
+		}
+		if !aws.ToBool(page.IsTruncated) {
+			break
+		}
+		marker = page.NextMarker
+	}
+	slices.Sort(seen)
+	if !slices.Equal(seen, []string{"a", "b", "dir/", "e"}) {
+		t.Errorf("ListObjects, page by page, listed %v", seen)
 	}
 }

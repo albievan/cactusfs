@@ -447,6 +447,19 @@ type GetInput struct {
 	Version *object.VersionRef
 	// CustomerKey is the client's key, for an object under SSE-C.
 	CustomerKey []byte
+	// Conditions are what the version must be for it to be served.
+	Conditions object.Conditions
+	// Source says that the object is read to be copied: a condition that
+	// would answer "not modified" to a reader fails the copy instead.
+	Source bool
+}
+
+// conditions judges a version against the conditions of a request.
+func (in GetInput) conditions(version object.Version) error {
+	if in.Conditions.IsZero() {
+		return nil
+	}
+	return in.Conditions.Check(version.ETag, version.ModifiedAt, !in.Source)
 }
 
 // Stat returns the metadata of an object as Get would serve it: for an
@@ -474,6 +487,13 @@ func (s *ObjectService) Stat(ctx context.Context, principal iam.Principal, in Ge
 		}
 		clear(key)
 	}
+	// Judged last: what a condition says about an object is said to
+	// those who may read it, and for SSE-C that takes the key.
+	if err := in.conditions(version); err != nil {
+		// The version is returned with the verdict: "not modified" is
+		// answered with its entity tag.
+		return version, fmt.Errorf("object.Stat: %w", err)
+	}
 	return version, nil
 }
 
@@ -495,7 +515,9 @@ type GetOutput struct {
 func (s *ObjectService) Get(ctx context.Context, principal iam.Principal, in GetInput) (GetOutput, error) {
 	out, err := s.get(ctx, principal, in)
 	if err != nil {
-		return GetOutput{}, fmt.Errorf("object.Get: %w", err)
+		// With a verdict on a condition comes the version it was about,
+		// and nothing to read.
+		return GetOutput{Version: out.Version}, fmt.Errorf("object.Get: %w", err)
 	}
 	return out, nil
 }
@@ -511,6 +533,18 @@ func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in Get
 		if err != nil {
 			return GetOutput{}, err
 		}
+		// Conditions first, where they can be: a caller that already
+		// has the version is told so, whatever range it asked for. For
+		// an object under a customer key the verdict waits until the
+		// key was shown, which opening does.
+		if version.Encryption.Mode != object.SSEC {
+			if err := admitKey(version.Encryption, in.CustomerKey); err != nil {
+				return GetOutput{}, err
+			}
+			if failed := in.conditions(version); failed != nil {
+				return GetOutput{Version: version}, failed
+			}
+		}
 		out, err := s.open(ctx, version, in)
 		// A concurrent overwrite or delete removes the replaced shards
 		// right after its commit. A reader that fetched the old version
@@ -522,6 +556,14 @@ func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in Get
 		if gone && attempt < getAttempts && version.DataID != lastData {
 			lastData = version.DataID
 			continue
+		}
+		if err == nil {
+			// Judged once the object is known to be readable by this
+			// caller - with the right key, for SSE-C.
+			if failed := in.conditions(version); failed != nil && version.Encryption.Mode == object.SSEC {
+				_ = out.Body.Close()
+				return GetOutput{Version: version}, failed
+			}
 		}
 		return out, err
 	}
@@ -1105,4 +1147,129 @@ func (s *ObjectService) tagTarget(ctx context.Context, principal iam.Principal, 
 		return object.Version{}, fmt.Errorf("%w: version %s of %s/%s is a delete marker", domain.ErrMethodNotAllowed, in.Version, in.Bucket, in.Key)
 	}
 	return version, nil
+}
+
+// CopyInput describes a copy: an object that is read, and the object its
+// bytes become.
+type CopyInput struct {
+	// Source names what is read, with the customer key and the
+	// conditions that reading takes. Its Range, when set, copies part.
+	Source GetInput
+	// Destination describes the new object: where it goes, its lock and
+	// encryption, and - when ReplaceMetadata is set - its metadata. Its
+	// Body, Size and Verify are not used.
+	Destination PutInput
+	// ReplaceMetadata gives the copy the metadata of Destination instead
+	// of the source's; ReplaceTags does the same for tags.
+	ReplaceMetadata bool
+	ReplaceTags     bool
+	// Digest wraps the bytes on their way and returns what yields the
+	// entity tag once they have all passed. The inbound adapter supplies
+	// it, because what an entity tag is, is protocol.
+	Digest func(body io.Reader) (io.Reader, func() (string, error))
+}
+
+// CopyOutput is a copy that was made.
+type CopyOutput struct {
+	Source  object.Version
+	Version object.Version
+}
+
+// Copy stores the bytes of one object as another: the source is read as any
+// reader reads it - decrypted and verified - and written as any writer
+// writes it, under keys of its own. Reading the source and writing the
+// destination are each authorized as what they are.
+func (s *ObjectService) Copy(ctx context.Context, principal iam.Principal, in CopyInput) (CopyOutput, error) {
+	if in.Digest == nil {
+		return CopyOutput{}, fmt.Errorf("object.Copy: %w: no digest for the copy", domain.ErrInvalidArgument)
+	}
+	out, err := s.copySource(ctx, principal, in)
+	if err != nil {
+		return CopyOutput{}, fmt.Errorf("object.Copy: %w", err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	source, dest := out.Version, in.Destination
+	if !in.ReplaceMetadata {
+		dest.ContentType, dest.ContentEncoding, dest.ContentDisposition = source.ContentType, source.ContentEncoding, source.ContentDisposition
+		dest.ContentLanguage, dest.CacheControl, dest.UserMetadata = source.ContentLanguage, source.CacheControl, source.UserMetadata
+	}
+	if !in.ReplaceTags {
+		dest.Tags = source.Tags
+	}
+	same := in.Source.Bucket == dest.Bucket && in.Source.Key == dest.Key && in.Source.Version == nil && in.Source.Range == nil
+	// Another mode of encryption is a change; so is a customer key, which
+	// may be another than the source's - that is how one is rotated - and
+	// an encryption context.
+	rekeyed := dest.SSE.Mode != source.Encryption.Mode || dest.SSE.Mode == object.SSEC || len(dest.SSE.Context) > 0
+	if same && !in.ReplaceMetadata && !in.ReplaceTags && !rekeyed && dest.Lock.IsZero() {
+		return CopyOutput{}, fmt.Errorf("object.Copy: %w: an object is copied onto itself only to change something about it", domain.ErrInvalidArgument)
+	}
+	body, verify := in.Digest(out.Body)
+	dest.Body, dest.Size, dest.Verify = body, out.Range.Length, verify
+	version, err := s.put(ctx, principal, dest)
+	if err != nil {
+		return CopyOutput{}, fmt.Errorf("object.Copy: %w", err)
+	}
+	return CopyOutput{Source: source, Version: version}, nil
+}
+
+// copySource opens what a copy reads. Tags that travel with the copy are
+// read with the permission to read tags.
+func (s *ObjectService) copySource(ctx context.Context, principal iam.Principal, in CopyInput) (GetOutput, error) {
+	source := in.Source
+	source.Source = true
+	out, err := s.get(ctx, principal, source)
+	if err != nil {
+		return GetOutput{}, err
+	}
+	if len(out.Version.Tags) > 0 && !in.ReplaceTags {
+		resource := iam.Resource{Bucket: source.Bucket, Key: source.Key}
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionGetObjectTagging, Resource: resource}); err != nil {
+			_ = out.Body.Close()
+			return GetOutput{}, err
+		}
+	}
+	return out, nil
+}
+
+// CopyPartInput is a part of a multipart upload whose bytes are those of an
+// object, or of a range of one.
+type CopyPartInput struct {
+	Source GetInput
+	Part   UploadPartInput
+	// Digest is as in CopyInput.
+	Digest func(body io.Reader) (io.Reader, func() (string, error))
+}
+
+// CopyPart stores a range of an object as a part of a multipart upload.
+func (s *ObjectService) CopyPart(ctx context.Context, principal iam.Principal, in CopyPartInput) (object.Part, error) {
+	if in.Digest == nil {
+		return object.Part{}, fmt.Errorf("object.CopyPart: %w: no digest for the copy", domain.ErrInvalidArgument)
+	}
+	source := in.Source
+	source.Source = true
+	out, err := s.get(ctx, principal, source)
+	if errors.Is(err, domain.ErrInvalidRange) {
+		// To a reader a range outside the object cannot be satisfied; to
+		// a copy it is a wrong argument.
+		return object.Part{}, fmt.Errorf("object.CopyPart: %w: the range is outside the source", domain.ErrInvalidArgument)
+	}
+	if err != nil {
+		return object.Part{}, fmt.Errorf("object.CopyPart: %w", err)
+	}
+	defer func() { _ = out.Body.Close() }()
+	// A reader that asks for more than there is gets what there is. A
+	// part that is shorter than was asked for, without a word, is an
+	// object that is not what its author assembled.
+	if r := source.Range; r != nil && r.Suffix == 0 && r.Last >= out.Version.Size {
+		return object.Part{}, fmt.Errorf("object.CopyPart: %w: the range ends after the %d bytes of the source", domain.ErrInvalidArgument, out.Version.Size)
+	}
+	part := in.Part
+	part.Body, part.Verify = in.Digest(out.Body)
+	part.Size, part.Checksums = out.Range.Length, nil
+	stored, err := s.uploadPart(ctx, principal, part)
+	if err != nil {
+		return object.Part{}, fmt.Errorf("object.CopyPart: %w", err)
+	}
+	return stored, nil
 }

@@ -97,8 +97,9 @@ was at work.
   hold no objects; uploads in progress are not objects, and clients and test suites
   delete buckets that have them. Their parts are dropped in the same entry.
 - **Uploads of one key are listed in order of upload ID**, not of the time they began.
-- **`UploadPartCopy`, and reading by `partNumber`, answer 501.** UploadPartCopy comes
-  with CopyObject (PLAN 6.9).
+- **Reading by `partNumber` answers 501.** `UploadPartCopy` came with CopyObject
+  (PLAN 6.9): the range of the source is read as a reader reads it and stored as a
+  part is.
 - **The lock headers are read when the upload begins and refused on its other
   requests**, where S3 ignores them.
 - **`CompleteMultipartUpload` must have a body its signature covers**, like every

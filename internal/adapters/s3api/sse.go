@@ -38,9 +38,20 @@ func managedSSEHeaders() []string {
 	return []string{headerSSE, headerSSEKMSKey, headerSSEContext, headerSSEBucketKey}
 }
 
-// customerSSEHeaders carry a key the client holds.
+// customerSSEHeaders carry a key the client holds: its algorithm, the key,
+// and the digest of the key, in that order.
 func customerSSEHeaders() []string {
 	return []string{headerSSECAlgo, headerSSECKey, headerSSECKeyMD5}
+}
+
+// copySourceSSEHeaders carry the customer key of the object a copy reads, in
+// the same order.
+func copySourceSSEHeaders() []string {
+	return []string{
+		"x-amz-copy-source-server-side-encryption-customer-algorithm",
+		"x-amz-copy-source-server-side-encryption-customer-key",
+		"x-amz-copy-source-server-side-encryption-customer-key-md5",
+	}
 }
 
 // allowSSEHeaders refuses the encryption headers on a request that does not
@@ -96,8 +107,14 @@ func oneValue(header http.Header, name string, read bool) error {
 // digest that came with it. A key is only taken from a request that arrived
 // over TLS: anywhere else it has already been disclosed.
 func customerKeyOf(r *http.Request) (key []byte, digest string, err error) {
+	return customerKeyFrom(r, customerSSEHeaders())
+}
+
+// customerKeyFrom reads a customer key from the three headers named:
+// algorithm, key, digest of the key.
+func customerKeyFrom(r *http.Request, names []string) (key []byte, digest string, err error) {
 	present := 0
-	for _, name := range customerSSEHeaders() {
+	for _, name := range names {
 		switch values := r.Header.Values(name); {
 		case len(values) == 1 && values[0] != "":
 			present++
@@ -108,10 +125,10 @@ func customerKeyOf(r *http.Request) (key []byte, digest string, err error) {
 	if present == 0 {
 		return nil, "", nil
 	}
-	if present != len(customerSSEHeaders()) {
+	if present != len(names) {
 		return nil, "", fmt.Errorf("%w: a customer key needs each of its three headers", domain.ErrInvalidArgument)
 	}
-	algorithm, rawKey, rawDigest := r.Header.Get(headerSSECAlgo), r.Header.Get(headerSSECKey), r.Header.Get(headerSSECKeyMD5)
+	algorithm, rawKey, rawDigest := r.Header.Get(names[0]), r.Header.Get(names[1]), r.Header.Get(names[2])
 	if r.TLS == nil {
 		return nil, "", errCustomerKeyInTheClear()
 	}

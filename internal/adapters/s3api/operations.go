@@ -3,6 +3,7 @@ package s3api
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -250,10 +251,19 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 		return err
 	}
 	defer clear(customerKey)
+	conditions, err := conditionsOf(req.Header, "If-")
+	if err != nil {
+		return err
+	}
 	in := app.GetInput{
 		Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range")), Version: req.version, CustomerKey: customerKey,
+		Conditions: conditions,
 	}
 	out, err := h.cfg.Objects.Get(ctx, req.principal, in)
+	if errors.Is(err, domain.ErrNotModified) {
+		notModified(req, out.Version)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -290,9 +300,17 @@ func (h *Handler) headObject(ctx context.Context, req *request) error {
 		return err
 	}
 	defer clear(customerKey)
+	conditions, err := conditionsOf(req.Header, "If-")
+	if err != nil {
+		return err
+	}
 	version, err := h.cfg.Objects.Stat(ctx, req.principal, app.GetInput{
-		Bucket: req.bucket, Key: req.key, Version: req.version, CustomerKey: customerKey,
+		Bucket: req.bucket, Key: req.key, Version: req.version, CustomerKey: customerKey, Conditions: conditions,
 	})
+	if errors.Is(err, domain.ErrNotModified) {
+		notModified(req, version)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

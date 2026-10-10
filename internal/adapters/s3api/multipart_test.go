@@ -244,7 +244,6 @@ func TestMultipartRequestsThatAreNotServed(t *testing.T) {
 		"a part number that is none":     {call{method: http.MethodPut, path: base + "&partNumber=one", body: []byte("x")}, 400, "InvalidArgument"},
 		"part number zero":               {call{method: http.MethodPut, path: base + "&partNumber=0", body: []byte("x")}, 400, "InvalidArgument"},
 		"part number 10001":              {call{method: http.MethodPut, path: base + "&partNumber=10001", body: []byte("x")}, 400, "InvalidArgument"},
-		"a copy as a part":               {call{method: http.MethodPut, path: base + "&partNumber=2", headers: map[string]string{"x-amz-copy-source": "/media/k"}}, 501, "NotImplemented"},
 		"a lock said with a part": {call{
 			method: http.MethodPut, path: base + "&partNumber=2", body: []byte("x"),
 			headers: map[string]string{headerLockLegalHold: "ON"},

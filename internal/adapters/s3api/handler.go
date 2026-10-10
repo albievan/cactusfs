@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -71,6 +72,8 @@ type Objects interface {
 	Put(ctx context.Context, principal iam.Principal, in app.PutInput) (object.Version, error)
 	Get(ctx context.Context, principal iam.Principal, in app.GetInput) (app.GetOutput, error)
 	Stat(ctx context.Context, principal iam.Principal, in app.GetInput) (object.Version, error)
+	Copy(ctx context.Context, principal iam.Principal, in app.CopyInput) (app.CopyOutput, error)
+	CopyPart(ctx context.Context, principal iam.Principal, in app.CopyPartInput) (object.Part, error)
 	ListVersions(ctx context.Context, principal iam.Principal, bucketName string, opts app.VersionListOptions) (app.VersionListPage, error)
 	Retention(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Retention, error)
 	SetRetention(ctx context.Context, principal iam.Principal, in app.LockInput, retention *object.Retention, bypassGovernance bool) (object.Version, error)
@@ -365,7 +368,7 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 				return fmt.Errorf("%w: %s is given more than once", errAuthQuery, name)
 			}
 			// A key in a URL is in every log the URL passes through.
-			if strings.EqualFold(name, headerSSECKey) {
+			if strings.EqualFold(name, headerSSECKey) || strings.EqualFold(name, copySourceSSEHeaders()[1]) {
 				return fmt.Errorf("%w: a customer key is not accepted in a query string", errAuthQuery)
 			}
 			req.Header.Set(name, values[0])
@@ -422,9 +425,10 @@ func allowQuery(query url.Values, allowed ...string) error {
 	return nil
 }
 
-// Request headers that change what an operation means and that this adapter
-// does not implement yet.
-func unsupportedConditionals() []string {
+// conditionalHeaders are the conditions HTTP lets a request put on what it
+// is about. They are read on GET and HEAD of an object; on a write they ask
+// for a conditional write, which is not implemented.
+func conditionalHeaders() []string {
 	return []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"}
 }
 
@@ -443,11 +447,6 @@ func knownAmzHeaders() []string {
 // A client that sets "If-None-Match: *" to avoid overwriting, or an object
 // lock header to protect a version, must not be told that it worked.
 func allowHeaders(header http.Header) error {
-	for _, name := range unsupportedConditionals() {
-		if header.Get(name) != "" {
-			return errNotImplemented()
-		}
-	}
 	for name, values := range header {
 		lower := strings.ToLower(name)
 		if !strings.HasPrefix(lower, "x-amz-") {
@@ -456,6 +455,8 @@ func allowHeaders(header http.Header) error {
 		switch {
 		case slices.Contains(knownAmzHeaders(), lower), slices.Contains(lockHeaders(), lower):
 		case strings.HasPrefix(lower, "x-amz-meta-"), strings.HasPrefix(lower, checksumHeaderPrefix):
+		case slices.Contains(copyHeaders(), lower):
+			// Read by the copy operations; refused elsewhere, in route.
 		case lower == headerTagging:
 			// Read by PutObject; refused elsewhere, in route.
 		case isSSEHeader(lower):
@@ -480,6 +481,34 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 	}
 	if err := allowSSEHeaders(req, query); err != nil {
 		return err
+	}
+	// Conditions are read where an object is read, and nowhere else: a
+	// client that says "If-None-Match: *" to keep from overwriting must
+	// not be told that it worked.
+	plain := true
+	for name := range query {
+		plain = plain && (name == queryClientInfo || name == "versionId")
+	}
+	reads := req.key != "" && plain && (req.Method == http.MethodGet || req.Method == http.MethodHead)
+	for _, name := range conditionalHeaders() {
+		if len(req.Header.Values(name)) > 0 && !reads {
+			return errNotImplemented()
+		}
+	}
+	// And what belongs to a copy comes with a copy: a PUT of an object
+	// or of a part that names a source.
+	// - and nothing else: a PUT of tags or of a retention that names a
+	// source is not a copy, and would ignore it.
+	part := query.Has("uploadId") && query.Has("partNumber")
+	for name := range query {
+		part = part && (name == queryClientInfo || name == "uploadId" || name == "partNumber")
+	}
+	onlyInfo := len(query) == 0 || (len(query) == 1 && query.Has(queryClientInfo))
+	copies := req.Method == http.MethodPut && req.key != "" && (onlyInfo || part) && len(req.Header.Values(headerCopySource)) > 0
+	for _, name := range copyHeaders() {
+		if len(req.Header.Values(name)) > 0 && !copies {
+			return fmt.Errorf("%w: %s is not part of this operation", domain.ErrInvalidArgument, name)
+		}
 	}
 	// Tags come with the request that creates an object, and no other.
 	selects := len(query)
@@ -595,8 +624,13 @@ func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Value
 			req.operation = "ListObjectsV2"
 			return h.listObjectsV2(ctx, req)
 		default:
-			// ListObjects version 1, or a sub-resource.
-			return errNotImplemented()
+			// ListObjects version 1 - or a sub-resource this adapter
+			// does not know, which the allow-list refuses.
+			if err := allowQuery(query, listObjectsV1Parameters()...); err != nil {
+				return err
+			}
+			req.operation = "ListObjects"
+			return h.listObjectsV1(ctx, req, query)
 		}
 	default:
 		// POST ?delete and the like: a feature, not a wrong method.
@@ -632,6 +666,10 @@ func (h *Handler) routeUpload(ctx context.Context, req *request, query url.Value
 	case http.MethodPut:
 		if err := allowQuery(query, "uploadId", "partNumber"); err != nil {
 			return true, err
+		}
+		if len(req.Header.Values(headerCopySource)) > 0 {
+			req.operation = "UploadPartCopy"
+			return true, h.uploadPartCopy(ctx, req, query)
 		}
 		req.operation = "UploadPart"
 		return true, h.uploadPart(ctx, req, query)
@@ -714,6 +752,10 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 	}
 	switch req.Method {
 	case http.MethodPut:
+		if len(req.Header.Values(headerCopySource)) > 0 {
+			req.operation = "CopyObject"
+			return h.copyObject(ctx, req)
+		}
 		req.operation = "PutObject"
 		return h.putObject(ctx, req)
 	case http.MethodGet:

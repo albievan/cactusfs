@@ -275,7 +275,10 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   ADR-0012, with a key per part and a sealed part list, ADR-0010), SSE-S3, SSE-KMS with
   an encryption context and SSE-C (ADR-0010), bucket policies with anonymous read access,
   CORS rules with unauthenticated preflight, tags of buckets and objects (ADR-0011),
-  lifecycle rules carried out by the node that leads (ADR-0013),
+  lifecycle rules carried out by the node that leads (ADR-0013), CopyObject and
+  UploadPartCopy (the source is read and the destination written as any reader and
+  writer would, under keys of its own), ListObjects version 1, and the conditional
+  headers on GET, HEAD and the source of a copy,
   ListObjectsV2; SigV4 in the Authorization header and in the query string (presigned
   URLs, valid for at most seven days); signed aws-chunked uploads; literal, `UNSIGNED-PAYLOAD` and
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` payloads with CRC32, CRC32C, CRC64NVME and SHA-256
