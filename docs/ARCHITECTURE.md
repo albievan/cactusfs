@@ -126,6 +126,7 @@ matching flag, and the flag wins.
 | `--tls-key` | `CACTUSFS_TLS_KEY` | — | PEM private key |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
 | `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
+| `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between passes of the worker that carries out lifecycle rules; `0` disables it |
 | `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | scrub read limit in MiB/s; `0` is no limit |
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
 | `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`) |
@@ -274,6 +275,7 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   ADR-0012, with a key per part and a sealed part list, ADR-0010), SSE-S3, SSE-KMS with
   an encryption context and SSE-C (ADR-0010), bucket policies with anonymous read access,
   CORS rules with unauthenticated preflight, tags of buckets and objects (ADR-0011),
+  lifecycle rules carried out by the node that leads (ADR-0013),
   ListObjectsV2; SigV4 in the Authorization header and in the query string (presigned
   URLs, valid for at most seven days); signed aws-chunked uploads; literal, `UNSIGNED-PAYLOAD` and
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` payloads with CRC32, CRC32C, CRC64NVME and SHA-256

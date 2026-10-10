@@ -61,6 +61,8 @@ type Buckets interface {
 	CORSOf(ctx context.Context, name string) *bucket.CORS
 	Tags(ctx context.Context, principal iam.Principal, name string) (map[string]string, error)
 	SetTags(ctx context.Context, principal iam.Principal, name string, tags map[string]string) error
+	Lifecycle(ctx context.Context, principal iam.Principal, name string) (*bucket.Lifecycle, error)
+	SetLifecycle(ctx context.Context, principal iam.Principal, name string, rules *bucket.Lifecycle) error
 }
 
 // Objects is the object use cases the adapter calls. *app.ObjectService

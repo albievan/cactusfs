@@ -83,6 +83,7 @@ type node struct {
 	telemetry   *telemetry.Telemetry
 
 	scrubber  *app.Scrubber
+	lifecycle *app.LifecycleWorker
 	collector *app.Collector
 	// stopBackground cancels the background tasks; background is done when
 	// they have returned.
@@ -224,6 +225,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 			n.maintenance.ObserveScrub(s)
 		},
 		// One node scrubs at a time: the one that leads the metadata group.
+		Active: n.meta.IsLeader,
+	})
+	n.lifecycle = app.NewLifecycleWorker(app.LifecycleWorkerConfig{
+		Buckets: meta, Index: meta, Uploads: meta, Objects: n.objects, Clock: n.clock, Logger: logger,
+		OnPass: n.telemetry.ObserveLifecycle,
+		// One node carries out rules at a time, as one node scrubs.
 		Active: n.meta.IsLeader,
 	})
 	n.collector = app.NewCollector(app.CollectorConfig{
@@ -546,6 +553,9 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.objects.Healer().Run(ctx) })
 	if cfg.ScrubInterval > 0 {
 		n.background.Go(func() { n.scrubber.Run(ctx, cfg.ScrubInterval) })
+	}
+	if cfg.LifecycleInterval > 0 {
+		n.background.Go(func() { n.lifecycle.Run(ctx, cfg.LifecycleInterval) })
 	}
 	if cfg.GCInterval > 0 && len(n.drives) > 0 {
 		n.background.Go(func() { n.collector.Run(ctx, cfg.GCInterval) })

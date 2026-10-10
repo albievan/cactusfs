@@ -43,6 +43,86 @@ const (
 // element said twice where the caller did not mark it (with a trailing "*")
 // as one that repeats, is malformed, never ignored. An element that was silently skipped could be the
 // one that mattered.
+// xmlShape says which elements a document may have, and where: for each
+// element, by name, the children it may have, and under "" the root. A child
+// written with a trailing "*" may repeat.
+type xmlShape map[string][]string
+
+// decodeShapedXML is decodeStrictXML for a document whose elements nest: an
+// element is accepted only under the parent the shape gives it, and no
+// element carries an attribute other than the namespace of the root. The
+// flat list of decodeStrictXML would accept a known element in the wrong
+// place, and the decoder would then drop it without a word - a rule read
+// without its prefix is a rule about every key.
+//
+// When the document has an element that notImplemented names, wherever it
+// is, the error is errNotImplemented.
+func decodeShapedXML(body io.Reader, limit int64, into any, shape xmlShape, notImplemented ...string) error {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return fmt.Errorf("%w: reading the request body", domain.ErrIncompleteBody)
+	}
+	if int64(len(data)) > limit || len(data) == 0 {
+		return errMalformedXML
+	}
+	may := func(parent, child string) bool {
+		for _, name := range shape[parent] {
+			if strings.TrimSuffix(name, "*") == child {
+				return true
+			}
+		}
+		return false
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	decoder.Strict = true
+	var open []string
+	misplaced := false
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return errMalformedXML
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			if slices.Contains(notImplemented, t.Name.Local) {
+				return errNotImplemented()
+			}
+			parent := ""
+			if len(open) > 0 {
+				parent = open[len(open)-1]
+			}
+			for _, attr := range t.Attr {
+				namespace := attr.Name.Local == "xmlns" && attr.Name.Space == ""
+				if !namespace || len(open) > 0 {
+					misplaced = true
+				}
+			}
+			if !may(parent, t.Name.Local) {
+				misplaced = true
+			}
+			open = append(open, t.Name.Local)
+		case xml.EndElement:
+			open = open[:len(open)-1]
+		}
+	}
+	if misplaced {
+		return errMalformedXML
+	}
+	// The root comes first: decodeStrictXML takes the first name for it.
+	flat := slices.Clone(shape[""])
+	for _, children := range shape {
+		for _, child := range children {
+			if base := strings.TrimSuffix(child, "*"); !slices.Contains(flat, base) && !slices.Contains(flat, base+"*") {
+				flat = append(flat, child)
+			}
+		}
+	}
+	return decodeStrictXML(bytes.NewReader(data), limit, into, flat...)
+}
+
 func decodeStrictXML(body io.Reader, limit int64, into any, allowed ...string) error {
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
@@ -334,7 +414,7 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 		return errUnsignedBody
 	}
 	var in deleteRequest
-	if err := decodeStrictXML(body.body, maxDeleteXML, &in, "Delete", "Quiet", "Object*", "Key", "VersionId", "ETag", "LastModifiedTime", "Size"); err != nil {
+	if err := decodeShapedXML(body.body, maxDeleteXML, &in, deleteShape()); err != nil {
 		return err
 	}
 	// Nothing is deleted on the strength of a body that is not the one
@@ -387,4 +467,8 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 	}
 	h.writeXML(ctx, req, http.StatusOK, result)
 	return nil
+}
+
+func deleteShape() xmlShape {
+	return xmlShape{"": {"Delete"}, "Delete": {"Quiet", "Object*"}, "Object": {"Key", "VersionId", "ETag", "LastModifiedTime", "Size"}}
 }

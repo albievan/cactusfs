@@ -125,7 +125,8 @@ DeleteObjects, ListObjectsV2, bucket versioning and object versions, Object Lock
 (retention, legal hold, default retention), multipart uploads (create, upload part,
 complete, abort, list parts, list uploads), SSE-KMS and SSE-C, and presigned URLs, by path or (with
 `--s3-domain`) by virtual host; bucket policies (which alone can open a bucket to
-anonymous readers), CORS rules and tags of buckets and objects. Copies, lifecycle and the rest
+anonymous readers), CORS rules, tags of buckets and objects, and lifecycle rules that
+expire objects, old versions and unfinished uploads. Copies and the rest
 answer `501 NotImplemented` for now.
 
 In a container, mount the drives and the certificate and run hardened:

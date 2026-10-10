@@ -52,7 +52,7 @@ func TestCORSValidate(t *testing.T) {
 			t.Errorf("%s: %v", tt.name, err)
 		}
 	}
-	for kind, want := range map[string]bool{bucket.ConfigPolicy: true, bucket.ConfigCORS: true, bucket.ConfigTagging: true, "lifecycle": false, "": false} {
+	for kind, want := range map[string]bool{bucket.ConfigPolicy: true, bucket.ConfigCORS: true, bucket.ConfigTagging: true, "acl": false, "": false} {
 		if bucket.ValidConfigKind(kind) != want {
 			t.Errorf("ValidConfigKind(%q)", kind)
 		}

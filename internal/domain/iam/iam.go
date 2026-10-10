@@ -49,6 +49,9 @@ const (
 	ActionGetObjectTagging    Action = "s3:GetObjectTagging"
 	ActionPutObjectTagging    Action = "s3:PutObjectTagging"
 	ActionDeleteObjectTagging Action = "s3:DeleteObjectTagging"
+	// Lifecycle rules.
+	ActionGetLifecycle Action = "s3:GetLifecycleConfiguration"
+	ActionPutLifecycle Action = "s3:PutLifecycleConfiguration"
 	// Multipart uploads. Beginning one, uploading its parts and completing
 	// it are s3:PutObject.
 	ActionAbortMultipartUpload       Action = "s3:AbortMultipartUpload"
@@ -170,6 +173,29 @@ type Principal struct {
 	Boundary *Document
 	// Session is where and how the request arrived; conditions test it.
 	Session Session
+	// Service is set, and nothing else is, when the node itself acts by a
+	// standing instruction of the deployment and not for a caller: the
+	// worker that carries out lifecycle rules is ServiceLifecycle. No
+	// request can authenticate as a service.
+	Service string
+}
+
+// ServiceLifecycle is the service that carries out the lifecycle rules of
+// buckets.
+const ServiceLifecycle = "lifecycle"
+
+// serviceMay reports what a service may do. The lifecycle worker removes
+// what rules say has expired - and nothing a lock keeps: lifting a retention
+// is not among its actions, so no rule ever removes a retained version.
+func serviceMay(service string, action Action) bool {
+	if service != ServiceLifecycle {
+		return false
+	}
+	switch action {
+	case ActionDeleteObject, ActionDeleteObjectVersion, ActionAbortMultipartUpload:
+		return true
+	}
+	return false
 }
 
 // Session describes the connection a request arrived on.
@@ -184,6 +210,9 @@ type Session struct {
 
 // Name returns what the principal is called in logs.
 func (p Principal) Name() string {
+	if p.Service != "" {
+		return "service/" + p.Service
+	}
 	if p.NodeID != "" {
 		return "node/" + p.NodeID
 	}
@@ -195,7 +224,7 @@ func (p Principal) Name() string {
 
 // Anonymous reports whether the principal is unauthenticated.
 func (p Principal) Anonymous() bool {
-	return p.AccessKeyID == "" && p.NodeID == "" && p.User == ""
+	return p.AccessKeyID == "" && p.NodeID == "" && p.User == "" && p.Service == ""
 }
 
 // Request is one authorization question: may Principal perform Action on
@@ -236,6 +265,15 @@ func Decide(req Request) error {
 		return fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
 	refused := fmt.Errorf("%w: %s may not %s on %s", domain.ErrAccessDenied, req.Principal.Name(), req.Action, req.Resource)
+	if service := req.Principal.Service; service != "" {
+		// A service is that and nothing else, and is bound by no policy:
+		// what it may do is fixed here.
+		p := req.Principal
+		if p.AccessKeyID == "" && !p.Root && p.NodeID == "" && p.User == "" && serviceMay(service, req.Action) {
+			return nil
+		}
+		return refused
+	}
 	if node := req.Principal.NodeID; node != "" || req.Action.cluster() {
 		// A node adds, records and removes itself only.
 		own := req.Action == ActionNodeRPC || req.Resource.Node == node

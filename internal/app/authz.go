@@ -50,7 +50,7 @@ func (a *Authorizer) WithBucketPolicies(source BucketPolicySource) *Authorizer {
 // because the policy might have denied it.
 func (a *Authorizer) bucketPolicy(ctx context.Context, req iam.Request) (*iam.BucketPolicy, error) {
 	source := a.policies.Load()
-	if source == nil || req.Resource.Bucket == "" || req.Principal.Root || req.Principal.NodeID != "" ||
+	if source == nil || req.Resource.Bucket == "" || req.Principal.Root || req.Principal.NodeID != "" || req.Principal.Service != "" ||
 		!strings.HasPrefix(string(req.Action), "s3:") {
 		return nil, nil
 	}

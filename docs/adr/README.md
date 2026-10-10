@@ -48,3 +48,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0010](0010-key-hierarchy.md) | Key hierarchy: one data key, several uses | accepted |
 | [0011](0011-bucket-policy-cors-tags.md) | Bucket policies, anonymous access, cross-origin rules and tags | accepted |
 | [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |
+| [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted |

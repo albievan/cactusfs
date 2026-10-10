@@ -1494,3 +1494,58 @@ func TestTagging(t *testing.T) {
 		t.Errorf("the object after its tags were deleted: %q", got)
 	}
 }
+
+func TestBucketLifecycleConfiguration(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	if _, err := c.GetBucketLifecycleConfiguration(t.Context(), &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchLifecycleConfiguration" {
+		t.Errorf("GetBucketLifecycleConfiguration without rules: code %q (%v)", errorCode(err), err)
+	}
+	rules := []types.LifecycleRule{
+		{
+			ID: aws.String("logs"), Status: types.ExpirationStatusEnabled, Filter: &types.LifecycleRuleFilter{Prefix: aws.String("logs/")},
+			Expiration:                     &types.LifecycleExpiration{Days: aws.Int32(30)},
+			NoncurrentVersionExpiration:    &types.NoncurrentVersionExpiration{NoncurrentDays: aws.Int32(7)},
+			AbortIncompleteMultipartUpload: &types.AbortIncompleteMultipartUpload{DaysAfterInitiation: aws.Int32(2)},
+		},
+		{
+			ID: aws.String("markers"), Status: types.ExpirationStatusDisabled, Filter: &types.LifecycleRuleFilter{Prefix: aws.String("")},
+			Expiration: &types.LifecycleExpiration{ExpiredObjectDeleteMarker: aws.Bool(true)},
+		},
+	}
+	if _, err := c.PutBucketLifecycleConfiguration(t.Context(), &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(name), LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: rules},
+	}); err != nil {
+		t.Fatalf("PutBucketLifecycleConfiguration: %v", err)
+	}
+	got, err := c.GetBucketLifecycleConfiguration(t.Context(), &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(name)})
+	if err != nil || len(got.Rules) != 2 {
+		t.Fatalf("GetBucketLifecycleConfiguration = %+v, %v", got, err)
+	}
+	first, second := got.Rules[0], got.Rules[1]
+	if aws.ToString(first.ID) != "logs" || first.Status != types.ExpirationStatusEnabled || first.Filter == nil || aws.ToString(first.Filter.Prefix) != "logs/" ||
+		first.Expiration == nil || aws.ToInt32(first.Expiration.Days) != 30 || first.NoncurrentVersionExpiration == nil ||
+		aws.ToInt32(first.NoncurrentVersionExpiration.NoncurrentDays) != 7 || first.AbortIncompleteMultipartUpload == nil ||
+		aws.ToInt32(first.AbortIncompleteMultipartUpload.DaysAfterInitiation) != 2 {
+		t.Errorf("the first rule reads back as %+v", first)
+	}
+	if second.Status != types.ExpirationStatusDisabled || second.Expiration == nil || !aws.ToBool(second.Expiration.ExpiredObjectDeleteMarker) {
+		t.Errorf("the second rule reads back as %+v", second)
+	}
+	// A transition is not something this store can do, and says so.
+	_, err = c.PutBucketLifecycleConfiguration(t.Context(), &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(name), LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
+			ID: aws.String("cold"), Status: types.ExpirationStatusEnabled, Filter: &types.LifecycleRuleFilter{Prefix: aws.String("")},
+			Transitions: []types.Transition{{Days: aws.Int32(30), StorageClass: types.TransitionStorageClassGlacier}},
+		}}},
+	})
+	if errorCode(err) != "NotImplemented" {
+		t.Errorf("a transition: code %q (%v), want NotImplemented", errorCode(err), err)
+	}
+	if _, err := c.DeleteBucketLifecycle(t.Context(), &s3.DeleteBucketLifecycleInput{Bucket: aws.String(name)}); err != nil {
+		t.Fatalf("DeleteBucketLifecycle: %v", err)
+	}
+	if _, err := c.GetBucketLifecycleConfiguration(t.Context(), &s3.GetBucketLifecycleConfigurationInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchLifecycleConfiguration" {
+		t.Errorf("after removal: code %q (%v)", errorCode(err), err)
+	}
+}

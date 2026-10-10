@@ -205,3 +205,43 @@ func policyAllows(p iam.BucketPolicy) bool {
 	}
 	return false
 }
+
+// TestServicePrincipal: the lifecycle service deletes and aborts, and does
+// nothing else - above all, it lifts no retention. It is a service only when
+// it is nothing else, and no policy binds or widens it.
+func TestServicePrincipal(t *testing.T) {
+	t.Parallel()
+	service := iam.Principal{Service: iam.ServiceLifecycle}
+	resource := iam.Resource{Bucket: "site", Key: "k"}
+	deny := mustBucketPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":"arn:aws:s3:::site/*"}]}`, "site")
+	for action, want := range map[iam.Action]bool{
+		iam.ActionDeleteObject: true, iam.ActionDeleteObjectVersion: true, iam.ActionAbortMultipartUpload: true,
+		iam.ActionOverrideGovernance: false, iam.ActionGetObject: false, iam.ActionPutObject: false, iam.ActionDeleteBucket: false,
+		iam.ActionPutBucketPolicy: false, iam.ActionPutLifecycle: false, iam.ActionPutObjectRetention: false, iam.ActionPutObjectLegalHold: false,
+		iam.ActionListBucket: false, "admin:ListUsers": false, iam.ActionNodeRPC: false,
+	} {
+		for _, policy := range []*iam.BucketPolicy{nil, deny} {
+			err := iam.Decide(iam.Request{Principal: service, Action: action, Resource: resource, BucketPolicy: policy})
+			if (err == nil) != want {
+				t.Errorf("the lifecycle service and %s: %v, want allowed = %v", action, err, want)
+			}
+		}
+	}
+	all := iam.Document{Version: iam.PolicyVersion, Statements: []iam.Statement{{Effect: iam.Allow, Actions: []string{"s3:*", "s3:BypassGovernanceRetention"}, Resources: []string{"*"}}}}
+	for name, p := range map[string]iam.Principal{
+		"another service":          {Service: "backup"},
+		"a service that is root":   {Service: iam.ServiceLifecycle, Root: true, AccessKeyID: "ROOT"},
+		"a service with a key":     {Service: iam.ServiceLifecycle, AccessKeyID: "K"},
+		"a service that is a user": {Service: iam.ServiceLifecycle, User: "u", AccessKeyID: "K", Policies: []iam.Document{all}},
+		"a service that is a node": {Service: iam.ServiceLifecycle, NodeID: "n1"},
+	} {
+		for _, action := range []iam.Action{iam.ActionDeleteObject, iam.ActionGetObject, iam.ActionOverrideGovernance, iam.ActionNodeRPC} {
+			if err := iam.Decide(iam.Request{Principal: p, Action: action, Resource: resource}); !errors.Is(err, domain.ErrAccessDenied) {
+				t.Errorf("%s and %s: %v", name, action, err)
+			}
+		}
+	}
+	if service.Anonymous() || service.Name() != "service/lifecycle" {
+		t.Errorf("the service is called %q, anonymous = %v", service.Name(), service.Anonymous())
+	}
+}

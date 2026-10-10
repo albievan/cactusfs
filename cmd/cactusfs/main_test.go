@@ -160,7 +160,8 @@ func TestParseServerConfig(t *testing.T) {
 			MetaDir: filepath.Join(dataDir, "meta"), KMS: "local", KMSKeyFile: filepath.Join(dataDir, "meta", "kms-local.json"),
 			DevPlaintext: true, LogLevel: slog.LevelInfo, ShutdownTimeout: 30 * time.Second,
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
-			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
+			LifecycleInterval: time.Hour,
+			Roles:             cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
 		if change != nil {
@@ -248,10 +249,12 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "root access key without secret", args: dev(), env: withPassphrase(map[string]string{envRootKeyID: "ROOTKEY"}), wantErr: "or neither"},
 		{name: "root secret without access key", args: dev(), env: withPassphrase(map[string]string{envRootKeyValue: "s"}), wantErr: "or neither"},
 		{
-			name: "background work switched off", args: dev("--scrub-interval", "0", "--gc-interval", "0", "--scrub-rate-mib", "0"), env: passphrase,
-			want: base(func(c *serverConfig) { c.ScrubInterval, c.GCInterval, c.ScrubRateMiB = 0, 0, 0 }),
+			name: "background work switched off", args: dev("--scrub-interval", "0", "--gc-interval", "0", "--scrub-rate-mib", "0", "--lifecycle-interval", "0"), env: passphrase,
+			want: base(func(c *serverConfig) { c.ScrubInterval, c.GCInterval, c.ScrubRateMiB, c.LifecycleInterval = 0, 0, 0, 0 }),
 		},
 		{name: "negative scrub interval", args: dev("--scrub-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
+		{name: "negative lifecycle interval", args: dev("--lifecycle-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
+		{name: "bad lifecycle interval variable", env: withPassphrase(map[string]string{envLifecycle: "daily"}), wantErr: envLifecycle},
 		{name: "negative scrub rate", args: dev("--scrub-rate-mib", "-1"), env: passphrase, wantErr: "must not be negative"},
 		{name: "grace period too short to be safe", args: dev("--gc-grace", "59m"), env: passphrase, wantErr: "grace period"},
 		{

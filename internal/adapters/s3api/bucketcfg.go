@@ -110,8 +110,7 @@ func (h *Handler) putBucketCORS(ctx context.Context, req *request) error {
 		return err
 	}
 	var in corsConfiguration
-	err = decodeStrictXML(strings.NewReader(string(raw)), maxConfigBody, &in,
-		"CORSConfiguration", "CORSRule*", "ID", "AllowedOrigin*", "AllowedMethod*", "AllowedHeader*", "ExposeHeader*", "MaxAgeSeconds")
+	err = decodeShapedXML(strings.NewReader(string(raw)), maxConfigBody, &in, corsShape())
 	if err != nil {
 		return err
 	}
@@ -184,7 +183,7 @@ func (h *Handler) readTags(req *request) (map[string]string, error) {
 		return nil, err
 	}
 	var in tagging
-	if err := decodeStrictXML(strings.NewReader(string(raw)), maxConfigBody, &in, "Tagging", "TagSet", "Tag*", "Key", "Value"); err != nil {
+	if err := decodeShapedXML(strings.NewReader(string(raw)), maxConfigBody, &in, taggingShape()); err != nil {
 		return nil, err
 	}
 	tags := map[string]string{}
@@ -195,6 +194,17 @@ func (h *Handler) readTags(req *request) (map[string]string, error) {
 		tags[tag.Key] = tag.Value
 	}
 	return tags, nil
+}
+
+func corsShape() xmlShape {
+	return xmlShape{
+		"": {"CORSConfiguration"}, "CORSConfiguration": {"CORSRule*"},
+		"CORSRule": {"ID", "AllowedOrigin*", "AllowedMethod*", "AllowedHeader*", "ExposeHeader*", "MaxAgeSeconds"},
+	}
+}
+
+func taggingShape() xmlShape {
+	return xmlShape{"": {"Tagging"}, "Tagging": {"TagSet"}, "TagSet": {"Tag*"}, "Tag": {"Key", "Value"}}
 }
 
 func tagsXML(tags map[string]string) tagging {
@@ -318,13 +328,15 @@ func (h *Handler) routeBucketConfig(ctx context.Context, req *request, query url
 		ops = operations{"cors", h.getBucketCORS, h.putBucketCORS, h.deleteBucketCORS}
 	case query.Has("tagging"):
 		ops = operations{"tagging", h.getBucketTagging, h.putBucketTagging, h.deleteBucketTagging}
+	case query.Has("lifecycle"):
+		ops = operations{"lifecycle", h.getBucketLifecycle, h.putBucketLifecycle, h.deleteBucketLifecycle}
 	default:
 		return false, nil
 	}
 	if err := allowQuery(query, ops.name); err != nil {
 		return true, err
 	}
-	title := map[string]string{"policy": "BucketPolicy", "cors": "BucketCors", "tagging": "BucketTagging"}[ops.name]
+	title := map[string]string{"policy": "BucketPolicy", "cors": "BucketCors", "tagging": "BucketTagging", "lifecycle": "BucketLifecycle"}[ops.name]
 	switch req.Method {
 	case http.MethodGet:
 		req.operation = "Get" + title

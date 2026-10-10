@@ -1200,6 +1200,10 @@ func TestBucketConfigurationChangesAreAudited(t *testing.T) {
 		{func() error { return buckets.SetCORS(ctx, alice, "site", nil) }, "s3:PutBucketCORS", [2]string{"cors", "removed"}},
 		{func() error { return buckets.SetTags(ctx, alice, "site", map[string]string{"team": "web"}) }, "s3:PutBucketTagging", [2]string{"tags", "1"}},
 		{func() error { return buckets.SetTags(ctx, alice, "site", nil) }, "s3:PutBucketTagging", [2]string{"tags", "0"}},
+		{func() error {
+			return buckets.SetLifecycle(ctx, alice, "site", &bucket.Lifecycle{Rules: []bucket.LifecycleRule{{Enabled: true, ExpirationDays: 1}}})
+		}, "s3:PutLifecycleConfiguration", [2]string{"rules", "1"}},
+		{func() error { return buckets.SetLifecycle(ctx, alice, "site", nil) }, "s3:PutLifecycleConfiguration", [2]string{"lifecycle", "removed"}},
 	}
 	for i, step := range steps {
 		if err := step.do(); err != nil {

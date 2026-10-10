@@ -740,8 +740,12 @@ func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o port
 	if o.Version != nil {
 		e.DeleteVersion.VersionRef = o.Version.String()
 	}
+	if !o.Expect.IsZero() {
+		e.DeleteVersion.Expect = o.Expect.String()
+	}
 	result, err := s.propose(ctx, e)
-	if errors.Is(err, domain.ErrUnavailable) && o.Version == nil && s.versionOf(e) > entrySchemaVersion {
+	// A conditional delete has no form in the first schema: it waits.
+	if errors.Is(err, domain.ErrUnavailable) && o.Version == nil && o.Expect.IsZero() && s.versionOf(e) > entrySchemaVersion {
 		// While a member of the previous release holds the cluster at the
 		// first schema, no bucket keeps versions, and a delete is what it
 		// always was.

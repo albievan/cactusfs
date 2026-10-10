@@ -24,7 +24,7 @@ const MaxConfigBytes = 64 << 10
 
 // ValidConfigKind reports whether kind is a kind of bucket configuration.
 func ValidConfigKind(kind string) bool {
-	return kind == ConfigPolicy || kind == ConfigCORS || kind == ConfigTagging
+	return kind == ConfigPolicy || kind == ConfigCORS || kind == ConfigTagging || kind == ConfigLifecycle
 }
 
 // Limits of a CORS configuration, from the Amazon S3 API reference.

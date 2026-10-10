@@ -140,6 +140,14 @@ type DeleteOptions struct {
 	// retention and asked to. The use case authorizes that; the store
 	// lifts nothing else on the strength of it.
 	BypassGovernance bool
+	// Expect, when not zero, makes the delete conditional: it is carried
+	// out only if the version it is about - the one Version names, or
+	// else the newest version of the key - has this version ID. If
+	// another has taken its place the delete is refused with
+	// domain.ErrConflict and changes nothing. Whoever decided on a
+	// reading of the state that something is to go says here what it
+	// read.
+	Expect object.ID
 }
 
 // DeleteResult is what committing a delete did.

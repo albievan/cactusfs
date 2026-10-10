@@ -242,6 +242,25 @@ func (h history) find(key, ref string) (found *versionRecord, storedKey []byte, 
 	return found, storedKey, nil
 }
 
+// subject returns the version a delete is about: the one ref names, or,
+// without a ref, the newest version of the key, delete marker or not.
+func (h history) subject(key, ref string) (*versionRecord, error) {
+	if ref != "" {
+		found, _, err := h.find(key, ref)
+		return found, err
+	}
+	current, err := readVersion(h.current, key)
+	if err != nil || current != nil {
+		return current, err
+	}
+	var newest *versionRecord
+	err = h.each(key, func(_ []byte, v *versionRecord) (bool, error) {
+		newest = v
+		return false, nil
+	})
+	return newest, err
+}
+
 // retire moves the current version of a key, if there is one, to "versions".
 func (h history) retire(key string) error {
 	current, err := readVersion(h.current, key)
@@ -513,6 +532,18 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		return applyResult{}, err
 	}
 
+	if cmd.Expect != "" {
+		// The proposer decided on an earlier reading of the state. If
+		// what it read is no longer what this delete would be about,
+		// nothing is deleted.
+		subject, err := h.subject(cmd.Key, cmd.VersionRef)
+		if err != nil {
+			return applyResult{}, err
+		}
+		if subject == nil || subject.VersionID != cmd.Expect {
+			return refuse(domain.ErrConflict, "%s/%s is not the version the delete was decided for", cmd.Bucket, cmd.Key)
+		}
+	}
 	if cmd.VersionRef != "" {
 		// One version, for good.
 		target, storedKey, err := h.find(cmd.Key, cmd.VersionRef)

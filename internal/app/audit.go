@@ -81,6 +81,8 @@ func NewAuditor(log ports.AuditLog, clock ports.Clock, logger *slog.Logger) *Aud
 // actorOf names a principal in the audit trail.
 func actorOf(p iam.Principal) string {
 	switch {
+	case p.Service != "":
+		return "service/" + p.Service
 	case p.NodeID != "":
 		return "node/" + p.NodeID
 	case p.Root:

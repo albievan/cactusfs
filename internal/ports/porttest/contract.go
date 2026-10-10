@@ -443,6 +443,97 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 			t.Errorf("a policy outlived its bucket: %q", got)
 		}
 	})
+	t.Run("a delete on a condition", func(t *testing.T) {
+		// Whoever decided on a reading of the state that a version is to
+		// go says which version it read; if another has taken its place,
+		// nothing is deleted.
+		store := open(t)
+		for _, b := range []bucket.Bucket{{Name: "plain"}, {Name: "ver"}} {
+			if err := store.CreateBucket(ctx, b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.SetBucketVersioning(ctx, "ver", bucket.VersioningEnabled); err != nil {
+			t.Fatal(err)
+		}
+		marker := func(fill byte) ports.DeleteOptions {
+			return ports.DeleteOptions{MarkerID: object.ID(bytes.Repeat([]byte{fill}, object.IDSize)), At: created}
+		}
+		old, fresh := SampleVersion("plain", "k", 1), SampleVersion("plain", "k", 2)
+		if _, err := store.PutVersion(ctx, old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.PutVersion(ctx, fresh); err != nil {
+			t.Fatal(err)
+		}
+		// Decided for the old version; the key was written again since.
+		late := marker(40)
+		late.Expect = old.VersionID
+		if _, err := store.DeleteObject(ctx, "plain", "k", late); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("a delete decided for a version that was replaced = %v, want %v", err, domain.ErrConflict)
+		}
+		if got, err := store.GetObject(ctx, "plain", "k"); err != nil || got.VersionID != fresh.VersionID {
+			t.Fatalf("the refused delete removed the object: %v", err)
+		}
+		// By name, too: "null" names whatever the null version is now.
+		null := object.VersionRef{Null: true}
+		late.Version = &null
+		if _, err := store.DeleteObject(ctx, "plain", "k", late); !errors.Is(err, domain.ErrConflict) {
+			t.Errorf("a delete of version null decided for another null version = %v", err)
+		}
+		right := marker(41)
+		right.Version, right.Expect = &null, fresh.VersionID
+		if result, err := store.DeleteObject(ctx, "plain", "k", right); err != nil || result.Removed == nil || result.Removed.VersionID != fresh.VersionID {
+			t.Errorf("a delete decided for the version that is there = %+v, %v", result, err)
+		}
+		// Nothing there at all is not what was expected either.
+		gone := marker(42)
+		gone.Expect = fresh.VersionID
+		if _, err := store.DeleteObject(ctx, "plain", "k", gone); !errors.Is(err, domain.ErrConflict) {
+			t.Errorf("a conditional delete of a key that is gone = %v", err)
+		}
+
+		// Where versions are kept: no marker over a version that was not
+		// the one judged, and a marker is itself something to expect.
+		first, err := store.PutVersion(ctx, SampleVersion("ver", "k", 3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := store.PutVersion(ctx, SampleVersion("ver", "k", 4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		over := marker(43)
+		over.Expect = first.Stored.VersionID
+		if _, err := store.DeleteObject(ctx, "ver", "k", over); !errors.Is(err, domain.ErrConflict) {
+			t.Errorf("a marker over a version that was not the one judged = %v", err)
+		}
+		over.Expect = second.Stored.VersionID
+		made, err := store.DeleteObject(ctx, "ver", "k", over)
+		if err != nil || made.Marker == nil {
+			t.Fatalf("a marker over the version that was judged = %+v, %v", made, err)
+		}
+		ref := made.Marker.Ref()
+		wrong := marker(44)
+		wrong.Version, wrong.Expect = &ref, second.Stored.VersionID
+		if _, err := store.DeleteObject(ctx, "ver", "k", wrong); !errors.Is(err, domain.ErrConflict) {
+			t.Errorf("removing a marker expected to be something else = %v", err)
+		}
+		// The newest version is the marker: a delete without a version
+		// that expects it is carried out, and makes another.
+		again := marker(45)
+		again.Expect = made.Marker.VersionID
+		if result, err := store.DeleteObject(ctx, "ver", "k", again); err != nil || result.Marker == nil {
+			t.Errorf("a delete expecting the marker that is newest = %+v, %v", result, err)
+		}
+		// An older version, by name, with the right expectation.
+		firstRef := first.Stored.Ref()
+		older := marker(46)
+		older.Version, older.Expect = &firstRef, first.Stored.VersionID
+		if result, err := store.DeleteObject(ctx, "ver", "k", older); err != nil || result.Removed == nil {
+			t.Errorf("removing an older version that is the one expected = %+v, %v", result, err)
+		}
+	})
 	t.Run("whose key it takes", func(t *testing.T) {
 		// What a version records about its encryption comes back as it
 		// went in, for every mode.

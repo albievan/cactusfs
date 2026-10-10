@@ -233,8 +233,20 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 	if !ok {
 		return ports.DeleteResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
 	}
-	m.seq++
 	versions := m.objects[bucketName][key]
+	if !o.Expect.IsZero() {
+		var subject *object.Version
+		for i := range versions {
+			if o.Version == nil || versions[i].Is(*o.Version) {
+				subject = &versions[i]
+				break
+			}
+		}
+		if subject == nil || subject.VersionID != o.Expect {
+			return ports.DeleteResult{}, fmt.Errorf("%w: %s/%s is not the version the delete was decided for", domain.ErrConflict, bucketName, key)
+		}
+	}
+	m.seq++
 	if o.Version != nil {
 		for _, v := range versions {
 			if v.Is(*o.Version) {

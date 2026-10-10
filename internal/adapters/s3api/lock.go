@@ -151,8 +151,11 @@ func (h *Handler) putObjectLockConfiguration(ctx context.Context, req *request) 
 		return errUnsignedBody
 	}
 	var cfg objectLockConfiguration
-	if err := decodeStrictXML(body.body, maxRequestXML, &cfg,
-		"ObjectLockConfiguration", "ObjectLockEnabled", "Rule", "DefaultRetention", "Mode", "Days", "Years"); err != nil {
+	shape := xmlShape{
+		"": {"ObjectLockConfiguration"}, "ObjectLockConfiguration": {"ObjectLockEnabled", "Rule"},
+		"Rule": {"DefaultRetention"}, "DefaultRetention": {"Mode", "Days", "Years"},
+	}
+	if err := decodeShapedXML(body.body, maxRequestXML, &cfg, shape); err != nil {
 		return err
 	}
 	if _, err := body.verify(); err != nil {

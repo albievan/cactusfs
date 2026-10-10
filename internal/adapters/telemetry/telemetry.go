@@ -77,6 +77,7 @@ type Telemetry struct {
 	scrubBytes     prometheus.Counter
 	gcPasses       prometheus.Counter
 	gcRemoved      prometheus.Counter
+	lifecycle      *prometheus.CounterVec
 	events         *prometheus.CounterVec
 }
 
@@ -138,6 +139,9 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	t.gcRemoved = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cactusfs_gc_shards_removed_total", Help: "Unreferenced shards removed by the garbage collector.",
 	})
+	t.lifecycle = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_lifecycle_actions_total", Help: "What lifecycle rules did, by kind: versions expired and removed, uploads aborted, removals a lock refused.",
+	}, []string{"action"})
 
 	t.events = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_events_total", Help: "Events derived from applied metadata entries on this node, by type.",
@@ -145,7 +149,7 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
-		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.events,
+		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.events,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
@@ -282,6 +286,16 @@ func (t *Telemetry) ObserveScrub(s app.ScrubStats) {
 	t.scrubPasses.Inc()
 	t.scrubObjects.Add(float64(s.Objects))
 	t.scrubBytes.Add(float64(s.Bytes))
+}
+
+// ObserveLifecycle records a completed pass of the lifecycle worker.
+func (t *Telemetry) ObserveLifecycle(s app.LifecycleStats) {
+	for action, n := range map[string]int{
+		"expired": s.Expired, "noncurrent_removed": s.Noncurrent, "marker_removed": s.Markers,
+		"upload_aborted": s.Aborted, "kept_by_lock": s.Kept, "changed_meanwhile": s.Skipped, "failed": s.Failed,
+	} {
+		t.lifecycle.WithLabelValues(action).Add(float64(n))
+	}
 }
 
 // ObserveGC records a completed pass of the garbage collector.

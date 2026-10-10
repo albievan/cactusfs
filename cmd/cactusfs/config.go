@@ -46,6 +46,7 @@ const (
 	envScrubInterval   = "CACTUSFS_SCRUB_INTERVAL"
 	envScrubRate       = "CACTUSFS_SCRUB_RATE_MIB"
 	envGCInterval      = "CACTUSFS_GC_INTERVAL"
+	envLifecycle       = "CACTUSFS_LIFECYCLE_INTERVAL"
 	envGCGrace         = "CACTUSFS_GC_GRACE"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envNodeID          = "CACTUSFS_NODE_ID"
@@ -84,6 +85,7 @@ const (
 	defaultScrubInterval   = 24 * time.Hour
 	defaultScrubRateMiB    = 64
 	defaultGCInterval      = time.Hour
+	defaultLifecycle       = time.Hour
 	defaultGCGrace         = 24 * time.Hour
 	// minGCGrace is the shortest grace period accepted. Writes in progress
 	// are protected from the collector by other means; the grace period is
@@ -144,6 +146,9 @@ type serverConfig struct {
 	// second; zero is no limit.
 	ScrubInterval time.Duration
 	ScrubRateMiB  int
+	// LifecycleInterval is the pause between two passes of the worker
+	// that carries out lifecycle rules; zero disables it.
+	LifecycleInterval time.Duration
 	// GCInterval is the pause between two passes of the garbage collector;
 	// zero disables it. GCGrace is the minimum age of an unreferenced shard
 	// before it is removed.
@@ -250,6 +255,10 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 	if err != nil {
 		return cfg, err
 	}
+	lifecycleInterval, err := envDuration(getenv, envLifecycle, defaultLifecycle)
+	if err != nil {
+		return cfg, err
+	}
 	gcInterval, err := envDuration(getenv, envGCInterval, defaultGCInterval)
 	if err != nil {
 		return cfg, err
@@ -321,6 +330,8 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"time allowed for in-flight requests to finish once the listeners have closed ($"+envShutdownTimeout+")")
 	fs.DurationVar(&cfg.ScrubInterval, "scrub-interval", scrubInterval,
 		"pause between two passes of the scrubber, which verifies and heals every object; 0 disables it ($"+envScrubInterval+")")
+	fs.DurationVar(&cfg.LifecycleInterval, "lifecycle-interval", lifecycleInterval,
+		"pause between two passes of the worker that carries out the lifecycle rules of buckets; 0 disables it ($"+envLifecycle+")")
 	fs.IntVar(&cfg.ScrubRateMiB, "scrub-rate-mib", scrubRate,
 		"limit on how fast the scrubber reads, in MiB per second; 0 is no limit ($"+envScrubRate+")")
 	fs.DurationVar(&cfg.GCInterval, "gc-interval", gcInterval,
@@ -406,8 +417,8 @@ func (c *serverConfig) validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("shutdown timeout %s: must be positive", c.ShutdownTimeout)
 	}
-	if c.ScrubInterval < 0 || c.GCInterval < 0 || c.ScrubRateMiB < 0 {
-		return errors.New("scrub interval, scrub rate and garbage collection interval must not be negative")
+	if c.ScrubInterval < 0 || c.GCInterval < 0 || c.ScrubRateMiB < 0 || c.LifecycleInterval < 0 {
+		return errors.New("scrub interval, scrub rate, lifecycle interval and garbage collection interval must not be negative")
 	}
 	if c.GCGrace < minGCGrace {
 		return fmt.Errorf("garbage collection grace period %s: must be at least %s", c.GCGrace, minGCGrace)

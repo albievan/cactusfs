@@ -191,6 +191,9 @@ type deleteVersionCmd struct {
 	// Bypass says that the proposer authorized the caller to lift a
 	// governance retention. It lifts nothing else.
 	Bypass bool `json:"bypass_governance,omitempty"`
+	// Expect, when set, is the version ID the version this delete is
+	// about must have; otherwise the delete is refused.
+	Expect string `json:"expect,omitempty"`
 }
 
 type removeNodeCmd struct {

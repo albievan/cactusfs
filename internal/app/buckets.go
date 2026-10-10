@@ -362,3 +362,51 @@ func (s *BucketService) config(ctx context.Context, principal iam.Principal, act
 	}
 	return raw, nil
 }
+
+// Lifecycle returns the lifecycle rules of a bucket, or nil when it has none.
+func (s *BucketService) Lifecycle(ctx context.Context, principal iam.Principal, name string) (*bucket.Lifecycle, error) {
+	raw, err := s.config(ctx, principal, iam.ActionGetLifecycle, name, bucket.ConfigLifecycle, "bucket.Lifecycle")
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	rules, err := decodeLifecycle(raw)
+	if err != nil {
+		return nil, fmt.Errorf("bucket.Lifecycle: %w", err)
+	}
+	return rules, nil
+}
+
+func decodeLifecycle(raw []byte) (*bucket.Lifecycle, error) {
+	var rules bucket.Lifecycle
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		return nil, fmt.Errorf("%w: stored lifecycle configuration: %s", domain.ErrIntegrity, err.Error())
+	}
+	return &rules, nil
+}
+
+// SetLifecycle replaces the lifecycle rules of a bucket; nil removes them.
+// The change is audited: rules delete data.
+func (s *BucketService) SetLifecycle(ctx context.Context, principal iam.Principal, name string, rules *bucket.Lifecycle) error {
+	if err := s.authorize(ctx, principal, iam.ActionPutLifecycle, name); err != nil {
+		return fmt.Errorf("bucket.SetLifecycle: %w", err)
+	}
+	var document []byte
+	details := map[string]string{"lifecycle": "removed"}
+	if rules != nil {
+		if err := rules.Validate(); err != nil {
+			return fmt.Errorf("bucket.SetLifecycle: %w", err)
+		}
+		var err error
+		if document, err = json.Marshal(rules); err != nil {
+			return fmt.Errorf("bucket.SetLifecycle: %w", err)
+		}
+		details = map[string]string{"rules": strconv.Itoa(len(rules.Rules))}
+	}
+	if err := s.buckets.SetBucketConfig(ctx, name, bucket.ConfigLifecycle, document); err != nil {
+		return fmt.Errorf("bucket.SetLifecycle: %w", err)
+	}
+	if s.auditor != nil {
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutLifecycle, iam.Resource{Bucket: name}, audit.Succeeded, details))
+	}
+	return nil
+}

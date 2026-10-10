@@ -940,6 +940,11 @@ type DeleteInput struct {
 	// retention holds it. The caller needs the permission to; without it
 	// the request is refused, never carried out without the bypass.
 	BypassGovernance bool
+	// Expect, when not zero, is the version ID of the version the caller
+	// decided to delete: the one Version names, or else the newest of
+	// the key. If another has taken its place, nothing is deleted and the
+	// error wraps domain.ErrConflict.
+	Expect object.ID
 }
 
 // DeleteOutput says what a delete did.
@@ -980,7 +985,7 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
 	result, err := s.index.DeleteObject(ctx, in.Bucket, in.Key, ports.DeleteOptions{
-		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(), BypassGovernance: in.BypassGovernance,
+		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(), BypassGovernance: in.BypassGovernance, Expect: in.Expect,
 	})
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)

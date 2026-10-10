@@ -274,8 +274,7 @@ func (h *Handler) completeMultipartUpload(ctx context.Context, req *request, que
 		return errUnsignedBody
 	}
 	var in completeMultipartUpload
-	err = decodeStrictXML(body.body, maxCompleteXML, &in,
-		"CompleteMultipartUpload", "Part*", "PartNumber", "ETag", "ChecksumCRC32", "ChecksumCRC32C", "ChecksumCRC64NVME", "ChecksumSHA256")
+	err = decodeShapedXML(body.body, maxCompleteXML, &in, completeShape())
 	if err != nil {
 		return err
 	}
@@ -324,6 +323,13 @@ func (h *Handler) completeMultipartUpload(ctx context.Context, req *request, que
 		Location: "/" + req.bucket + "/" + (&url.URL{Path: req.key}).EscapedPath(),
 	})
 	return nil
+}
+
+func completeShape() xmlShape {
+	return xmlShape{
+		"": {"CompleteMultipartUpload"}, "CompleteMultipartUpload": {"Part*"},
+		"Part": {"PartNumber", "ETag", "ChecksumCRC32", "ChecksumCRC32C", "ChecksumCRC64NVME", "ChecksumSHA256"},
+	}
 }
 
 func (h *Handler) abortMultipartUpload(ctx context.Context, req *request, query url.Values) error {
