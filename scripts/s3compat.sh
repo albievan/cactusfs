@@ -22,7 +22,18 @@ trap 'rm -rf "$work"' EXIT
 # Individual test failures are judged against the baseline below. A package
 # that does not build or run is always a failure.
 suite_status=0
-go test -count=1 -tags=s3compat -json ./test/s3compat/... >"$work/events.json" 2>"$work/stderr" || suite_status=$?
+# In the builder image the AWS CLI and ceph/s3-tests are there, and the tests
+# that drive the server with them are built in (tag s3tools).
+tags=s3compat
+if [ "${CACTUSFS_IN_BUILDER:-}" = 1 ]; then
+	tags=s3compat,s3tools
+fi
+# The tests of ceph/s3-tests have a baseline of their own, which the Go test
+# that runs them keeps: recording here records there.
+if [ "$mode" = record ]; then
+	export CACTUSFS_S3COMPAT_RECORD=1
+fi
+go test -count=1 -timeout=30m -tags="$tags" -json ./test/s3compat/... >"$work/events.json" 2>"$work/stderr" || suite_status=$?
 if [ ! -s "$work/events.json" ]; then
 	echo "s3-compat: FAIL - go test produced no output:" >&2
 	cat "$work/stderr" >&2
@@ -62,6 +73,16 @@ check)
 		cat "$work/regressions.txt" >&2
 		exit 1
 	fi
+	# The tool tests are part of the contract wherever they are built: a
+	# baseline without them would let them fail unnoticed.
+	if [ "$tags" != s3compat ]; then
+		for required in TestCephS3Tests TestAWSCLICopyUpAndDown; do
+			if ! grep -q " $required$" "$work/baseline.txt"; then
+				echo "s3-compat: FAIL - $required is not in $baseline; run 'make s3-compat-record'" >&2
+				exit 1
+			fi
+		done
+	fi
 	if [ "$total" -gt 0 ] && [ "$recorded" -eq 0 ]; then
 		echo "s3-compat: FAIL - the suite has $total tests but no baseline is recorded;" >&2
 		echo "           run 'make s3-compat-record' and commit $baseline" >&2
@@ -72,6 +93,9 @@ check)
 	echo "s3-compat: PASS"
 	;;
 record)
+	if [ -s "$baseline" ] && [ -n "$(tail -c 1 "$baseline")" ]; then
+		echo >>"$baseline"
+	fi
 	comm -13 "$work/baseline.txt" "$work/passed.txt" >>"$baseline"
 	echo "s3-compat: baseline now records $(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$baseline" | wc -l | tr -d ' ') tests"
 	;;

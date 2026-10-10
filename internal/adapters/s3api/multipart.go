@@ -377,7 +377,7 @@ func (h *Handler) listParts(ctx context.Context, req *request, query url.Values)
 	}
 	key := req.key
 	if encoding == encodingURL {
-		key = url.QueryEscape(key)
+		key = encodeName(key)
 	}
 	who := owner{ID: req.principal.AccessKeyID, DisplayName: req.principal.AccessKeyID}
 	result := listPartsResult{
@@ -408,7 +408,7 @@ func (h *Handler) listMultipartUploads(ctx context.Context, req *request, query 
 	}
 	encode := func(s string) string {
 		if encoding == encodingURL {
-			return url.QueryEscape(s)
+			return encodeName(s)
 		}
 		return s
 	}

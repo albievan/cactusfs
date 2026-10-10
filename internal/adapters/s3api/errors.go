@@ -90,6 +90,8 @@ func errorMappings() []mapping {
 		{domain.ErrInvalidObjectKey, apiError{http.StatusBadRequest, "KeyTooLongError", "Your key is too long or not valid."}},
 		{domain.ErrObjectNotFound, apiError{http.StatusNotFound, "NoSuchKey", "The specified key does not exist."}},
 		{domain.ErrInvalidRange, apiError{http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable."}},
+		// Before the argument error it is one of.
+		{domain.ErrInvalidTag, apiError{http.StatusBadRequest, "InvalidTag", "The tag provided was not a valid tag. This error can occur if the tag did not pass input validation."}},
 		{domain.ErrInvalidArgument, apiError{http.StatusBadRequest, "InvalidArgument", "Invalid argument."}},
 		{domain.ErrConflict, apiError{http.StatusConflict, "OperationAborted", "A conflicting operation is currently in progress against this resource. Please try again."}},
 

@@ -40,6 +40,9 @@ func TestCopyObjectOverHTTP(t *testing.T) {
 		got.header.Get("x-amz-tagging-count") != "1" || got.header.Get("ETag") != etagOf(body) {
 		t.Errorf("the copy = %q, %v", got.body, got.header)
 	}
+	// As the AWS CLI sends every copy: annotations, of which this store
+	// has none, are to be left behind.
+	s.mustStatus(copyTo("/dst/as-the-cli", "/src/dir/a%20b.txt", map[string]string{"x-amz-object-annotation-directive": "EXCLUDE"}), http.StatusOK)
 	// The source without a leading slash, and with the metadata and tags
 	// of the request.
 	s.mustStatus(copyTo("/dst/replaced", "src/dir/a%20b.txt", map[string]string{
@@ -91,11 +94,13 @@ func TestCopyObjectOverHTTP(t *testing.T) {
 		"a checksum to compute":          {copyTo("/dst/never", "/src/doc", map[string]string{"x-amz-checksum-algorithm": "CRC32"}), 501, "NotImplemented"},
 		// A source on what is routed elsewhere is not a copy: it would
 		// be ignored, and is refused instead.
-		"a source on a PUT of tags":         {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?tagging", body: tagBody("a", "1"), headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 400, "InvalidArgument"},
-		"a source on a PUT of a retention":  {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?retention", headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 400, "InvalidArgument"},
-		"a source on a PUT of a legal hold": {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?legal-hold", headers: map[string]string{"x-amz-copy-source": "/src/doc", "x-amz-metadata-directive": "REPLACE"}}), 400, "InvalidArgument"},
-		"a write condition":                 {copyTo("/dst/never", "/src/doc", map[string]string{"If-None-Match": "*"}), 501, "NotImplemented"},
-		"without credentials":               {s.do(call{method: http.MethodPut, path: "/dst/never", unsigned: true, headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 403, "AccessDenied"},
+		"a source on a PUT of tags":                    {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?tagging", body: tagBody("a", "1"), headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 400, "InvalidArgument"},
+		"a source on a PUT of a retention":             {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?retention", headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 400, "InvalidArgument"},
+		"a source on a PUT of a legal hold":            {s.do(call{method: http.MethodPut, path: "/dst/copy.txt?legal-hold", headers: map[string]string{"x-amz-copy-source": "/src/doc", "x-amz-metadata-directive": "REPLACE"}}), 400, "InvalidArgument"},
+		"annotations to copy, which there are none of": {copyTo("/dst/never", "/src/doc", map[string]string{"x-amz-object-annotation-directive": "COPY"}), 501, "NotImplemented"},
+		"annotations left behind, said twice":          {s.do(call{method: http.MethodPut, path: "/dst/never", headers: map[string]string{"x-amz-copy-source": "/src/doc", "x-amz-object-annotation-directive": "EXCLUDE, EXCLUDE"}}), 501, "NotImplemented"},
+		"a write condition":                            {copyTo("/dst/never", "/src/doc", map[string]string{"If-None-Match": "*"}), 501, "NotImplemented"},
+		"without credentials":                          {s.do(call{method: http.MethodPut, path: "/dst/never", unsigned: true, headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 403, "AccessDenied"},
 		// What belongs to a copy, on what is not one.
 		"a directive on a plain put": {s.do(call{method: http.MethodPut, path: "/dst/never", body: []byte("x"), headers: map[string]string{"x-amz-metadata-directive": "REPLACE"}}), 400, "InvalidArgument"},
 		"a source on a read":         {s.do(call{method: http.MethodGet, path: "/dst/copy.txt", headers: map[string]string{"x-amz-copy-source": "/src/doc"}}), 400, "InvalidArgument"},
@@ -181,6 +186,9 @@ func TestUploadPartCopyOverHTTP(t *testing.T) {
 	if err := xml.Unmarshal(one.body, &first); err != nil || first.ETag != etagOf(source[:object.MinPartSize]) {
 		t.Fatalf("UploadPartCopy answered %s (%v)", one.body, err)
 	}
+	if got := one.header.Get("x-amz-server-side-encryption"); got != "AES256" {
+		t.Errorf("UploadPartCopy says the part is encrypted with %q", got)
+	}
 	two := s.mustStatus(partCopy(2, map[string]string{"x-amz-copy-source-range": fmt.Sprintf("bytes=%d-%d", object.MinPartSize, object.MinPartSize+999)}), http.StatusOK)
 	var second copyPartResult
 	if err := xml.Unmarshal(two.body, &second); err != nil {
@@ -191,15 +199,16 @@ func TestUploadPartCopyOverHTTP(t *testing.T) {
 		status  int
 		code    string
 	}{
-		"a range past the end":                        {map[string]string{"x-amz-copy-source-range": fmt.Sprintf("bytes=%d-%d", object.MinPartSize+2000, object.MinPartSize+3000)}, 400, "InvalidArgument"},
-		"a range that ends after the source":          {map[string]string{"x-amz-copy-source-range": "bytes=0-999999999"}, 400, "InvalidArgument"},
-		"a checksum to compute":                       {map[string]string{"x-amz-checksum-algorithm": "SHA256"}, 501, "NotImplemented"},
-		"a range without an end":                      {map[string]string{"x-amz-copy-source-range": "bytes=5-"}, 400, "InvalidArgument"},
-		"the last bytes":                              {map[string]string{"x-amz-copy-source-range": "bytes=-5"}, 400, "InvalidArgument"},
-		"a range backwards":                           {map[string]string{"x-amz-copy-source-range": "bytes=9-3"}, 400, "InvalidArgument"},
-		"a range that is none":                        {map[string]string{"x-amz-copy-source-range": "0-9"}, 400, "InvalidArgument"},
-		"a directive, which is for copies of objects": {map[string]string{"x-amz-metadata-directive": "REPLACE"}, 400, "InvalidArgument"},
-		"a condition that fails":                      {map[string]string{"x-amz-copy-source-if-match": `"another"`}, 412, "PreconditionFailed"},
+		"annotations, which belong to the copy of an object": {map[string]string{"x-amz-object-annotation-directive": "EXCLUDE"}, 400, "InvalidArgument"},
+		"a range past the end":                               {map[string]string{"x-amz-copy-source-range": fmt.Sprintf("bytes=%d-%d", object.MinPartSize+2000, object.MinPartSize+3000)}, 400, "InvalidArgument"},
+		"a range that ends after the source":                 {map[string]string{"x-amz-copy-source-range": "bytes=0-999999999"}, 400, "InvalidArgument"},
+		"a checksum to compute":                              {map[string]string{"x-amz-checksum-algorithm": "SHA256"}, 501, "NotImplemented"},
+		"a range without an end":                             {map[string]string{"x-amz-copy-source-range": "bytes=5-"}, 400, "InvalidArgument"},
+		"the last bytes":                                     {map[string]string{"x-amz-copy-source-range": "bytes=-5"}, 400, "InvalidArgument"},
+		"a range backwards":                                  {map[string]string{"x-amz-copy-source-range": "bytes=9-3"}, 400, "InvalidArgument"},
+		"a range that is none":                               {map[string]string{"x-amz-copy-source-range": "0-9"}, 400, "InvalidArgument"},
+		"a directive, which is for copies of objects":        {map[string]string{"x-amz-metadata-directive": "REPLACE"}, 400, "InvalidArgument"},
+		"a condition that fails":                             {map[string]string{"x-amz-copy-source-if-match": `"another"`}, 412, "PreconditionFailed"},
 	} {
 		r := partCopy(3, tt.headers)
 		if code := s.errorCode(r); r.status != tt.status || code != tt.code {

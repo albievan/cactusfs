@@ -150,6 +150,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 |---|---|---|
 | A base image or tool changes under a tag | Every base image pinned by digest; Go tools pinned in `go.mod` and `go.sum`; console packages pinned by lockfile; CI actions pinned by commit SHA | **implemented**; pnpm itself is pinned by version only |
 | A package runs code at install time | pnpm lifecycle scripts are disabled for the console | **implemented** |
+| A test tool of the builder image changes under its name | The AWS CLI installer and the ceph/s3-tests archive are fetched by URL and accepted only by SHA-256; the Python packages of the tests are installed with `--require-hashes` from a lock file in the repository. They exist in the builder image only; the stage is not built for the product image | **implemented**; the tools themselves run with the privileges of the builder container during `make s3-compat`. The s3-tests archive is one GitHub generates for a commit: if its bytes change the builder build fails until the checksum is looked at again |
 | A vulnerable Go dependency | `govulncheck` gate | **implemented** |
 | A vulnerable console package | Audit gate for `web/` | not planned yet — see open question 4 |
 | A gate silently switched off | `make lint` rejects `//nolint`, skipped tests and `testing.Short`; gates whose subject does not exist yet fail as soon as it appears | **implemented** |

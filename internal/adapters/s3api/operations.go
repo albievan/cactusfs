@@ -131,7 +131,7 @@ func (h *Handler) listObjectsV2(ctx context.Context, req *request) error {
 	// that characters XML cannot carry survive.
 	encode := func(s string) string {
 		if encoding == encodingURL {
-			return url.QueryEscape(s)
+			return encodeName(s)
 		}
 		return s
 	}
@@ -374,8 +374,18 @@ func setObjectHeaders(header http.Header, v object.Version, customerDigest strin
 		}
 	}
 	for key, value := range v.UserMetadata {
-		header.Set(userMetadataPrefix+key, value)
+		// In lower case, as S3 sends them and as SDKs hand them to their
+		// callers: Set would write "X-Amz-Meta-Owner", and a client that
+		// stored "owner" would be given "Owner".
+		header[strings.ToLower(userMetadataPrefix)+key] = []string{value}
 	}
+}
+
+// encodeName encodes a key, a prefix or a delimiter for a listing that was
+// asked for with encoding-type=url, as S3 does: percent-encoded, a space as
+// "+", and "/" left as it is.
+func encodeName(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "%2F", "/")
 }
 
 // parseRange parses an HTTP Range header with a single byte range. As HTTP

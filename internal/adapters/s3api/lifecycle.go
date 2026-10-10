@@ -82,7 +82,8 @@ func (h *Handler) putBucketLifecycle(ctx context.Context, req *request) error {
 			rule.Enabled = true
 		case "Disabled":
 		default:
-			return fmt.Errorf("%w: lifecycle: rule %d: Status is Enabled or Disabled", domain.ErrInvalidArgument, i)
+			// A document that does not say what the schema lets it say.
+			return errMalformedXML
 		}
 		switch {
 		case r.Prefix != nil && r.Filter != nil:

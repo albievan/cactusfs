@@ -313,7 +313,7 @@ func (h *Handler) listObjectVersions(ctx context.Context, req *request, query ur
 	}
 	encode := func(s string) string {
 		if encoding == encodingURL {
-			return url.QueryEscape(s)
+			return encodeName(s)
 		}
 		return s
 	}

@@ -189,7 +189,7 @@ func (h *Handler) readTags(req *request) (map[string]string, error) {
 	tags := map[string]string{}
 	for _, tag := range in.Tags {
 		if _, twice := tags[tag.Key]; twice {
-			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidArgument, tag.Key)
+			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidTag, tag.Key)
 		}
 		tags[tag.Key] = tag.Value
 	}
@@ -303,7 +303,7 @@ func tagsOf(header http.Header) (map[string]string, error) {
 	tags := map[string]string{}
 	for key, list := range parsed {
 		if len(list) != 1 {
-			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidArgument, key)
+			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidTag, key)
 		}
 		tags[key] = list[0]
 	}

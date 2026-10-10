@@ -5,7 +5,10 @@
 // Nothing under internal/domain imports anything outside the standard library.
 package domain
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Lifecycle errors.
 var (
@@ -39,6 +42,10 @@ var (
 	// ErrInvalidArgument reports a request parameter that is malformed or out
 	// of range.
 	ErrInvalidArgument = errors.New("invalid argument")
+	// ErrInvalidTag reports tags that cannot be kept: too many, too long,
+	// given twice, or of characters a tag may not have. It is an
+	// ErrInvalidArgument.
+	ErrInvalidTag = fmt.Errorf("%w: invalid tag", ErrInvalidArgument)
 	// ErrAccessDenied reports that the authorizer refused the request.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrCredentialNotFound reports an access key ID that does not exist or

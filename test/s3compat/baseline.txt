@@ -60,3 +60,12 @@ github.com/albievan/cactusfs/test/s3compat TestConditionalGet
 github.com/albievan/cactusfs/test/s3compat TestCopyObject
 github.com/albievan/cactusfs/test/s3compat TestListObjectsV1
 github.com/albievan/cactusfs/test/s3compat TestUploadPartCopy
+github.com/albievan/cactusfs/test/s3compat TestAWSCLIBuckets
+github.com/albievan/cactusfs/test/s3compat TestAWSCLICopyUpAndDown
+github.com/albievan/cactusfs/test/s3compat TestAWSCLICustomerKey
+github.com/albievan/cactusfs/test/s3compat TestAWSCLIMoveAndRemove
+github.com/albievan/cactusfs/test/s3compat TestAWSCLIMultipart
+github.com/albievan/cactusfs/test/s3compat TestAWSCLIPresign
+github.com/albievan/cactusfs/test/s3compat TestAWSCLIS3API
+github.com/albievan/cactusfs/test/s3compat TestAWSCLISync
+github.com/albievan/cactusfs/test/s3compat TestCephS3Tests

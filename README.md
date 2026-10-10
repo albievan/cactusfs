@@ -270,7 +270,7 @@ make help                  # all targets
 
 | Target | What it does |
 |---|---|
-| `make check` | format, lint, vet, unit tests + coverage, integration, S3 compatibility, vulnerabilities, contracts, licences, console, cross-build, image, Helm, fresh clone |
+| `make check` | format, lint, vet, unit tests + coverage, integration, S3 compatibility (the AWS SDK for Go, the AWS CLI and the S3 tests of Ceph), vulnerabilities, contracts, licences, console, cross-build, image, Helm, fresh clone |
 | `make test` | unit tests, fast |
 | `make fmt` | format Go sources |
 | `make build` | `bin/cactusfs` for this OS |

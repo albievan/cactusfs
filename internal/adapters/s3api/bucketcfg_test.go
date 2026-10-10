@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"testing/quick"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
@@ -475,4 +477,63 @@ func FuzzTagging(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestErrorNamesAsS3HasThem: tags that cannot be kept, and a lifecycle
+// status that is none, are refused by the names S3 has for that. (That user
+// metadata is sent under lower-case header names is checked by the tests of
+// ceph/s3-tests in the compatibility suite and by TestMetadataHeaderNames:
+// the HTTP client of Go rewrites the case of the names it receives.)
+func TestErrorNamesAsS3HasThem(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.putObject("/bkt/k", []byte("x"))
+	eleven := []string{}
+	for _, k := range strings.Split("a b c d e f g h i j k", " ") {
+		eleven = append(eleven, k, "v")
+	}
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt/k?tagging", body: tagBody(eleven...)}), http.StatusBadRequest, "InvalidTag")
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt/k?tagging", body: tagBody("a", "1", "a", "2")}), http.StatusBadRequest, "InvalidTag")
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt/x", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "a=" + strings.Repeat("v", 300)}}), http.StatusBadRequest, "InvalidTag")
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt?lifecycle", body: []byte(`<LifecycleConfiguration><Rule><Status>enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)}),
+		http.StatusBadRequest, "MalformedXML")
+}
+
+// TestMetadataHeaderNames: user metadata is written under lower-case header
+// names, as S3 sends them. Looked at where the handler writes them, because
+// the HTTP client of Go would rewrite their case.
+func TestMetadataHeaderNames(t *testing.T) {
+	t.Parallel()
+	header := http.Header{}
+	setObjectHeaders(header, object.Version{UserMetadata: map[string]string{"owner": "albie", "two-words": "yes"}}, "")
+	for _, name := range []string{"x-amz-meta-owner", "x-amz-meta-two-words"} {
+		if _, ok := header[name]; !ok {
+			t.Errorf("no header spelled %s in %v", name, header)
+		}
+	}
+	if _, ok := header["X-Amz-Meta-Owner"]; ok {
+		t.Errorf("metadata under a canonical header name: %v", header)
+	}
+}
+
+// TestEncodeName: a name encoded for a listing decodes to what it was, and
+// its slashes stay slashes.
+func TestEncodeName(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"photos/2026/a b.jpg": "photos/2026/a+b.jpg", "/": "/", "a%2Fb": "a%252Fb", "a+b": "a%2Bb", "line\nbreak": "line%0Abreak", "": "",
+	} {
+		if got := encodeName(in); got != want {
+			t.Errorf("encodeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	property := func(name string) bool {
+		encoded := encodeName(name)
+		decoded, err := url.QueryUnescape(encoded)
+		return err == nil && decoded == name && !strings.Contains(encoded, "%2F")
+	}
+	if err := quick.Check(property, nil); err != nil {
+		t.Error(err)
+	}
 }

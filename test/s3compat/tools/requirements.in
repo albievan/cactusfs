@@ -1,0 +1,7 @@
+boto3
+botocore
+munch
+isodate
+requests
+pytz
+pytest

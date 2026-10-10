@@ -45,8 +45,13 @@ const (
 
 // suite is the running server and how to reach it.
 type suite struct {
-	endpoint  string // https://127.0.0.1:<port>
-	s3Addr    string
+	endpoint string // https://127.0.0.1:<port>
+	s3Addr   string
+	// adminAddr is where the management API listens; certFile is the
+	// certificate authority clients are to trust, as a file, for tools
+	// that are told by a path.
+	adminAddr string
+	certFile  string
 	accessKey string
 	secretKey string
 	pool      *x509.CertPool
@@ -87,13 +92,20 @@ func run(m *testing.M) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	target.pool = pool
+	target.pool, target.certFile = pool, certFile
 	if target.accessKey, target.secretKey, err = randomCredentials(); err != nil {
 		return 0, err
 	}
 
-	server := exec.CommandContext(ctx, bin, "server",
-		"--data", filepath.Join(dir, "drive1"), "--data", filepath.Join(dir, "drive2"), "--kms", "local",
+	// The time limit above is for building and starting. The server then
+	// runs for as long as the suite does, whose own limit is that of
+	// "go test".
+	serving, stop := context.WithCancel(context.Background())
+	defer stop()
+	server := exec.CommandContext(serving, bin, "server",
+		// Four drives: objects are erasure-coded, as in a deployment.
+		"--data", filepath.Join(dir, "drive1"), "--data", filepath.Join(dir, "drive2"),
+		"--data", filepath.Join(dir, "drive3"), "--data", filepath.Join(dir, "drive4"), "--kms", "local",
 		"--tls-cert", certFile, "--tls-key", keyFile,
 		"--admin-addr", "127.0.0.1:0", "--s3-addr", "127.0.0.1:0", "--s3-domain", domain)
 	server.Env = append(server.Environ(),
@@ -119,12 +131,20 @@ func run(m *testing.M) (int, error) {
 			Listener string `json:"listener"`
 			Addr     string `json:"addr"`
 		}
-		if json.Unmarshal(logs.Bytes(), &entry) == nil && entry.Msg == "listening" && entry.Listener == "s3" {
+		if json.Unmarshal(logs.Bytes(), &entry) != nil || entry.Msg != "listening" {
+			continue
+		}
+		switch entry.Listener {
+		case "s3":
 			target.s3Addr = entry.Addr
+		case "admin":
+			target.adminAddr = entry.Addr
+		}
+		if target.s3Addr != "" && target.adminAddr != "" {
 			break
 		}
 	}
-	if target.s3Addr == "" {
+	if target.s3Addr == "" || target.adminAddr == "" {
 		return 0, fmt.Errorf("server did not start: %s", stderr.String())
 	}
 	target.endpoint = "https://" + target.s3Addr

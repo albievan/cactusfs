@@ -28,12 +28,18 @@ const (
 	headerMetadataDirective = "x-amz-metadata-directive"
 	headerTaggingDirective  = "x-amz-tagging-directive"
 	copySourceIfPrefix      = "x-amz-copy-source-if-"
+	// headerAnnotationDirective says what a copy does with the object
+	// annotations of its source. This store keeps none. The AWS CLI sends
+	// EXCLUDE - leave them behind - with every CopyObject, which asks for
+	// nothing; any other value asks for what is not implemented.
+	headerAnnotationDirective = "x-amz-object-annotation-directive"
+	annotationsExcluded       = "EXCLUDE"
 )
 
 // copyHeaders are the headers that belong to a copy and to nothing else.
 func copyHeaders() []string {
 	return append([]string{
-		headerCopySource, headerCopySourceRange, headerMetadataDirective, headerTaggingDirective,
+		headerCopySource, headerCopySourceRange, headerMetadataDirective, headerTaggingDirective, headerAnnotationDirective,
 		copySourceIfPrefix + "match", copySourceIfPrefix + "none-match", copySourceIfPrefix + "modified-since", copySourceIfPrefix + "unmodified-since",
 	}, copySourceSSEHeaders()...)
 }
@@ -233,6 +239,9 @@ func (h *Handler) copyObject(ctx context.Context, req *request) error {
 	if req.Header.Get(headerCopySourceRange) != "" {
 		return fmt.Errorf("%w: %s belongs to the copy of a part", domain.ErrInvalidArgument, headerCopySourceRange)
 	}
+	if values := req.Header.Values(headerAnnotationDirective); len(values) > 1 || (len(values) == 1 && values[0] != annotationsExcluded) {
+		return errNotImplemented()
+	}
 	replaceMetadata, err := directive(req.Header, headerMetadataDirective)
 	if err != nil {
 		return err
@@ -317,12 +326,12 @@ func (h *Handler) uploadPartCopy(ctx context.Context, req *request, query url.Va
 		}
 		source.Range = spec
 	}
-	for _, name := range []string{headerMetadataDirective, headerTaggingDirective, headerTagging} {
+	for _, name := range []string{headerMetadataDirective, headerTaggingDirective, headerTagging, headerAnnotationDirective} {
 		if len(req.Header.Values(name)) > 0 {
 			return fmt.Errorf("%w: %s is not part of this operation", domain.ErrInvalidArgument, name)
 		}
 	}
-	customerKey, _, err := customerKeyOf(req.Request)
+	customerKey, keyDigest, err := customerKeyOf(req.Request)
 	if err != nil {
 		return err
 	}
@@ -333,6 +342,13 @@ func (h *Handler) uploadPartCopy(ctx context.Context, req *request, query url.Va
 	})
 	if err != nil {
 		return err
+	}
+	// How the part is encrypted, as UploadPart says it.
+	if customerKey != nil {
+		req.w.Header().Set(headerSSECAlgo, sseAES256)
+		req.w.Header().Set(headerSSECKeyMD5, keyDigest)
+	} else {
+		req.w.Header().Set(headerSSE, sseAES256)
 	}
 	h.writeXML(ctx, req, http.StatusOK, copyPartResult{XMLNS: s3Namespace, ETag: quote(part.ETag), LastModified: xmlTime(part.ModifiedAt)})
 	return nil
@@ -366,7 +382,7 @@ func (h *Handler) listObjectsV1(ctx context.Context, req *request, query url.Val
 	}
 	encode := func(s string) string {
 		if encoding == encodingURL {
-			return url.QueryEscape(s)
+			return encodeName(s)
 		}
 		return s
 	}

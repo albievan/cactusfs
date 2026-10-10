@@ -237,7 +237,7 @@ func TestListObjectsV2(t *testing.T) {
 	if got := list("&fetch-owner=true"); got.Contents[0].Owner == nil || got.Contents[0].Owner.ID != s.keyID {
 		t.Errorf("fetch-owner listing has no owner: %+v", got.Contents[0])
 	}
-	if got := list("&encoding-type=url"); got.Contents[4].Key != "z+last.txt" || got.EncodingType != "url" || got.Contents[1].Key != "photos%2F1.jpg" {
+	if got := list("&encoding-type=url"); got.Contents[4].Key != "z+last.txt" || got.EncodingType != "url" || got.Contents[1].Key != "photos/1.jpg" {
 		t.Errorf("url-encoded listing = %+v", keys(got))
 	}
 	if got := list("&max-keys=0"); len(got.Contents) != 0 || got.IsTruncated {

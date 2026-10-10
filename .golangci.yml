@@ -8,6 +8,7 @@ run:
   build-tags:
     - integration
     - s3compat
+    - s3tools
     - chaos
     - console
 
