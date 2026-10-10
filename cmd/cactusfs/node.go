@@ -144,6 +144,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// Every outbound port is reached through a decorator that traces and
 	// counts the call.
 	meta := n.telemetry.InstrumentMetadata(n.meta)
+	n.authorizer.WithBucketPolicies(meta)
 
 	if cfg.clustered() {
 		if err := n.joinCluster(ctx, cfg, logger); err != nil {
@@ -173,7 +174,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 
 	n.maintenance = app.NewMaintenance(n.id, n.clock)
 	drives := n.driveSource(stores)
-	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor)
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.meta.LocalConfig())
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
 		OnHeal: func(r app.HealResult) {

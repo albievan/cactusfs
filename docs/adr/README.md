@@ -46,4 +46,5 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted |
 | [0009](0009-object-lock.md) | Object Lock: where it is enforced, and the clock that decides | accepted |
 | [0010](0010-key-hierarchy.md) | Key hierarchy: one data key, several uses | accepted |
+| [0011](0011-bucket-policy-cors-tags.md) | Bucket policies, anonymous access, cross-origin rules and tags | accepted |
 | [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |

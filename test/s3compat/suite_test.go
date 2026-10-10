@@ -1343,3 +1343,154 @@ func put2(t *testing.T, bucket string) types.ServerSideEncryption {
 	_, out := get(t, bucket, "plain")
 	return out.ServerSideEncryption
 }
+
+func TestBucketPolicyPublicRead(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	nobody := newClient(clientOptions{endpoint: target.endpoint, pathStyle: true, anonymous: true})
+	put(t, name, "index.html", []byte("<h1>hello</h1>"))
+
+	if _, err := nobody.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("index.html")}); errorCode(err) != "AccessDenied" {
+		t.Fatalf("anonymous GetObject before a policy: code %q (%v), want AccessDenied", errorCode(err), err)
+	}
+	if _, err := c.GetBucketPolicy(t.Context(), &s3.GetBucketPolicyInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchBucketPolicy" {
+		t.Errorf("GetBucketPolicy without one: code %q (%v)", errorCode(err), err)
+	}
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Sid":"public","Effect":"Allow","Principal":"*",`+
+		`"Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::%s/*"}]}`, name)
+	if _, err := c.PutBucketPolicy(t.Context(), &s3.PutBucketPolicyInput{Bucket: aws.String(name), Policy: aws.String(policy)}); err != nil {
+		t.Fatalf("PutBucketPolicy: %v", err)
+	}
+	got, err := c.GetBucketPolicy(t.Context(), &s3.GetBucketPolicyInput{Bucket: aws.String(name)})
+	if err != nil || aws.ToString(got.Policy) != policy {
+		t.Errorf("GetBucketPolicy = %q, %v", aws.ToString(got.Policy), err)
+	}
+	out, err := nobody.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("index.html")})
+	if err != nil {
+		t.Fatalf("anonymous GetObject of what the policy opens: %v", err)
+	}
+	body, _ := io.ReadAll(out.Body)
+	_ = out.Body.Close()
+	if string(body) != "<h1>hello</h1>" {
+		t.Errorf("anonymous GetObject = %q", body)
+	}
+	// Nobody writes, whatever the policy says.
+	if _, err := nobody.PutObject(t.Context(), &s3.PutObjectInput{Bucket: aws.String(name), Key: aws.String("defaced"), Body: bytes.NewReader([]byte("x"))}); errorCode(err) != "AccessDenied" {
+		t.Errorf("anonymous PutObject: code %q (%v), want AccessDenied", errorCode(err), err)
+	}
+	if _, err := nobody.DeleteObject(t.Context(), &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("index.html")}); errorCode(err) != "AccessDenied" {
+		t.Errorf("anonymous DeleteObject: code %q (%v), want AccessDenied", errorCode(err), err)
+	}
+	if _, err := c.DeleteBucketPolicy(t.Context(), &s3.DeleteBucketPolicyInput{Bucket: aws.String(name)}); err != nil {
+		t.Fatalf("DeleteBucketPolicy: %v", err)
+	}
+	if _, err := nobody.GetObject(t.Context(), &s3.GetObjectInput{Bucket: aws.String(name), Key: aws.String("index.html")}); errorCode(err) != "AccessDenied" {
+		t.Errorf("anonymous GetObject after the policy was removed: code %q (%v)", errorCode(err), err)
+	}
+}
+
+func TestBucketCors(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	if _, err := c.GetBucketCors(t.Context(), &s3.GetBucketCorsInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchCORSConfiguration" {
+		t.Errorf("GetBucketCors without rules: code %q (%v)", errorCode(err), err)
+	}
+	rules := []types.CORSRule{{
+		ID: aws.String("app"), AllowedOrigins: []string{"https://app.example"}, AllowedMethods: []string{"GET", "PUT"},
+		AllowedHeaders: []string{"*"}, ExposeHeaders: []string{"ETag"}, MaxAgeSeconds: aws.Int32(300),
+	}}
+	if _, err := c.PutBucketCors(t.Context(), &s3.PutBucketCorsInput{Bucket: aws.String(name), CORSConfiguration: &types.CORSConfiguration{CORSRules: rules}}); err != nil {
+		t.Fatalf("PutBucketCors: %v", err)
+	}
+	got, err := c.GetBucketCors(t.Context(), &s3.GetBucketCorsInput{Bucket: aws.String(name)})
+	if err != nil || len(got.CORSRules) != 1 || !slices.Equal(got.CORSRules[0].AllowedMethods, []string{"GET", "PUT"}) ||
+		aws.ToInt32(got.CORSRules[0].MaxAgeSeconds) != 300 || aws.ToString(got.CORSRules[0].ID) != "app" {
+		t.Errorf("GetBucketCors = %+v, %v", got, err)
+	}
+	// The preflight a browser sends, without credentials.
+	preflight := func(origin string) (int, http.Header) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodOptions, target.endpoint+"/"+name+"/k", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "PUT")
+		req.Header.Set("Access-Control-Request-Headers", "content-type")
+		resp, err := httpClient().Do(req)
+		if err != nil {
+			t.Fatalf("preflight: %v", err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Header
+	}
+	if status, header := preflight("https://app.example"); status != http.StatusOK || header.Get("Access-Control-Allow-Origin") != "https://app.example" ||
+		header.Get("Access-Control-Max-Age") != "300" {
+		t.Errorf("preflight = %d, %v", status, header)
+	}
+	if status, header := preflight("https://evil.example"); status != http.StatusForbidden || header.Get("Access-Control-Allow-Origin") != "" {
+		t.Errorf("preflight from another origin = %d, %v", status, header)
+	}
+	if _, err := c.DeleteBucketCors(t.Context(), &s3.DeleteBucketCorsInput{Bucket: aws.String(name)}); err != nil {
+		t.Fatalf("DeleteBucketCors: %v", err)
+	}
+	if status, _ := preflight("https://app.example"); status != http.StatusForbidden {
+		t.Errorf("preflight after the rules were removed = %d", status)
+	}
+}
+
+func TestTagging(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	tagSet := func(pairs ...string) *types.Tagging {
+		set := &types.Tagging{}
+		for i := 0; i+1 < len(pairs); i += 2 {
+			set.TagSet = append(set.TagSet, types.Tag{Key: aws.String(pairs[i]), Value: aws.String(pairs[i+1])})
+		}
+		return set
+	}
+	if _, err := c.PutBucketTagging(t.Context(), &s3.PutBucketTaggingInput{Bucket: aws.String(name), Tagging: tagSet("team", "finance")}); err != nil {
+		t.Fatalf("PutBucketTagging: %v", err)
+	}
+	bucketTags, err := c.GetBucketTagging(t.Context(), &s3.GetBucketTaggingInput{Bucket: aws.String(name)})
+	if err != nil || len(bucketTags.TagSet) != 1 || aws.ToString(bucketTags.TagSet[0].Value) != "finance" {
+		t.Errorf("GetBucketTagging = %+v, %v", bucketTags, err)
+	}
+	if _, err := c.DeleteBucketTagging(t.Context(), &s3.DeleteBucketTaggingInput{Bucket: aws.String(name)}); err != nil {
+		t.Errorf("DeleteBucketTagging: %v", err)
+	}
+	if _, err := c.GetBucketTagging(t.Context(), &s3.GetBucketTaggingInput{Bucket: aws.String(name)}); errorCode(err) != "NoSuchTagSet" {
+		t.Errorf("GetBucketTagging without tags: code %q (%v)", errorCode(err), err)
+	}
+
+	if _, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+		Bucket: aws.String(name), Key: aws.String("report"), Body: bytes.NewReader([]byte("q3")), Tagging: aws.String("project=apollo&stage=draft+one"),
+	}); err != nil {
+		t.Fatalf("PutObject with tags: %v", err)
+	}
+	objectTags, err := c.GetObjectTagging(t.Context(), &s3.GetObjectTaggingInput{Bucket: aws.String(name), Key: aws.String("report")})
+	if err != nil || len(objectTags.TagSet) != 2 {
+		t.Fatalf("GetObjectTagging = %+v, %v", objectTags, err)
+	}
+	head, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("report")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, out := get(t, name, "report")
+	if aws.ToInt32(out.TagCount) != 2 || aws.ToInt64(head.ContentLength) != 2 {
+		t.Errorf("TagCount = %d", aws.ToInt32(out.TagCount))
+	}
+	if _, err := c.PutObjectTagging(t.Context(), &s3.PutObjectTaggingInput{Bucket: aws.String(name), Key: aws.String("report"), Tagging: tagSet("stage", "final")}); err != nil {
+		t.Fatalf("PutObjectTagging: %v", err)
+	}
+	objectTags, err = c.GetObjectTagging(t.Context(), &s3.GetObjectTaggingInput{Bucket: aws.String(name), Key: aws.String("report")})
+	if err != nil || len(objectTags.TagSet) != 1 || aws.ToString(objectTags.TagSet[0].Value) != "final" {
+		t.Errorf("GetObjectTagging after replacing = %+v, %v", objectTags, err)
+	}
+	if _, err := c.DeleteObjectTagging(t.Context(), &s3.DeleteObjectTaggingInput{Bucket: aws.String(name), Key: aws.String("report")}); err != nil {
+		t.Errorf("DeleteObjectTagging: %v", err)
+	}
+	if got, _ := get(t, name, "report"); string(got) != "q3" {
+		t.Errorf("the object after its tags were deleted: %q", got)
+	}
+}

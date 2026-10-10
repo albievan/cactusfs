@@ -191,7 +191,12 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 	}
 	defer clear(sse.CustomerKey)
 	digest := req.Header.Get(headerSSECKeyMD5)
+	tags, err := tagsOf(req.Header)
+	if err != nil {
+		return err
+	}
 	in := app.PutInput{
+		Tags:               tags,
 		Lock:               lock,
 		SSE:                sse,
 		Bucket:             req.bucket,
@@ -336,6 +341,9 @@ func setObjectHeaders(header http.Header, v object.Version, customerDigest strin
 	header.Set("Last-Modified", v.ModifiedAt.UTC().Format(http.TimeFormat))
 	header.Set("Accept-Ranges", "bytes")
 	setSSEHeaders(header, v.Encryption, customerDigest)
+	if len(v.Tags) > 0 {
+		header.Set("X-Amz-Tagging-Count", strconv.Itoa(len(v.Tags)))
+	}
 	setLockHeaders(header, v.Lock)
 	for name, value := range map[string]string{
 		"Content-Encoding":    v.ContentEncoding,

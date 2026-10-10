@@ -95,6 +95,8 @@ func TestEventsMatchTheContract(t *testing.T) {
 		ports.EventObjectRetentionChanged:    {ports.ObjectEvent{}, "Object"},
 		ports.EventObjectLegalHoldChanged:    {ports.ObjectEvent{}, "Object"},
 		ports.EventBucketLockChanged:         {ports.BucketEvent{}, "Bucket"},
+		ports.EventBucketConfigChanged:       {ports.BucketEvent{}, "Bucket"},
+		ports.EventObjectTagsChanged:         {ports.ObjectEvent{}, "Object"},
 	}
 
 	var addresses []string

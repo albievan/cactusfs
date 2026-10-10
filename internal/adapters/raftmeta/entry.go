@@ -85,6 +85,25 @@ type entry struct {
 	PutPart        *putPartCmd        `json:"put_part,omitempty"`
 	CompleteUpload *completeUploadCmd `json:"complete_upload,omitempty"`
 	AbortUpload    *uploadRefCmd      `json:"abort_upload,omitempty"`
+	// Bucket configuration and tags (schema 2).
+	SetBucketConfig *bucketConfigCmd `json:"set_bucket_config,omitempty"`
+	SetTags         *tagsCmd         `json:"set_tags,omitempty"`
+}
+
+// bucketConfigCmd replaces one configuration document of a bucket; without
+// a document it removes it.
+type bucketConfigCmd struct {
+	Bucket   string `json:"bucket"`
+	Kind     string `json:"kind"`
+	Document []byte `json:"document,omitempty"`
+}
+
+// tagsCmd replaces the tags of a version.
+type tagsCmd struct {
+	Bucket     string            `json:"bucket"`
+	Key        string            `json:"key"`
+	VersionRef string            `json:"version_ref"`
+	Tags       map[string]string `json:"tags,omitempty"`
 }
 
 // versioningCmd changes the versioning state of a bucket.
@@ -233,6 +252,9 @@ type bucketRecord struct {
 	ObjectLock bool   `json:"object_lock,omitempty"`
 	// DefaultRetention is given to versions put without a retention.
 	DefaultRetention *retentionRule `json:"default_retention,omitempty"`
+	// Config holds the configuration documents of the bucket by kind:
+	// policy, CORS rules, tags (schema 2).
+	Config map[string][]byte `json:"config,omitempty"`
 }
 
 // versionRecord is an object version as it is stored and replicated.
@@ -254,6 +276,8 @@ type versionRecord struct {
 	// Parts is the number of parts of a version a multipart upload made;
 	// its data is then in "extents" under DataID (schema 2).
 	Parts int `json:"parts,omitempty"`
+	// Tags are the tags of the version (schema 2).
+	Tags map[string]string `json:"tags,omitempty"`
 	// Dropped is set only in the answer to an entry that removed this
 	// version, never in the state: the parts that went with it, whose
 	// data the proposer may now remove.
@@ -375,10 +399,10 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 func versionOf(e entry) byte {
 	switch e.Type {
 	case cmdSetVersioning, cmdDeleteVersion, cmdSetBucketLock, cmdSetRetention, cmdSetLegalHold,
-		cmdCreateUpload, cmdPutPart, cmdCompleteUpload, cmdAbortUpload:
+		cmdCreateUpload, cmdPutPart, cmdCompleteUpload, cmdAbortUpload, cmdSetBucketConfig, cmdSetTags:
 		return entrySchemaTimed
 	}
-	if !e.At.IsZero() || (e.PutObject != nil && (e.PutObject.Lock != nil || e.PutObject.Encryption.Mode != "")) {
+	if !e.At.IsZero() || (e.PutObject != nil && (e.PutObject.Lock != nil || e.PutObject.Encryption.Mode != "" || len(e.PutObject.Tags) != 0)) {
 		return entrySchemaTimed
 	}
 	// A bucket created with what only this schema knows: a binary of the
@@ -409,6 +433,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil,
 		e.SetBucketLock != nil, e.SetRetention != nil, e.SetLegalHold != nil,
 		e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
+		e.SetBucketConfig != nil, e.SetTags != nil,
 	} {
 		if present {
 			set++
@@ -450,6 +475,10 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.CompleteUpload != nil && data[0] >= entrySchemaTimed
 	case cmdAbortUpload:
 		ok = ok && e.AbortUpload != nil && data[0] >= entrySchemaTimed
+	case cmdSetBucketConfig:
+		ok = ok && e.SetBucketConfig != nil && data[0] >= entrySchemaTimed
+	case cmdSetTags:
+		ok = ok && e.SetTags != nil && data[0] >= entrySchemaTimed
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -496,6 +525,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		DeleteMarker:       v.DeleteMarker,
 		Lock:               lockToRecord(v.Lock),
 		Parts:              v.Parts,
+		Tags:               v.Tags,
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -535,6 +565,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		DeleteMarker:       r.DeleteMarker,
 		Lock:               r.Lock.toDomain(),
 		Parts:              r.Parts,
+		Tags:               r.Tags,
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,

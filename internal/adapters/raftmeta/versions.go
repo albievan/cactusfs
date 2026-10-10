@@ -434,6 +434,9 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 	if v.Parts != 0 || v.Encryption.KeyMode != "" {
 		return refuse(domain.ErrInvalidArgument, "a put does not make a version of parts")
 	}
+	if err := object.ValidateTags(v.Tags, object.MaxObjectTags); err != nil {
+		return applyResult{err: err}, nil
+	}
 	// What an answer names is never taken from an entry.
 	v.Dropped = nil
 	removed, refused, err := commitVersion(tx, b, &v, now)
@@ -640,6 +643,12 @@ func applySetBucketLock(tx *bbolt.Tx, cmd bucketLockCmd) (applyResult, error) {
 // lockTarget finds the version a lock command is about, in a bucket whose
 // versions can be locked.
 func lockTarget(tx *bbolt.Tx, bucketName, key, ref string) (history, *versionRecord, []byte, *applyResult, error) {
+	return versionTarget(tx, bucketName, key, ref, true)
+}
+
+// versionTarget finds the version an entry is about, to change something
+// that is kept with it. needLock refuses a bucket without Object Lock.
+func versionTarget(tx *bbolt.Tx, bucketName, key, ref string, needLock bool) (history, *versionRecord, []byte, *applyResult, error) {
 	refused := func(err error, format string, args ...any) (history, *versionRecord, []byte, *applyResult, error) {
 		result, _ := refuse(err, format, args...)
 		return history{}, nil, nil, &result, nil
@@ -651,7 +660,7 @@ func lockTarget(tx *bbolt.Tx, bucketName, key, ref string) (history, *versionRec
 	switch {
 	case b == nil || tx.Bucket(objectsBucket()).Bucket([]byte(bucketName)) == nil:
 		return refused(domain.ErrBucketNotFound, "%s", bucketName)
-	case !b.ObjectLock:
+	case needLock && !b.ObjectLock:
 		return refused(domain.ErrLockNotConfigured, "bucket %s was not created with Object Lock", bucketName)
 	}
 	h, err := openHistory(tx, bucketName, true)
@@ -666,7 +675,7 @@ func lockTarget(tx *bbolt.Tx, bucketName, key, ref string) (history, *versionRec
 	case target == nil:
 		return refused(domain.ErrVersionNotFound, "%s/%s version %s", bucketName, key, ref)
 	case target.DeleteMarker:
-		return refused(domain.ErrMethodNotAllowed, "a delete marker cannot be locked")
+		return refused(domain.ErrMethodNotAllowed, "a delete marker has nothing to change")
 	}
 	return h, target, storedKey, nil, nil
 }

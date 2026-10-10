@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -974,5 +975,112 @@ func TestEncryptionModesNeedTheSecondSchema(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBucketConfigurationAndTagsNeedTheSecondSchema: a binary of the first
+// schema knows neither; their entries are written in the second.
+func TestBucketConfigurationAndTagsNeedTheSecondSchema(t *testing.T) {
+	t.Parallel()
+	tagged := porttest.SampleVersion("b", "k", 1)
+	tagged.Tags = map[string]string{"a": "b"}
+	for _, e := range []entry{
+		{Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: "b", Kind: "policy", Document: []byte("{}")}},
+		{Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "b", Key: "k", VersionRef: "null"}},
+		{Type: cmdPutObject, PutObject: versionToRecord(tagged)},
+	} {
+		if got := versionOf(e); got != entrySchemaTimed {
+			t.Errorf("%s is written in schema %d, want %d", e.Type, got, entrySchemaTimed)
+		}
+	}
+	// An entry of the first schema that brings them anyway is applied
+	// without: a bucket with no policy, a version with no tags.
+	f := newFSM(t)
+	apply := func(index uint64, e entry) applyResult {
+		t.Helper()
+		data, err := encodeEntry(e, entrySchemaVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+	}
+	open := &bucketRecord{Name: "b", Config: map[string][]byte{"policy": []byte(`{"open":"to anyone"}`)}}
+	if r := apply(1, entry{Type: cmdCreateBucket, CreateBucket: open}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r := apply(2, entry{Type: cmdPutObject, PutObject: versionToRecord(tagged)}); r.err != nil {
+		t.Fatal(r.err)
+	}
+	if err := f.view(func(tx *bbolt.Tx) error {
+		b, err := readBucket(tx, "b")
+		if err != nil || b == nil || len(b.Config) != 0 {
+			t.Errorf("a bucket created by an entry of the first schema has configuration %v, %v", b, err)
+		}
+		v, err := readVersion(tx.Bucket(objectsBucket()).Bucket([]byte("b")), "k")
+		if err != nil || v == nil || len(v.Tags) != 0 {
+			t.Errorf("a version put by an entry of the first schema has tags %v, %v", v, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigurationAndTagChangesAreEvents: the events of a bucket's
+// configuration and of a version's tags come from the entries that were
+// applied, and from none that was refused.
+func TestConfigurationAndTagChangesAreEvents(t *testing.T) {
+	t.Parallel()
+	f := newFSM(t)
+	index := uint64(0)
+	apply := func(e entry) applyResult {
+		t.Helper()
+		index++
+		data, err := encodeEntry(e, entrySchemaTimed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := result(t, f.Apply(&raft.Log{Index: index, Type: raft.LogCommand, Data: data}))
+		if r.fatal {
+			t.Fatalf("%s stopped the state machine: %v", e.Type, r.err)
+		}
+		return r
+	}
+	types := func(r applyResult) []string {
+		var out []string
+		for _, e := range r.events {
+			out = append(out, e.Type)
+		}
+		return out
+	}
+	apply(entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "b"}})
+	apply(entry{Type: cmdPutObject, PutObject: versionToRecord(porttest.SampleVersion("b", "k", 1))})
+	set := apply(entry{Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: "b", Kind: "policy", Document: []byte("{}")}})
+	if got := types(set); set.err != nil || len(got) != 1 || got[0] != ports.EventBucketConfigChanged {
+		t.Errorf("bucket.config.put: %v, events %v", set.err, got)
+	}
+	tagged := apply(entry{Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "b", Key: "k", VersionRef: object.NullVersion, Tags: map[string]string{"a": "b"}}})
+	if got := types(tagged); tagged.err != nil || len(got) != 1 || got[0] != ports.EventObjectTagsChanged {
+		t.Errorf("object.tags.put: %v, events %v", tagged.err, got)
+	}
+	// Refused, and so no event - and none of them stops the state machine.
+	eleven := map[string]string{}
+	for i := range 11 {
+		eleven[strings.Repeat("k", i+1)] = ""
+	}
+	many := porttest.SampleVersion("b", "many", 2)
+	many.Tags = eleven
+	for name, e := range map[string]entry{
+		"a kind there is not":        {Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: "b", Kind: "acl", Document: []byte("x")}},
+		"too large":                  {Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: "b", Kind: "cors", Document: make([]byte, 64<<10+1)}},
+		"a missing bucket":           {Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: "missing", Kind: "cors", Document: []byte("x")}},
+		"eleven tags":                {Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "b", Key: "k", VersionRef: object.NullVersion, Tags: eleven}},
+		"a missing version":          {Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "b", Key: "missing", VersionRef: object.NullVersion}},
+		"a version ref that is none": {Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "b", Key: "k", VersionRef: "zz"}},
+		"a put with eleven tags":     {Type: cmdPutObject, PutObject: versionToRecord(many)},
+	} {
+		if r := apply(e); r.err == nil || len(r.events) != 0 {
+			t.Errorf("%s: %v, events %v", name, r.err, types(r))
+		}
 	}
 }

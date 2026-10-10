@@ -93,6 +93,8 @@ type Version struct {
 	DeleteMarker bool
 	// Lock is what keeps the version from being removed, if anything.
 	Lock Lock
+	// Tags are the tags of the version.
+	Tags map[string]string
 	// Parts, when not zero, says that the version was made by a multipart
 	// upload and consists of that many parts. Its bytes are then those of
 	// its parts, in order: DataID names the parts (it was the upload's ID)

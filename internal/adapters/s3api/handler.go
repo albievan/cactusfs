@@ -54,6 +54,13 @@ type Buckets interface {
 	SetDefaultRetention(ctx context.Context, principal iam.Principal, name string, d *bucket.DefaultRetention) error
 	Versioning(ctx context.Context, principal iam.Principal, name string) (bucket.Versioning, error)
 	SetVersioning(ctx context.Context, principal iam.Principal, name string, state bucket.Versioning) error
+	Policy(ctx context.Context, principal iam.Principal, name string) ([]byte, error)
+	SetPolicy(ctx context.Context, principal iam.Principal, name string, document []byte) error
+	CORS(ctx context.Context, principal iam.Principal, name string) (*bucket.CORS, error)
+	SetCORS(ctx context.Context, principal iam.Principal, name string, rules *bucket.CORS) error
+	CORSOf(ctx context.Context, name string) *bucket.CORS
+	Tags(ctx context.Context, principal iam.Principal, name string) (map[string]string, error)
+	SetTags(ctx context.Context, principal iam.Principal, name string, tags map[string]string) error
 }
 
 // Objects is the object use cases the adapter calls. *app.ObjectService
@@ -75,6 +82,8 @@ type Objects interface {
 	AbortUpload(ctx context.Context, principal iam.Principal, in app.UploadRef) error
 	ListParts(ctx context.Context, principal iam.Principal, in app.ListPartsInput) (app.ListPartsOutput, error)
 	ListUploads(ctx context.Context, principal iam.Principal, in app.ListUploadsInput) (app.ListUploadsOutput, error)
+	Tags(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Version, error)
+	SetTags(ctx context.Context, principal iam.Principal, in app.LockInput, tags map[string]string) (object.Version, error)
 }
 
 // Identities resolves an access key to its secret and principal.
@@ -199,7 +208,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("X-Amz-Request-Id", req.id)
 	header.Set("X-Content-Type-Options", "nosniff")
 
-	ctx := r.Context()
+	ctx := app.WithRequestScope(r.Context())
 	if err := h.serve(ctx, req); err != nil {
 		h.writeError(ctx, req, err)
 	}
@@ -230,10 +239,17 @@ func newRequestID() string {
 	return strings.ToUpper(hex.EncodeToString(id[:]))
 }
 
-// serve authenticates the request, then routes it. Nothing about a bucket or
-// an object is revealed, and no body is read, before authentication.
+// serve authenticates the request, then routes it. No body is read before
+// authentication, and nothing about an object is revealed. One thing about a
+// bucket is: the cross-origin headers its rules give an origin are sent with
+// every answer, a refusal included, as a browser needs them - so a bucket
+// with rules for an origin can be told from one without.
 func (h *Handler) serve(ctx context.Context, req *request) error {
 	h.address(req)
+	if req.Method == http.MethodOptions {
+		return h.preflight(ctx, req)
+	}
+	h.crossOrigin(ctx, req)
 	if err := h.authenticate(ctx, req); err != nil {
 		if code := toAPIError(err); code.status == http.StatusForbidden {
 			// Refused credentials, as opposed to a request this adapter
@@ -303,6 +319,13 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 			return err
 		}
 		sig = signed.signature
+	case header == "" && (req.Method == http.MethodGet || req.Method == http.MethodHead):
+		// No credentials, and a request that only reads: the caller is
+		// nobody in particular. Whether nobody may read this is the
+		// authorizer's to say; without a bucket policy that opens it,
+		// the answer is no.
+		req.principal = anonymous(req)
+		return nil
 	case header == "":
 		return errAuthMissing
 	default:
@@ -431,6 +454,8 @@ func allowHeaders(header http.Header) error {
 		switch {
 		case slices.Contains(knownAmzHeaders(), lower), slices.Contains(lockHeaders(), lower):
 		case strings.HasPrefix(lower, "x-amz-meta-"), strings.HasPrefix(lower, checksumHeaderPrefix):
+		case lower == headerTagging:
+			// Read by PutObject; refused elsewhere, in route.
 		case isSSEHeader(lower):
 			// Read, or refused, by the operation: see allowSSEHeaders.
 		case lower == "x-amz-storage-class" && len(values) == 1 && values[0] == storageClass:
@@ -454,6 +479,14 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 	if err := allowSSEHeaders(req, query); err != nil {
 		return err
 	}
+	// Tags come with the request that creates an object, and no other.
+	selects := len(query)
+	if query.Has(queryClientInfo) {
+		selects--
+	}
+	if len(req.Header.Values(headerTagging)) > 0 && (req.Method != http.MethodPut || req.key == "" || selects > 0) {
+		return errNotImplemented()
+	}
 
 	switch {
 	case req.bucket == "":
@@ -473,6 +506,9 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) routeBucket(ctx context.Context, req *request, query url.Values) error {
+	if handled, err := h.routeBucketConfig(ctx, req, query); handled {
+		return err
+	}
 	switch req.Method {
 	case http.MethodPut:
 		if query.Has("versioning") {
@@ -631,7 +667,8 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 	if req.Method == http.MethodGet || req.Method == http.MethodHead || req.Method == http.MethodDelete {
 		allowed = append(allowed, "versionId")
 	}
-	// The lock of a version is read and changed with GET and PUT.
+	// The lock of a version is read and changed with GET and PUT; its
+	// tags also removed with DELETE.
 	sub := ""
 	if req.Method == http.MethodGet || req.Method == http.MethodPut {
 		for _, name := range []string{"retention", "legal-hold"} {
@@ -639,6 +676,9 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 				sub, allowed = name, []string{name, "versionId"}
 			}
 		}
+	}
+	if query.Has("tagging") && (req.Method == http.MethodGet || req.Method == http.MethodPut || req.Method == http.MethodDelete) {
+		sub, allowed = "tagging", []string{"tagging", "versionId"}
 	}
 	if err := allowQuery(query, allowed...); err != nil {
 		return err
@@ -660,6 +700,15 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 	case sub == "legal-hold":
 		req.operation = "PutObjectLegalHold"
 		return h.putObjectLegalHold(ctx, req)
+	case sub == "tagging" && req.Method == http.MethodGet:
+		req.operation = "GetObjectTagging"
+		return h.getObjectTagging(ctx, req)
+	case sub == "tagging" && req.Method == http.MethodPut:
+		req.operation = "PutObjectTagging"
+		return h.putObjectTagging(ctx, req)
+	case sub == "tagging":
+		req.operation = "DeleteObjectTagging"
+		return h.deleteObjectTagging(ctx, req)
 	}
 	switch req.Method {
 	case http.MethodPut:

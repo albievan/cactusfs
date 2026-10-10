@@ -395,12 +395,13 @@ func (f *fsm) Apply(log *raft.Log) any {
 			if e.PutObject != nil {
 				// Nor what the first schema has no word for: a binary
 				// of that schema would store the version without.
-				e.PutObject.Lock, e.PutObject.Parts, e.PutObject.Dropped = nil, 0, nil
+				e.PutObject.Lock, e.PutObject.Parts, e.PutObject.Dropped, e.PutObject.Tags = nil, 0, nil, nil
 				enc := &e.PutObject.Encryption
 				enc.KeyMode, enc.Mode, enc.Context, enc.KeyCheck = "", "", nil, nil
 			}
 			if e.CreateBucket != nil {
 				e.CreateBucket.ObjectLock, e.CreateBucket.Versioning, e.CreateBucket.DefaultRetention = false, "", nil
+				e.CreateBucket.Config = nil
 			}
 		}
 		now := applied{index: log.Index}
@@ -458,6 +459,10 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return applySetRetention(tx, *e.SetRetention, now)
 	case cmdSetLegalHold:
 		return applySetLegalHold(tx, *e.SetLegalHold, now)
+	case cmdSetBucketConfig:
+		return applySetBucketConfig(tx, *e.SetBucketConfig)
+	case cmdSetTags:
+		return applySetTags(tx, *e.SetTags, now)
 	case cmdCreateUpload:
 		return applyCreateUpload(tx, *e.CreateUpload)
 	case cmdPutPart:

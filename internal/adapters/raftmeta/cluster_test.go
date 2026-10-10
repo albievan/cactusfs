@@ -1143,6 +1143,13 @@ func TestVersionsWhenAMemberHasNotRegistered(t *testing.T) {
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("m1")
+	// The last registration was committed through s4; m1 learns of it when
+	// it has applied that entry, which on a busy machine is a moment later.
+	// Until then it says, rightly, that the cluster is being upgraded.
+	eventually(t, "m1 to see every member on schema 2", func() bool {
+		level, err := store.entryVersion()
+		return err == nil && level >= entrySchemaTimed
+	})
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "ver"}); err != nil {
 		t.Fatal(err)
 	}

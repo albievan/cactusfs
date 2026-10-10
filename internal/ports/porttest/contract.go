@@ -353,6 +353,96 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 	t.Run("versions", func(t *testing.T) { versionsContract(t, open(t)) })
 	t.Run("object lock", func(t *testing.T) { lockContract(t, open(t)) })
 	t.Run("multipart uploads", func(t *testing.T) { uploadsContract(t, open) })
+	t.Run("bucket configuration and tags", func(t *testing.T) {
+		store := open(t)
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := store.GetBucketConfig(ctx, "b", bucket.ConfigPolicy); err != nil || got != nil {
+			t.Errorf("configuration of a new bucket = %q, %v", got, err)
+		}
+		for kind, document := range map[string]string{bucket.ConfigPolicy: `{"a":1}`, bucket.ConfigCORS: `{"rules":[]}`, bucket.ConfigTagging: `{"k":"v"}`} {
+			if err := store.SetBucketConfig(ctx, "b", kind, []byte(document)); err != nil {
+				t.Fatalf("SetBucketConfig %s: %v", kind, err)
+			}
+		}
+		if got, err := store.GetBucketConfig(ctx, "b", bucket.ConfigCORS); err != nil || string(got) != `{"rules":[]}` {
+			t.Errorf("GetBucketConfig = %q, %v", got, err)
+		}
+		// One kind is replaced and removed without touching the others.
+		if err := store.SetBucketConfig(ctx, "b", bucket.ConfigCORS, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := store.GetBucketConfig(ctx, "b", bucket.ConfigCORS); got != nil {
+			t.Errorf("a removed configuration = %q", got)
+		}
+		if got, _ := store.GetBucketConfig(ctx, "b", bucket.ConfigPolicy); string(got) != `{"a":1}` {
+			t.Errorf("the policy after the CORS rules were removed = %q", got)
+		}
+		// The bucket itself is as it was.
+		if b, err := store.GetBucket(ctx, "b"); err != nil || b.Name != "b" || !b.CreatedAt.Equal(created) {
+			t.Errorf("the bucket after its configuration changed = %+v, %v", b, err)
+		}
+		for name, tt := range map[string]struct {
+			bucketName, kind string
+			document         []byte
+			want             error
+		}{
+			"a missing bucket":    {"missing", bucket.ConfigPolicy, []byte("x"), domain.ErrBucketNotFound},
+			"a kind there is not": {"b", "lifecycle-of-another-day", []byte("x"), domain.ErrInvalidArgument},
+			"too large":           {"b", bucket.ConfigPolicy, bytes.Repeat([]byte("x"), bucket.MaxConfigBytes+1), domain.ErrInvalidArgument},
+		} {
+			if err := store.SetBucketConfig(ctx, tt.bucketName, tt.kind, tt.document); !errors.Is(err, tt.want) {
+				t.Errorf("SetBucketConfig with %s = %v, want %v", name, err, tt.want)
+			}
+		}
+		if _, err := store.GetBucketConfig(ctx, "missing", bucket.ConfigPolicy); !errors.Is(err, domain.ErrBucketNotFound) {
+			t.Errorf("GetBucketConfig of a missing bucket = %v", err)
+		}
+
+		// Tags of a version, in a bucket without Object Lock.
+		v := SampleVersion("b", "k", 1)
+		v.Tags = map[string]string{"born": "tagged"}
+		if _, err := store.PutVersion(ctx, v); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := store.GetObject(ctx, "b", "k"); err != nil || got.Tags["born"] != "tagged" {
+			t.Errorf("tags of a version put with them = %v, %v", got.Tags, err)
+		}
+		tagged, err := store.SetTags(ctx, "b", "k", v.Ref(), map[string]string{"stage": "final"})
+		if err != nil || len(tagged.Tags) != 1 || tagged.Tags["stage"] != "final" {
+			t.Fatalf("SetTags = %v, %v", tagged.Tags, err)
+		}
+		if got, _ := store.GetObject(ctx, "b", "k"); got.Tags["stage"] != "final" || got.DataID != v.DataID || got.ETag != v.ETag {
+			t.Errorf("the version after tagging = %+v", got)
+		}
+		if cleared, err := store.SetTags(ctx, "b", "k", v.Ref(), nil); err != nil || len(cleared.Tags) != 0 {
+			t.Errorf("SetTags to none = %v, %v", cleared.Tags, err)
+		}
+		eleven := map[string]string{}
+		for i := range 11 {
+			eleven[strconv.Itoa(i)] = ""
+		}
+		if _, err := store.SetTags(ctx, "b", "k", v.Ref(), eleven); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("eleven tags = %v", err)
+		}
+		if _, err := store.SetTags(ctx, "b", "missing", v.Ref(), nil); !errors.Is(err, domain.ErrVersionNotFound) {
+			t.Errorf("SetTags of a missing version = %v", err)
+		}
+		// The configuration goes with the bucket.
+		if _, err := store.DeleteObject(ctx, "b", "k", ports.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DeleteBucket(ctx, "b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := store.GetBucketConfig(ctx, "b", bucket.ConfigPolicy); got != nil {
+			t.Errorf("a policy outlived its bucket: %q", got)
+		}
+	})
 	t.Run("whose key it takes", func(t *testing.T) {
 		// What a version records about its encryption comes back as it
 		// went in, for every mode.

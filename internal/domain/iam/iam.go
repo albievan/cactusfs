@@ -38,6 +38,17 @@ const (
 	ActionGetObjectLegalHold  Action = "s3:GetObjectLegalHold"
 	ActionGetBucketObjectLock Action = "s3:GetBucketObjectLockConfiguration"
 	ActionPutBucketObjectLock Action = "s3:PutBucketObjectLockConfiguration"
+	// Bucket policy, CORS and tags.
+	ActionGetBucketPolicy     Action = "s3:GetBucketPolicy"
+	ActionPutBucketPolicy     Action = "s3:PutBucketPolicy"
+	ActionDeleteBucketPolicy  Action = "s3:DeleteBucketPolicy"
+	ActionGetBucketCORS       Action = "s3:GetBucketCORS"
+	ActionPutBucketCORS       Action = "s3:PutBucketCORS"
+	ActionGetBucketTagging    Action = "s3:GetBucketTagging"
+	ActionPutBucketTagging    Action = "s3:PutBucketTagging"
+	ActionGetObjectTagging    Action = "s3:GetObjectTagging"
+	ActionPutObjectTagging    Action = "s3:PutObjectTagging"
+	ActionDeleteObjectTagging Action = "s3:DeleteObjectTagging"
 	// Multipart uploads. Beginning one, uploading its parts and completing
 	// it are s3:PutObject.
 	ActionAbortMultipartUpload       Action = "s3:AbortMultipartUpload"
@@ -195,6 +206,9 @@ type Request struct {
 	Resource  Resource
 	// Now is the time of the decision; conditions on time test it.
 	Now time.Time
+	// BucketPolicy is the policy of the bucket the resource is in, if it
+	// has one.
+	BucketPolicy *BucketPolicy
 }
 
 // Decide answers an authorization request. The rule is default deny.
@@ -212,6 +226,13 @@ type Request struct {
 // A refusal wraps domain.ErrAccessDenied.
 func Decide(req Request) error {
 	if req.Principal.Anonymous() {
+		// Only the policy of a bucket lets anybody in unauthenticated,
+		// and only to read.
+		session := Context{SourceIP: req.Principal.Session.SourceIP, SecureTransport: req.Principal.Session.SecureTransport, Now: req.Now}
+		if req.BucketPolicy != nil && anonymousReadable(req.Action) &&
+			req.BucketPolicy.judge(req.Principal, req.Action, req.Resource.String(), session) == allowed {
+			return nil
+		}
 		return fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
 	refused := fmt.Errorf("%w: %s may not %s on %s", domain.ErrAccessDenied, req.Principal.Name(), req.Action, req.Resource)
@@ -237,7 +258,13 @@ func Decide(req Request) error {
 		Now: req.Now, Username: req.Principal.User,
 	}
 	resource := req.Resource.String()
-	if judge(req.Principal.Policies, req.Action, resource, ctx) != allowed {
+	// The user's own policies and the bucket's: either may allow, and a
+	// Deny in either wins over every Allow.
+	own, bucket := judge(req.Principal.Policies, req.Action, resource, ctx), silent
+	if req.BucketPolicy != nil {
+		bucket = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx)
+	}
+	if own == denied || bucket == denied || (own != allowed && bucket != allowed) {
 		return refused
 	}
 	if boundary := req.Principal.Boundary; boundary != nil && judge([]Document{*boundary}, req.Action, resource, ctx) != allowed {

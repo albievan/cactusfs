@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -1169,4 +1170,55 @@ func TestKnowingAKeyIsNotUsingIt(t *testing.T) {
 	// The root key and console sessions are not API keys of users.
 	f.identities.Authenticated(f.root)
 	f.identities.Authenticated(iam.Principal{User: "alice"})
+}
+
+// TestBucketConfigurationChangesAreAudited: a policy, cross-origin rules and
+// tags set on a bucket or taken off it are in the trail, and a policy with
+// whether it opens anything to everyone.
+func TestBucketConfigurationChangesAreAudited(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newIAMFixture(t)
+	buckets := app.NewBucketService(f.meta, f.authz, f.clock).WithAuditor(f.auditor)
+	alice := f.as(t, f.user(t, "alice", iam.RoleBucketAdmin))
+	if err := buckets.Create(ctx, alice, "site"); err != nil {
+		t.Fatal(err)
+	}
+	base := len(f.trail(t))
+	open := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`)
+	closed := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/bob"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`)
+	rules := &bucket.CORS{Rules: []bucket.CORSRule{{AllowedOrigins: []string{"*"}, AllowedMethods: []string{"GET"}}}}
+	steps := []struct {
+		do     func() error
+		action string
+		detail [2]string
+	}{
+		{func() error { return buckets.SetPolicy(ctx, alice, "site", open) }, "s3:PutBucketPolicy", [2]string{"open_to_anyone", "true"}},
+		{func() error { return buckets.SetPolicy(ctx, alice, "site", closed) }, "s3:PutBucketPolicy", [2]string{"open_to_anyone", "false"}},
+		{func() error { return buckets.SetPolicy(ctx, alice, "site", nil) }, "s3:DeleteBucketPolicy", [2]string{"policy", "removed"}},
+		{func() error { return buckets.SetCORS(ctx, alice, "site", rules) }, "s3:PutBucketCORS", [2]string{"rules", "1"}},
+		{func() error { return buckets.SetCORS(ctx, alice, "site", nil) }, "s3:PutBucketCORS", [2]string{"cors", "removed"}},
+		{func() error { return buckets.SetTags(ctx, alice, "site", map[string]string{"team": "web"}) }, "s3:PutBucketTagging", [2]string{"tags", "1"}},
+		{func() error { return buckets.SetTags(ctx, alice, "site", nil) }, "s3:PutBucketTagging", [2]string{"tags", "0"}},
+	}
+	for i, step := range steps {
+		if err := step.do(); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+	}
+	// What changed nothing is not recorded as a change.
+	if err := buckets.SetPolicy(ctx, alice, "site", []byte("not a policy")); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatal(err)
+	}
+	records := f.trail(t)[base:]
+	if len(records) != len(steps) {
+		t.Fatalf("%d records for %d changes", len(records), len(steps))
+	}
+	for i, step := range steps {
+		r := records[i]
+		if r.Action != step.action || r.Actor != "user/alice" || r.Resource != "arn:aws:s3:::site" || r.Outcome != audit.Succeeded ||
+			r.Details[step.detail[0]] != step.detail[1] {
+			t.Errorf("record %d = %+v, want %s with %s=%s", i, r, step.action, step.detail[0], step.detail[1])
+		}
+	}
 }

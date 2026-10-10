@@ -11,6 +11,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -211,5 +212,152 @@ func TestAuthorizerLogsRefusalsWithoutSecrets(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("refusal log lacks %s: %s", want, logs.String())
 		}
+	}
+}
+
+// failingPolicies cannot read the policy of any bucket.
+type failingPolicies struct{}
+
+func (failingPolicies) GetBucketConfig(context.Context, string, string) ([]byte, error) {
+	return nil, domain.ErrUnavailable
+}
+
+// brokenPolicies hold a policy that does not parse.
+type brokenPolicies struct{}
+
+func (brokenPolicies) GetBucketConfig(context.Context, string, string) ([]byte, error) {
+	return []byte("not a policy"), nil
+}
+
+// TestAuthorizerAndBucketPolicies: the authorizer takes the policy of the
+// bucket into its decision, and refuses when it cannot read it - the policy
+// might have denied the request.
+func TestAuthorizerAndBucketPolicies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	meta := porttest.NewMemMetadata()
+	clock := porttest.NewClock(testNow)
+	if err := meta.CreateBucket(ctx, bucket.Bucket{Name: "site"}); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
+	authz := app.NewAuthorizer(logger, clock, nil).WithBucketPolicies(meta)
+	buckets := app.NewBucketService(meta, authz, clock)
+	policy := []byte(`{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"},
+		{"Effect":"Deny","Principal":"*","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::site/*"}]}`)
+	read := iam.Request{Action: iam.ActionGetObject, Resource: iam.Resource{Bucket: "site", Key: "index.html"}}
+	if err := authz.Authorize(ctx, read); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Fatalf("anonymous read before there is a policy = %v", err)
+	}
+	if err := buckets.SetPolicy(ctx, anonymous(), "site", policy); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("SetPolicy by nobody = %v", err)
+	}
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", []byte(`{"Version":"2012-10-17"}`)); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("SetPolicy with a document that is none = %v", err)
+	}
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", policy); err != nil {
+		t.Fatalf("SetPolicy: %v", err)
+	}
+	if got, err := buckets.Policy(ctx, porttest.Root(), "site"); err != nil || string(got) != string(policy) {
+		t.Errorf("Policy = %s, %v", got, err)
+	}
+	if err := authz.Authorize(ctx, read); err != nil {
+		t.Errorf("anonymous read of what the policy opens: %v", err)
+	}
+	write := read
+	write.Action = iam.ActionPutObject
+	if err := authz.Authorize(ctx, write); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("anonymous write = %v", err)
+	}
+	// A user their own policy allows everything is still denied what the
+	// bucket denies; root is not.
+	all := iam.Document{Version: iam.PolicyVersion, Statements: []iam.Statement{{Effect: iam.Allow, Actions: []string{"s3:*"}, Resources: []string{"*"}}}}
+	user := iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{all}}
+	remove := iam.Request{Principal: user, Action: iam.ActionDeleteObject, Resource: read.Resource}
+	if err := authz.Authorize(ctx, remove); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("a delete the bucket denies, by a user who may otherwise = %v", err)
+	}
+	remove.Principal = porttest.Root()
+	if err := authz.Authorize(ctx, remove); err != nil {
+		t.Errorf("root, bound by a bucket policy: %v", err)
+	}
+	// What is not about a bucket asks for no policy.
+	if err := authz.Authorize(ctx, iam.Request{Principal: user, Action: iam.ActionListAllMyBuckets}); err != nil {
+		t.Errorf("ListAllMyBuckets: %v", err)
+	}
+
+	// A policy that cannot be read, or cannot be understood, refuses
+	// everybody it could have bound - and nobody it could not.
+	for name, source := range map[string]app.BucketPolicySource{"unavailable": failingPolicies{}, "damaged": brokenPolicies{}} {
+		closed := app.NewAuthorizer(logger, clock, nil).WithBucketPolicies(source)
+		request := iam.Request{Principal: user, Action: iam.ActionGetObject, Resource: read.Resource}
+		if err := closed.Authorize(ctx, request); err == nil {
+			t.Errorf("%s policy: a user was allowed", name)
+		}
+		if err := closed.Authorize(ctx, read); err == nil {
+			t.Errorf("%s policy: an anonymous caller was allowed", name)
+		}
+		request.Principal = porttest.Root()
+		if err := closed.Authorize(ctx, request); err != nil {
+			t.Errorf("%s policy: root was refused: %v", name, err)
+		}
+	}
+
+	// CORS rules and tags of the bucket.
+	rules := &bucket.CORS{Rules: []bucket.CORSRule{{AllowedOrigins: []string{"*"}, AllowedMethods: []string{"GET"}}}}
+	if err := buckets.SetCORS(ctx, user, "site", rules); err != nil {
+		t.Errorf("SetCORS by a user with s3:* = %v", err)
+	}
+	if err := buckets.SetCORS(ctx, user, "site", nil); err != nil {
+		t.Errorf("removing the rules by a user with s3:* = %v", err)
+	}
+	if err := buckets.SetCORS(ctx, porttest.Root(), "site", &bucket.CORS{}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("SetCORS with no rules = %v", err)
+	}
+	if err := buckets.SetCORS(ctx, porttest.Root(), "site", rules); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := buckets.CORS(ctx, porttest.Root(), "site"); err != nil || got == nil || len(got.Rules) != 1 {
+		t.Errorf("CORS = %+v, %v", got, err)
+	}
+	if got := buckets.CORSOf(ctx, "site"); got == nil || len(got.Rules) != 1 {
+		t.Errorf("CORSOf = %+v", got)
+	}
+	if buckets.CORSOf(ctx, "missing") != nil {
+		t.Error("CORSOf of a missing bucket")
+	}
+	if _, err := buckets.CORS(ctx, anonymous(), "site"); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("CORS by nobody = %v", err)
+	}
+	if err := buckets.SetCORS(ctx, porttest.Root(), "site", nil); err != nil || buckets.CORSOf(ctx, "site") != nil {
+		t.Errorf("removing the rules: %v", err)
+	}
+	if got, err := buckets.CORS(ctx, porttest.Root(), "site"); err != nil || got != nil {
+		t.Errorf("CORS after removal = %+v, %v", got, err)
+	}
+	if err := buckets.SetTags(ctx, porttest.Root(), "site", map[string]string{"team": "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := buckets.Tags(ctx, porttest.Root(), "site"); err != nil || got["team"] != "web" {
+		t.Errorf("Tags = %v, %v", got, err)
+	}
+	if err := buckets.SetTags(ctx, porttest.Root(), "site", map[string]string{"": "x"}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("SetTags with an empty key = %v", err)
+	}
+	if err := buckets.SetTags(ctx, anonymous(), "site", nil); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("SetTags by nobody = %v", err)
+	}
+	if err := buckets.SetTags(ctx, porttest.Root(), "site", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := buckets.Tags(ctx, porttest.Root(), "site"); err != nil || got != nil {
+		t.Errorf("Tags after removal = %v, %v", got, err)
+	}
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := authz.Authorize(ctx, read); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("anonymous read after the policy was removed = %v", err)
 	}
 }

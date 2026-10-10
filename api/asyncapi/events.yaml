@@ -71,6 +71,16 @@ channels:
     messages:
       event:
         $ref: '#/components/messages/BucketObjectLockChanged'
+  bucketConfigurationChanged:
+    address: cactusfs.bucket.configuration-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketConfigurationChanged'
+  objectTagsChanged:
+    address: cactusfs.object.tags-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/ObjectTagsChanged'
   rootCredentialSet:
     address: cactusfs.iam.root-credential-set.v1
     messages:
@@ -134,6 +144,14 @@ operations:
     action: send
     channel:
       $ref: '#/channels/bucketObjectLockChanged'
+  publishBucketConfigurationChanged:
+    action: send
+    channel:
+      $ref: '#/channels/bucketConfigurationChanged'
+  publishObjectTagsChanged:
+    action: send
+    channel:
+      $ref: '#/channels/objectTagsChanged'
   publishRootCredentialSet:
     action: send
     channel:
@@ -265,6 +283,30 @@ components:
                 const: cactusfs.bucket.object-lock-changed.v1
               data:
                 $ref: '#/components/schemas/Bucket'
+    BucketConfigurationChanged:
+      name: cactusfs.bucket.configuration-changed.v1
+      title: The policy, the CORS rules or the tags of a bucket were set, changed or removed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.configuration-changed.v1
+              data:
+                $ref: '#/components/schemas/Bucket'
+    ObjectTagsChanged:
+      name: cactusfs.object.tags-changed.v1
+      title: The tags of an object version were set, changed or removed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.object.tags-changed.v1
+              data:
+                $ref: '#/components/schemas/Object'
     RootCredentialSet:
       name: cactusfs.iam.root-credential-set.v1
       title: The deployment was given its root credential

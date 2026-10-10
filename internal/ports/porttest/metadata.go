@@ -46,6 +46,9 @@ type MemMetadata struct {
 	// data ID of the version.
 	uploads map[string]map[object.ID]*memUpload
 	extents map[object.ID][]object.Part
+	// config holds the configuration documents of buckets, by bucket and
+	// kind.
+	config map[string]map[string][]byte
 
 	// Now, when set, is the store's time: what Object Lock is judged on.
 	// The real store uses the time its leader stamps entries with.
@@ -64,6 +67,7 @@ func NewMemMetadata() *MemMetadata {
 		objects: map[string]map[string][]object.Version{},
 		uploads: map[string]map[object.ID]*memUpload{},
 		extents: map[object.ID][]object.Part{},
+		config:  map[string]map[string][]byte{},
 	}
 }
 
@@ -105,6 +109,7 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	delete(m.objects, name)
 	// Uploads that were never completed go with the bucket.
 	delete(m.uploads, name)
+	delete(m.config, name)
 	return nil
 }
 
@@ -171,6 +176,9 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	}
 	if v.Parts != 0 || v.Encryption.KeyMode != "" {
 		return ports.PutResult{}, fmt.Errorf("%w: a put does not make a version of parts", domain.ErrInvalidArgument)
+	}
+	if err := object.ValidateTags(v.Tags, object.MaxObjectTags); err != nil {
+		return ports.PutResult{}, err
 	}
 	return m.commit(b, v)
 }
@@ -318,6 +326,12 @@ func (m *MemMetadata) SetBucketDefaultRetention(_ context.Context, name string, 
 
 // locked finds the version a lock change is about and applies change to it.
 func (m *MemMetadata) locked(bucketName, key string, ref object.VersionRef, change func(v *object.Version) error) (object.Version, error) {
+	return m.changed(bucketName, key, ref, true, change)
+}
+
+// changed changes something that is kept with a version. needLock refuses a
+// bucket without Object Lock.
+func (m *MemMetadata) changed(bucketName, key string, ref object.VersionRef, needLock bool, change func(v *object.Version) error) (object.Version, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
@@ -327,7 +341,7 @@ func (m *MemMetadata) locked(bucketName, key string, ref object.VersionRef, chan
 	switch {
 	case !ok:
 		return object.Version{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
-	case !b.ObjectLock:
+	case needLock && !b.ObjectLock:
 		return object.Version{}, fmt.Errorf("%w: bucket %s", domain.ErrLockNotConfigured, bucketName)
 	}
 	versions := m.objects[bucketName][key]
@@ -615,4 +629,57 @@ func (m *MemMetadata) Tamper(bucketName, key string, change func(v *object.Versi
 	if versions := m.objects[bucketName][key]; len(versions) > 0 {
 		change(&versions[0])
 	}
+}
+
+// SetBucketConfig implements ports.BucketStore.
+func (m *MemMetadata) SetBucketConfig(_ context.Context, name, kind string, document []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FailWrites != nil {
+		return m.FailWrites
+	}
+	switch _, ok := m.buckets[name]; {
+	case !ok:
+		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
+	case !bucket.ValidConfigKind(kind):
+		return fmt.Errorf("%w: bucket configuration %q", domain.ErrInvalidArgument, kind)
+	case len(document) > bucket.MaxConfigBytes:
+		return fmt.Errorf("%w: bucket configuration of %d bytes", domain.ErrInvalidArgument, len(document))
+	}
+	if len(document) == 0 {
+		delete(m.config[name], kind)
+		return nil
+	}
+	if m.config[name] == nil {
+		m.config[name] = map[string][]byte{}
+	}
+	m.config[name][kind] = append([]byte(nil), document...)
+	return nil
+}
+
+// GetBucketConfig implements ports.BucketStore.
+func (m *MemMetadata) GetBucketConfig(_ context.Context, name, kind string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.buckets[name]; !ok {
+		return nil, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
+	}
+	if document := m.config[name][kind]; len(document) > 0 {
+		return append([]byte(nil), document...), nil
+	}
+	return nil, nil
+}
+
+// SetTags implements ports.ObjectIndex.
+func (m *MemMetadata) SetTags(_ context.Context, bucketName, key string, ref object.VersionRef, tags map[string]string) (object.Version, error) {
+	if err := object.ValidateTags(tags, object.MaxObjectTags); err != nil {
+		return object.Version{}, err
+	}
+	return m.changed(bucketName, key, ref, false, func(v *object.Version) error {
+		v.Tags = maps.Clone(tags)
+		if len(v.Tags) == 0 {
+			v.Tags = nil
+		}
+		return nil
+	})
 }

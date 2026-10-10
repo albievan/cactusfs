@@ -9,10 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,13 +51,38 @@ func root() iam.Principal { return iam.Principal{AccessKeyID: "ROOT", Root: true
 
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// Not a port the system hands out by itself: one of those can be given
+	// to another test's outgoing connection between the moment it is found
+	// free here and the moment a node binds it. Ports below the ephemeral
+	// ranges of Linux and macOS are taken only by who asks for them by
+	// number, and no two calls in this process ask for the same.
+	for range portSpan {
+		port := portBase + int(nextPort.Add(1))%portSpan
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", address)
+		if err != nil {
+			continue
+		}
+		_ = listener.Close()
+		return address
 	}
-	defer func() { _ = listener.Close() }()
-	return listener.Addr().String()
+	t.Fatal("no free port for a test node")
+	return ""
 }
+
+// Test nodes listen on ports from portBase up; where in that range a test
+// binary begins depends on its process, so that two binaries running at once
+// rarely meet - and when they do, the port is found taken and skipped.
+const (
+	portBase = 20000
+	portSpan = 10000
+)
+
+var nextPort = func() *atomic.Int64 {
+	var n atomic.Int64
+	n.Store(int64(os.Getpid()*131) % portSpan)
+	return &n
+}()
 
 // newTestCluster prepares a cluster: roles maps node IDs to their roles.
 func newTestCluster(t *testing.T, roles map[string]string) *testCluster {

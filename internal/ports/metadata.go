@@ -33,6 +33,12 @@ type BucketStore interface {
 	// domain.ErrLockNotConfigured when the bucket was not created with
 	// Object Lock.
 	SetBucketDefaultRetention(ctx context.Context, name string, d *bucket.DefaultRetention) error
+	// SetBucketConfig replaces one configuration document of a bucket -
+	// its policy, its CORS rules, its tags - or, with nil, removes it.
+	SetBucketConfig(ctx context.Context, name, kind string, document []byte) error
+	// GetBucketConfig returns one configuration document of a bucket, or
+	// nil when the bucket has none of that kind.
+	GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error)
 }
 
 // ObjectIndex is the replicated index from bucket and key to object version.
@@ -78,6 +84,8 @@ type ObjectIndex interface {
 	// GetObject returns the current version of an object. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrObjectNotFound.
 	GetObject(ctx context.Context, bucketName, key string) (object.Version, error)
+	// SetTags replaces the tags of a version; nil removes them.
+	SetTags(ctx context.Context, bucketName, key string, ref object.VersionRef, tags map[string]string) (object.Version, error)
 	// ObjectParts returns up to limit parts of a version that is made of
 	// parts, in order, beginning with the part that holds the byte at
 	// offset. dataID is the version's. It returns none when the version

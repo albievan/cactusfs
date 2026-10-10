@@ -28,7 +28,10 @@ import (
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
-var testNow = time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+// testNow is the time of the test clock. It is far ahead of any day the
+// tests will run on: the cookie jar of the HTTP client judges a session
+// cookie's expiry by the real clock, and drops one that expired "yesterday".
+var testNow = time.Date(2099, 10, 8, 9, 0, 0, 0, time.UTC)
 
 type lockedBuffer struct {
 	mu  sync.Mutex

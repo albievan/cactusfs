@@ -109,6 +109,9 @@ type PutInput struct {
 	// SSE says whose key it takes to read the object. The zero value is
 	// the default: the deployment's KMS.
 	SSE object.SSE
+	// Tags are the tags of the new version. Setting them is a permission
+	// of its own.
+	Tags map[string]string
 
 	// Verify is called once Body has been read to its end and before
 	// anything becomes durable. It returns the entity tag of the content,
@@ -141,8 +144,16 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		return object.Version{}, err
 	}
 
+	if len(in.Tags) > 0 {
+		if err := object.ValidateTags(in.Tags, object.MaxObjectTags); err != nil {
+			return object.Version{}, err
+		}
+		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectTagging, Resource: resource}); err != nil {
+			return object.Version{}, err
+		}
+	}
 	version := object.Version{
-		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock,
+		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock, Tags: in.Tags,
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata,
 	}
@@ -1038,4 +1049,55 @@ func (s *ObjectService) List(
 		page.NextContinuation = ""
 	}
 	return page, nil
+}
+
+// Tags returns the tags of a version.
+func (s *ObjectService) Tags(ctx context.Context, principal iam.Principal, in LockInput) (object.Version, error) {
+	version, err := s.tagTarget(ctx, principal, iam.ActionGetObjectTagging, in)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.Tags: %w", err)
+	}
+	return version, nil
+}
+
+// SetTags replaces the tags of a version; none removes them.
+func (s *ObjectService) SetTags(ctx context.Context, principal iam.Principal, in LockInput, tags map[string]string) (object.Version, error) {
+	action := iam.ActionPutObjectTagging
+	if len(tags) == 0 {
+		action = iam.ActionDeleteObjectTagging
+	}
+	if err := object.ValidateTags(tags, object.MaxObjectTags); err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
+	}
+	version, err := s.tagTarget(ctx, principal, action, in)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
+	}
+	stored, err := s.index.SetTags(ctx, in.Bucket, in.Key, version.Ref(), tags)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
+	}
+	return stored, nil
+}
+
+// tagTarget authorizes a request about the tags of a version and finds it.
+func (s *ObjectService) tagTarget(ctx context.Context, principal iam.Principal, action iam.Action, in LockInput) (object.Version, error) {
+	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: action, Resource: resource}); err != nil {
+		return object.Version{}, err
+	}
+	if err := object.ValidateKey(in.Key); err != nil {
+		return object.Version{}, err
+	}
+	if in.Version == nil {
+		return s.index.GetObject(ctx, in.Bucket, in.Key)
+	}
+	version, err := s.index.GetVersion(ctx, in.Bucket, in.Key, *in.Version)
+	if err != nil {
+		return object.Version{}, err
+	}
+	if version.DeleteMarker {
+		return object.Version{}, fmt.Errorf("%w: version %s of %s/%s is a delete marker", domain.ErrMethodNotAllowed, in.Version, in.Bucket, in.Key)
+	}
+	return version, nil
 }

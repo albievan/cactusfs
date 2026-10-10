@@ -37,6 +37,13 @@ const (
 // set, changed or removed. The payload is a BucketEvent.
 const EventBucketLockChanged = "cactusfs.bucket.object-lock-changed.v1"
 
+// EventBucketConfigChanged tells that the policy, the CORS rules or the tags
+// of a bucket were set, changed or removed.
+const EventBucketConfigChanged = "cactusfs.bucket.configuration-changed.v1"
+
+// EventObjectTagsChanged tells that the tags of an object version changed.
+const EventObjectTagsChanged = "cactusfs.object.tags-changed.v1"
+
 // BucketVersioningEvent is the payload of EventBucketVersioningChanged.
 type BucketVersioningEvent struct {
 	Bucket string `json:"bucket"`

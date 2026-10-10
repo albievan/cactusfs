@@ -52,3 +52,6 @@ github.com/albievan/cactusfs/test/s3compat TestMultipartUpload
 github.com/albievan/cactusfs/test/s3compat TestSSEKMS
 github.com/albievan/cactusfs/test/s3compat TestSSECustomerKey
 github.com/albievan/cactusfs/test/s3compat TestSSECustomerKeyMultipart
+github.com/albievan/cactusfs/test/s3compat TestBucketCors
+github.com/albievan/cactusfs/test/s3compat TestBucketPolicyPublicRead
+github.com/albievan/cactusfs/test/s3compat TestTagging

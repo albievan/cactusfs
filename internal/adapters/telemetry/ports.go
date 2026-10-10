@@ -361,3 +361,27 @@ func (m *metadata) ScanUploads(ctx context.Context, bucketName string, start por
 	done(err)
 	return err
 }
+
+// SetBucketConfig implements ports.BucketStore.
+func (m *metadata) SetBucketConfig(ctx context.Context, name, kind string, document []byte) error {
+	ctx, done := m.t.call(ctx, portMetadata, "SetBucketConfig")
+	err := m.next.SetBucketConfig(ctx, name, kind, document)
+	done(err)
+	return err
+}
+
+// GetBucketConfig implements ports.BucketStore.
+func (m *metadata) GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "GetBucketConfig")
+	document, err := m.next.GetBucketConfig(ctx, name, kind)
+	done(err)
+	return document, err
+}
+
+// SetTags implements ports.ObjectIndex.
+func (m *metadata) SetTags(ctx context.Context, bucketName, key string, ref object.VersionRef, tags map[string]string) (object.Version, error) {
+	ctx, done := m.t.call(ctx, portMetadata, "SetTags")
+	version, err := m.next.SetTags(ctx, bucketName, key, ref, tags)
+	done(err)
+	return version, err
+}

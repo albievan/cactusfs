@@ -135,6 +135,25 @@ func (o *oneOrMany) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// nullCondition reports whether some statement of a raw document has a
+// Condition that is null: there, and saying nothing.
+func nullCondition(data []byte) bool {
+	var probe struct {
+		Statement []struct {
+			Condition json.RawMessage `json:"Condition"`
+		} `json:"Statement"`
+	}
+	if json.Unmarshal(data, &probe) != nil {
+		return false
+	}
+	for _, s := range probe.Statement {
+		if bytes.Equal(bytes.TrimSpace(s.Condition), []byte("null")) {
+			return true
+		}
+	}
+	return false
+}
+
 type wireStatement struct {
 	Sid       string                          `json:"Sid,omitempty"`
 	Effect    string                          `json:"Effect"`
@@ -162,8 +181,11 @@ func ParsePolicy(data []byte) (Document, error) {
 	// fields with one name it keeps the last, and it matches names without
 	// regard to case. Both would let a document mean something else than
 	// it reads.
-	if err := checkFields(data); err != nil {
+	if err := checkFields(data, fieldsAt); err != nil {
 		return Document{}, invalidPolicy("%v", err)
+	}
+	if nullCondition(data) {
+		return Document{}, invalidPolicy("a Condition is null")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -222,9 +244,9 @@ func ParsePolicy(data []byte) (Document, error) {
 // checkFields walks a document and refuses a field that appears twice in
 // one object, and, where the fields are fixed, one that is not spelled
 // exactly as the policy language spells it.
-func checkFields(data []byte) error {
+func checkFields(data []byte, fields func(where string) []string) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := walkFields(decoder, ""); err != nil {
+	if err := walkFields(decoder, "", fields); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); err == nil {
@@ -249,7 +271,7 @@ func fieldsAt(where string) []string {
 // maxPolicyDepth bounds how deeply a document may nest.
 const maxPolicyDepth = 8
 
-func walkFields(decoder *json.Decoder, where string) error {
+func walkFields(decoder *json.Decoder, where string, fields func(where string) []string) error {
 	if strings.Count(where, "/") > maxPolicyDepth {
 		return fmt.Errorf("nested too deeply")
 	}
@@ -274,7 +296,7 @@ func walkFields(decoder *json.Decoder, where string) error {
 				return fmt.Errorf("field %q appears twice", name)
 			}
 			seen[name] = true
-			if allowed := fieldsAt(where); allowed != nil {
+			if allowed := fields(where); allowed != nil {
 				known := false
 				for _, field := range allowed {
 					known = known || field == name
@@ -283,13 +305,13 @@ func walkFields(decoder *json.Decoder, where string) error {
 					return fmt.Errorf("unknown field %q", name)
 				}
 			}
-			if err := walkFields(decoder, where+"/"+name); err != nil {
+			if err := walkFields(decoder, where+"/"+name, fields); err != nil {
 				return err
 			}
 		}
 	case '[':
 		for decoder.More() {
-			if err := walkFields(decoder, where+"/[]"); err != nil {
+			if err := walkFields(decoder, where+"/[]", fields); err != nil {
 				return err
 			}
 		}

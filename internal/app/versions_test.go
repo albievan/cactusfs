@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -772,4 +773,119 @@ type referencedIndex struct {
 
 func (i *referencedIndex) IsDataReferenced(context.Context, object.ID) (bool, error) {
 	return i.referenced, i.err
+}
+
+// TestObjectTags: the tags of a version, who may read and change them, and
+// what they are kept with.
+func TestObjectTags(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := erasureFixture(t)
+	f.meta.Now = f.clock.Now
+	if err := f.meta.CreateBucket(ctx, bucket.Bucket{Name: "vault", ObjectLock: true, CreatedAt: testNow}); err != nil {
+		t.Fatal(err)
+	}
+	may := func(actions ...string) iam.Principal {
+		doc := iam.Document{Version: iam.PolicyVersion, Statements: []iam.Statement{{Effect: iam.Allow, Actions: actions, Resources: []string{"*"}}}}
+		return iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{doc}}
+	}
+	put := func(p iam.Principal, bucketName, key string, tags map[string]string, lock object.Lock) (object.Version, error) {
+		return f.objects.Put(ctx, p, app.PutInput{Bucket: bucketName, Key: key, Body: bytes.NewReader([]byte("x")), Size: 1, Tags: tags, Lock: lock})
+	}
+	tags := map[string]string{"project": "apollo"}
+
+	// Creating an object with tags takes the permission to tag as well.
+	if _, err := put(may("s3:PutObject"), "b", "k", tags, object.Lock{}); !errors.Is(err, domain.ErrAccessDenied) {
+		t.Errorf("Put with tags, without the permission to tag = %v", err)
+	}
+	if _, _, err := f.get("b", "k", nil); !errors.Is(err, domain.ErrObjectNotFound) {
+		t.Errorf("the refused put made an object: %v", err)
+	}
+	if _, err := put(may("s3:PutObject"), "b", "untagged", nil, object.Lock{}); err != nil {
+		t.Errorf("Put without tags by one who may write: %v", err)
+	}
+	created, err := put(may("s3:PutObject", "s3:PutObjectTagging"), "b", "k", tags, object.Lock{})
+	if err != nil || created.Tags["project"] != "apollo" {
+		t.Fatalf("Put with tags = %v, %v", created.Tags, err)
+	}
+	eleven := map[string]string{}
+	for i := range 11 {
+		eleven[strings.Repeat("k", i+1)] = ""
+	}
+	if _, err := put(porttest.Root(), "b", "many", eleven, object.Lock{}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("Put with eleven tags = %v", err)
+	}
+
+	in := app.LockInput{Bucket: "b", Key: "k"}
+	denied := []struct {
+		name string
+		call func(p iam.Principal) error
+		with []string
+	}{
+		{"reading tags", func(p iam.Principal) error { _, err := f.objects.Tags(ctx, p, in); return err }, []string{"s3:GetObject", "s3:PutObjectTagging", "s3:DeleteObjectTagging"}},
+		{"setting tags", func(p iam.Principal) error { _, err := f.objects.SetTags(ctx, p, in, tags); return err }, []string{"s3:PutObject", "s3:GetObjectTagging", "s3:DeleteObjectTagging"}},
+		{"removing tags", func(p iam.Principal) error { _, err := f.objects.SetTags(ctx, p, in, nil); return err }, []string{"s3:PutObject", "s3:GetObjectTagging", "s3:PutObjectTagging"}},
+	}
+	for _, tt := range denied {
+		if err := tt.call(may(tt.with...)); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("%s with only %v = %v", tt.name, tt.with, err)
+		}
+		if err := tt.call(anonymous()); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("%s by nobody = %v", tt.name, err)
+		}
+	}
+	if got, err := f.objects.Tags(ctx, may("s3:GetObjectTagging"), in); err != nil || got.Tags["project"] != "apollo" {
+		t.Errorf("Tags = %v, %v", got.Tags, err)
+	}
+	if got, err := f.objects.SetTags(ctx, may("s3:PutObjectTagging"), in, map[string]string{"stage": "final"}); err != nil || len(got.Tags) != 1 || got.Tags["stage"] != "final" {
+		t.Errorf("SetTags = %v, %v", got.Tags, err)
+	}
+	if got, err := f.objects.SetTags(ctx, may("s3:DeleteObjectTagging"), in, nil); err != nil || len(got.Tags) != 0 {
+		t.Errorf("removing tags = %v, %v", got.Tags, err)
+	}
+	// The object is what it was.
+	if got, _, err := f.get("b", "k", nil); err != nil || string(got) != "x" {
+		t.Errorf("the object after tagging: %q, %v", got, err)
+	}
+	for name, tt := range map[string]struct {
+		in   app.LockInput
+		tags map[string]string
+		want error
+	}{
+		"a missing key":          {app.LockInput{Bucket: "b", Key: "missing"}, tags, domain.ErrObjectNotFound},
+		"a missing bucket":       {app.LockInput{Bucket: "missing", Key: "k"}, tags, domain.ErrBucketNotFound},
+		"a missing version":      {app.LockInput{Bucket: "b", Key: "k", Version: &object.VersionRef{ID: object.ID{9}}}, tags, domain.ErrVersionNotFound},
+		"a key that is none":     {app.LockInput{Bucket: "b", Key: ""}, tags, domain.ErrInvalidObjectKey},
+		"eleven tags":            {in, eleven, domain.ErrInvalidArgument},
+		"a tag that is not text": {in, map[string]string{"\x00": "x"}, domain.ErrInvalidArgument},
+	} {
+		if _, err := f.objects.SetTags(ctx, porttest.Root(), tt.in, tt.tags); !errors.Is(err, tt.want) {
+			t.Errorf("SetTags with %s = %v, want %v", name, err, tt.want)
+		}
+	}
+
+	// A locked version can be tagged: a lock keeps the data and the
+	// version, not its labels. A delete marker has none.
+	lock := object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: testNow.Add(time.Hour)}}
+	locked, err := put(porttest.Root(), "vault", "ledger", nil, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := locked.Ref()
+	byVersion := app.LockInput{Bucket: "vault", Key: "ledger", Version: &ref}
+	tagged, err := f.objects.SetTags(ctx, porttest.Root(), byVersion, tags)
+	if err != nil || tagged.Tags["project"] != "apollo" || tagged.Lock.Retention == nil || !tagged.Lock.Retention.Until.Equal(lock.Retention.Until) {
+		t.Errorf("tagging a locked version = %+v, %v", tagged, err)
+	}
+	deleted, err := f.objects.Delete(ctx, porttest.Root(), app.DeleteInput{Bucket: "vault", Key: "ledger"})
+	if err != nil || deleted.Marker == nil {
+		t.Fatal(err)
+	}
+	marker := deleted.Marker.Ref()
+	if _, err := f.objects.SetTags(ctx, porttest.Root(), app.LockInput{Bucket: "vault", Key: "ledger", Version: &marker}, tags); !errors.Is(err, domain.ErrMethodNotAllowed) {
+		t.Errorf("tagging a delete marker = %v", err)
+	}
+	if got, err := f.objects.Tags(ctx, porttest.Root(), byVersion); err != nil || got.Tags["project"] != "apollo" {
+		t.Errorf("tags of the version under the marker = %v, %v", got.Tags, err)
+	}
 }
