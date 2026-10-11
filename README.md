@@ -207,8 +207,8 @@ Where those ports are, by way of running it:
 | The binary (`cactusfs server`) | `https://localhost:9000` | `https://localhost:9001` |
 | The binary with `--dev-plaintext` | `http://127.0.0.1:9000` | `http://127.0.0.1:9001` |
 | Compose cluster (`make up`) | `https://localhost:9000`, `:9010`, `:9020`, `:9030` (nodes 1 to 4) | `https://localhost:9001`, `:9011`, `:9021`, `:9031`, on this machine only |
-| Helm chart, inside the cluster | `https://<release>.<namespace>.svc:9000` | `https://<release>.<namespace>.svc:9001` |
-| Helm chart with `service.type=NodePort` | `https://<machine>:<service.s3NodePort>` | `https://<machine>:<service.adminNodePort>` |
+| Helm chart, inside the cluster | `https://<release>.<namespace>.svc:9000` | `https://<release>-admin.<namespace>.svc:9001` |
+| Helm chart, published as NodePorts | `https://<machine>:<service.nodePort>` (`service.type=NodePort`) | `https://<machine>:<adminService.nodePort>` (`adminService.type=NodePort`) |
 
 The two kinds of credentials of a new deployment:
 
@@ -305,11 +305,17 @@ majority of the voters to start. Things to know for now:
 
 The chart in `deploy/helm/cactusfs` runs the same cluster on Kubernetes or k3s: every
 node is a StatefulSet of one pod with a claim for its metadata and one for each drive,
-behind a headless Service for the nodes and a Service for clients. Pods run as a
-non-root user with a read-only root filesystem and every capability dropped, and are
-admitted under the `restricted` Pod Security Standard. A NetworkPolicy lets the nodes
-reach each other and DNS, and nobody reach them until you say who
-(`networkPolicy.clientsFrom`).
+behind a headless Service for the nodes, a Service for S3 (`<release>`) and a Service of
+its own for the admin port (`<release>-admin`). Pods run as a non-root user with a
+read-only root filesystem and every capability dropped, and are admitted under the
+`restricted` Pod Security Standard. A NetworkPolicy lets the nodes reach each other and
+DNS, and nobody reach them until you say who: `networkPolicy.clientsFrom` for S3,
+`networkPolicy.adminFrom` for the admin port, each apart, and `networkPolicy.egressTo`
+for what the nodes must reach themselves (Vault).
+
+Nodes are named `<release>-<pool>-<index>`, with the name of the Helm release exactly
+as you give it: `helm install store ...` makes `store-meta-0`, `store-meta-1`,
+`store-meta-2` and `store-data-0` with the default pools. That name is the node's ID.
 
 The chart makes no Secret and renders nothing until you name the ones it needs:
 
@@ -318,7 +324,7 @@ The chart makes no Secret and renders nothing until you name the ones it needs:
 | `secrets.root` | root credentials: keys `access-key`, `secret-key` |
 | `secrets.tls` | certificate of the S3 and admin listeners (`kubernetes.io/tls`) |
 | `secrets.nodeCA` | the CA of node certificates: key `ca.crt` |
-| `<node ID>-node-tls` | one per node (`kubernetes.io/tls`), its certificate naming the node ID `<release>-<pool>-<index>`; a pod mounts its own and no other |
+| `<node ID>-node-tls` | one per node (`kubernetes.io/tls`). The certificate carries exactly one DNS name, the node ID, and no IP address - not the pod's DNS name as well. A pod mounts its own and no other |
 | `kms.vault.tokenSecret` | the Vault token, key `token` - or, for development, `kms.local.*` with `dev.localKMS=true` |
 
 ```sh
@@ -331,14 +337,27 @@ voters, one node, and a development cluster on the disks of one machine
 (`localVolumes`: the directories `<basePath>/<node ID>/{meta,data1,...}` must exist and
 belong to user 65532).
 
+**Upgrading.** `helm upgrade` changes what the nodes are to be and restarts none of
+them (`updateStrategy: OnDelete`): every node is a StatefulSet of its own, and nothing
+else would keep an upgrade from restarting all of them at once. Bring the change to one
+node at a time - nodes that do not vote first, then the voters, the one that leads the
+metadata group last - and wait for each to be ready again before the next:
+
+```sh
+kubectl -n cactusfs delete pod <node ID>-0
+kubectl -n cactusfs wait --for=condition=Ready pod/<node ID>-0 --timeout=5m
+```
+
 Two things about the machine, which are not the chart's to do:
 
-- **firewalld.** On a host that runs firewalld, k3s needs the pod and service networks
-  in the trusted zone, or pods cannot reach each other and the cluster never forms:
+- **firewalld.** On a host that runs firewalld, k3s needs its pod and service networks
+  in the trusted zone, or pods cannot reach each other and the cluster never forms.
+  With the networks k3s uses unless told otherwise:
   `firewall-cmd --permanent --zone=trusted --add-source=10.42.0.0/16 --add-source=10.43.0.0/16 && firewall-cmd --reload`.
-- **NodePorts are published past the host firewall.** With `service.type=NodePort` the
-  S3 and admin ports answer on every address of the machine. Remember the console user
-  `admin` / `admin` before you choose that.
+- **NodePorts are published past the host firewall.** A Service of type NodePort
+  answers on every address of the machine, whatever firewalld says. The admin port has
+  a Service of its own so that S3 can be published without it; remember the console
+  user `admin` / `admin` before you publish that one.
 
 ## Develop
 
