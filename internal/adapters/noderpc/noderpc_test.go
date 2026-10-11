@@ -16,6 +16,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/disk"
 	"github.com/albievan/cactusfs/internal/adapters/noderpc"
+	nodev1 "github.com/albievan/cactusfs/internal/adapters/noderpc/nodev1/cactusfs/node/v1"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -651,6 +652,19 @@ func TestCallsToTheLeader(t *testing.T) {
 	}
 	if !errors.Is(proposeErr, domain.ErrOutcomeUnknown) {
 		t.Errorf("Propose whose answer did not come = %v, want %v", proposeErr, domain.ErrOutcomeUnknown)
+	}
+
+	// The same from the leader's side, without a race: when its own
+	// patience ends first and it answers, it says that the outcome is
+	// unknown and not merely that time ran out.
+	ended, end := context.WithCancel(ctx)
+	end()
+	answer, err := slow.server.Propose(ended, &nodev1.ProposeRequest{Entry: []byte("late")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reported := domain.FromCodes(answer.GetError().GetCodes(), answer.GetError().GetMessage()); !errors.Is(reported, domain.ErrOutcomeUnknown) {
+		t.Errorf("the leader's answer to a proposal it gave up waiting for = %v, want %v", reported, domain.ErrOutcomeUnknown)
 	}
 
 	if err := client.Close(); err != nil {

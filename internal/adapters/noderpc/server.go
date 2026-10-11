@@ -228,6 +228,13 @@ func (s *Server) Propose(ctx context.Context, req *nodev1.ProposeRequest) (*node
 	}
 	result, err := s.cfg.Meta.ProposeLocal(ctx, req.GetEntry())
 	if err != nil {
+		// The proposal was handed over. An error that does not say what
+		// became of it - the caller's patience ending while it waited is
+		// one - leaves the entry possibly in the log, and the caller must
+		// be told that, whichever of the two notices the deadline first.
+		if len(domain.Codes(err)) == 0 {
+			err = fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, err)
+		}
 		return &nodev1.ProposeResponse{Error: toWire(err)}, nil
 	}
 	return &nodev1.ProposeResponse{Result: result}, nil
