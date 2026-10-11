@@ -166,3 +166,71 @@ export function uploadObject(bucket: string, key: string, file: File): Promise<O
     }),
   );
 }
+
+/** What an upload in progress reports: bytes sent, of how many. */
+export type UploadProgress = (sent: number, total: number) => void;
+
+/**
+ * Uploads a file as an object and reports how far it is. fetch cannot say how
+ * much of a request body has been sent, so this one call is made with
+ * XMLHttpRequest - to the same operation of the same contract, with what the
+ * session middleware adds to every other call: the CSRF token, an
+ * Idempotency-Key, the session cookie, and the report of a 401.
+ */
+export function uploadObjectWithProgress(
+  bucket: string,
+  key: string,
+  file: File,
+  onProgress: UploadProgress,
+): Promise<ObjectMetadata> {
+  const path: keyof paths = '/buckets/{bucket}/object';
+  const query = new URLSearchParams({ key });
+  const url = `${API_BASE}${path.replace('{bucket}', encodeURIComponent(bucket))}?${query.toString()}`;
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('PUT', url);
+    request.responseType = 'text';
+    request.setRequestHeader('Content-Type', file.type === '' ? 'application/octet-stream' : file.type);
+    request.setRequestHeader('Idempotency-Key', crypto.randomUUID());
+    const token = readCsrfToken();
+    if (token !== null) {
+      request.setRequestHeader('X-CSRF-Token', token);
+    }
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded, event.total);
+      }
+    };
+    const unexpected = (title: string) =>
+      new ApiError({ type: 'about:blank', title, status: request.status, code: 'UnexpectedResponse' });
+    request.onerror = () => {
+      reject(unexpected('The upload did not reach the server'));
+    };
+    request.onabort = () => {
+      reject(unexpected('The upload was stopped'));
+    };
+    request.onload = () => {
+      if (request.status === 401) {
+        for (const listener of unauthorizedListeners) {
+          listener();
+        }
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(request.responseText) as unknown;
+      } catch {
+        body = undefined;
+      }
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(file.size, file.size);
+        resolve(body as ObjectMetadata);
+      } else if (isProblem(body)) {
+        reject(new ApiError(body));
+      } else {
+        reject(unexpected(`The server answered ${String(request.status)} ${request.statusText}`.trim()));
+      }
+    };
+    request.send(file);
+  });
+}
+

@@ -912,7 +912,43 @@ textarea[readonly] {
   overflow-wrap: anywhere;
 }
 
+.upload-bar {
+  flex: 0 1 12rem;
+  min-width: 4rem;
+  height: 0.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+  appearance: none;
+}
+
+.upload-bar::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.upload-bar::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--saguaro);
+}
+
+.upload-bar::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--saguaro);
+}
+
+.upload-failed .upload-bar::-webkit-progress-value {
+  background: var(--danger);
+}
+
+.upload-failed .upload-bar::-moz-progress-bar {
+  background: var(--danger);
+}
+
 .upload-state {
+  min-width: 5.5rem;
+  text-align: right;
   color: var(--muted);
   font-size: 0.85rem;
   font-weight: 600;
@@ -1181,7 +1217,7 @@ textarea[readonly] {
     flex: 1 1 100%;
   }
 
-  .grid thead {
+  .grid:not(.grid-keep) thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1190,14 +1226,14 @@ textarea[readonly] {
     white-space: nowrap;
   }
 
-  .grid,
-  .grid tbody,
-  .grid tr,
-  .grid td {
+  .grid:not(.grid-keep),
+  .grid:not(.grid-keep) tbody,
+  .grid:not(.grid-keep) tr,
+  .grid:not(.grid-keep) td {
     display: block;
   }
 
-  .grid tr {
+  .grid:not(.grid-keep) tr {
     margin-bottom: 0.75rem;
     padding: 0.6rem 0.85rem;
     border: 1px solid var(--line);
@@ -1205,16 +1241,16 @@ textarea[readonly] {
     background: var(--wash);
   }
 
-  .grid td {
+  .grid:not(.grid-keep) td {
     padding: 0.25rem 0;
     border: 0;
   }
 
-  .grid td.grid-check:empty {
+  .grid:not(.grid-keep) td.grid-check:empty {
     display: none;
   }
 
-  .grid td::before {
+  .grid:not(.grid-keep) td::before {
     content: attr(data-label);
     display: block;
     color: var(--muted);
@@ -1222,6 +1258,22 @@ textarea[readonly] {
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+  }
+
+  /* A grid that is kept stays a grid: it scrolls sideways when it must, and
+     its first column - the tick and the name - is what one reads first. */
+  .grid-scroll {
+    margin-inline: -0.25rem;
+  }
+
+  .grid-keep {
+    min-width: 34rem;
+    font-size: 0.925rem;
+  }
+
+  .grid-keep th,
+  .grid-keep td {
+    padding: 0.6rem 0.55rem;
   }
 
   .facts {

@@ -77,6 +77,10 @@ export function fakeApi(routes: Record<string, Handler> = {}): FakeApi {
       : handler(call);
   });
 
+  // The upload with progress is made with XMLHttpRequest; here it asks the
+  // same fake API, and reports its progress in two steps.
+  vi.stubGlobal('XMLHttpRequest', FakeXHR);
+
   return {
     calls,
     callsTo: (method, path) => calls.filter((call) => call.method === method && call.path === path),
@@ -102,3 +106,51 @@ export function signedIn(routes: Record<string, Handler> = {}): FakeApi {
     ...routes,
   });
 }
+
+/** As much of XMLHttpRequest as an upload needs, answered by the stubbed fetch. */
+class FakeXHR {
+  status = 0;
+  statusText = '';
+  responseText = '';
+  responseType = '';
+  upload: { onprogress: ((event: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = {
+    onprogress: null,
+  };
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  private method = 'GET';
+  private url = '';
+  private readonly headers = new Headers();
+
+  open(method: string, url: string): void {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string): void {
+    this.headers.set(name, value);
+  }
+
+  send(body: Blob): void {
+    const total = body.size;
+    this.upload.onprogress?.({ lengthComputable: true, loaded: Math.floor(total / 2), total });
+    void body
+      .text()
+      .then((text) =>
+        globalThis.fetch(
+          new Request(new URL(this.url, 'http://localhost'), { method: this.method, headers: this.headers, body: text }),
+        ),
+      )
+      .then(async (response) => {
+        this.status = response.status;
+        this.statusText = response.statusText;
+        this.responseText = await response.text();
+        this.onload?.();
+      })
+      .catch(() => {
+        this.onerror?.();
+      });
+  }
+}
+

@@ -396,14 +396,14 @@ describe('object browser', () => {
     expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(2);
   });
 
-  it('uploads several files, each under the prefix by its own name, and says what became of each', async () => {
+  it('uploads several files at a time, each with a bar of its own, and begins no more after a refusal', async () => {
     const stored: string[] = [];
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
         json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false }),
       'PUT /buckets/photos/object': (call) => {
         const key = call.query.get('key') ?? '';
-        if (key.endsWith('c.txt')) {
+        if (key.endsWith('a.txt')) {
           return problem(403, 'Access denied', undefined, 'req-3');
         }
         stored.push(key);
@@ -421,28 +421,60 @@ describe('object browser', () => {
     render(<ObjectsScreen bucket="photos" prefix="notes/" />);
     await screen.findByText('There is nothing here.');
 
-    const files = ['a.txt', 'b.txt', 'c.txt', 'd.txt'].map((name) => new NodeFile([name], name, { type: 'text/plain' }));
+    const names = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt'];
+    const files = names.map((name) => new NodeFile([name], name, { type: 'text/plain' }));
     fireEvent.change(screen.getByLabelText('File'), { target: { files } });
     // Several files: the field is the prefix they go under.
     expect((screen.getByLabelText('Upload under this prefix') as HTMLInputElement).value).toBe('notes/');
-    expect(screen.getByText(/4 files chosen/)).toBeDefined();
+    expect(screen.getByText(/5 files chosen/)).toBeDefined();
     fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
 
-    // One request a file, in order, until the first refusal: d.txt is not sent.
+    // Four are on their way at once, each with a request of its own. The
+    // first is refused: the three beside it finish, the fifth is not begun.
     expect((await screen.findByRole('alert')).textContent).toContain('Access denied');
     expect(api.callsTo('PUT', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual([
       'notes/a.txt',
       'notes/b.txt',
       'notes/c.txt',
+      'notes/d.txt',
     ]);
     const progress = within(screen.getByRole('list', { name: 'Upload progress' }));
-    expect(progress.getAllByText('Stored')).toHaveLength(2);
+    await waitFor(() => {
+      expect(progress.getAllByText('Stored')).toHaveLength(3);
+    });
     expect(progress.getByText('Not stored')).toBeDefined();
     expect(progress.getByText('Waiting')).toBeDefined();
+    // Each file has a bar of its own: full for what was stored, empty for
+    // what was never begun.
+    expect((screen.getByRole('progressbar', { name: 'Upload of notes/b.txt' }) as HTMLProgressElement).value).toBe(1);
+    expect((screen.getByRole('progressbar', { name: 'Upload of notes/e.txt' }) as HTMLProgressElement).value).toBe(0);
+    // The request of an upload carries what every changing request does.
+    const sent = api.callsTo('PUT', '/buckets/photos/object')[1];
+    expect(sent?.headers.get('Idempotency-Key')).not.toBeNull();
+    expect(sent?.headers.get('Content-Type')).toBe('text/plain');
+    expect(sent?.body).toBe('b.txt');
     // What was stored is listed.
     await waitFor(() => {
-      expect(screen.getByLabelText('Select a.txt')).toBeDefined();
+      expect(screen.getByLabelText('Select b.txt')).toBeDefined();
     });
+  });
+
+  it('keeps the objects in a table, whatever the width of the screen', async () => {
+    fakeApi({
+      'GET /buckets/photos/objects': () => json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false }),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    const table = (await screen.findByRole('table')) as HTMLTableElement;
+    // The class that keeps it from being turned into cards on a phone.
+    expect(table.className).toContain('grid-keep');
+    expect(within(table).getAllByRole('columnheader').map((th) => th.textContent)).toEqual([
+      'Select',
+      'Name',
+      'Size',
+      'Last modified',
+      'Actions',
+    ]);
   });
 
   it('uploads a file under the current prefix and lists again', async () => {

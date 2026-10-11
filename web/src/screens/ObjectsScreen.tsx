@@ -1,6 +1,6 @@
 import { useCallback, useState, type FormEvent } from 'react';
 
-import { api, objectDownloadUrl, unwrap, uploadObject, type ObjectMetadata } from '../api/client';
+import { api, objectDownloadUrl, unwrap, uploadObjectWithProgress, type ObjectMetadata } from '../api/client';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatBytes, formatTime } from '../ui/format';
@@ -15,6 +15,17 @@ interface ObjectsScreenProps {
   bucket: string;
   /** The prefix to list; empty for the top of the bucket. */
   prefix: string;
+}
+
+/** How many files are on their way at once. */
+const UPLOADS_AT_ONCE = 4;
+
+/** One file of an upload and how far it is. */
+interface Upload {
+  name: string;
+  state: 'waiting' | 'sending' | 'stored' | 'failed';
+  sent: number;
+  total: number;
 }
 
 const UPLOAD_ICON = {
@@ -61,15 +72,15 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [key, setKey] = useState('');
   // What became of each file of the last upload.
-  const [uploads, setUploads] = useState<{ name: string; state: 'waiting' | 'sending' | 'stored' | 'failed' }[]>([]);
+  const [uploads, setUploads] = useState<Upload[]>([]);
   // The keys ticked for deletion, of this page.
   const [chosen, setChosen] = useState<string[]>([]);
 
   const several = files.length > 1;
 
-  // Uploads the chosen files one after another, each with a request of its
-  // own, as the API has it. It stops at the first refusal; what was stored
-  // until then stays stored.
+  // Uploads the chosen files, a few at a time, each with a request of its
+  // own, as the API has it. After a refusal no further file is begun; those
+  // on their way finish, and what was stored stays stored.
   const upload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -77,21 +88,37 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
       return;
     }
     const sending = files.map((file) => ({ file, key: several ? key + file.name : key }));
-    setUploads(sending.map(({ key: objectKey }) => ({ name: objectKey, state: 'waiting' })));
-    const mark = (index: number, state: 'sending' | 'stored' | 'failed') => {
-      setUploads((list) => list.map((entry, i) => (i === index ? { ...entry, state } : entry)));
+    setUploads(sending.map(({ file, key: objectKey }) => ({ name: objectKey, state: 'waiting', sent: 0, total: file.size })));
+    const update = (index: number, change: Partial<Upload>) => {
+      setUploads((list) => list.map((entry, i) => (i === index ? { ...entry, ...change } : entry)));
     };
     void action
       .run(async () => {
-        for (const [index, { file, key: objectKey }] of sending.entries()) {
-          mark(index, 'sending');
-          try {
-            await uploadObject(bucket, objectKey, file);
-          } catch (error) {
-            mark(index, 'failed');
-            throw error;
+        let next = 0;
+        let refusal: unknown = null;
+        const worker = async () => {
+          while (refusal === null && next < sending.length) {
+            const index = next;
+            next += 1;
+            const item = sending[index];
+            if (item === undefined) {
+              return;
+            }
+            update(index, { state: 'sending' });
+            try {
+              await uploadObjectWithProgress(bucket, item.key, item.file, (sent, total) => {
+                update(index, { sent, total });
+              });
+              update(index, { state: 'stored', sent: item.file.size, total: item.file.size });
+            } catch (error) {
+              update(index, { state: 'failed' });
+              refusal ??= error;
+            }
           }
-          mark(index, 'stored');
+        };
+        await Promise.all(Array.from({ length: Math.min(UPLOADS_AT_ONCE, sending.length) }, worker));
+        if (refusal !== null) {
+          throw refusal instanceof Error ? refusal : new Error('The upload failed');
         }
         form.reset();
         setFiles([]);
@@ -208,17 +235,27 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         </form>
         {several ? (
           <p className="form-hint">
-            {files.length} files chosen: each is stored under the prefix by its own name. A file whose key already
-            exists replaces it.
+            {files.length} files chosen: each is stored under the prefix by its own name, {UPLOADS_AT_ONCE} at a time. A
+            file whose key already exists replaces it.
           </p>
         ) : null}
-        {uploads.length > 1 ? (
+        {uploads.length > 0 ? (
           <ul className="uploads" aria-label="Upload progress">
             {uploads.map((entry) => (
               <li key={entry.name} className={`upload upload-${entry.state}`}>
                 <i className={`bi ${UPLOAD_ICON[entry.state]}`} aria-hidden="true" />
                 <span className="upload-name">{entry.name}</span>
-                <span className="upload-state">{UPLOAD_WORD[entry.state]}</span>
+                <progress
+                  className="upload-bar"
+                  aria-label={`Upload of ${entry.name}`}
+                  value={entry.state === 'stored' ? 1 : entry.total > 0 ? entry.sent / entry.total : 0}
+                  max={1}
+                />
+                <span className="upload-state">
+                  {entry.state === 'sending' && entry.total > 0
+                    ? `${String(Math.floor((entry.sent / entry.total) * 100))} %`
+                    : UPLOAD_WORD[entry.state]}
+                </span>
               </li>
             ))}
           </ul>
@@ -289,87 +326,89 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           </div>
         ) : null}
         {page !== undefined && !empty ? (
-          <table className="table table-hover align-middle grid">
-            <thead>
-              <tr>
-                <th scope="col" className="grid-check">
-                  <span className="visually-hidden">Select</span>
-                </th>
-                <th scope="col">Name</th>
-                <th scope="col">Size</th>
-                <th scope="col">Last modified</th>
-                <th scope="col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {page.common_prefixes.map((commonPrefix) => (
-                <tr key={`prefix ${commonPrefix}`}>
-                  <td className="grid-check" />
-                  <td data-label="Name">
-                    <a className="btn btn-link-row" href={routeHref(['buckets', bucket], { prefix: commonPrefix })}>
-                      <i className="bi bi-folder" aria-hidden="true" />
-                      {commonPrefix.slice(prefix.length)}
-                    </a>
-                  </td>
-                  <td data-label="Size">-</td>
-                  <td data-label="Last modified">-</td>
-                  <td data-label="Actions">-</td>
+          <div className="table-responsive grid-scroll">
+            <table className="table table-hover align-middle grid grid-keep">
+              <thead>
+                <tr>
+                  <th scope="col" className="grid-check">
+                    <span className="visually-hidden">Select</span>
+                  </th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Size</th>
+                  <th scope="col">Last modified</th>
+                  <th scope="col">Actions</th>
                 </tr>
-              ))}
-              {page.objects.map((object) => {
-                const name = object.key.slice(prefix.length);
-                return (
-                  <tr key={`object ${object.key}`} className={selected.includes(object.key) ? 'grid-chosen' : undefined}>
-                    <td className="grid-check">
-                      <input
-                        className="form-check-input"
-                        type="checkbox"
-                        aria-label={`Select ${name}`}
-                        checked={selected.includes(object.key)}
-                        onChange={(event) => {
-                          choose(object.key, event.target.checked);
-                        }}
-                      />
+              </thead>
+              <tbody>
+                {page.common_prefixes.map((commonPrefix) => (
+                  <tr key={`prefix ${commonPrefix}`}>
+                    <td className="grid-check" />
+                    <td data-label="Name">
+                      <a className="btn btn-link-row" href={routeHref(['buckets', bucket], { prefix: commonPrefix })}>
+                        <i className="bi bi-folder" aria-hidden="true" />
+                        {commonPrefix.slice(prefix.length)}
+                      </a>
                     </td>
-                    <td data-label="Name">{name}</td>
-                    <td data-label="Size">{formatBytes(object.size)}</td>
-                    <td data-label="Last modified">{formatTime(object.last_modified)}</td>
-                    <td data-label="Actions">
-                      <span className="d-flex flex-wrap gap-2">
-                        <a
-                          className="btn btn-outline-secondary"
-                          href={objectDownloadUrl(bucket, object.key)}
-                          download
-                          aria-label={`Download ${name}`}
-                        >
-                          <i className="bi bi-download" aria-hidden="true" /> Download
-                        </a>
-                        <button
-                          type="button"
-                          className="btn btn-outline-secondary"
-                          aria-label={`Details of ${name}`}
-                          disabled={action.busy}
-                          onClick={() => {
-                            showMetadata(object.key);
-                          }}
-                        >
-                          <i className="bi bi-info-circle" aria-hidden="true" /> Details
-                        </button>
-                        <ConfirmButton
-                          label="Delete"
-                          question={`Delete ${name}?`}
-                          disabled={action.busy}
-                          onConfirm={() => {
-                            remove(object.key);
+                    <td data-label="Size">-</td>
+                    <td data-label="Last modified">-</td>
+                    <td data-label="Actions">-</td>
+                  </tr>
+                ))}
+                {page.objects.map((object) => {
+                  const name = object.key.slice(prefix.length);
+                  return (
+                    <tr key={`object ${object.key}`} className={selected.includes(object.key) ? 'grid-chosen' : undefined}>
+                      <td className="grid-check">
+                        <input
+                          className="form-check-input"
+                          type="checkbox"
+                          aria-label={`Select ${name}`}
+                          checked={selected.includes(object.key)}
+                          onChange={(event) => {
+                            choose(object.key, event.target.checked);
                           }}
                         />
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      </td>
+                      <td data-label="Name">{name}</td>
+                      <td data-label="Size">{formatBytes(object.size)}</td>
+                      <td data-label="Last modified">{formatTime(object.last_modified)}</td>
+                      <td data-label="Actions">
+                        <span className="d-flex flex-wrap gap-2">
+                          <a
+                            className="btn btn-outline-secondary"
+                            href={objectDownloadUrl(bucket, object.key)}
+                            download
+                            aria-label={`Download ${name}`}
+                          >
+                            <i className="bi bi-download" aria-hidden="true" /> Download
+                          </a>
+                          <button
+                            type="button"
+                            className="btn btn-outline-secondary"
+                            aria-label={`Details of ${name}`}
+                            disabled={action.busy}
+                            onClick={() => {
+                              showMetadata(object.key);
+                            }}
+                          >
+                            <i className="bi bi-info-circle" aria-hidden="true" /> Details
+                          </button>
+                          <ConfirmButton
+                            label="Delete"
+                            question={`Delete ${name}?`}
+                            disabled={action.busy}
+                            onConfirm={() => {
+                              remove(object.key);
+                            }}
+                          />
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : null}
         <div className="pager">
           <button
