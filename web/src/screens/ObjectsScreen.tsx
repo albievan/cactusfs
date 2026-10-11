@@ -17,6 +17,15 @@ interface ObjectsScreenProps {
   prefix: string;
 }
 
+const UPLOAD_ICON = {
+  waiting: 'bi-hourglass',
+  sending: 'bi-arrow-up-circle',
+  stored: 'bi-check-circle',
+  failed: 'bi-x-circle',
+} as const;
+
+const UPLOAD_WORD = { waiting: 'Waiting', sending: 'Uploading…', stored: 'Stored', failed: 'Not stored' } as const;
+
 /**
  * The object browser of one bucket: walks prefixes as if they were folders,
  * pages through long listings, uploads, downloads, deletes, and shows what is
@@ -47,24 +56,50 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   const listing = useLoad(load);
   const action = useAction();
   const [metadata, setMetadata] = useState<ObjectMetadata | null>(null);
-  const [file, setFile] = useState<File | null>(null);
+  // The files chosen for upload. One file can be given any key; several go
+  // under a prefix, each by its own name.
+  const [files, setFiles] = useState<File[]>([]);
   const [key, setKey] = useState('');
+  // What became of each file of the last upload.
+  const [uploads, setUploads] = useState<{ name: string; state: 'waiting' | 'sending' | 'stored' | 'failed' }[]>([]);
   // The keys ticked for deletion, of this page.
   const [chosen, setChosen] = useState<string[]>([]);
 
+  const several = files.length > 1;
+
+  // Uploads the chosen files one after another, each with a request of its
+  // own, as the API has it. It stops at the first refusal; what was stored
+  // until then stays stored.
   const upload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
-    if (file === null) {
+    if (files.length === 0) {
       return;
     }
-    void action.run(async () => {
-      await uploadObject(bucket, key, file);
-      form.reset();
-      setFile(null);
-      setKey('');
-      listing.reload();
-    });
+    const sending = files.map((file) => ({ file, key: several ? key + file.name : key }));
+    setUploads(sending.map(({ key: objectKey }) => ({ name: objectKey, state: 'waiting' })));
+    const mark = (index: number, state: 'sending' | 'stored' | 'failed') => {
+      setUploads((list) => list.map((entry, i) => (i === index ? { ...entry, state } : entry)));
+    };
+    void action
+      .run(async () => {
+        for (const [index, { file, key: objectKey }] of sending.entries()) {
+          mark(index, 'sending');
+          try {
+            await uploadObject(bucket, objectKey, file);
+          } catch (error) {
+            mark(index, 'failed');
+            throw error;
+          }
+          mark(index, 'stored');
+        }
+        form.reset();
+        setFiles([]);
+        setKey('');
+      })
+      .then(() => {
+        listing.reload();
+      });
   };
 
   const remove = (objectKey: string) => {
@@ -143,20 +178,23 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               className="form-control"
               name="file"
               type="file"
+              multiple
               required
               onChange={(event) => {
-                const chosen = event.target.files?.[0] ?? null;
-                setFile(chosen);
-                setKey(chosen === null ? '' : prefix + chosen.name);
+                const chosen = Array.from(event.target.files ?? []);
+                setFiles(chosen);
+                setUploads([]);
+                const [only] = chosen;
+                setKey(chosen.length === 1 && only !== undefined ? prefix + only.name : prefix);
               }}
             />
           </label>
           <label className="field field-wide">
-            <span>Object key</span>
+            <span>{several ? 'Upload under this prefix' : 'Object key'}</span>
             <input
               className="form-control"
               name="key"
-              required
+              required={!several}
               spellCheck={false}
               value={key}
               onChange={(event) => {
@@ -168,6 +206,23 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             <i className="bi bi-upload" aria-hidden="true" /> Upload
           </button>
         </form>
+        {several ? (
+          <p className="form-hint">
+            {files.length} files chosen: each is stored under the prefix by its own name. A file whose key already
+            exists replaces it.
+          </p>
+        ) : null}
+        {uploads.length > 1 ? (
+          <ul className="uploads" aria-label="Upload progress">
+            {uploads.map((entry) => (
+              <li key={entry.name} className={`upload upload-${entry.state}`}>
+                <i className={`bi ${UPLOAD_ICON[entry.state]}`} aria-hidden="true" />
+                <span className="upload-name">{entry.name}</span>
+                <span className="upload-state">{UPLOAD_WORD[entry.state]}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </section>
 
       {metadata === null ? null : (

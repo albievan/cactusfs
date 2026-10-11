@@ -396,6 +396,55 @@ describe('object browser', () => {
     expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(2);
   });
 
+  it('uploads several files, each under the prefix by its own name, and says what became of each', async () => {
+    const stored: string[] = [];
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false }),
+      'PUT /buckets/photos/object': (call) => {
+        const key = call.query.get('key') ?? '';
+        if (key.endsWith('c.txt')) {
+          return problem(403, 'Access denied', undefined, 'req-3');
+        }
+        stored.push(key);
+        return json(200, {
+          bucket: 'photos',
+          key,
+          size: call.body.length,
+          etag: '"e"',
+          last_modified: CREATED,
+          content_type: 'text/plain',
+          encryption: 'SSE-S3',
+        });
+      },
+    });
+    render(<ObjectsScreen bucket="photos" prefix="notes/" />);
+    await screen.findByText('There is nothing here.');
+
+    const files = ['a.txt', 'b.txt', 'c.txt', 'd.txt'].map((name) => new NodeFile([name], name, { type: 'text/plain' }));
+    fireEvent.change(screen.getByLabelText('File'), { target: { files } });
+    // Several files: the field is the prefix they go under.
+    expect((screen.getByLabelText('Upload under this prefix') as HTMLInputElement).value).toBe('notes/');
+    expect(screen.getByText(/4 files chosen/)).toBeDefined();
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
+
+    // One request a file, in order, until the first refusal: d.txt is not sent.
+    expect((await screen.findByRole('alert')).textContent).toContain('Access denied');
+    expect(api.callsTo('PUT', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual([
+      'notes/a.txt',
+      'notes/b.txt',
+      'notes/c.txt',
+    ]);
+    const progress = within(screen.getByRole('list', { name: 'Upload progress' }));
+    expect(progress.getAllByText('Stored')).toHaveLength(2);
+    expect(progress.getByText('Not stored')).toBeDefined();
+    expect(progress.getByText('Waiting')).toBeDefined();
+    // What was stored is listed.
+    await waitFor(() => {
+      expect(screen.getByLabelText('Select a.txt')).toBeDefined();
+    });
+  });
+
   it('uploads a file under the current prefix and lists again', async () => {
     let objects: ReturnType<typeof object>[] = [];
     const api = fakeApi({

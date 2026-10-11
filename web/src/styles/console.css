@@ -882,6 +882,57 @@ textarea[readonly] {
   font-size: 0.9rem;
 }
 
+.form-hint {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.uploads {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.85rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.upload {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--bs-border-radius);
+  background: var(--wash);
+}
+
+.upload-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.upload-state {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.upload-stored .bi {
+  color: var(--saguaro);
+}
+
+.upload-failed {
+  border-color: #e3b6b2;
+  background: var(--danger-soft);
+}
+
+.upload-failed .bi,
+.upload-failed .upload-state {
+  color: var(--danger);
+}
+
 .tile-figures {
   display: flex;
   flex-wrap: wrap;
