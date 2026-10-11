@@ -22,7 +22,7 @@ describe('session', () => {
     render(<App />);
 
     await screen.findByRole('heading', { name: 'Sign in' });
-    expect(screen.getByRole('region', { name: 'About CactusFS' }).textContent).toContain('S3-compatible');
+    expect(screen.getByRole('complementary', { name: 'About CactusFS' }).textContent).toContain('S3-compatible');
     // Nothing leaves the deployment: both links are served by it.
     expect(screen.getByRole('link', { name: 'API documentation' }).getAttribute('href')).toBe('/docs');
     expect(screen.getByRole('link', { name: 'API contract' }).getAttribute('href')).toBe('/api/v1/openapi.yaml');

@@ -14,6 +14,8 @@ interface SignInProps {
 
 /**
  * The sign-in screen: what the store is, on the left; the form, on the right.
+ * The form comes first in the document, as it does on a narrow screen and for
+ * whoever has the page read to them.
  * The API sets the session token as an HttpOnly cookie; the password is sent
  * once and kept nowhere.
  */
@@ -34,23 +36,6 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
 
   return (
     <div className="signin">
-      <section className="signin-hero" aria-label="About CactusFS">
-        <div className="signin-hero-text">
-          <h2>Object storage that keeps what you give it</h2>
-          <p>
-            CactusFS is an S3-compatible object store. Every object is encrypted before it is
-            stored, split into erasure-coded shards across drives and nodes, checked on every
-            read and healed in the background. Versioning and Object Lock keep data out of
-            reach of mistakes and of ransomware.
-          </p>
-          <ul className="signin-points">
-            <li>Encrypted at rest, always</li>
-            <li>Erasure-coded and self-healing</li>
-            <li>One binary, standalone or cluster</li>
-          </ul>
-        </div>
-        <Dunes />
-      </section>
       <main className="signin-panel">
         <img className="signin-logo" src={logo} alt="CactusFS" />
         <form className="signin-form" onSubmit={submit}>
@@ -101,6 +86,23 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
           <a href="/api/v1/openapi.yaml">API contract</a>
         </nav>
       </main>
+      <aside className="signin-hero" aria-label="About CactusFS">
+        <div className="signin-hero-text">
+          <h2>Object storage that keeps what you give it</h2>
+          <p>
+            CactusFS is an S3-compatible object store. Every object is encrypted before it is
+            stored, split into erasure-coded shards across drives and nodes, checked on every
+            read and healed in the background. Versioning and Object Lock keep data out of
+            reach of mistakes and of ransomware.
+          </p>
+          <ul className="signin-points">
+            <li>Encrypted at rest, always</li>
+            <li>Erasure-coded and self-healing</li>
+            <li>One binary, standalone or cluster</li>
+          </ul>
+        </div>
+        <Dunes />
+      </aside>
     </div>
   );
 }
@@ -120,7 +122,7 @@ function Dunes() {
           `M0 ${String(y + 40)} ` +
           `C 200 ${String(y - lift)}, 380 ${String(y + lift * 0.9)}, 600 ${String(y)} ` +
           `S 980 ${String(y - lift * 0.7)}, 1200 ${String(y + 20)}`;
-        return <path key={index} d={d} style={{ opacity: 0.18 + index * 0.05 }} />;
+        return <path key={index} d={d} strokeOpacity={0.12 + index * 0.035} />;
       })}
     </svg>
   );

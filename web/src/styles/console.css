@@ -180,9 +180,12 @@ code {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(20rem, 28rem);
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .signin-hero {
+  grid-row: 1;
+  grid-column: 1;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -235,13 +238,15 @@ code {
   bottom: 0;
   left: 0;
   width: 100%;
-  height: 55%;
+  height: min(55%, 24rem);
   fill: none;
   stroke: var(--dune);
   stroke-width: 1.2;
 }
 
 .signin-panel {
+  grid-row: 1;
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: 2rem;
@@ -302,9 +307,15 @@ code {
   }
 
   .signin-panel {
-    order: -1;
+    grid-row: 1;
+    grid-column: 1;
     border-left: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .signin-hero {
+    grid-row: 2;
+    grid-column: 1;
   }
 
   .signin-hero-text {
