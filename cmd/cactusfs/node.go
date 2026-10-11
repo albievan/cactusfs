@@ -257,6 +257,19 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		logger.InfoContext(ctx, "root credentials generated for a new deployment; they are shown once on standard error")
 		showCredentials(notice, *generated)
 	}
+	// A new deployment begins with a console user whose name and password
+	// are public (ADR-0014). Said loudly, once.
+	if n.identities.CreatedRoot() {
+		created, err := n.iam.EnsureDefaultAdmin(ctx)
+		if err != nil {
+			return err
+		}
+		if created {
+			logger.WarnContext(ctx, "console user created with the default password; delete the user or change the password before the console can be reached by anybody else",
+				"user", app.DefaultAdminName)
+			_, _ = fmt.Fprintf(notice, "\nThis new deployment has the console user %q with the default password (ADR-0014).\nDelete that user, or change its password, before anybody else can reach the admin port.\n\n", app.DefaultAdminName)
+		}
+	}
 	return nil
 }
 

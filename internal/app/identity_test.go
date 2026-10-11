@@ -363,6 +363,18 @@ func TestGeneratedRootCredentialsAreShownEvenWhenTheCommitIsUncertain(t *testing
 		t.Errorf("the credentials that were shown are not the stored ones: %v", err)
 	}
 
+	// Generated here and found stored: this node began the deployment.
+	if !svc.CreatedRoot() {
+		t.Error("a generated credential that was stored after all: CreatedRoot = false")
+	}
+	// Supplied, and found stored: another node given the same credential
+	// may have stored it. This node does not claim the deployment.
+	supplied := app.Credentials{AccessKeyID: "SUPPLIEDROOTKEY00001", SecretKey: strings.Repeat("s", 40)}
+	svc = app.NewIdentityService(&unsureStore{RootCredentialStore: porttest.NewMemMetadata(), store: true}, kms, porttest.NewClock(testNow), rand.Reader)
+	if _, err := svc.EnsureRoot(ctx, &supplied); err != nil || svc.CreatedRoot() {
+		t.Errorf("a supplied credential of unknown outcome: CreatedRoot = %v, %v; want false", svc.CreatedRoot(), err)
+	}
+
 	empty := porttest.NewMemMetadata()
 	svc = app.NewIdentityService(&unsureStore{RootCredentialStore: empty}, kms, porttest.NewClock(testNow), rand.Reader)
 	generated, err = svc.EnsureRoot(ctx, nil)

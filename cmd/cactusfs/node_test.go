@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -143,7 +144,9 @@ func TestSuppliedRootCredentials(t *testing.T) {
 	cfg.secrets.rootAccessKey, cfg.secrets.rootSecretKey = id, secret
 
 	first := mustStart(t, cfg)
-	if first.notice != "" {
+	// The notice speaks of the default console user (ADR-0014), and of
+	// nothing that was supplied.
+	if strings.Contains(first.notice, id) || strings.Contains(first.notice, secret) || strings.Contains(first.notice, "Access key ID") {
 		t.Errorf("supplied credentials were printed: %q", first.notice)
 	}
 	if strings.Contains(first.logs, secret) {
@@ -296,5 +299,38 @@ func TestSystemClock(t *testing.T) {
 	before := time.Now()
 	if got := (systemClock{}).Now(); got.Before(before) || got.After(before.Add(time.Minute)) {
 		t.Errorf("Now() = %v", got)
+	}
+}
+
+// TestDefaultConsoleUser: a new deployment can be signed in to as admin with
+// the password admin (ADR-0014), is told so loudly, and a deployment whose
+// operator deleted that user does not get it back.
+func TestDefaultConsoleUser(t *testing.T) {
+	t.Parallel()
+	cfg := nodeConfig(t.TempDir())
+	first := mustStart(t, cfg)
+	if !strings.Contains(first.notice, `console user "admin"`) {
+		t.Errorf("nothing on standard error about the default console user: %q", first.notice)
+	}
+	if !strings.Contains(first.logs, "default password") {
+		t.Errorf("nothing in the log about the default password:\n%s", first.logs)
+	}
+	visitor := iam.Session{SourceIP: netip.MustParseAddr("127.0.0.1"), SecureTransport: true, RequestID: "REQ-1"}
+	if _, err := first.node.sessions.SignIn(t.Context(), app.DefaultAdminName, app.DefaultAdminPassword, visitor); err != nil {
+		t.Fatalf("sign-in with the default user: %v", err)
+	}
+	root := iam.Principal{AccessKeyID: "ROOT", Root: true, Session: visitor}
+	if err := first.node.iam.DeleteUser(t.Context(), root, app.DefaultAdminName); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.node.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again := mustStart(t, cfg)
+	if _, err := again.node.sessions.SignIn(t.Context(), app.DefaultAdminName, app.DefaultAdminPassword, visitor); err == nil {
+		t.Error("the deleted default user is back after a restart")
+	}
+	if strings.Contains(again.logs, "default password") {
+		t.Errorf("a second start speaks of the default password:\n%s", again.logs)
 	}
 }

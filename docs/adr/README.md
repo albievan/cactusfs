@@ -49,3 +49,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0011](0011-bucket-policy-cors-tags.md) | Bucket policies, anonymous access, cross-origin rules and tags | accepted |
 | [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |
 | [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted |
+| [0014](0014-default-console-user.md) | A default console user | accepted |

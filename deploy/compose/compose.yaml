@@ -91,7 +91,10 @@ services:
       CACTUSFS_TOPOLOGY_ZONE: zone-a
     ports:
       - "${CACTUSFS_PORT_BASE_1:-90}00:9000"
-      - "${CACTUSFS_PORT_BASE_1:-90}01:9001"
+      # The admin port, on this machine only: a new deployment has the console
+      # user admin with the password admin (ADR-0014). Delete that user or change
+      # its password before publishing this port more widely.
+      - "127.0.0.1:${CACTUSFS_PORT_BASE_1:-90}01:9001"
     volumes:
       - config:/var/lib/cactusfs/config:ro
       - node1-meta:/var/lib/cactusfs/meta
@@ -109,7 +112,10 @@ services:
       CACTUSFS_TOPOLOGY_ZONE: zone-b
     ports:
       - "${CACTUSFS_PORT_BASE_2:-90}10:9000"
-      - "${CACTUSFS_PORT_BASE_2:-90}11:9001"
+      # The admin port, on this machine only: a new deployment has the console
+      # user admin with the password admin (ADR-0014). Delete that user or change
+      # its password before publishing this port more widely.
+      - "127.0.0.1:${CACTUSFS_PORT_BASE_2:-90}11:9001"
     volumes:
       - config:/var/lib/cactusfs/config:ro
       - node2-meta:/var/lib/cactusfs/meta
@@ -127,7 +133,10 @@ services:
       CACTUSFS_TOPOLOGY_ZONE: zone-a
     ports:
       - "${CACTUSFS_PORT_BASE_3:-90}20:9000"
-      - "${CACTUSFS_PORT_BASE_3:-90}21:9001"
+      # The admin port, on this machine only: a new deployment has the console
+      # user admin with the password admin (ADR-0014). Delete that user or change
+      # its password before publishing this port more widely.
+      - "127.0.0.1:${CACTUSFS_PORT_BASE_3:-90}21:9001"
     volumes:
       - config:/var/lib/cactusfs/config:ro
       - node3-meta:/var/lib/cactusfs/meta
@@ -149,7 +158,10 @@ services:
       CACTUSFS_TOPOLOGY_ZONE: zone-b
     ports:
       - "${CACTUSFS_PORT_BASE_4:-90}30:9000"
-      - "${CACTUSFS_PORT_BASE_4:-90}31:9001"
+      # The admin port, on this machine only: a new deployment has the console
+      # user admin with the password admin (ADR-0014). Delete that user or change
+      # its password before publishing this port more widely.
+      - "127.0.0.1:${CACTUSFS_PORT_BASE_4:-90}31:9001"
     volumes:
       - config:/var/lib/cactusfs/config:ro
       - node4-meta:/var/lib/cactusfs/meta

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -35,6 +36,9 @@ type IdentityService struct {
 	// once, when the deployment is bootstrapped, and never changes.
 	rootMu sync.Mutex
 	root   *iam.RootCredential
+	// createdRoot says that this service stored the root credential: the
+	// deployment is new, and this node is the one that began it.
+	createdRoot atomic.Bool
 	// touched is when each key's use was last recorded; touches carries
 	// the ones that are due to the goroutine that records them.
 	touchMu sync.Mutex
@@ -93,6 +97,9 @@ func (s *IdentityService) EnsureRoot(ctx context.Context, provided *Credentials)
 	}
 	root := iam.RootCredential{AccessKeyID: creds.AccessKeyID, Secret: sealed, CreatedAt: s.clock.Now().UTC()}
 	err = s.roots.SetRootCredential(ctx, root)
+	if err == nil {
+		s.createdRoot.Store(true)
+	}
 	if err == nil && s.auditor != nil {
 		s.auditor.Succeeded(ctx, s.auditor.System("system:BootstrapRoot", "", map[string]string{
 			"access_key_id": creds.AccessKeyID, "generated": strconv.FormatBool(generated != nil),
@@ -102,6 +109,13 @@ func (s *IdentityService) EnsureRoot(ctx context.Context, provided *Credentials)
 		// The credential may have been stored. If it was, it must be shown
 		// now: there is no second chance to show it.
 		if stored, readErr := s.roots.GetRootCredential(ctx); readErr == nil && stored.AccessKeyID == creds.AccessKeyID {
+			// A credential generated here and found stored was stored
+			// by this node. One that was supplied may have been stored
+			// by another node that was given the same: this node then
+			// cannot say that it began the deployment, and does not.
+			if generated != nil {
+				s.createdRoot.Store(true)
+			}
 			return generated, s.checkStoredRoot(ctx, stored, creds)
 		}
 	}
@@ -119,6 +133,13 @@ func (s *IdentityService) EnsureRoot(ctx context.Context, provided *Credentials)
 		return nil, fmt.Errorf("identity.EnsureRoot: %w", err)
 	}
 	return generated, nil
+}
+
+// CreatedRoot reports whether EnsureRoot stored the root credential: the
+// deployment is new and this node began it. What is done once for a new
+// deployment is done by the node for which this is true.
+func (s *IdentityService) CreatedRoot() bool {
+	return s.createdRoot.Load()
 }
 
 func (s *IdentityService) checkStoredRoot(ctx context.Context, stored iam.RootCredential, provided *Credentials) error {

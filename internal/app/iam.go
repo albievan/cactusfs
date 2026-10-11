@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -92,6 +93,57 @@ func (s *IAMService) hash(password string) (string, error) {
 		return "", fmt.Errorf("%w: a password must be %d to %d characters", domain.ErrInvalidArgument, MinPasswordLength, maxPasswordLength)
 	}
 	return s.hasher.Hash(password)
+}
+
+// The console user every new deployment begins with (ADR-0014, decided by
+// Albie on 2026-10-11): the name and the password are the same everywhere
+// and are public. Whoever runs the deployment is expected to change the
+// password, or delete the user, before anybody else can reach the console.
+const (
+	DefaultAdminName     = "admin"
+	DefaultAdminPassword = "admin"
+)
+
+// EnsureDefaultAdmin gives a new deployment its first console user:
+// DefaultAdminName with DefaultAdminPassword and the role cluster-admin. It
+// is called once, when the deployment is bootstrapped; a user of that name
+// who is already there is left as it is, and so is a deployment whose
+// operator has deleted the user. It reports whether the deployment now has
+// the user with the default password because of this call.
+//
+// The password is shorter than MinPasswordLength, which holds for every
+// password that is set afterwards, this user's own included.
+func (s *IAMService) EnsureDefaultAdmin(ctx context.Context) (bool, error) {
+	hash, err := s.hasher.Hash(DefaultAdminPassword)
+	if err != nil {
+		return false, fmt.Errorf("iam.EnsureDefaultAdmin: %w", err)
+	}
+	user := iam.User{
+		Name: DefaultAdminName, Roles: []string{iam.RoleClusterAdmin}, PasswordHash: hash, CreatedAt: s.clock.Now().UTC(),
+	}
+	record := s.auditor.System("system:BootstrapAdmin", "user/"+DefaultAdminName, map[string]string{
+		"roles": iam.RoleClusterAdmin, "password": "default",
+	})
+	err = s.store.PutUser(ctx, user, true, record)
+	switch {
+	case errors.Is(err, domain.ErrEntityExists):
+		return false, nil
+	case errors.Is(err, domain.ErrOutcomeUnknown):
+		// The user may have been made. If it is there with the default
+		// password, the caller must hear of it: a deployment must not
+		// have that user without the warning that goes with it.
+		stored, readErr := s.store.GetUser(ctx, DefaultAdminName)
+		if readErr != nil {
+			return false, fmt.Errorf("iam.EnsureDefaultAdmin: %w", err)
+		}
+		if ok, verifyErr := s.hasher.Verify(stored.PasswordHash, DefaultAdminPassword); verifyErr == nil && ok {
+			return true, nil
+		}
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("iam.EnsureDefaultAdmin: %w", err)
+	}
+	return true, nil
 }
 
 // CreateUser adds a user.

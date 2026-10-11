@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
@@ -1224,5 +1226,134 @@ func TestBucketConfigurationChangesAreAudited(t *testing.T) {
 			r.Details[step.detail[0]] != step.detail[1] {
 			t.Errorf("record %d = %+v, want %s with %s=%s", i, r, step.action, step.detail[0], step.detail[1])
 		}
+	}
+}
+
+// TestEnsureDefaultAdmin: a new deployment is given the console user
+// "admin" with the password "admin" and every right (ADR-0014), once.
+func TestEnsureDefaultAdmin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newIAMFixture(t)
+	if !f.identities.CreatedRoot() {
+		t.Fatal("the service that stored the root credential does not say so")
+	}
+	created, err := f.iam.EnsureDefaultAdmin(ctx)
+	if err != nil || !created {
+		t.Fatalf("EnsureDefaultAdmin = %v, %v", created, err)
+	}
+	user, err := f.store.GetUser(ctx, app.DefaultAdminName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(user.Roles, []string{iam.RoleClusterAdmin}) || user.Disabled {
+		t.Errorf("the default user = %+v", user)
+	}
+	// Hashed like any password; the password itself is nowhere.
+	if ok, err := f.hasher.Verify(user.PasswordHash, app.DefaultAdminPassword); err != nil || !ok {
+		t.Errorf("the default password does not verify: %v, %v", ok, err)
+	}
+	trail := f.trail(t)
+	if last := trail[len(trail)-1]; last.Action != "system:BootstrapAdmin" || last.Details["password"] != "default" {
+		t.Errorf("the record of the default user = %+v", last)
+	}
+	for _, record := range trail {
+		for _, value := range record.Details {
+			if value == app.DefaultAdminPassword {
+				t.Errorf("a password in the audit trail: %+v", record)
+			}
+		}
+	}
+
+	for name, tt := range map[string]struct {
+		prepare func(t *testing.T)
+		check   func(t *testing.T, u iam.User, err error)
+	}{
+		"a user of that name is left as it is": {
+			prepare: func(t *testing.T) {
+				t.Helper()
+				if _, err := f.iam.UpdateUser(ctx, f.root, app.UserInput{Name: app.DefaultAdminName, Roles: []string{iam.RoleReadOnly}, Password: "a password of its own"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, u iam.User, err error) {
+				t.Helper()
+				if err != nil || !slices.Equal(u.Roles, []string{iam.RoleReadOnly}) {
+					t.Errorf("after a second call the user = %+v, %v", u, err)
+				}
+				if ok, _ := f.hasher.Verify(u.PasswordHash, app.DefaultAdminPassword); ok {
+					t.Error("the default password is back")
+				}
+			},
+		},
+		"the default password cannot be set again, by anybody": {
+			prepare: func(t *testing.T) {
+				t.Helper()
+				_, err := f.iam.UpdateUser(ctx, f.root, app.UserInput{Name: app.DefaultAdminName, Roles: []string{iam.RoleReadOnly}, Password: app.DefaultAdminPassword})
+				if !errors.Is(err, domain.ErrInvalidArgument) {
+					t.Errorf("setting the password %q: error = %v, want %v", app.DefaultAdminPassword, err, domain.ErrInvalidArgument)
+				}
+			},
+			check: func(*testing.T, iam.User, error) {},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tt.prepare(t)
+			if created, err := f.iam.EnsureDefaultAdmin(ctx); err != nil || created {
+				t.Fatalf("EnsureDefaultAdmin again = %v, %v", created, err)
+			}
+			u, err := f.store.GetUser(ctx, app.DefaultAdminName)
+			tt.check(t, u, err)
+		})
+	}
+
+	// A node that joins a deployment another node began does not store the
+	// root credential, and so makes no user.
+	later := app.NewIdentityService(f.meta, f.kms, f.clock, rand.Reader)
+	if _, err := later.EnsureRoot(ctx, nil); err != nil || later.CreatedRoot() {
+		t.Errorf("a later start: CreatedRoot = %v, %v", later.CreatedRoot(), err)
+	}
+}
+
+// outcomeUnknownUsers is an IAM store whose PutUser answers that it does not
+// know what became of the change, having made it or not.
+type outcomeUnknownUsers struct {
+	ports.IAMStore
+	apply bool
+}
+
+func (s outcomeUnknownUsers) PutUser(ctx context.Context, u iam.User, create bool, record audit.Record) error {
+	if s.apply {
+		if err := s.IAMStore.PutUser(ctx, u, create, record); err != nil {
+			return err
+		}
+	}
+	return domain.ErrOutcomeUnknown
+}
+
+// TestEnsureDefaultAdminWhenTheOutcomeIsUnknown: the deployment never has
+// the default user without the caller hearing of it.
+func TestEnsureDefaultAdminWhenTheOutcomeIsUnknown(t *testing.T) {
+	t.Parallel()
+	for name, tt := range map[string]struct {
+		applied bool
+		want    bool
+		wantErr error
+	}{
+		"the user was made":     {applied: true, want: true},
+		"the user was not made": {applied: false, wantErr: domain.ErrOutcomeUnknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newIAMFixture(t)
+			service := app.NewIAMService(app.IAMServiceConfig{
+				Store: outcomeUnknownUsers{IAMStore: f.store, apply: tt.applied}, Trail: f.store, Authz: f.authz, Auditor: f.auditor,
+				KMS: f.kms, Hasher: f.hasher, Clock: f.clock, Entropy: rand.Reader,
+			})
+			created, err := service.EnsureDefaultAdmin(context.Background())
+			if created != tt.want || !errors.Is(err, tt.wantErr) {
+				t.Errorf("EnsureDefaultAdmin = %v, %v; want %v, %v", created, err, tt.want, tt.wantErr)
+			}
+		})
 	}
 }

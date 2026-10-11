@@ -147,7 +147,8 @@ test/{integration,s3compat,chaos}/
   root filesystem, all capabilities dropped, multi-arch (amd64 + arm64).
 - **Vault-backed.** The KMS port has two adapters: Vault Transit (required for clusters
   in production) and a sealed local key file (standalone/dev, explicit opt-in). There is
-  no unencrypted fallback. No secrets in code, images, env files or tests.
+  no unencrypted fallback. No secrets in code, images, env files or tests
+  (the public default password of ADR-0014 is the one exception).
 - **Frontend.** React + TypeScript + Vite in `web/`, responsive, talks ONLY to the admin
   API through the generated client (`openapi-typescript` + `openapi-fetch`). No business
   or authorization logic in the frontend. Screens: buckets, object browser, users,
@@ -176,8 +177,11 @@ These are product constraints, not optional features. Every plan must respect th
 - **Integrity.** Every shard carries a SHA-256 checksum verified on every read. A
   background scrubber finds bitrot and heals from parity. Never return bytes that failed
   verification.
-- **No default credentials.** First start requires or generates root credentials; there
-  is no built-in username or password.
+- **No default credentials, with one exception.** First start requires or generates
+  root credentials; there is no default API key. The exception (Albie, 2026-10-11,
+  ADR-0014): a new deployment is given the console user `admin` with the password
+  `admin` and the role `cluster-admin`, made once and never restored. Add no other
+  built-in username or password.
 - **API keys.** A key is `{access_key_id, secret}` owned by a user. The S3 API uses it
   with SigV4; the admin API accepts it as a bearer credential. SigV4 needs the secret
   server-side, so secrets are stored **envelope-encrypted through the KMS**, shown once
@@ -352,7 +356,8 @@ Milestone order (seed `PLAN.md` with this if it is empty):
 - Derive a filesystem path from an object key or bucket name.
 - Add a cgo dependency or anything that breaks the Windows, macOS or Linux build.
 - Add an external service that standalone mode would need in order to start.
-- Ship default credentials, or log secrets, tokens or object contents.
+- Ship default credentials other than the console user of ADR-0014, or log secrets,
+  tokens or object contents.
 - Copy code from MinIO or any GPL/AGPL project.
 - Copy, import or reference code, scripts, hosts or paths from any other project or
   private repository.
@@ -374,5 +379,7 @@ Milestone order (seed `PLAN.md` with this if it is empty):
 - API keys for the API, a frontend for users, RBAC management.
 - Standalone product: no code from any other project. Any Go developer can download the
   source and build it with Go alone or with a container engine alone.
+- 2026-10-11: a default console user `admin` with the password `admin` on every new
+  deployment (ADR-0014).
 - **Still open — ask before acting on them:** the project's own licence; whether
   `github.com/albievan/cactusfs` is the final module path.

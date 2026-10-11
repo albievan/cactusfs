@@ -162,7 +162,8 @@ Behaviour:
   in-flight requests the shutdown timeout to finish, and exits 0. Requests that outlive
   the timeout are cut off and the exit code is 1. With the default drain delay of zero
   the listener closes immediately, so the 503 is only observable when a delay is set.
-- **Root credentials.** There is no built-in login. A new deployment stores the root
+- **Root credentials.** There is no built-in API key (for the one built-in console
+  user see ADR-0014). A new deployment stores the root
   credentials supplied in the environment, or generates a pair and prints it once on
   standard error — never in the log. The secret is stored sealed through the KMS. On
   later starts, supplied credentials that differ from the stored ones stop the node.
@@ -325,7 +326,8 @@ The full analysis is in `docs/threat-model.md`. In brief:
   its owner and every policy that applies are resolved in one consistent read when a
   request is authenticated. The probe endpoints are the one exception and disclose
   nothing.
-- No default credentials. API key secrets are envelope-encrypted, shown once, compared
+- No default API key. A new deployment has one default console user, `admin` with the
+  password `admin`, made once (ADR-0014): change it first. API key secrets are envelope-encrypted, shown once, compared
   in constant time **(implemented)**. Keys expire, can be narrowed by an inline policy
   and are revoked for every node at once.
 - Hash-chained, append-only audit trail **(implemented)**: changes to identities are

@@ -53,9 +53,11 @@ func adminCall(ctx context.Context, t *testing.T, method, url string, headers ma
 // it, and says that it has no console.
 func TestManagementAPIOfTheBinary(t *testing.T) {
 	t.Parallel()
+	// Built before the clock of the test starts: on a cold cache the build
+	// alone can take longer than the test may.
+	bin, dir := buildBinary(t), t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
-	bin, dir := buildBinary(t), t.TempDir()
 	const accessKey, secretKey = "AKIDINTEGRATIONROOT0", "integration-root-secret-key-0123456789ab"
 	srv := startServer(ctx, t, bin, dir, "CACTUSFS_ROOT_ACCESS_KEY="+accessKey, "CACTUSFS_ROOT_SECRET_KEY="+secretKey)
 	base := "http://" + waitForListening(t, srv.logs)["admin"]
@@ -115,6 +117,22 @@ func TestManagementAPIOfTheBinary(t *testing.T) {
 	status, header, got := adminCall(ctx, t, http.MethodGet, base+"/api/v1/buckets/from-the-api/object?key=dir/file.bin", root, nil)
 	if status != http.StatusOK || !bytes.Equal(got, content) || !strings.HasPrefix(header.Get("Content-Disposition"), "attachment") {
 		t.Fatalf("download = %d, %d bytes, disposition %q", status, len(got), header.Get("Content-Disposition"))
+	}
+
+	// The console user every new deployment begins with (ADR-0014): signs
+	// in over HTTP with the password everybody knows, which can then never
+	// be chosen again.
+	if status, _, body := adminCall(ctx, t, http.MethodPost, base+"/api/v1/session", nil, map[string]any{"username": "admin", "password": "admin"}); status != http.StatusOK {
+		t.Errorf("sign-in as the default console user = %d %s", status, body)
+	}
+	if status, _, body := adminCall(ctx, t, http.MethodPut, base+"/api/v1/users/admin", root, map[string]any{"roles": []string{"cluster-admin"}, "password": "admin"}); status != http.StatusBadRequest {
+		t.Errorf("setting the default password again = %d %s, want 400", status, body)
+	}
+	if status, _, body := adminCall(ctx, t, http.MethodDelete, base+"/api/v1/users/admin", root, nil); status != http.StatusNoContent {
+		t.Errorf("deleting the default console user = %d %s", status, body)
+	}
+	if status, _, _ := adminCall(ctx, t, http.MethodPost, base+"/api/v1/session", nil, map[string]any{"username": "admin", "password": "admin"}); status != http.StatusUnauthorized {
+		t.Errorf("sign-in as the deleted default user = %d, want 401", status)
 	}
 
 	// A console user: signs in, reads with the cookie, changes with the

@@ -55,9 +55,17 @@ export CACTUSFS_KMS_PASSPHRASE='choose a long passphrase'
 ./cactusfs server --dev-plaintext --data ./.data --kms local
 ```
 
-On its first start a deployment has no login. It prints generated root credentials
+On its first start a deployment prints generated root credentials (an API key)
 **once** on standard error — store them — or uses the ones you supply in
 `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY`.
+
+A new deployment also has one console user: **`admin`, password `admin`**, with every
+right. **Delete that user, or change its password, before anybody else can reach the
+admin port** (console → Users). The user is made once: after you change or delete it,
+it never comes back. Deleting is the surer of the two: it ends the user's sessions and
+removes its API keys, while a changed password leaves a session that is already open
+valid until it expires (30 minutes) and leaves in place whatever was made through it.
+The compose cluster publishes the admin port on `127.0.0.1` only for this reason.
 
 ```sh
 export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…  AWS_DEFAULT_REGION=us-east-1
