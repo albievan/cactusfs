@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { App } from './App';
@@ -98,6 +98,41 @@ describe('session', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+  });
+
+  it('has the sections down the left as links with icons, and folds them to icons alone', async () => {
+    signedIn({ 'GET /buckets': () => json(200, []) });
+    render(<App />);
+
+    const sections = within(await screen.findByRole('navigation', { name: 'Sections' }));
+    const links = sections.getAllByRole('link');
+    expect(links.map((link) => link.textContent.trim())).toEqual([
+      'Buckets',
+      'Users',
+      'Groups',
+      'Roles',
+      'Policies',
+      'Cluster',
+      'Audit log',
+    ]);
+    for (const link of links) {
+      expect(link.querySelector('i.bi')?.getAttribute('aria-hidden')).toBe('true');
+    }
+    expect(sections.getByRole('link', { name: 'Buckets' }).getAttribute('aria-current')).toBe('page');
+
+    // Folded, the names are still there for whoever has the page read, the
+    // mark stands in for the logo, and the choice is remembered.
+    const fold = screen.getByRole('button', { name: 'Show icons only' });
+    expect(fold.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(fold);
+    expect(fold.getAttribute('aria-pressed')).toBe('true');
+    expect(sections.getByRole('link', { name: 'Users' }).getAttribute('title')).toBe('Users');
+    expect(screen.getByAltText('CactusFS').getAttribute('src')).toContain('cactusfs-mark.svg');
+    expect(window.localStorage.getItem('cactusfs.nav.folded')).toBe('1');
+
+    fireEvent.click(fold);
+    expect(fold.getAttribute('aria-pressed')).toBe('false');
+    expect(window.localStorage.getItem('cactusfs.nav.folded')).toBe('0');
   });
 
   it('signs out with the CSRF token and forgets it', async () => {

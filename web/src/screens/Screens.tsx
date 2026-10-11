@@ -5,6 +5,7 @@ import { ClusterScreen } from './ClusterScreen';
 import { GroupsScreen } from './GroupsScreen';
 import { ObjectsScreen } from './ObjectsScreen';
 import { PoliciesScreen } from './PoliciesScreen';
+import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
@@ -28,7 +29,7 @@ export function Screens() {
     case 'groups':
       return <GroupsScreen />;
     case 'roles':
-      return <RolesScreen />;
+      return item === undefined ? <RolesScreen /> : <RoleScreen key={item} name={item} />;
     case 'policies':
       return <PoliciesScreen />;
     case 'cluster':

@@ -22,7 +22,7 @@ function ProblemBody({ error }: { error: unknown }) {
   if (error instanceof ApiError) {
     const { title, detail, request_id: requestId } = error.problem;
     return (
-      <div className="notice notice-error" role="alert">
+      <div className="alert alert-danger notice" role="alert">
         <p className="notice-title">{title}</p>
         {detail === undefined || detail === '' ? null : <p>{detail}</p>}
         {requestId === undefined || requestId === '' ? null : (
@@ -35,7 +35,7 @@ function ProblemBody({ error }: { error: unknown }) {
   }
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <div className="notice notice-error" role="alert">
+    <div className="alert alert-danger notice" role="alert">
       <p className="notice-title">{message}</p>
     </div>
   );

@@ -52,12 +52,13 @@ export function GroupsScreen() {
       <h1>Groups</h1>
       <ProblemNotice error={action.error ?? groups.error} />
 
-      <section className="card" aria-labelledby="create-group">
+      <section className="card card-body panel" aria-labelledby="create-group">
         <h2 id="create-group">Create a group</h2>
         <form className="form-row" onSubmit={create}>
           <label className="field">
             <span>Group name</span>
             <input
+              className="form-control"
               name="name"
               required
               autoCapitalize="none"
@@ -71,6 +72,7 @@ export function GroupsScreen() {
           <label className="field field-wide">
             <span>Roles (separated by commas)</span>
             <input
+              className="form-control"
               name="roles"
               autoCapitalize="none"
               spellCheck={false}
@@ -80,18 +82,18 @@ export function GroupsScreen() {
               }}
             />
           </label>
-          <button type="submit" className="button button-primary" disabled={action.busy}>
-            Create group
+          <button type="submit" className="btn btn-primary" disabled={action.busy}>
+            <i className="bi bi-plus-lg" aria-hidden="true" /> Create group
           </button>
         </form>
       </section>
 
-      <section className="card" aria-labelledby="group-list">
+      <section className="card card-body panel" aria-labelledby="group-list">
         <h2 id="group-list">All groups</h2>
         {groups.loading ? <Loading /> : null}
         {groups.data !== undefined && groups.data.length === 0 ? <p>There are no groups yet.</p> : null}
         {groups.data !== undefined && groups.data.length > 0 ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -123,10 +125,10 @@ export function GroupsScreen() {
                   </td>
                   <td data-label="Created">{formatTime(group.created_at)}</td>
                   <td data-label="Actions">
-                    <span className="actions">
+                    <span className="d-flex flex-wrap gap-2">
                       <button
                         type="button"
-                        className="button"
+                        className="btn btn-outline-secondary"
                         aria-label={`Edit group ${group.name}`}
                         onClick={() => {
                           setEditing(group.name);

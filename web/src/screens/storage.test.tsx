@@ -19,8 +19,46 @@ describe('buckets', () => {
     fakeApi({ 'GET /buckets': () => json(200, [{ name: 'photos', created_at: CREATED }]) });
     render(<BucketsScreen />);
 
-    const link = await screen.findByRole('link', { name: 'photos' });
+    const link = await screen.findByRole('link', { name: 'Open photos' });
     expect(link.getAttribute('href')).toBe('#/buckets/photos');
+  });
+
+  it('shows how many objects each bucket holds and how much they are together', async () => {
+    const api = fakeApi({
+      'GET /buckets': () =>
+        json(200, [
+          { name: 'photos', created_at: CREATED },
+          { name: 'huge', created_at: CREATED },
+          { name: 'private', created_at: CREATED },
+          { name: 'later', created_at: CREATED },
+        ]),
+      'GET /buckets/photos/usage': () => json(200, { object_count: 1234, total_size: 5 * 1024 * 1024, complete: true }),
+      'GET /buckets/huge/usage': () => json(200, { object_count: 1000000, total_size: 1024, complete: false }),
+      'GET /buckets/private/usage': () => problem(403, 'Access denied'),
+    });
+    let down = true;
+    api.on({
+      'GET /buckets/later/usage': () =>
+        down ? problem(503, 'No metadata leader') : json(200, { object_count: 1, total_size: 3, complete: true }),
+    });
+    render(<BucketsScreen />);
+
+    const photos = within((await screen.findByRole('heading', { name: 'photos' })).closest('article') as HTMLElement);
+    expect(await photos.findByText(/1,234\s+objects/)).toBeDefined();
+    expect(photos.getByText('5.0 MiB')).toBeDefined();
+    // A count that stopped at its bound says so.
+    const huge = within(screen.getByRole('heading', { name: 'huge' }).closest('article') as HTMLElement);
+    expect(await huge.findByText(/1,000,000\s+or more\s+objects/)).toBeDefined();
+    // Whoever may not list a bucket is shown no figure, and no alarm.
+    const hidden = within(screen.getByRole('heading', { name: 'private' }).closest('article') as HTMLElement);
+    expect(await hidden.findByText('Usage not shown')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    // A figure that could not be had just now can be asked for again.
+    const later = within(screen.getByRole('heading', { name: 'later' }).closest('article') as HTMLElement);
+    expect(await later.findByText(/Usage unavailable/)).toBeDefined();
+    down = false;
+    fireEvent.click(later.getByRole('button', { name: 'Count again' }));
+    expect(await later.findByText(/1\s+object$/)).toBeDefined();
   });
 
   it('says so when there are none', async () => {
@@ -46,7 +84,7 @@ describe('buckets', () => {
     fireEvent.change(screen.getByLabelText('Bucket name'), { target: { value: 'photos' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create bucket' }));
 
-    expect(await screen.findByRole('link', { name: 'photos' })).toBeDefined();
+    expect(await screen.findByRole('link', { name: 'Open photos' })).toBeDefined();
     expect(JSON.parse(api.callsTo('POST', '/buckets')[0]?.body ?? '')).toEqual({ name: 'photos' });
     expect((screen.getByLabelText('Bucket name') as HTMLInputElement).value).toBe('');
   });
@@ -99,7 +137,7 @@ describe('buckets', () => {
     expect(alert.textContent).toContain('Delete its objects first.');
     expect(alert.textContent).toContain('req-42');
     expect(alert.parentElement?.getAttribute('aria-live')).toBe('assertive');
-    expect(screen.getByRole('link', { name: 'photos' })).toBeDefined();
+    expect(screen.getByRole('link', { name: 'Open photos' })).toBeDefined();
   });
 
   it('shows the refusal to list, and does not hide the form because of it', async () => {
@@ -266,6 +304,96 @@ describe('object browser', () => {
 
     expect(await screen.findByText('There is nothing here.')).toBeDefined();
     expect(api.callsTo('DELETE', '/buckets/photos/object')[0]?.query.get('key')).toBe('a.txt');
+  });
+
+  it('deletes the objects that are ticked, and only those', async () => {
+    let objects = [object('a.txt'), object('b.txt'), object('c.txt')];
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: ['dir/'], truncated: false }),
+      'DELETE /buckets/photos/object': (call) => {
+        objects = objects.filter((o) => o.key !== call.query.get('key'));
+        return noContent();
+      },
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    // Nothing is ticked: nothing can be deleted.
+    const bulk = await screen.findByRole('button', { name: 'Delete selected' });
+    expect((bulk as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('0 selected')).toBeDefined();
+
+    fireEvent.click(screen.getByLabelText('Select a.txt'));
+    fireEvent.click(screen.getByLabelText('Select c.txt'));
+    expect(screen.getByText('2 selected')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+    // It asks first, and says how many.
+    expect(screen.getByRole('group', { name: 'Delete 2 objects?' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, delete selected' }));
+
+    await waitFor(() => {
+      expect(api.callsTo('DELETE', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual([
+        'a.txt',
+        'c.txt',
+      ]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByLabelText('Select a.txt')).toBeNull();
+    });
+    expect(screen.getByLabelText('Select b.txt')).toBeDefined();
+    expect(screen.getByText('0 selected')).toBeDefined();
+  });
+
+  it('deletes nothing that was ticked on another page', async () => {
+    const api = fakeApi({
+      'GET /buckets/photos/objects': (call) =>
+        call.query.get('continuation_token') === null
+          ? json(200, {
+              objects: [object('a.txt'), object('b.txt')],
+              common_prefixes: [],
+              truncated: true,
+              next_continuation_token: 'b.txt',
+            })
+          : json(200, { objects: [object('z.txt')], common_prefixes: [], truncated: false }),
+      'DELETE /buckets/photos/object': () => noContent(),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByLabelText('Select a.txt'));
+    fireEvent.click(screen.getByLabelText('Select b.txt'));
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    fireEvent.click(await screen.findByLabelText('Select z.txt'));
+    expect(screen.getByText('1 selected')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+    expect(screen.getByRole('group', { name: 'Delete 1 object?' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, delete selected' }));
+
+    await waitFor(() => {
+      expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(1);
+    });
+    expect(api.callsTo('DELETE', '/buckets/photos/object')[0]?.query.get('key')).toBe('z.txt');
+    // Back on the first page nothing is ticked any more.
+    fireEvent.click(screen.getByRole('button', { name: 'First page' }));
+    expect(((await screen.findByLabelText('Select a.txt')) as HTMLInputElement).checked).toBe(false);
+    expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(1);
+  });
+
+  it('ticks every object of the page at once, and stops at a refusal', async () => {
+    const objects = [object('a.txt'), object('b.txt')];
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false }),
+      'DELETE /buckets/photos/object': (call) =>
+        call.query.get('key') === 'a.txt' ? noContent() : problem(403, 'Access denied', undefined, 'req-9'),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByLabelText('Select all on this page'));
+    expect(screen.getByText('2 selected')).toBeDefined();
+    expect((screen.getByLabelText('Select b.txt') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, delete selected' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Access denied');
+    expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(2);
   });
 
   it('uploads a file under the current prefix and lists again', async () => {

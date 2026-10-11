@@ -19,12 +19,13 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
     return (
       <button
         type="button"
-        className="button button-danger"
+        className="btn btn-outline-danger"
         disabled={disabled}
         onClick={() => {
           setAsking(true);
         }}
       >
+        {label === 'Delete' ? <i className="bi bi-trash" aria-hidden="true" /> : null}
         {label}
       </button>
     );
@@ -34,7 +35,7 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
       <span className="confirm-question">{question}</span>
       <button
         type="button"
-        className="button button-danger"
+        className="btn btn-outline-danger"
         disabled={disabled}
         onClick={() => {
           setAsking(false);
@@ -45,7 +46,7 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
       </button>
       <button
         type="button"
-        className="button"
+        className="btn btn-outline-secondary"
         onClick={() => {
           setAsking(false);
         }}

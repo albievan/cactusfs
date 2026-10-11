@@ -31,11 +31,13 @@ export function UserScreen({ name }: UserScreenProps) {
     <>
       <h1>User {name}</h1>
       <p>
-        <a href={routeHref(['users'])}>All users</a>
+        <a className="btn btn-outline-secondary btn-sm" href={routeHref(['users'])}>
+          <i className="bi bi-arrow-left" aria-hidden="true" /> All users
+        </a>
       </p>
       <ProblemNotice error={action.error ?? user.error} />
 
-      <section className="card" aria-labelledby="edit-user">
+      <section className="card card-body panel" aria-labelledby="edit-user">
         <h2 id="edit-user">Settings</h2>
         {user.loading ? <Loading /> : null}
         {user.data === undefined ? null : (
@@ -96,6 +98,7 @@ function UserForm({ user, action }: { user: User; action: Action }) {
       <label className="field">
         <span>Roles (separated by commas)</span>
         <input
+          className="form-control"
           name="roles"
           spellCheck={false}
           autoCapitalize="none"
@@ -108,6 +111,7 @@ function UserForm({ user, action }: { user: User; action: Action }) {
       <label className="field">
         <span>Groups (separated by commas)</span>
         <input
+          className="form-control"
           name="groups"
           spellCheck={false}
           autoCapitalize="none"
@@ -120,6 +124,7 @@ function UserForm({ user, action }: { user: User; action: Action }) {
       <label className="field">
         <span>New console password (leave empty to keep the current one)</span>
         <input
+          className="form-control"
           name="password"
           type="password"
           autoComplete="new-password"
@@ -131,6 +136,7 @@ function UserForm({ user, action }: { user: User; action: Action }) {
       </label>
       <label className="check">
         <input
+          className="form-check-input"
           name="disabled"
           type="checkbox"
           checked={disabled}
@@ -146,9 +152,9 @@ function UserForm({ user, action }: { user: User; action: Action }) {
         <dt>Created</dt>
         <dd>{formatTime(saved.created_at)}</dd>
       </dl>
-      <div className="form-actions">
-        <button type="submit" className="button button-primary" disabled={action.busy}>
-          Save changes
+      <div className="form-actions d-flex flex-wrap gap-2">
+        <button type="submit" className="btn btn-primary" disabled={action.busy}>
+          <i className="bi bi-check-lg" aria-hidden="true" /> Save changes
         </button>
         <span role="status">{done ? 'Saved.' : ''}</span>
       </div>

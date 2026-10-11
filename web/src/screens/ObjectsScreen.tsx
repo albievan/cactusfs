@@ -49,6 +49,8 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   const [metadata, setMetadata] = useState<ObjectMetadata | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [key, setKey] = useState('');
+  // The keys ticked for deletion, of this page.
+  const [chosen, setChosen] = useState<string[]>([]);
 
   const upload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -71,8 +73,39 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
       );
       setMetadata((shown) => (shown?.key === objectKey ? null : shown));
+      setChosen((left) => left.filter((k) => k !== objectKey));
       listing.reload();
     });
+  };
+
+  // Another page is another choice: what was ticked on the page left behind
+  // is not carried along, where nobody can see it.
+  const turnTo = (pages: string[]) => {
+    setChosen([]);
+    setTokens(pages);
+  };
+
+  const choose = (objectKey: string, on: boolean) => {
+    setChosen((keys) => (on ? [...keys.filter((k) => k !== objectKey), objectKey] : keys.filter((k) => k !== objectKey)));
+  };
+
+  // Deletes what is ticked on the page shown - the keys the count and the
+  // question name, and no others - one request an object, as the API has it.
+  // It stops at the first refusal; what was deleted until then stays deleted.
+  const removeChosen = (keys: string[]) => {
+    void action
+      .run(async () => {
+        for (const objectKey of keys) {
+          await unwrap(
+            api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
+          );
+          setChosen((left) => left.filter((k) => k !== objectKey));
+          setMetadata((shown) => (shown?.key === objectKey ? null : shown));
+        }
+      })
+      .then(() => {
+        listing.reload();
+      });
   };
 
   const showMetadata = (objectKey: string) => {
@@ -90,6 +123,10 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   const page = listing.data;
   const nextToken = page?.truncated === true ? page.next_continuation_token : undefined;
   const empty = page !== undefined && page.objects.length === 0 && page.common_prefixes.length === 0;
+  const pageKeys = page?.objects.map((object) => object.key) ?? [];
+  // Only what is still on the page counts as chosen.
+  const selected = chosen.filter((k) => pageKeys.includes(k));
+  const allChosen = pageKeys.length > 0 && selected.length === pageKeys.length;
 
   return (
     <>
@@ -97,12 +134,13 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
       <Breadcrumbs bucket={bucket} prefix={prefix} />
       <ProblemNotice error={action.error ?? listing.error} />
 
-      <section className="card" aria-labelledby="upload-object">
+      <section className="card card-body panel" aria-labelledby="upload-object">
         <h2 id="upload-object">Upload an object</h2>
         <form className="form-row" onSubmit={upload}>
           <label className="field">
             <span>File</span>
             <input
+              className="form-control"
               name="file"
               type="file"
               required
@@ -116,6 +154,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           <label className="field field-wide">
             <span>Object key</span>
             <input
+              className="form-control"
               name="key"
               required
               spellCheck={false}
@@ -125,14 +164,14 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               }}
             />
           </label>
-          <button type="submit" className="button button-primary" disabled={action.busy}>
-            Upload
+          <button type="submit" className="btn btn-primary" disabled={action.busy}>
+            <i className="bi bi-upload" aria-hidden="true" /> Upload
           </button>
         </form>
       </section>
 
       {metadata === null ? null : (
-        <section className="card" aria-labelledby="object-metadata">
+        <section className="card card-body panel" aria-labelledby="object-metadata">
           <h2 id="object-metadata">Object details</h2>
           <dl className="facts">
             <dt>Bucket</dt>
@@ -154,7 +193,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           </dl>
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             onClick={() => {
               setMetadata(null);
             }}
@@ -164,14 +203,43 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         </section>
       )}
 
-      <section className="card" aria-labelledby="object-list">
+      <section className="card card-body panel" aria-labelledby="object-list">
         <h2 id="object-list">Objects</h2>
         {listing.loading ? <Loading /> : null}
         {empty ? <p>There is nothing here.</p> : null}
+        {page !== undefined && pageKeys.length > 0 ? (
+          <div className="toolbar">
+            <label className="check">
+              <input
+                className="form-check-input"
+                type="checkbox"
+                checked={allChosen}
+                onChange={(event) => {
+                  setChosen(event.target.checked ? pageKeys : []);
+                }}
+              />
+              <span>Select all on this page</span>
+            </label>
+            <span className="toolbar-count" aria-live="polite">
+              {selected.length} selected
+            </span>
+            <ConfirmButton
+              label="Delete selected"
+              question={`Delete ${String(selected.length)} ${selected.length === 1 ? 'object' : 'objects'}?`}
+              disabled={action.busy || selected.length === 0}
+              onConfirm={() => {
+                removeChosen(selected);
+              }}
+            />
+          </div>
+        ) : null}
         {page !== undefined && !empty ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
+                <th scope="col" className="grid-check">
+                  <span className="visually-hidden">Select</span>
+                </th>
                 <th scope="col">Name</th>
                 <th scope="col">Size</th>
                 <th scope="col">Last modified</th>
@@ -181,8 +249,10 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             <tbody>
               {page.common_prefixes.map((commonPrefix) => (
                 <tr key={`prefix ${commonPrefix}`}>
+                  <td className="grid-check" />
                   <td data-label="Name">
-                    <a href={routeHref(['buckets', bucket], { prefix: commonPrefix })}>
+                    <a className="btn btn-link-row" href={routeHref(['buckets', bucket], { prefix: commonPrefix })}>
+                      <i className="bi bi-folder" aria-hidden="true" />
                       {commonPrefix.slice(prefix.length)}
                     </a>
                   </td>
@@ -194,30 +264,41 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               {page.objects.map((object) => {
                 const name = object.key.slice(prefix.length);
                 return (
-                  <tr key={`object ${object.key}`}>
+                  <tr key={`object ${object.key}`} className={selected.includes(object.key) ? 'grid-chosen' : undefined}>
+                    <td className="grid-check">
+                      <input
+                        className="form-check-input"
+                        type="checkbox"
+                        aria-label={`Select ${name}`}
+                        checked={selected.includes(object.key)}
+                        onChange={(event) => {
+                          choose(object.key, event.target.checked);
+                        }}
+                      />
+                    </td>
                     <td data-label="Name">{name}</td>
                     <td data-label="Size">{formatBytes(object.size)}</td>
                     <td data-label="Last modified">{formatTime(object.last_modified)}</td>
                     <td data-label="Actions">
-                      <span className="actions">
+                      <span className="d-flex flex-wrap gap-2">
                         <a
-                          className="button"
+                          className="btn btn-outline-secondary"
                           href={objectDownloadUrl(bucket, object.key)}
                           download
                           aria-label={`Download ${name}`}
                         >
-                          Download
+                          <i className="bi bi-download" aria-hidden="true" /> Download
                         </a>
                         <button
                           type="button"
-                          className="button"
+                          className="btn btn-outline-secondary"
                           aria-label={`Details of ${name}`}
                           disabled={action.busy}
                           onClick={() => {
                             showMetadata(object.key);
                           }}
                         >
-                          Details
+                          <i className="bi bi-info-circle" aria-hidden="true" /> Details
                         </button>
                         <ConfirmButton
                           label="Delete"
@@ -238,31 +319,31 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         <div className="pager">
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={tokens.length === 0}
             onClick={() => {
-              setTokens([]);
+              turnTo([]);
             }}
           >
             First page
           </button>
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={tokens.length === 0}
             onClick={() => {
-              setTokens(tokens.slice(0, -1));
+              turnTo(tokens.slice(0, -1));
             }}
           >
             Previous page
           </button>
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={nextToken === undefined}
             onClick={() => {
               if (nextToken !== undefined) {
-                setTokens([...tokens, nextToken]);
+                turnTo([...tokens, nextToken]);
               }
             }}
           >
@@ -282,18 +363,25 @@ function Breadcrumbs({ bucket, prefix }: { bucket: string; prefix: string }) {
   }
   return (
     <nav aria-label="Prefix">
-      <ol className="breadcrumbs">
+      <ol className="crumbs">
         <li>
-          <a href={routeHref(['buckets'])}>Buckets</a>
+          <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets'])}>
+            <i className="bi bi-bucket" aria-hidden="true" />
+            Buckets
+          </a>
         </li>
         <li>
-          <a href={routeHref(['buckets', bucket])}>{bucket}</a>
+          <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets', bucket])}>
+            {bucket}
+          </a>
         </li>
         {parts.map((part, index) => {
           const upTo = parts.slice(0, index + 1).join(DELIMITER) + DELIMITER;
           return (
             <li key={upTo}>
-              <a href={routeHref(['buckets', bucket], { prefix: upTo })}>{part === '' ? DELIMITER : part}</a>
+              <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets', bucket], { prefix: upTo })}>
+                {part === '' ? DELIMITER : part}
+              </a>
             </li>
           );
         })}

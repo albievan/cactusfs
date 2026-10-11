@@ -5,6 +5,7 @@ import { fakeApi, json, noContent, problem } from '../test/fakeApi';
 import { ApiKeys } from './ApiKeys';
 import { GroupsScreen } from './GroupsScreen';
 import { PoliciesScreen } from './PoliciesScreen';
+import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
@@ -419,5 +420,123 @@ describe('policies', () => {
       expect(screen.queryByText('get-only')).toBeNull();
     });
     expect(api.callsTo('DELETE', '/policies/get-only')).toHaveLength(1);
+  });
+});
+
+describe('one role', () => {
+  const policies = [
+    {
+      name: 'put-only',
+      built_in: false,
+      created_at: CREATED,
+      document: { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 's3:PutObject', Resource: '*' }] },
+    },
+    {
+      name: 'cluster-admin',
+      built_in: true,
+      created_at: CREATED,
+      document: { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: ['s3:*', 'admin:*'], Resource: '*' }] },
+    },
+  ];
+
+  it('is opened from the list of roles by a button that carries its name', async () => {
+    fakeApi({
+      'GET /roles': () => json(200, [{ name: 'uploader', policies: ['put-only'], built_in: false, created_at: CREATED }]),
+    });
+    render(<RolesScreen />);
+
+    const open = await screen.findByRole('link', { name: 'uploader' });
+    expect(open.getAttribute('href')).toBe('#/roles/uploader');
+    expect(open.className).toContain('btn');
+  });
+
+  it('shows the policy of the role and saves a change to it', async () => {
+    const api = fakeApi({
+      'GET /roles/uploader': () =>
+        json(200, { name: 'uploader', policies: ['put-only'], built_in: false, created_at: CREATED }),
+      'GET /policies/put-only': () => json(200, policies[0]),
+      'PUT /policies/put-only': () => json(200, policies[0]),
+    });
+    render(<RoleScreen name="uploader" />);
+
+    const document = (await screen.findByLabelText('Policy document of put-only as JSON')) as HTMLTextAreaElement;
+    expect(document.value).toContain('s3:PutObject');
+    expect(document.readOnly).toBe(false);
+    // The policy is asked for by its name: the list of all policies is not needed.
+    expect(api.callsTo('GET', '/policies')).toHaveLength(0);
+    // A policy can belong to several roles, and the screen says so.
+    expect(screen.getByText(/changes it for every role that\s+has it/)).toBeDefined();
+
+    const changed = { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 's3:GetObject', Resource: '*' }] };
+    fireEvent.change(document, { target: { value: JSON.stringify(changed) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+    await waitFor(() => {
+      expect(body(api.callsTo('PUT', '/policies/put-only')[0])).toEqual({ document: changed });
+    });
+  });
+
+  it('gives the role other policies, and deletes it', async () => {
+    const api = fakeApi({
+      'GET /roles/uploader': () =>
+        json(200, { name: 'uploader', policies: ['put-only'], built_in: false, created_at: CREATED }),
+      'GET /roles': () => json(200, []),
+      'GET /policies/put-only': () => json(200, policies[0]),
+      'GET /policies/list': () => problem(404, 'No such policy'),
+      'PUT /roles/uploader': () =>
+        json(200, { name: 'uploader', policies: ['put-only', 'list'], built_in: false, created_at: CREATED }),
+      'DELETE /roles/uploader': () => noContent(),
+    });
+    render(<RoleScreen name="uploader" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Change policies' }));
+    typeInto('Policies of role uploader', 'put-only list');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(body(api.callsTo('PUT', '/roles/uploader')[0])).toEqual({ policies: ['put-only', 'list'] });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, delete' }));
+    await waitFor(() => {
+      expect(api.callsTo('DELETE', '/roles/uploader')).toHaveLength(1);
+    });
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/roles');
+    });
+  });
+
+  it('shows a built-in role and its policy, and offers no change', async () => {
+    fakeApi({
+      'GET /roles/cluster-admin': () =>
+        json(200, { name: 'cluster-admin', policies: ['cluster-admin'], built_in: true, created_at: CREATED }),
+      'GET /policies/cluster-admin': () => json(200, policies[1]),
+    });
+    render(<RoleScreen name="cluster-admin" />);
+
+    const document = (await screen.findByLabelText(
+      'Policy document of cluster-admin as JSON',
+    )) as HTMLTextAreaElement;
+    expect(document.readOnly).toBe(true);
+    expect(screen.getByText(/cannot be changed or deleted/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Save policy' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Change policies' })).toBeNull();
+  });
+
+  it('says which policy of the role cannot be read, and shows the others', async () => {
+    fakeApi({
+      'GET /roles/mixed': () =>
+        json(200, { name: 'mixed', policies: ['put-only', 'secret', 'gone'], built_in: false, created_at: CREATED }),
+      'GET /policies/put-only': () => json(200, policies[0]),
+      'GET /policies/secret': () => problem(403, 'Access denied'),
+      'GET /policies/gone': () => problem(404, 'No such policy'),
+    });
+    render(<RoleScreen name="mixed" />);
+
+    expect(await screen.findByLabelText('Policy document of put-only as JSON')).toBeDefined();
+    const secret = (await screen.findByRole('heading', { name: 'Policy secret' })).closest('section') as HTMLElement;
+    expect((await within(secret).findByRole('alert')).textContent).toContain('Access denied');
+    const gone = screen.getByRole('heading', { name: 'Policy gone' }).closest('section') as HTMLElement;
+    expect(await within(gone).findByText(/does not exist/)).toBeDefined();
   });
 });

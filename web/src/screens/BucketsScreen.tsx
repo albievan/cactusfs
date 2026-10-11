@@ -1,9 +1,9 @@
-import { useState, type FormEvent } from 'react';
+import { useCallback, useState, type FormEvent } from 'react';
 
-import { api, unwrap } from '../api/client';
+import { api, ApiError, unwrap } from '../api/client';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { formatTime } from '../ui/format';
+import { formatBytes, formatTime } from '../ui/format';
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
@@ -39,12 +39,13 @@ export function BucketsScreen() {
       <h1>Buckets</h1>
       <ProblemNotice error={action.error ?? buckets.error} />
 
-      <section className="card" aria-labelledby="create-bucket">
+      <section className="card card-body panel" aria-labelledby="create-bucket">
         <h2 id="create-bucket">Create a bucket</h2>
         <form className="form-row" onSubmit={create}>
           <label className="field">
             <span>Bucket name</span>
             <input
+              className="form-control"
               name="name"
               required
               autoCapitalize="none"
@@ -55,33 +56,37 @@ export function BucketsScreen() {
               }}
             />
           </label>
-          <button type="submit" className="button button-primary" disabled={action.busy}>
-            Create bucket
+          <button type="submit" className="btn btn-primary" disabled={action.busy}>
+            <i className="bi bi-plus-lg" aria-hidden="true" /> Create bucket
           </button>
         </form>
       </section>
 
-      <section className="card" aria-labelledby="bucket-list">
+      <section className="card card-body panel" aria-labelledby="bucket-list">
         <h2 id="bucket-list">All buckets</h2>
         {buckets.loading ? <Loading /> : null}
         {buckets.data !== undefined && buckets.data.length === 0 ? <p>There are no buckets yet.</p> : null}
         {buckets.data !== undefined && buckets.data.length > 0 ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Created</th>
-                <th scope="col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {buckets.data.map((bucket) => (
-                <tr key={bucket.name}>
-                  <td data-label="Name">
-                    <a href={routeHref(['buckets', bucket.name])}>{bucket.name}</a>
-                  </td>
-                  <td data-label="Created">{formatTime(bucket.created_at)}</td>
-                  <td data-label="Actions">
+          <ul className="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3 list-unstyled mb-0">
+            {buckets.data.map((bucket) => (
+              <li className="col" key={bucket.name}>
+                <article className="tile h-100">
+                  <div className="tile-head">
+                    <i className="bi bi-bucket tile-icon" aria-hidden="true" />
+                    <div className="tile-text">
+                      <h3 className="tile-title">{bucket.name}</h3>
+                      <p className="tile-meta">Created {formatTime(bucket.created_at)}</p>
+                      <BucketUsage bucket={bucket.name} />
+                    </div>
+                  </div>
+                  <div className="tile-actions">
+                    <a
+                      className="btn btn-primary btn-sm"
+                      href={routeHref(['buckets', bucket.name])}
+                      aria-label={`Open ${bucket.name}`}
+                    >
+                      <i className="bi bi-folder2-open" aria-hidden="true" /> Open
+                    </a>
                     <ConfirmButton
                       label="Delete"
                       question={`Delete bucket ${bucket.name}?`}
@@ -90,13 +95,57 @@ export function BucketsScreen() {
                         remove(bucket.name);
                       }}
                     />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                </article>
+              </li>
+            ))}
+          </ul>
         ) : null}
       </section>
     </>
+  );
+}
+
+/**
+ * How much a bucket holds: its objects counted and their sizes added up, as
+ * the API reports it. Whoever may not list the bucket is told nothing.
+ */
+function BucketUsage({ bucket }: { bucket: string }) {
+  const load = useCallback(
+    () => unwrap(api.GET('/buckets/{bucket}/usage', { params: { path: { bucket } } })),
+    [bucket],
+  );
+  const usage = useLoad(load);
+  if (usage.data === undefined) {
+    if (usage.loading) {
+      return <p className="tile-figures">Counting…</p>;
+    }
+    // Whoever may not list the bucket is told nothing; anything else is a
+    // figure that could not be had just now, and can be asked for again.
+    if (usage.error instanceof ApiError && usage.error.problem.status === 403) {
+      return <p className="tile-figures">Usage not shown</p>;
+    }
+    return (
+      <p className="tile-figures">
+        Usage unavailable
+        <button type="button" className="btn btn-outline-secondary btn-sm" onClick={usage.reload}>
+          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Count again
+        </button>
+      </p>
+    );
+  }
+  const { object_count: count, total_size: size, complete } = usage.data;
+  const more = complete ? '' : ' or more';
+  return (
+    <p className="tile-figures">
+      <span className="badge text-bg-light">
+        <i className="bi bi-files" aria-hidden="true" /> {count.toLocaleString('en')}
+        {more} {count === 1 && complete ? 'object' : 'objects'}
+      </span>
+      <span className="badge text-bg-light">
+        <i className="bi bi-hdd" aria-hidden="true" /> {formatBytes(size)}
+        {more}
+      </span>
+    </p>
   );
 }

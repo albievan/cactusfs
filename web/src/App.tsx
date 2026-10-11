@@ -8,8 +8,6 @@ import { SignIn } from './screens/SignIn';
 import { Loading } from './ui/Loading';
 import { ProblemNotice } from './ui/ProblemNotice';
 
-import './styles/console.css';
-
 type SessionState =
   | { status: 'loading' }
   | { status: 'signed-out'; error: unknown }
@@ -95,7 +93,7 @@ export function App() {
           <ProblemNotice error={session.error} />
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-primary"
             onClick={() => {
               setSession({ status: 'loading' });
               setRound((value) => value + 1);

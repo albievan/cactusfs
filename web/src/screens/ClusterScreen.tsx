@@ -28,13 +28,13 @@ export function ClusterScreen() {
       <p>
         <button
           type="button"
-          className="button"
+          className="btn btn-outline-secondary"
           onClick={() => {
             cluster.reload();
             maintenance.reload();
           }}
         >
-          Refresh
+          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Refresh
         </button>
       </p>
       <ProblemNotice error={cluster.error} />
@@ -42,29 +42,39 @@ export function ClusterScreen() {
       {cluster.loading ? <Loading /> : null}
       {status === undefined ? null : (
         <>
-          <section className="card" aria-labelledby="cluster-summary">
+          <section className="card card-body panel" aria-labelledby="cluster-summary">
             <h2 id="cluster-summary">Deployment</h2>
-            <dl className="facts">
-              <dt>Deployment ID</dt>
-              <dd>
-                <code>{status.deployment_id}</code>
-              </dd>
-              <dt>Answered by</dt>
-              <dd>{status.answered_by}</dd>
-              <dt>Metadata leader</dt>
-              <dd>{status.leader === '' ? 'None' : status.leader}</dd>
-              <dt>Drives online</dt>
-              <dd>
-                {status.drives_online} of {status.drives_total}
-              </dd>
-              <dt>Node failures tolerated</dt>
-              <dd>{status.node_failures_tolerated}</dd>
+            <dl className="stats">
+              <div className="stat">
+                <dt>Drives online</dt>
+                <dd>
+                  {status.drives_online} of {status.drives_total}
+                </dd>
+              </div>
+              <div className="stat">
+                <dt>Node failures tolerated</dt>
+                <dd>{status.node_failures_tolerated}</dd>
+              </div>
+              <div className="stat">
+                <dt>Metadata leader</dt>
+                <dd>{status.leader === '' ? 'None' : status.leader}</dd>
+              </div>
+              <div className="stat">
+                <dt>Answered by</dt>
+                <dd>{status.answered_by}</dd>
+              </div>
+              <div className="stat stat-wide">
+                <dt>Deployment ID</dt>
+                <dd>
+                  <code>{status.deployment_id}</code>
+                </dd>
+              </div>
             </dl>
           </section>
 
-          <section className="card" aria-labelledby="cluster-nodes">
+          <section className="card card-body panel" aria-labelledby="cluster-nodes">
             <h2 id="cluster-nodes">Nodes</h2>
-            <table className="table">
+            <table className="table table-hover align-middle grid">
               <thead>
                 <tr>
                   <th scope="col">Node</th>
@@ -94,13 +104,13 @@ export function ClusterScreen() {
             </table>
           </section>
 
-          <section className="card" aria-labelledby="cluster-sets">
+          <section className="card card-body panel" aria-labelledby="cluster-sets">
             <h2 id="cluster-sets">Erasure sets</h2>
             {status.erasure_sets.length === 0 ? <p>There are no erasure sets.</p> : null}
             {status.erasure_sets.map((set) => (
               <div key={set.index}>
                 <h3>Erasure set {set.index}</h3>
-                <table className="table">
+                <table className="table table-hover align-middle grid">
                   <thead>
                     <tr>
                       <th scope="col">Drive</th>
@@ -128,7 +138,7 @@ export function ClusterScreen() {
         </>
       )}
 
-      <section className="card" aria-labelledby="cluster-maintenance">
+      <section className="card card-body panel" aria-labelledby="cluster-maintenance">
         <h2 id="cluster-maintenance">Maintenance</h2>
         <ProblemNotice error={maintenance.error} />
         {maintenance.loading ? <Loading /> : null}

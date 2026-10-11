@@ -47,12 +47,13 @@ export function UsersScreen() {
       <h1>Users</h1>
       <ProblemNotice error={action.error ?? users.error} />
 
-      <section className="card" aria-labelledby="create-user">
+      <section className="card card-body panel" aria-labelledby="create-user">
         <h2 id="create-user">Create a user</h2>
         <form className="form-grid" onSubmit={create}>
           <label className="field">
             <span>User name</span>
             <input
+              className="form-control"
               name="name"
               required
               autoCapitalize="none"
@@ -67,6 +68,7 @@ export function UsersScreen() {
           <label className="field">
             <span>Console password (optional)</span>
             <input
+              className="form-control"
               name="password"
               type="password"
               autoComplete="new-password"
@@ -79,6 +81,7 @@ export function UsersScreen() {
           <label className="field">
             <span>Roles (separated by commas)</span>
             <input
+              className="form-control"
               name="roles"
               spellCheck={false}
               autoCapitalize="none"
@@ -91,6 +94,7 @@ export function UsersScreen() {
           <label className="field">
             <span>Groups (separated by commas)</span>
             <input
+              className="form-control"
               name="groups"
               spellCheck={false}
               autoCapitalize="none"
@@ -100,20 +104,20 @@ export function UsersScreen() {
               }}
             />
           </label>
-          <div className="form-actions">
-            <button type="submit" className="button button-primary" disabled={action.busy}>
-              Create user
+          <div className="form-actions d-flex flex-wrap gap-2">
+            <button type="submit" className="btn btn-primary" disabled={action.busy}>
+              <i className="bi bi-plus-lg" aria-hidden="true" /> Create user
             </button>
           </div>
         </form>
       </section>
 
-      <section className="card" aria-labelledby="user-list">
+      <section className="card card-body panel" aria-labelledby="user-list">
         <h2 id="user-list">All users</h2>
         {users.loading ? <Loading /> : null}
         {users.data !== undefined && users.data.length === 0 ? <p>There are no users yet.</p> : null}
         {users.data !== undefined && users.data.length > 0 ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -128,7 +132,10 @@ export function UsersScreen() {
               {users.data.map((user) => (
                 <tr key={user.name}>
                   <td data-label="Name">
-                    <a href={routeHref(['users', user.name])}>{user.name}</a>
+                    <a className="btn btn-link-row" href={routeHref(['users', user.name])}>
+                      <i className="bi bi-person" aria-hidden="true" />
+                      {user.name}
+                    </a>
                   </td>
                   <td data-label="Roles">{joinNames(user.roles) || '-'}</td>
                   <td data-label="Groups">{joinNames(user.groups) || '-'}</td>

@@ -56,12 +56,12 @@ export function AuditScreen({ after }: AuditScreenProps) {
       <h1>Audit log</h1>
       <ProblemNotice error={action.error ?? page.error} />
 
-      <section className="card" aria-labelledby="audit-records">
+      <section className="card card-body panel" aria-labelledby="audit-records">
         <h2 id="audit-records">{after === 0 ? 'Records from the beginning' : `Records after number ${after}`}</h2>
         <div className="pager">
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={after === 0}
             onClick={() => {
               navigate(auditHref(0));
@@ -71,7 +71,7 @@ export function AuditScreen({ after }: AuditScreenProps) {
           </button>
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={after === 0}
             onClick={() => {
               navigate(auditHref(Math.max(0, after - PAGE_SIZE)));
@@ -81,7 +81,7 @@ export function AuditScreen({ after }: AuditScreenProps) {
           </button>
           <button
             type="button"
-            className="button"
+            className="btn btn-outline-secondary"
             disabled={nextAfter === undefined}
             onClick={() => {
               if (nextAfter !== undefined) {
@@ -91,17 +91,17 @@ export function AuditScreen({ after }: AuditScreenProps) {
           >
             Newer
           </button>
-          <button type="button" className="button" disabled={action.busy} onClick={newest}>
+          <button type="button" className="btn btn-outline-secondary" disabled={action.busy} onClick={newest}>
             Newest
           </button>
-          <button type="button" className="button" onClick={page.reload}>
-            Refresh
+          <button type="button" className="btn btn-outline-secondary" onClick={page.reload}>
+            <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Refresh
           </button>
         </div>
         {page.loading ? <Loading /> : null}
         {page.data !== undefined && page.data.records.length === 0 ? <p>There are no records here.</p> : null}
         {page.data !== undefined && page.data.records.length > 0 ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
                 <th scope="col">Number</th>

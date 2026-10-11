@@ -44,6 +44,7 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
           <label className="field">
             <span>User name</span>
             <input
+              className="form-control"
               name="username"
               autoComplete="username"
               autoCapitalize="none"
@@ -57,6 +58,7 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
           <label className="field">
             <span>Password</span>
             <input
+              className="form-control"
               name="password"
               type={shown ? 'text' : 'password'}
               autoComplete="current-password"
@@ -69,6 +71,7 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
           </label>
           <label className="signin-show">
             <input
+              className="form-check-input"
               type="checkbox"
               checked={shown}
               onChange={(event) => {
@@ -77,13 +80,17 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
             />
             <span>Show what I type</span>
           </label>
-          <button type="submit" className="button button-primary signin-submit" disabled={action.busy}>
+          <button type="submit" className="btn btn-primary btn-lg signin-submit" disabled={action.busy}>
             Sign in
           </button>
         </form>
         <nav className="signin-links" aria-label="Documentation">
-          <a href="/docs">API documentation</a>
-          <a href="/api/v1/openapi.yaml">API contract</a>
+          <a className="btn btn-outline-secondary btn-sm" href="/docs">
+            <i className="bi bi-book" aria-hidden="true" /> API documentation
+          </a>
+          <a className="btn btn-outline-secondary btn-sm" href="/api/v1/openapi.yaml">
+            <i className="bi bi-file-earmark-code" aria-hidden="true" /> API contract
+          </a>
         </nav>
       </main>
       <aside className="signin-hero" aria-label="About CactusFS">

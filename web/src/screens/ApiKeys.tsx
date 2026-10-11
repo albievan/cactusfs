@@ -68,7 +68,7 @@ export function ApiKeys({ user }: ApiKeysProps) {
   };
 
   return (
-    <section className="card" aria-labelledby="api-keys">
+    <section className="card card-body panel" aria-labelledby="api-keys">
       <h2 id="api-keys">API keys</h2>
       <ProblemNotice error={action.error ?? keys.error} />
 
@@ -86,6 +86,7 @@ export function ApiKeys({ user }: ApiKeysProps) {
         <label className="field">
           <span>Description (optional)</span>
           <input
+            className="form-control"
             name="description"
             value={description}
             onChange={(event) => {
@@ -96,6 +97,7 @@ export function ApiKeys({ user }: ApiKeysProps) {
         <label className="field">
           <span>Expires (optional)</span>
           <input
+            className="form-control"
             name="expires"
             type="datetime-local"
             value={expires}
@@ -107,6 +109,7 @@ export function ApiKeys({ user }: ApiKeysProps) {
         <label className="field field-full">
           <span>Inline policy as JSON (optional; narrows what the key may do)</span>
           <textarea
+            className="form-control"
             name="policy"
             rows={6}
             spellCheck={false}
@@ -116,8 +119,8 @@ export function ApiKeys({ user }: ApiKeysProps) {
             }}
           />
         </label>
-        <div className="form-actions">
-          <button type="submit" className="button button-primary" disabled={action.busy}>
+        <div className="form-actions d-flex flex-wrap gap-2">
+          <button type="submit" className="btn btn-primary" disabled={action.busy}>
             Create API key
           </button>
         </div>
@@ -127,7 +130,7 @@ export function ApiKeys({ user }: ApiKeysProps) {
       {keys.loading ? <Loading /> : null}
       {keys.data !== undefined && keys.data.length === 0 ? <p>This user has no API keys.</p> : null}
       {keys.data !== undefined && keys.data.length > 0 ? (
-        <table className="table">
+        <table className="table table-hover align-middle grid">
           <thead>
             <tr>
               <th scope="col">Access key ID</th>
@@ -190,7 +193,7 @@ function NewKeyNotice({ created, onDone }: { created: APIKeyCreated; onDone: () 
   };
 
   return (
-    <div className="notice notice-secret" role="status">
+    <div className="alert alert-success notice" role="status">
       <p className="notice-title">Copy the secret key now. It is shown this once and cannot be had again.</p>
       <dl className="facts">
         <dt>Access key ID</dt>
@@ -202,11 +205,11 @@ function NewKeyNotice({ created, onDone }: { created: APIKeyCreated; onDone: () 
           <code>{created.secret_key}</code>
         </dd>
       </dl>
-      <div className="actions">
-        <button type="button" className="button" onClick={copy}>
+      <div className="d-flex flex-wrap gap-2">
+        <button type="button" className="btn btn-outline-secondary" onClick={copy}>
           Copy secret key
         </button>
-        <button type="button" className="button button-primary" onClick={onDone}>
+        <button type="button" className="btn btn-primary" onClick={onDone}>
           I have copied it
         </button>
         <span role="status">{copied ? 'Copied.' : ''}</span>

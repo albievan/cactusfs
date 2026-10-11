@@ -17,5 +17,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.sessionStorage.clear();
+  window.localStorage.clear();
   window.location.hash = '';
 });

@@ -29,6 +29,7 @@ export function NamesEditor({ label, names, busy, onSave, onCancel }: NamesEdito
       <label className="field field-wide">
         <span>{label}</span>
         <input
+          className="form-control"
           spellCheck={false}
           autoCapitalize="none"
           value={text}
@@ -37,10 +38,10 @@ export function NamesEditor({ label, names, busy, onSave, onCancel }: NamesEdito
           }}
         />
       </label>
-      <button type="submit" className="button button-primary" disabled={busy}>
-        Save
+      <button type="submit" className="btn btn-primary" disabled={busy}>
+        <i className="bi bi-check-lg" aria-hidden="true" /> Save
       </button>
-      <button type="button" className="button" onClick={onCancel}>
+      <button type="button" className="btn btn-outline-secondary" onClick={onCancel}>
         Cancel
       </button>
     </form>

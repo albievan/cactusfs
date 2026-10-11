@@ -2,7 +2,7 @@
 export function Loading() {
   return (
     <p className="loading" role="status">
-      Loading…
+      <span className="spinner-border spinner-border-sm" aria-hidden="true" /> Loading…
     </p>
   );
 }

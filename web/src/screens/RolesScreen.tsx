@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 
 import { api, unwrap } from '../api/client';
+import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatTime, joinNames, parseNames } from '../ui/format';
 import { useAction, useLoad } from '../ui/hooks';
@@ -52,12 +53,13 @@ export function RolesScreen() {
       <h1>Roles</h1>
       <ProblemNotice error={action.error ?? roles.error} />
 
-      <section className="card" aria-labelledby="create-role">
+      <section className="card card-body panel" aria-labelledby="create-role">
         <h2 id="create-role">Create a role</h2>
         <form className="form-row" onSubmit={create}>
           <label className="field">
             <span>Role name</span>
             <input
+              className="form-control"
               name="name"
               required
               autoCapitalize="none"
@@ -71,6 +73,7 @@ export function RolesScreen() {
           <label className="field field-wide">
             <span>Policies (separated by commas)</span>
             <input
+              className="form-control"
               name="policies"
               autoCapitalize="none"
               spellCheck={false}
@@ -80,18 +83,18 @@ export function RolesScreen() {
               }}
             />
           </label>
-          <button type="submit" className="button button-primary" disabled={action.busy}>
-            Create role
+          <button type="submit" className="btn btn-primary" disabled={action.busy}>
+            <i className="bi bi-plus-lg" aria-hidden="true" /> Create role
           </button>
         </form>
       </section>
 
-      <section className="card" aria-labelledby="role-list">
+      <section className="card card-body panel" aria-labelledby="role-list">
         <h2 id="role-list">All roles</h2>
         {roles.loading ? <Loading /> : null}
         {roles.data !== undefined && roles.data.length === 0 ? <p>There are no roles.</p> : null}
         {roles.data !== undefined && roles.data.length > 0 ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -104,7 +107,12 @@ export function RolesScreen() {
             <tbody>
               {roles.data.map((role) => (
                 <tr key={role.name}>
-                  <td data-label="Name">{role.name}</td>
+                  <td data-label="Name">
+                    <a className="btn btn-link-row" href={routeHref(['roles', role.name])}>
+                      <i className="bi bi-person-badge" aria-hidden="true" />
+                      {role.name}
+                    </a>
+                  </td>
                   <td data-label="Policies">
                     {editing === role.name ? (
                       <NamesEditor
@@ -128,10 +136,10 @@ export function RolesScreen() {
                     {role.built_in ? (
                       'Read-only'
                     ) : (
-                      <span className="actions">
+                      <span className="d-flex flex-wrap gap-2">
                         <button
                           type="button"
-                          className="button"
+                          className="btn btn-outline-secondary"
                           aria-label={`Edit role ${role.name}`}
                           onClick={() => {
                             setEditing(role.name);

@@ -55,12 +55,13 @@ export function PoliciesScreen() {
       <h1>Policies</h1>
       <ProblemNotice error={action.error ?? policies.error} />
 
-      <section className="card" aria-labelledby="create-policy">
+      <section className="card card-body panel" aria-labelledby="create-policy">
         <h2 id="create-policy">Create a policy</h2>
         <form className="form-grid" onSubmit={create}>
           <label className="field">
             <span>Policy name</span>
             <input
+              className="form-control"
               name="name"
               required
               autoCapitalize="none"
@@ -74,6 +75,7 @@ export function PoliciesScreen() {
           <label className="field field-full">
             <span>Policy document as JSON</span>
             <textarea
+              className="form-control"
               name="document"
               required
               rows={10}
@@ -84,9 +86,9 @@ export function PoliciesScreen() {
               }}
             />
           </label>
-          <div className="form-actions">
-            <button type="submit" className="button button-primary" disabled={action.busy}>
-              Create policy
+          <div className="form-actions d-flex flex-wrap gap-2">
+            <button type="submit" className="btn btn-primary" disabled={action.busy}>
+              <i className="bi bi-plus-lg" aria-hidden="true" /> Create policy
             </button>
           </div>
         </form>
@@ -105,12 +107,12 @@ export function PoliciesScreen() {
         />
       )}
 
-      <section className="card" aria-labelledby="policy-list">
+      <section className="card card-body panel" aria-labelledby="policy-list">
         <h2 id="policy-list">All policies</h2>
         {policies.loading ? <Loading /> : null}
         {policies.data !== undefined && policies.data.length === 0 ? <p>There are no policies.</p> : null}
         {policies.data !== undefined && policies.data.length > 0 ? (
-          <table className="table">
+          <table className="table table-hover align-middle grid">
             <thead>
               <tr>
                 <th scope="col">Name</th>
@@ -126,10 +128,10 @@ export function PoliciesScreen() {
                   <td data-label="Kind">{policy.built_in ? 'Built-in' : 'Custom'}</td>
                   <td data-label="Created">{formatTime(policy.created_at)}</td>
                   <td data-label="Actions">
-                    <span className="actions">
+                    <span className="d-flex flex-wrap gap-2">
                       <button
                         type="button"
-                        className="button"
+                        className="btn btn-outline-secondary"
                         aria-label={`${policy.built_in ? 'View' : 'Edit'} policy ${policy.name}`}
                         onClick={() => {
                           setOpen(policy.name);
@@ -163,10 +165,13 @@ interface PolicyEditorProps {
   policy: Policy;
   action: Action;
   onSaved: () => void;
-  onClose: () => void;
+  /** Closes the editor; without it the editor has no Close button. */
+  onClose?: () => void;
 }
 
-function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
+/** Shows a policy document and, unless the policy is built in, lets it be changed. */
+export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
+  const heading = `edit-policy-${policy.name}`;
   const [text, setText] = useState(formatPolicyDocument(policy.document));
 
   const save = (event: FormEvent) => {
@@ -187,8 +192,8 @@ function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
   };
 
   return (
-    <section className="card" aria-labelledby="edit-policy">
-      <h2 id="edit-policy">
+    <section className="card card-body panel" aria-labelledby={heading}>
+      <h2 id={heading}>
         Policy {policy.name}
         {policy.built_in ? ' (built-in, read-only)' : ''}
       </h2>
@@ -196,6 +201,7 @@ function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
         <label className="field field-full">
           <span>Policy document of {policy.name} as JSON</span>
           <textarea
+            className="form-control"
             name="document"
             required
             rows={14}
@@ -207,15 +213,17 @@ function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
             }}
           />
         </label>
-        <div className="form-actions">
+        <div className="form-actions d-flex flex-wrap gap-2">
           {policy.built_in ? null : (
-            <button type="submit" className="button button-primary" disabled={action.busy}>
-              Save policy
+            <button type="submit" className="btn btn-primary" disabled={action.busy}>
+              <i className="bi bi-check-lg" aria-hidden="true" /> Save policy
             </button>
           )}
-          <button type="button" className="button" onClick={onClose}>
-            Close
-          </button>
+          {onClose === undefined ? null : (
+            <button type="button" className="btn btn-outline-secondary" onClick={onClose}>
+              Close
+            </button>
+          )}
         </div>
       </form>
     </section>
