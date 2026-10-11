@@ -64,6 +64,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/buckets/{bucket}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How many objects a bucket holds, and their size together
+         * @description Counts the current versions of the bucket's objects and adds up their sizes, by reading the index: older versions and uploads in progress are not counted. For a very large bucket the count stops at a bound and `complete` is false; the figures are then of the keys counted so far.
+         */
+        get: operations["getBucketUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/buckets/{bucket}/objects": {
         parameters: {
             query?: never;
@@ -461,6 +481,20 @@ export interface components {
             etag: string;
             /** Format: date-time */
             last_modified: string;
+        };
+        BucketUsage: {
+            /**
+             * Format: int64
+             * @description Objects in the bucket (current versions; delete markers are not objects).
+             */
+            object_count: number;
+            /**
+             * Format: int64
+             * @description Their sizes added up, in bytes.
+             */
+            total_size: number;
+            /** @description False when the bucket has more objects than are counted in one request. */
+            complete: boolean;
         };
         ObjectList: {
             objects: components["schemas"]["ObjectSummary"][];
@@ -893,6 +927,29 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The bucket's usage. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketUsage"];
+                };
             };
             default: components["responses"]["Problem"];
         };

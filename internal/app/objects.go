@@ -36,6 +36,10 @@ type ObjectService struct {
 	// under entropyMu because a source need not be safe for concurrent use.
 	entropyMu sync.Mutex
 	entropy   io.Reader
+
+	// usage holds the last count of every bucket that was asked about.
+	usageMu sync.Mutex
+	usage   map[string]*usageEntry
 }
 
 // ObjectServiceConfig lists what an ObjectService depends on.
@@ -1040,6 +1044,100 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 		}))
 	}
 	return DeleteOutput{Marker: result.Marker, Removed: result.Removed}, nil
+}
+
+// BucketUsage is how much a bucket holds.
+type BucketUsage struct {
+	// Objects is the number of objects: current versions, not delete
+	// markers, not older versions, not uploads in progress.
+	Objects int64
+	// Bytes is their sizes added up.
+	Bytes int64
+	// Complete is false when the count stopped at MaxUsageScan.
+	Complete bool
+}
+
+// MaxUsageScan bounds how many keys Usage counts in one call. The count is
+// a walk of the index under the metadata store's read lock, which a change
+// waiting to be applied must wait for: about four microseconds a key was
+// measured, so this many keys hold changes up for a few tenths of a second
+// at most.
+const MaxUsageScan = 100_000
+
+// usageFor is how long a count is answered again without another walk.
+const usageFor = 30 * time.Second
+
+// usageEntry is the count of one bucket and when it was made. Its lock is
+// held for a walk, so that one walk of a bucket runs at a time on a node and
+// whoever asks meanwhile waits for it and gets its figure.
+type usageEntry struct {
+	mu    sync.Mutex
+	usage BucketUsage
+	at    time.Time
+	known bool
+}
+
+// Usage counts the objects of a bucket and adds up their sizes. It needs
+// what listing the bucket needs: it tells nothing a listing does not.
+//
+// A figure is up to half a minute old: every caller is authorized, but the
+// walk is made once in that time for a bucket, however many ask.
+func (s *ObjectService) Usage(ctx context.Context, principal iam.Principal, bucketName string) (BucketUsage, error) {
+	resource := iam.Resource{Bucket: bucketName}
+	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucket, Resource: resource}); err != nil {
+		return BucketUsage{}, fmt.Errorf("object.Usage: %w", err)
+	}
+	s.usageMu.Lock()
+	if s.usage == nil {
+		s.usage = map[string]*usageEntry{}
+	}
+	entry := s.usage[bucketName]
+	if entry == nil {
+		entry = &usageEntry{}
+		s.usage[bucketName] = entry
+	}
+	s.usageMu.Unlock()
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.known && s.clock.Now().Sub(entry.at) < usageFor {
+		return entry.usage, nil
+	}
+	usage, err := s.countObjects(ctx, bucketName, MaxUsageScan)
+	if err != nil {
+		// Nothing is kept of a bucket that is not there.
+		entry.known = false
+		if errors.Is(err, domain.ErrBucketNotFound) {
+			s.usageMu.Lock()
+			delete(s.usage, bucketName)
+			s.usageMu.Unlock()
+		}
+		return BucketUsage{}, fmt.Errorf("object.Usage: %w", err)
+	}
+	entry.usage, entry.at, entry.known = usage, s.clock.Now(), true
+	return usage, nil
+}
+
+// countObjects walks the index of a bucket, for at most limit keys.
+func (s *ObjectService) countObjects(ctx context.Context, bucketName string, limit int) (BucketUsage, error) {
+	usage := BucketUsage{Complete: true}
+	seen := 0
+	err := s.index.ScanObjects(ctx, bucketName, "", func(v object.Version) ports.ScanControl {
+		if seen == limit {
+			usage.Complete = false
+			return ports.ScanControl{Stop: true}
+		}
+		seen++
+		if !v.DeleteMarker {
+			usage.Objects++
+			usage.Bytes += v.Size
+		}
+		return ports.ScanControl{}
+	})
+	if err != nil {
+		return BucketUsage{}, err
+	}
+	return usage, nil
 }
 
 // List returns one page of a bucket listing.

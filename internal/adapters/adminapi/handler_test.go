@@ -429,6 +429,7 @@ func TestAuthorizationIsTheUseCases(t *testing.T) {
 		}
 	}
 	f.must(http.StatusOK, call{method: "GET", path: "/buckets/reports/objects", bearer: reader})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/reports/usage", bearer: reader})
 	// An auditor reads everything about the deployment and changes nothing.
 	for _, path := range []string{"/users", "/groups", "/roles", "/policies", "/audit", "/cluster", "/cluster/maintenance", "/users/reader/keys"} {
 		f.must(http.StatusOK, call{method: "GET", path: path, bearer: auditor})
@@ -731,6 +732,18 @@ func TestBucketsAndObjects(t *testing.T) {
 		t.Errorf("second page of 2026/ = %+v", page)
 	}
 	f.must(http.StatusBadRequest, call{method: "GET", path: "/buckets/photos/objects?limit=100000"})
+
+	// How much the bucket holds: its objects counted, their sizes added up.
+	var usage struct {
+		ObjectCount int64 `json:"object_count"`
+		TotalSize   int64 `json:"total_size"`
+		Complete    bool  `json:"complete"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/usage"}).decode(t, &usage)
+	if usage.ObjectCount != 4 || usage.TotalSize != 4*int64(len(content)) || !usage.Complete {
+		t.Errorf("usage of the bucket = %+v", usage)
+	}
+	f.must(http.StatusNotFound, call{method: "GET", path: "/buckets/no-such-bucket/usage"})
 
 	// A download is the bytes, as a file to save: whatever was uploaded,
 	// the browser does not render it on the console's origin.

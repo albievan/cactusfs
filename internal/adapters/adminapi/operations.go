@@ -136,6 +136,15 @@ func (o *operations) DeleteBucket(ctx context.Context, request api.DeleteBucketR
 
 const defaultListLimit = 200
 
+// GetBucketUsage implements api.StrictServerInterface.
+func (o *operations) GetBucketUsage(ctx context.Context, request api.GetBucketUsageRequestObject) (api.GetBucketUsageResponseObject, error) {
+	usage, err := o.h.cfg.Objects.Usage(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketUsage200JSONResponse{ObjectCount: usage.Objects, TotalSize: usage.Bytes, Complete: usage.Complete}, nil
+}
+
 // ListObjects implements api.StrictServerInterface.
 func (o *operations) ListObjects(ctx context.Context, request api.ListObjectsRequestObject) (api.ListObjectsResponseObject, error) {
 	opts := object.ListOptions{MaxKeys: defaultListLimit}

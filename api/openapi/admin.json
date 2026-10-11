@@ -285,6 +285,37 @@
         }
       }
     },
+    "/buckets/{bucket}/usage": {
+      "get": {
+        "operationId": "getBucketUsage",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "How many objects a bucket holds, and their size together",
+        "description": "Counts the current versions of the bucket's objects and adds up their sizes, by reading the index: older versions and uploads in progress are not counted. For a very large bucket the count stops at a bound and `complete` is false; the figures are then of the keys counted so far.",
+        "x-cactusfs-action": "s3:ListBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bucket's usage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketUsage"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/buckets/{bucket}/objects": {
       "get": {
         "operationId": "listObjects",
@@ -1719,6 +1750,32 @@
           "last_modified": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "BucketUsage": {
+        "type": "object",
+        "required": [
+          "object_count",
+          "total_size",
+          "complete"
+        ],
+        "properties": {
+          "object_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Objects in the bucket (current versions; delete markers are not objects)."
+          },
+          "total_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Their sizes added up, in bytes."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "False when the bucket has more objects than are counted in one request."
           }
         }
       },

@@ -143,6 +143,18 @@ type BucketCreate struct {
 	Name string `json:"name"`
 }
 
+// BucketUsage defines model for BucketUsage.
+type BucketUsage struct {
+	// Complete False when the bucket has more objects than are counted in one request.
+	Complete bool `json:"complete"`
+
+	// ObjectCount Objects in the bucket (current versions; delete markers are not objects).
+	ObjectCount int64 `json:"object_count"`
+
+	// TotalSize Their sizes added up, in bytes.
+	TotalSize int64 `json:"total_size"`
+}
+
 // ClusterStatus defines model for ClusterStatus.
 type ClusterStatus struct {
 	// AnsweredBy The node that answered.
@@ -719,6 +731,9 @@ type ServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(w http.ResponseWriter, r *http.Request, bucket BucketName, params ListObjectsParams)
+	// GetBucketUsage How many objects a bucket holds, and their size together
+	// (GET /buckets/{bucket}/usage)
+	GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName)
 	// GetCluster The nodes and drives of the deployment
 	// (GET /cluster)
 	GetCluster(w http.ResponseWriter, r *http.Request)
@@ -1438,6 +1453,39 @@ func (siw *ServerInterfaceWrapper) ListObjects(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListObjects(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketUsage operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketUsage(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketUsage(w, r, bucket)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3021,6 +3069,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets", wrapper.CreateBucket)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}", wrapper.DeleteBucket)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}", wrapper.GetBucket)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/usage", wrapper.GetBucketUsage)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/objects", wrapper.ListObjects)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.DeleteObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.GetObject)
@@ -3438,6 +3487,43 @@ type ListObjectsdefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response ListObjectsdefaultApplicationProblemPlusJSONResponse) VisitListObjectsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketUsageRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketUsageResponseObject interface {
+	VisitGetBucketUsageResponse(w http.ResponseWriter) error
+}
+
+type GetBucketUsage200JSONResponse BucketUsage
+
+func (response GetBucketUsage200JSONResponse) VisitGetBucketUsageResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketUsagedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketUsagedefaultApplicationProblemPlusJSONResponse) VisitGetBucketUsageResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -4505,6 +4591,9 @@ type StrictServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(ctx context.Context, request ListObjectsRequestObject) (ListObjectsResponseObject, error)
+	// GetBucketUsage How many objects a bucket holds, and their size together
+	// (GET /buckets/{bucket}/usage)
+	GetBucketUsage(ctx context.Context, request GetBucketUsageRequestObject) (GetBucketUsageResponseObject, error)
 	// GetCluster The nodes and drives of the deployment
 	// (GET /cluster)
 	GetCluster(ctx context.Context, request GetClusterRequestObject) (GetClusterResponseObject, error)
@@ -4898,6 +4987,32 @@ func (sh *strictHandler) ListObjects(w http.ResponseWriter, r *http.Request, buc
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListObjectsResponseObject); ok {
 		if err := validResponse.VisitListObjectsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketUsage operation middleware
+func (sh *strictHandler) GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketUsageRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketUsage(ctx, request.(GetBucketUsageRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketUsage")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketUsageResponseObject); ok {
+		if err := validResponse.VisitGetBucketUsageResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
