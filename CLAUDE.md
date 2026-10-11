@@ -381,5 +381,7 @@ Milestone order (seed `PLAN.md` with this if it is empty):
   source and build it with Go alone or with a container engine alone.
 - 2026-10-11: a default console user `admin` with the password `admin` on every new
   deployment (ADR-0014).
-- **Still open — ask before acting on them:** the project's own licence; whether
-  `github.com/albievan/cactusfs` is the final module path.
+- 2026-10-11: the project's own licence is a dedication to the public domain, as
+  SQLite's is (`LICENSE.md`). Dependencies keep to the list of §3.
+- **Still open — ask before acting on it:** whether `github.com/albievan/cactusfs` is
+  the final module path.

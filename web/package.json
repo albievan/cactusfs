@@ -1,6 +1,7 @@
 {
   "name": "cactusfs-console",
   "private": true,
+  "license": "SEE LICENSE IN ../LICENSE.md",
   "version": "0.0.0",
   "type": "module",
   "packageManager": "pnpm@12.9.1",

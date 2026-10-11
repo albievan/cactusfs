@@ -416,4 +416,5 @@ docs/                architecture, threat model, decision records
 
 ## Licence
 
-Not yet chosen. Until a licence file is added, no licence is granted.
+Public domain, as SQLite is: see [LICENSE.md](LICENSE.md). The modules and packages
+CactusFS is built with keep their own licences (MIT, BSD, ISC, Apache-2.0, MPL-2.0).
