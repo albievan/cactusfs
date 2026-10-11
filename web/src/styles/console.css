@@ -173,20 +173,87 @@ code {
   padding: 3rem var(--gap);
 }
 
-/* Sign-in */
+/* Sign-in: the store on the left, the form on the right. On a narrow screen
+   the form comes first and the left side is a band under it. */
 
 .signin {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 28rem);
+  min-height: 100vh;
+}
+
+.signin-hero {
+  position: relative;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 1.5rem;
-  min-height: 100vh;
-  padding: 3rem var(--gap);
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 20% 10%, #1f4f3b 0%, var(--night-green) 55%, #0c2219 100%);
+  color: var(--sand);
+}
+
+.signin-hero-text {
+  position: relative;
+  z-index: 1;
+  box-sizing: content-box;
+  max-width: 34rem;
+  padding: clamp(2rem, 12vh, 9rem) clamp(1.5rem, 3vw, 3rem) 2rem clamp(1.5rem, 8vw, 7rem);
+}
+
+.signin-hero h2 {
+  margin: 0 0 1.25rem;
+  color: var(--sand);
+  font-size: clamp(1.5rem, 2.4vw, 2.1rem);
+  line-height: 1.2;
+}
+
+.signin-hero p {
+  margin: 0 0 1.5rem;
+  color: #e6dcc6;
+  line-height: 1.75;
+}
+
+.signin-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.signin-points li {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid rgb(217 195 154 / 45%);
+  border-radius: 999px;
+  color: var(--dune);
+  font-size: 0.875rem;
+}
+
+.signin-dunes {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 55%;
+  fill: none;
+  stroke: var(--dune);
+  stroke-width: 1.2;
+}
+
+.signin-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+  padding: clamp(1.5rem, 6vh, 4rem) clamp(1.25rem, 3vw, 2.5rem) 1.5rem;
+  background: var(--sand);
+  border-left: 1px solid var(--line);
 }
 
 /* The tagline logo is never shown below 64 px high. */
 .signin-logo {
-  height: 104px;
+  align-self: flex-start;
+  height: 84px;
   width: auto;
   max-width: 100%;
   min-height: 64px;
@@ -198,8 +265,57 @@ code {
   flex-direction: column;
   gap: 0.75rem;
   width: 100%;
-  max-width: 24rem;
 }
+
+.signin-form h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.35rem;
+}
+
+.signin-show {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.signin-submit {
+  margin-top: 0.5rem;
+  padding-block: 0.7rem;
+}
+
+.signin-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 52rem) {
+  .signin {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+  }
+
+  .signin-panel {
+    order: -1;
+    border-left: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .signin-hero-text {
+    padding: 2rem 1.25rem 9rem;
+  }
+
+  .signin-dunes {
+    height: 8rem;
+  }
+}
+
 
 /* Cards */
 

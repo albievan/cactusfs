@@ -17,6 +17,24 @@ describe('session', () => {
     expect(screen.getByAltText('CactusFS').getAttribute('src')).toContain('cactusfs-logo-tagline.svg');
   });
 
+  it('says what the store is, links to the documentation it serves, and can show the password', async () => {
+    fakeApi({ 'GET /session': () => problem(401, 'Not signed in') });
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Sign in' });
+    expect(screen.getByRole('region', { name: 'About CactusFS' }).textContent).toContain('S3-compatible');
+    // Nothing leaves the deployment: both links are served by it.
+    expect(screen.getByRole('link', { name: 'API documentation' }).getAttribute('href')).toBe('/docs');
+    expect(screen.getByRole('link', { name: 'API contract' }).getAttribute('href')).toBe('/api/v1/openapi.yaml');
+
+    const password = screen.getByLabelText('Password');
+    expect(password.getAttribute('type')).toBe('password');
+    fireEvent.click(screen.getByLabelText('Show what I type'));
+    expect(password.getAttribute('type')).toBe('text');
+    fireEvent.click(screen.getByLabelText('Show what I type'));
+    expect(password.getAttribute('type')).toBe('password');
+  });
+
   it('signs in, keeps the CSRF token for the tab, and shows the console', async () => {
     let signedInNow = false;
     const api = fakeApi({
