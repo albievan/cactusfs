@@ -186,8 +186,8 @@ every commit that touches the write path or the state machine.
 |---|---|---|---|---|
 | A.1 | done | Console user `admin` / `admin` on a new deployment | made once by the node that stores the root credential, with `cluster-admin`; never made again after the operator changes or deletes it; hashed with Argon2id; audited, warned about in the log, password in neither; `admin` cannot be set as a password afterwards; no default API key | `internal/app/{iam,identity}.go` + tests, `cmd/cactusfs/node.go` + test, `test/integration/admin_test.go`, `deploy/compose/compose.yaml`, `docs/adr/{0014-default-console-user,README}.md`, `CLAUDE.md`, `README.md`, `docs/{threat-model,ARCHITECTURE}.md` |
 
-| A.2 | in_progress | Sign-in screen in two parts | what the store is on the left (dark, with a decoration drawn in the page), the logo and the form on the right, links to the documentation the node serves; stacks on a narrow screen; nothing fetched from elsewhere; password can be shown; console tests cover it | `web/src/screens/SignIn.tsx`, `web/src/styles/console.css`, `web/src/App.test.tsx` |
-| A.3 | in_progress | Every URL and both kinds of first credentials in the README | tables of endpoints and of where the ports are per way of deploying; the console user `admin`/`admin` and the root key told apart; Kubernetes section | `README.md` |
+| A.2 | done | Sign-in screen in two parts | what the store is on the left (dark, with a decoration drawn in the page), the logo and the form on the right, links to the documentation the node serves; stacks on a narrow screen; nothing fetched from elsewhere; password can be shown; console tests cover it | `web/src/screens/SignIn.tsx`, `web/src/styles/console.css`, `web/src/App.test.tsx` |
+| A.3 | done | Every URL and both kinds of first credentials in the README | tables of endpoints and of where the ports are per way of deploying; the console user `admin`/`admin` and the root key told apart; Kubernetes section | `README.md` |
 
 ## Milestone 7 — Deployment hardening
 
