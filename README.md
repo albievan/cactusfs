@@ -185,6 +185,44 @@ than its owner. Five roles are built in: `cluster-admin`, `bucket-admin`, `read-
 sign-in is written to a hash-chained audit trail; `--audit-export` also writes each
 record to standard output as a JSON line.
 
+### Addresses and first sign-in
+
+Everything is served over TLS on two ports of every gateway node. `<host>` is the
+machine, or the name your certificate carries.
+
+| What | URL | Sign in with |
+|---|---|---|
+| S3 API | `https://<host>:9000` | an API key, signed with SigV4 (region `us-east-1` unless set) |
+| Console | `https://<host>:9001/` | a console user: **`admin` / `admin`** on a new deployment |
+| Swagger UI | `https://<host>:9001/docs` | **Authorize** with `<access key ID>:<secret key>` |
+| Management API | `https://<host>:9001/api/v1` | `Authorization: Bearer <access key ID>:<secret key>` |
+| API contract | `https://<host>:9001/api/v1/openapi.yaml`, `/api/v1/openapi.json` | nothing |
+| Liveness, readiness | `https://<host>:9001/healthz`, `/readyz` | nothing |
+| Metrics | `https://<host>:9001/metrics` | an API key allowed `admin:GetMetrics`, as a bearer credential |
+
+Where those ports are, by way of running it:
+
+| Deployment | S3 | Console, Swagger UI, management API |
+|---|---|---|
+| The binary (`cactusfs server`) | `https://localhost:9000` | `https://localhost:9001` |
+| The binary with `--dev-plaintext` | `http://127.0.0.1:9000` | `http://127.0.0.1:9001` |
+| Compose cluster (`make up`) | `https://localhost:9000`, `:9010`, `:9020`, `:9030` (nodes 1 to 4) | `https://localhost:9001`, `:9011`, `:9021`, `:9031`, on this machine only |
+| Helm chart, inside the cluster | `https://<release>.<namespace>.svc:9000` | `https://<release>.<namespace>.svc:9001` |
+| Helm chart with `service.type=NodePort` | `https://<machine>:<service.s3NodePort>` | `https://<machine>:<service.adminNodePort>` |
+
+The two kinds of credentials of a new deployment:
+
+- **Console: user `admin`, password `admin`**, with every right (ADR-0014). The same
+  on every new deployment and known to everybody: delete the user or change the
+  password first, as said above. It signs in to the console only; it has no API key.
+- **API: the root key.** Generated and printed once at the first start, or the pair
+  you set in `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY` (with the chart:
+  the Secret named in `secrets.root`, keys `access-key` and `secret-key`). It works for
+  S3, for the management API and in Swagger UI. There is no default API key.
+
+The certificate authority to trust is your own; for the development setups it is
+`s3-ca.pem`, which `cactusfs dev-init` writes.
+
 ### Management API, documentation and console
 
 The admin listener (`--admin-addr`, port 9001) serves:
@@ -262,6 +300,45 @@ majority of the voters to start. Things to know for now:
   is started again**, not simply restarted empty.
 - **Keep the cluster on one site.** Sites are to be linked by replication, not by
   stretching the metadata group across a WAN.
+
+### On Kubernetes
+
+The chart in `deploy/helm/cactusfs` runs the same cluster on Kubernetes or k3s: every
+node is a StatefulSet of one pod with a claim for its metadata and one for each drive,
+behind a headless Service for the nodes and a Service for clients. Pods run as a
+non-root user with a read-only root filesystem and every capability dropped, and are
+admitted under the `restricted` Pod Security Standard. A NetworkPolicy lets the nodes
+reach each other and DNS, and nobody reach them until you say who
+(`networkPolicy.clientsFrom`).
+
+The chart makes no Secret and renders nothing until you name the ones it needs:
+
+| Value | Secret |
+|---|---|
+| `secrets.root` | root credentials: keys `access-key`, `secret-key` |
+| `secrets.tls` | certificate of the S3 and admin listeners (`kubernetes.io/tls`) |
+| `secrets.nodeCA` | the CA of node certificates: key `ca.crt` |
+| `<node ID>-node-tls` | one per node (`kubernetes.io/tls`), its certificate naming the node ID `<release>-<pool>-<index>`; a pod mounts its own and no other |
+| `kms.vault.tokenSecret` | the Vault token, key `token` - or, for development, `kms.local.*` with `dev.localKMS=true` |
+
+```sh
+helm install cactusfs deploy/helm/cactusfs -n cactusfs -f my-values.yaml
+kubectl -n cactusfs get pods        # alive at once, ready when the cluster has formed
+```
+
+`deploy/helm/cactusfs/ci/` has value sets to start from: a cluster with Vault, five
+voters, one node, and a development cluster on the disks of one machine
+(`localVolumes`: the directories `<basePath>/<node ID>/{meta,data1,...}` must exist and
+belong to user 65532).
+
+Two things about the machine, which are not the chart's to do:
+
+- **firewalld.** On a host that runs firewalld, k3s needs the pod and service networks
+  in the trusted zone, or pods cannot reach each other and the cluster never forms:
+  `firewall-cmd --permanent --zone=trusted --add-source=10.42.0.0/16 --add-source=10.43.0.0/16 && firewall-cmd --reload`.
+- **NodePorts are published past the host firewall.** With `service.type=NodePort` the
+  S3 and admin ports answer on every address of the machine. Remember the console user
+  `admin` / `admin` before you choose that.
 
 ## Develop
 
