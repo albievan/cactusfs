@@ -51,3 +51,6 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted |
 | [0014](0014-default-console-user.md) | A default console user | accepted |
 | [0015](0015-helm-chart.md) | The Helm chart: a StatefulSet for every node | accepted |
+| [0016](0016-object-access-and-schema-3.md) | Who uploaded and who read an object, and entry schema 3 | accepted |
+| [0017](0017-sub-buckets.md) | Sub-buckets | accepted |
+| [0018](0018-tag-rules-and-catalogue.md) | Tag rules, lower-case tags, and a catalogue of tags | accepted |
