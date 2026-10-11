@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albievan/cactusfs/api/openapi"
@@ -20,7 +21,9 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/web"
 )
 
@@ -62,6 +65,10 @@ type serveOptions struct {
 	drainDelay time.Duration
 	// shutdownTimeout bounds the wait for in-flight requests.
 	shutdownTimeout time.Duration
+	// ready, when not nil, is closed when the node has started. Until
+	// then the listeners are open and serve refusals; "listening" is logged
+	// when they serve the node. Nil means that they do from the start.
+	ready <-chan struct{}
 }
 
 // runServer runs a node until ctx is cancelled, then shuts it down
@@ -93,27 +100,63 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		logger.InfoContext(ctx, "traces are not exported: no OTLP endpoint is configured")
 	}
 
-	n, err := openNode(ctx, cfg, tel, logger, notice)
-	if err != nil {
-		return fmt.Errorf("server.Open: %w", err)
+	// The listeners open before the node is part of its deployment: a
+	// member of a cluster may wait a long time for the others, and whatever
+	// watches it - a kubelet, a load balancer - must find it alive and not
+	// ready, not absent. Until then the probes answer and everything else
+	// is refused; see starting.
+	gate := health.NewGate()
+	metadata := &lateCheck{name: "metadata"}
+	probes := health.NewHandler(app.NewHealthService(gate, metadata), logger, readinessTimeout)
+	adminHandler, s3Handler := &handlerSwitch{}, &handlerSwitch{}
+	adminHandler.set(startingAdmin(probes))
+	s3Handler.set(s3api.Starting())
+	// Every node answers probes and serves metrics; the S3 API is the
+	// gateway's.
+	serving, addrs := []endpoint{{name: "admin", handler: adminHandler, ioTimeout: adminIOTimeout}}, []string{cfg.AdminAddr}
+	if cfg.Roles.Has(cluster.RoleGateway) {
+		serving, addrs = append(serving, endpoint{name: "s3", handler: s3Handler}), append(addrs, cfg.S3Addr)
 	}
-	defer func() {
-		// The stores are closed only once no handler can still be using
-		// them: a write that is being committed must not find its drive or
-		// the metadata store torn down.
-		if errors.Is(err, errHandlersRunning) {
-			return
-		}
-		if closeErr := n.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("server.Close: %w", closeErr))
-		}
+	endpoints, err := listen(ctx, serving, addrs)
+	if err != nil {
+		return err
+	}
+	ready := make(chan struct{})
+	serveCtx, stopServing := context.WithCancel(ctx)
+	defer stopServing()
+	// A listener that stops on its own takes the node down, while it
+	// starts as well as after: opening is given up when serving has ended.
+	openCtx, stopOpening := context.WithCancel(ctx)
+	defer stopOpening()
+	served := make(chan error, 1)
+	go func() {
+		defer stopOpening()
+		served <- serve(serveCtx, endpoints, serveOptions{
+			tlsConfig:       tlsConfig,
+			drainDelay:      cfg.DrainDelay,
+			shutdownTimeout: cfg.ShutdownTimeout,
+			ready:           ready,
+		}, gate, logger)
 	}()
 
+	n, err := openNode(openCtx, cfg, tel, logger, notice)
+	if err != nil {
+		// Nothing was served but refusals; they end with the node.
+		stopServing()
+		servedErr := <-served
+		if ctx.Err() != nil && servedErr == nil {
+			// Told to stop while it was starting - waiting for the other
+			// members, as a rule: a stop like any other, and not a
+			// failure.
+			logger.InfoContext(ctx, "stopped before the node had started")
+			return nil
+		}
+		return errors.Join(fmt.Errorf("server.Open: %w", err), servedErr)
+	}
 	n.startBackground(ctx, cfg)
 
-	gate := health.NewGate()
 	admin := http.NewServeMux()
-	health.NewHandler(app.NewHealthService(gate, n.meta), logger, readinessTimeout).Register(admin)
+	probes.Register(admin)
 	admin.Handle("GET /metrics", tel.MetricsHandler(n.identities, n.authorizer, logger))
 	// The management API and its documentation are the gateway's; the
 	// console is served by nodes with the console role. All of it shares
@@ -129,31 +172,71 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	if cfg.Roles.Has(cluster.RoleConsole) {
 		admin.Handle("/", console.NewHandler(web.Dist()))
 	}
-
-	s3 := tel.TraceS3(s3api.NewHandler(s3api.Config{
+	s3Handler.set(tel.TraceS3(s3api.NewHandler(s3api.Config{
 		Buckets: n.buckets, Objects: n.objects, Identities: n.identities,
 		Clock: n.clock, Logger: logger, Region: cfg.Region, Domain: cfg.S3Domain,
 		Observe: tel.ObserveS3,
-	}))
-
-	// Every node answers probes and serves metrics; the S3 API is the
-	// gateway's.
-	serving, addrs := []endpoint{{name: "admin", handler: admin, ioTimeout: adminIOTimeout}}, []string{cfg.AdminAddr}
-	if cfg.Roles.Has(cluster.RoleGateway) {
-		serving, addrs = append(serving, endpoint{name: "s3", handler: s3}), append(addrs, cfg.S3Addr)
-	}
-	endpoints, err := listen(ctx, serving, addrs)
-	if err != nil {
-		return err
-	}
+	})))
+	adminHandler.set(admin)
+	metadata.set(n.meta)
 	logger.InfoContext(ctx, "node started", slog.String("drives", n.describe()), slog.String("metadata_node", n.meta.NodeID()),
 		slog.String("roles", cfg.Roles.String()), slog.Bool("cluster", cfg.clustered()))
+	close(ready)
 
-	return serve(ctx, endpoints, serveOptions{
-		tlsConfig:       tlsConfig,
-		drainDelay:      cfg.DrainDelay,
-		shutdownTimeout: cfg.ShutdownTimeout,
-	}, gate, logger)
+	err = <-served
+	// The stores are closed only once no handler can still be using them:
+	// a write that is being committed must not find its drive or the
+	// metadata store torn down.
+	if errors.Is(err, errHandlersRunning) {
+		return err
+	}
+	if closeErr := n.Close(); closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("server.Close: %w", closeErr))
+	}
+	return err
+}
+
+// handlerSwitch serves with whatever handler it was last given: what a
+// listener serves changes, once, when the node has started.
+type handlerSwitch struct {
+	current atomic.Pointer[http.Handler]
+}
+
+func (s *handlerSwitch) set(h http.Handler) { s.current.Store(&h) }
+
+// ServeHTTP implements http.Handler.
+func (s *handlerSwitch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*s.current.Load()).ServeHTTP(w, r)
+}
+
+// startingAdmin is what the admin listener serves until the node has
+// started: the probes, and a refusal of everything else.
+func startingAdmin(probes *health.Handler) http.Handler {
+	mux := http.NewServeMux()
+	probes.Register(mux)
+	mux.Handle("/", adminapi.Starting())
+	return mux
+}
+
+// lateCheck is a readiness check that fails until it is given the check it
+// stands for: the node is not ready before it has a metadata store to ask.
+type lateCheck struct {
+	name  string
+	check atomic.Pointer[ports.ReadinessCheck]
+}
+
+func (c *lateCheck) set(check ports.ReadinessCheck) { c.check.Store(&check) }
+
+// Name implements ports.ReadinessCheck.
+func (c *lateCheck) Name() string { return c.name }
+
+// Check implements ports.ReadinessCheck.
+func (c *lateCheck) Check(ctx context.Context) error {
+	check := c.check.Load()
+	if check == nil {
+		return fmt.Errorf("%w: the node is starting", domain.ErrUnavailable)
+	}
+	return (*check).Check(ctx)
 }
 
 // lineWriter serialises writes to a stream that several writers share.
@@ -253,12 +336,24 @@ func serve(ctx context.Context, endpoints []endpoint, opts serveOptions, gate *h
 			}
 			serveErr <- server.ServeTLS(e.listener, "", "")
 		}()
-		logger.InfoContext(ctx, "listening",
-			slog.String("listener", e.name),
-			slog.String("addr", e.listener.Addr().String()),
-			slog.Bool("tls", opts.tlsConfig != nil),
-			slog.String("version", version),
-		)
+	}
+	// "listening" says that the node is served there; a listener that is
+	// open while the node starts says only that.
+	announce := func(msg string) {
+		for _, e := range endpoints {
+			logger.InfoContext(ctx, msg,
+				slog.String("listener", e.name),
+				slog.String("addr", e.listener.Addr().String()),
+				slog.Bool("tls", opts.tlsConfig != nil),
+				slog.String("version", version),
+			)
+		}
+	}
+	ready := opts.ready
+	if ready == nil {
+		announce("listening")
+	} else {
+		announce("listener open; the node is starting")
 	}
 	if opts.tlsConfig == nil {
 		logger.WarnContext(ctx, "plaintext HTTP enabled for development; never use this in production")
@@ -267,10 +362,26 @@ func serve(ctx context.Context, endpoints []endpoint, opts serveOptions, gate *h
 	// A listener that stops on its own takes the node down: half a node
 	// must not keep running.
 	var failure error
-	select {
-	case err := <-serveErr:
-		failure = fmt.Errorf("server.Serve: %w", err)
-	case <-ctx.Done():
+	for waiting := true; waiting; {
+		select {
+		case err := <-serveErr:
+			failure, waiting = fmt.Errorf("server.Serve: %w", err), false
+		case <-ready:
+			announce("listening")
+			ready = nil
+		case <-ctx.Done():
+			waiting = false
+		}
+	}
+	// A node that never started has nobody to drain. (One that started at
+	// the very moment it was told to stop did, and has.)
+	if ready != nil {
+		select {
+		case <-ready:
+			announce("listening")
+		default:
+			opts.drainDelay = 0
+		}
 	}
 
 	gate.Close()

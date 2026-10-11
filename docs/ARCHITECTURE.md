@@ -157,6 +157,14 @@ Behaviour:
   answers 200 when every `ports.ReadinessCheck` passes and 503 otherwise. The probes are
   unauthenticated, so a response is only `{"status":"ok"}` or `{"status":"unavailable"}`;
   the failing check and its error go to the log.
+- **Start-up.** The listeners open first, before the node has opened its stores or
+  joined its cluster - a member may wait a long time for the others. Until the node
+  has started, `/healthz` answers 200 and `/readyz` 503, and everything else is
+  refused without being read or authenticated: 503 `ServiceUnavailable` in XML on the
+  S3 listener, 503 problem+json on the admin listener (management API, Swagger UI,
+  console and `/metrics` alike), each with `Retry-After`. The log says `listener open;
+  the node is starting` then, and `listening` only once the node itself is served. A
+  node told to stop before it has started stops at once, with no drain delay.
 - **Shutdown.** On SIGTERM or interrupt the readiness gate closes, so `/readyz` answers
   503. The node keeps serving for the drain delay, then closes its listener, gives
   in-flight requests the shutdown timeout to finish, and exits 0. Requests that outlive
