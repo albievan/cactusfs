@@ -42,8 +42,8 @@ docker run --rm cactusfs version
 
 The image is distroless, runs as a non-root user and has no shell.
 
-The web console in `web/` is a placeholder. The container build compiles it, but no
-build embeds or serves it yet (PLAN 5.4).
+The image, and the binary of `make build`, carry the web console; a binary built with
+plain `go build` serves the APIs and says that it has no console.
 
 ## Run
 
