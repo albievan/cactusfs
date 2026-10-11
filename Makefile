@@ -74,6 +74,13 @@ ifeq ($(HOST_GOOS),windows)
 EXE := .exe
 endif
 
+# On a machine that is shared, the builder can be held to a part of it:
+#   make check BUILDER_LIMITS=--cpus=4,--memory=6g GOFLAGS=-p=2
+# The limits are engine options, separated by commas. GOFLAGS, GOMAXPROCS and
+# GOMEMLIMIT of the caller reach the builder.
+BUILDER_LIMITS ?=
+comma := ,
+
 # The engine socket is passed through for targets that build images and, later,
 # for testcontainers. Rootless Podman: ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock
 SOCKET_MOUNT := $(if $(wildcard $(ENGINE_SOCKET)),-v $(ENGINE_SOCKET):/var/run/docker.sock)
@@ -86,10 +93,11 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-v "$(CURDIR)":/src -w /src \
 	-v $(CACHE_VOLUME):/cache \
 	-v $(NODE_VOLUME):/src/web/node_modules \
-	$(SOCKET_MOUNT) $(BUILDKIT_ENV) \
+	$(SOCKET_MOUNT) $(BUILDKIT_ENV) $(subst $(comma), ,$(BUILDER_LIMITS)) \
 	-e VERSION=$(VERSION) -e IMAGE=$(IMAGE) \
 	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
-	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE
+	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE \
+	-e GOFLAGS -e GOMAXPROCS -e GOMEMLIMIT
 
 builder:
 	@echo "builder: $(BUILDER_IMAGE) ($(ENGINE))"
@@ -123,6 +131,15 @@ down:
 
 clean: builder
 	@$(BUILDER_RUN) $(BUILDER_IMAGE) rm -rf bin dist web/dist .cache
+
+# The same targets on another machine, for when this one must not run
+# containers (see scripts/remote.sh):
+#   make remote-check REMOTE=user@host
+# REMOTE_DIR is where the tree is copied to; REMOTE_VARS are make variables
+# for that side, such as directories to keep the builder's caches in:
+#   REMOTE_VARS="CACHE_VOLUME=/data/x/cache NODE_VOLUME=/data/x/node_modules"
+remote-%:
+	@REMOTE="$(REMOTE)" REMOTE_DIR="$(REMOTE_DIR)" scripts/remote.sh $* ENGINE=$(ENGINE) $(REMOTE_VARS)
 
 else
 # ------------------------------------------------------------------------------
