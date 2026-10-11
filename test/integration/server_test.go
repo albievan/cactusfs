@@ -156,9 +156,11 @@ func (s *server) stop(t *testing.T) {
 func TestServerProbesAndGracefulShutdown(t *testing.T) {
 	t.Parallel()
 
+	// Built before the clock of the test starts: on a cold cache the build
+	// alone can take longer than the test may.
+	bin, dir := buildBinary(t), t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
-	bin, dir := buildBinary(t), t.TempDir()
 
 	first := startServer(ctx, t, bin, dir)
 	addrs := waitForListening(t, first.logs)

@@ -62,9 +62,11 @@ func apiCode(err error) string {
 // release until something only this one can express is written.
 func TestUpgradeFromThePreviousRelease(t *testing.T) {
 	t.Parallel()
+	// Built before the clock of the test starts: on a cold cache the build
+	// alone can take longer than the test may.
+	bin, dir := buildBinary(t), t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
-	bin, dir := buildBinary(t), t.TempDir()
 	copyTree(t, filepath.Join("testdata", "previous-release"), dir)
 
 	start := func() (*server, *s3.Client) {
