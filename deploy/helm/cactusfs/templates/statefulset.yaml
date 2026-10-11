@@ -13,6 +13,7 @@
 {{- $pool := index $root.Values.pools (int .pool) -}}
 {{- $stores := include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "storage") -}}
 {{- $gateway := include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "gateway") -}}
+{{- $voter := include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "meta") -}}
 {{- $host := include "cactusfs.host" (dict "id" $id "root" $root) }}
 ---
 apiVersion: apps/v1
@@ -27,8 +28,11 @@ spec:
   # A node is one pod, for life.
   replicas: 1
   podManagementPolicy: Parallel
+  # A change reaches a node when its pod is deleted, and not before: every
+  # node is a StatefulSet of its own, and nothing else would keep an upgrade
+  # from restarting all of them at once. The README gives the order.
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   selector:
     matchLabels:
       {{- include "cactusfs.selector" $root | nindent 6 }}
@@ -36,9 +40,12 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "cactusfs.labels" $root | nindent 8 }}
+        {{- include "cactusfs.selector" $root | nindent 8 }}
         cactusfs.io/node: {{ $id }}
         cactusfs.io/pool: {{ $pool.name }}
+        {{- if $voter }}
+        cactusfs.io/voter: "true"
+        {{- end }}
         {{- if $gateway }}
         cactusfs.io/gateway: "true"
         {{- end }}
@@ -77,9 +84,33 @@ spec:
           labelSelector:
             matchLabels: {{- include "cactusfs.selector" $root | nindent 14 }}
       {{- end }}
+      {{- if and $clustered $voter }}
+      # The voters are kept apart from each other as well: a machine that
+      # held two of three would take the metadata group with it. (A second
+      # spread constraint on the same key is not allowed; this says it.)
+      affinity:
+        podAntiAffinity:
+          {{- if eq $root.Values.spread.whenUnsatisfiable "DoNotSchedule" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: {{ $root.Values.spread.topologyKey }}
+              labelSelector:
+                matchLabels:
+                  {{- include "cactusfs.selector" $root | nindent 18 }}
+                  cactusfs.io/voter: "true"
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: {{ $root.Values.spread.topologyKey }}
+                labelSelector:
+                  matchLabels:
+                    {{- include "cactusfs.selector" $root | nindent 20 }}
+                    cactusfs.io/voter: "true"
+          {{- end }}
+      {{- end }}
       containers:
         - name: cactusfs
-          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          image: {{ include "cactusfs.image" $root | quote }}
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           args: ["server"]
           securityContext:

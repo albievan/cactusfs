@@ -8,16 +8,20 @@ image:
   repository: cactusfs
   # The chart's appVersion when empty.
   tag: ""
+  # A digest (sha256:...) to run exactly that image; it wins over the tag.
+  digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
 # The domain of the cluster's DNS.
 clusterDomain: cluster.local
 
-# Pools of nodes. A node is named <release>-<pool>-<index>; that name is its
-# node ID, the name in its certificate, and the name of its Secret below.
-# roles: empty for all roles (the node votes in the metadata group), or a
-# list without "meta" for a node that stores and serves but does not vote.
+# Pools of nodes. A node is named <release>-<pool>-<index>, with the name
+# of the Helm release as it is; that name is its node ID, the one name in its
+# certificate, and the name of its Secret below.
+# roles: empty for all roles (the node votes in the metadata group), or names
+# separated by commas, without "meta", for a node that stores and serves but
+# does not vote.
 # Across all pools 3 or 5 nodes must vote, and at least 4 must store - or
 # exactly one node in all, which is a standalone deployment.
 pools:
@@ -100,15 +104,23 @@ s3:
   domain: ""
   region: us-east-1
 
+# The Service of the S3 API, named after the release. ClusterIP by default:
+# how it is published is the operator's choice.
 service:
-  # The Service clients use: S3 on 9000; admin API, Swagger UI and console on
-  # 9001. ClusterIP by default: how it is published is the operator's choice.
   type: ClusterIP
-  s3Port: 9000
-  adminPort: 9001
+  port: 9000
   # Only with type NodePort or LoadBalancer.
-  s3NodePort: null
-  adminNodePort: null
+  nodePort: null
+  annotations: {}
+
+# The Service of the management API, Swagger UI and the console, named
+# <release>-admin: published apart from S3, and by default not at all. A new
+# deployment has the console user admin with the password admin (ADR-0014):
+# delete it or change its password before this Service is opened to anybody.
+adminService:
+  type: ClusterIP
+  port: 9001
+  nodePort: null
   annotations: {}
 
 resources:
@@ -147,16 +159,23 @@ podLabels: {}
 # Default deny, with the exceptions a cluster needs.
 networkPolicy:
   enabled: true
-  # Who may reach the S3 and admin ports: a list of NetworkPolicy peers
-  # (podSelector, namespaceSelector, ipBlock). Empty: nobody - name your
-  # clients, your ingress controller's namespace, or a network.
+  # Who may reach the S3 port: a list of NetworkPolicy peers (podSelector,
+  # namespaceSelector, ipBlock). Empty: nobody - name your clients, your
+  # ingress controller's namespace, or a network.
   clientsFrom: []
+  # Who may reach the admin port, in the same form. Empty: nobody.
+  adminFrom: []
   # Where the pods may ask for names.
   dns:
     - namespaceSelector:
         matchLabels: {kubernetes.io/metadata.name: kube-system}
       podSelector:
         matchLabels: {k8s-app: kube-dns}
-  # What else the pods may reach: Vault, a collector of traces.
-  #   - {cidr: 10.0.0.5/32, port: 8200}
+  # What else the pods may reach - Vault, a collector of traces: peers in
+  # the same form, and ports. With kms.type=vault this must say where Vault
+  # is, or the nodes could not open their keys.
+  #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+  #     ports: [8200]
+  #   - to: [{ipBlock: {cidr: 10.0.0.5/32}}]
+  #     ports: [8200]
   egressTo: []

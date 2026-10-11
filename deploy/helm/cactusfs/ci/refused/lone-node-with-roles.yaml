@@ -1,0 +1,4 @@
+# expect: a node on its own has every role
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+pools:
+  - {name: node, replicas: 1, roles: "gateway,storage"}

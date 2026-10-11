@@ -1,0 +1,5 @@
+# expect: dev.localKMS=true
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+kms:
+  type: local
+  local: {keyFileSecret: k, passphraseSecret: p}

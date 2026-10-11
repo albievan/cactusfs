@@ -3,3 +3,7 @@ secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
 kms:
   type: vault
   vault: {addr: "https://vault.example.test:8200", key: cactusfs, tokenSecret: cactusfs-vault-token}
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]

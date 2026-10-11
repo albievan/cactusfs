@@ -1,0 +1,5 @@
+# expect: lower-case letters, digits and hyphens
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+pools:
+  - {name: Meta_A, replicas: 3, roles: ""}
+  - {name: data, replicas: 1, roles: "gateway,storage"}

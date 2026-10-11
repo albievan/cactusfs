@@ -1,8 +1,8 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
 # Nothing reaches the pods and the pods reach nothing, except what is listed
-# here: each other on the node ports; whoever the operator names, on the S3
-# and admin ports; DNS; and the addresses the operator names (Vault, a
+# here: each other on the node ports; whoever the operator names for S3, and
+# whoever for the admin port, each apart; DNS; and the addresses the operator names (Vault, a
 # collector of traces). Probes come from the kubelet on the pod's own
 # machine, which a NetworkPolicy does not govern.
 apiVersion: networking.k8s.io/v1
@@ -27,6 +27,10 @@ spec:
     - from: {{- toYaml . | nindent 8 }}
       ports:
         - {protocol: TCP, port: 9000}
+    {{- end }}
+    {{- with .Values.networkPolicy.adminFrom }}
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
         - {protocol: TCP, port: 9001}
     {{- end }}
   egress:
@@ -45,9 +49,10 @@ spec:
         - {protocol: TCP, port: 53}
     {{- end }}
     {{- range .Values.networkPolicy.egressTo }}
-    - to:
-        - ipBlock: {cidr: {{ .cidr | quote }}}
+    - to: {{- toYaml .to | nindent 8 }}
       ports:
-        - {protocol: TCP, port: {{ .port }}}
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ . }}}
+        {{- end }}
     {{- end }}
 {{- end }}

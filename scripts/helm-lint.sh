@@ -26,16 +26,23 @@ for values in "$CHART"/ci/*.yaml; do
 	helm template cactusfs "$CHART" -n cactusfs -f "$values" >/dev/null
 	echo "helm-lint: $(basename "$values") renders"
 done
-# And refuses what must not be deployed.
-refused() {
-	if helm template cactusfs "$CHART" "$@" >/dev/null 2>&1; then
-		echo "helm-lint: FAIL - rendered with $*" >&2
+# And refuses what must not be deployed - for the reason it should: each
+# file of ci/refused is laid over the cluster's values and names, in its first
+# line, words of the refusal it must be met with.
+for values in "$CHART"/ci/refused/*.yaml; do
+	expect=$(sed -n '1s/^# expect: //p' "$values")
+	[ -n "$expect" ] || { echo "helm-lint: FAIL - $values does not say what to expect" >&2; exit 1; }
+	if out=$(helm template cactusfs "$CHART" -n cactusfs -f "$CHART/ci/cluster-values.yaml" -f "$values" 2>&1); then
+		echo "helm-lint: FAIL - rendered with $(basename "$values")" >&2
 		exit 1
 	fi
-}
-refused
-refused -f "$CHART/ci/cluster-values.yaml" --set 'pools[0].replicas=4'
-refused -f "$CHART/ci/cluster-values.yaml" --set 'pools[1].replicas=0'
-refused -f "$CHART/ci/cluster-values.yaml" --set kms.type=local,kms.local.keyFileSecret=k,kms.local.passphraseSecret=p
-refused -f "$CHART/ci/cluster-values.yaml" --set secrets.tls=
+	case $out in
+	*"$expect"*) echo "helm-lint: $(basename "$values") refused" ;;
+	*)
+		echo "helm-lint: FAIL - $(basename "$values") was refused, but not for the reason it names:" >&2
+		echo "$out" >&2
+		exit 1
+		;;
+	esac
+done
 echo "helm-lint: PASS"

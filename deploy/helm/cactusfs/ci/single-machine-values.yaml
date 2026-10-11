@@ -8,4 +8,6 @@ drives: {count: 2, size: 10Gi}
 metadata: {size: 2Gi}
 localVolumes: {enabled: true, basePath: /srv/cactusfs, nodeName: machine-1}
 spread: {whenUnsatisfiable: ScheduleAnyway}
-service: {type: NodePort, s3NodePort: 30900, adminNodePort: 30901}
+service: {type: NodePort, nodePort: 30900}
+networkPolicy:
+  clientsFrom: [{ipBlock: {cidr: 192.0.2.0/24}}]

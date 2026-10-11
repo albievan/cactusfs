@@ -1,0 +1,5 @@
+# expect: is not a role
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+pools:
+  - {name: meta, replicas: 3, roles: ""}
+  - {name: data, replicas: 1, roles: "gateway,storage,cache"}

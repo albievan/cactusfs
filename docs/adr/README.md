@@ -50,3 +50,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |
 | [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted |
 | [0014](0014-default-console-user.md) | A default console user | accepted |
+| [0015](0015-helm-chart.md) | The Helm chart: a StatefulSet for every node | accepted |

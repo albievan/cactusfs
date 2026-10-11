@@ -1,0 +1,3 @@
+# expect: say where Vault is
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+networkPolicy: {egressTo: []}

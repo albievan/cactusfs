@@ -1,0 +1,5 @@
+# expect: a cluster has at least 4
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+pools:
+  - {name: meta, replicas: 3, roles: ""}
+  - {name: gw, replicas: 1, roles: "gateway"}
