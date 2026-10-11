@@ -1,0 +1,9 @@
+{
+  "magic": "cactusfs-drive",
+  "format_version": 1,
+  "drive_id": "b6092e806a366a3f11fd89324d65283d",
+  "created_at": "2026-10-11T22:44:16.327439Z",
+  "cluster_id": "292b3117fedbcae487cbf0c8b42a3b78",
+  "node_id": null,
+  "set": null
+}

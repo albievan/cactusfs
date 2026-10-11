@@ -7,6 +7,7 @@ run:
   # Lint the code behind every build tag the repository uses.
   build-tags:
     - integration
+    - fixturegen
     - s3compat
     - s3tools
     - chaos
