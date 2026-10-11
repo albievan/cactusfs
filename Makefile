@@ -75,10 +75,13 @@ EXE := .exe
 endif
 
 # On a machine that is shared, the builder can be held to a part of it:
-#   make check BUILDER_LIMITS=--cpus=4,--memory=6g GOFLAGS=-p=2
-# The limits are engine options, separated by commas. GOFLAGS, GOMAXPROCS and
-# GOMEMLIMIT of the caller reach the builder.
+#   make check BUILDER_LIMITS=--cpus=4,--memory=6g GO_P=2
+# The limits are engine options, separated by commas (so none of them may
+# hold a comma: write a range as 0-3). GO_P is how many packages Go builds and
+# tests at once, and how many threads it runs. Nothing else of the caller's Go
+# settings reaches the builder: GOFLAGS could narrow what the gates test.
 BUILDER_LIMITS ?=
+GO_P ?=
 comma := ,
 
 # The engine socket is passed through for targets that build images and, later,
@@ -97,7 +100,7 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-e VERSION=$(VERSION) -e IMAGE=$(IMAGE) \
 	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
 	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE \
-	-e GOFLAGS -e GOMAXPROCS -e GOMEMLIMIT
+	$(if $(GO_P),-e GOFLAGS=-p=$(GO_P) -e GOMAXPROCS=$(GO_P))
 
 builder:
 	@echo "builder: $(BUILDER_IMAGE) ($(ENGINE))"

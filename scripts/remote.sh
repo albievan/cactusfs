@@ -20,11 +20,17 @@ dir=${REMOTE_DIR:-cactusfs-src}
 # shell: only what cannot mean anything to a shell is let through.
 plain() {
 	case $1 in
-	*[!A-Za-z0-9_./=:@+,-]* | '') return 1 ;;
+	*[!A-Za-z0-9_./=:@+,-]* | '' | -*) return 1 ;;
 	esac
 }
 for arg in "$@" "$dir" "$REMOTE"; do
-	plain "$arg" || { echo "remote: '$arg' has characters this script does not pass to another machine" >&2; exit 2; }
+	# A value of a make variable may begin with a hyphen (an engine
+	# option); a target, a name, a host and a directory may not.
+	case $arg in
+	*=*) name=${arg%%=*} value=${arg#*=} ;;
+	*) name=$arg value=x ;;
+	esac
+	plain "$name" && { [ -z "${value#-}" ] || plain "x$value"; } || { echo "remote: '$arg' has characters this script does not pass to another machine" >&2; exit 2; }
 done
 case $dir in
 / | . | .. | */.. | */. | /root | /home | /etc* | /usr* | /var | /bin* | /boot*)
@@ -43,7 +49,12 @@ trap 'rm -rf "$work"' EXIT
 #    it: a bundle of HEAD.
 git bundle create -q "$work/head.bundle" HEAD
 # 2. The working tree as git sees it - tracked and untracked, not what is
-#    ignored - less the files that are tracked and gone.
+#    ignored - less the files that are tracked and gone. What is not
+#    committed is said, so that nobody takes a green run for a judgement of
+#    the commit alone.
+untracked=$(git ls-files -o --exclude-standard | wc -l | tr -d ' ')
+changed=$(git status --porcelain | wc -l | tr -d ' ')
+echo "remote: commit $head with $changed uncommitted changes, $untracked of them files git does not track"
 git ls-files -d -z >"$work/deleted"
 git ls-files -co --exclude-standard -z | python3 -c '
 import sys
@@ -75,10 +86,10 @@ ssh "$REMOTE" "set -e; cd '$dir'
 	git fetch -q .git/head.bundle HEAD
 	git checkout -q -f --detach $head
 	git clean -q -fd
+	while IFS= read -r gone; do [ -z \"\$gone\" ] || rm -rf -- \"\$gone\"; done <.git/deleted.txt
 	tar -xf .git/tree.tar
-	while IFS= read -r gone; do [ -z \"\$gone\" ] || rm -f -- \"\$gone\"; done <.git/deleted.txt
 	rm -f .git/head.bundle .git/tree.tar .git/deleted.txt $run.status
-	nohup sh -c 'make $*; echo \$? >$run.status; rmdir $run.lock' >$run.$id.log 2>&1 </dev/null &
+	nohup sh -c 'make $*; echo \$? >$run.status.tmp; mv $run.status.tmp $run.status; rmdir $run.lock' >$run.$id.log 2>&1 </dev/null &
 	echo \$! >$run.pid"
 
 # The target runs detached from any connection, which may not outlive it;
@@ -89,12 +100,14 @@ while :; do
 	sleep 10
 	# One connection a round: how much the log holds, that much of it from
 	# where the last round ended, and how the run stands.
-	if ! out=$(ssh -o ConnectTimeout=20 "$REMOTE" "cd '$dir'
-		size=\$(wc -c <$run.$id.log | tr -d ' ')
-		head -c \"\$size\" $run.$id.log | tail -c +$((seen + 1))
+	# The state is read before the log is measured, so that the end of the
+	# log of a run that has just ended is not missed.
+	if ! out=$(ssh -o ConnectTimeout=20 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$REMOTE" "cd '$dir'
 		if [ -e $run.status ]; then state=\$(cat $run.status)
 		elif kill -0 \"\$(cat $run.pid)\" 2>/dev/null; then state=running
 		else state=lost; fi
+		size=\$(wc -c <$run.$id.log | tr -d ' ')
+		head -c \"\$size\" $run.$id.log | tail -c +$((seen + 1))
 		printf '\n%s %s\n' \"\$size\" \"\$state\""); then
 		failures=$((failures + 1))
 		[ "$failures" -lt 30 ] || { echo "remote: no connection to $REMOTE for five minutes; the run may still be going" >&2; exit 1; }
