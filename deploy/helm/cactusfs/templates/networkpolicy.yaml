@@ -1,0 +1,53 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
+# Nothing reaches the pods and the pods reach nothing, except what is listed
+# here: each other on the node ports; whoever the operator names, on the S3
+# and admin ports; DNS; and the addresses the operator names (Vault, a
+# collector of traces). Probes come from the kubelet on the pod's own
+# machine, which a NetworkPolicy does not govern.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cactusfs.fullname" . }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "cactusfs.selector" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    {{- if gt (len $nodes) 1 }}
+    - from:
+        - podSelector:
+            matchLabels: {{- include "cactusfs.selector" . | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 9002}
+        - {protocol: TCP, port: 9003}
+    {{- end }}
+    {{- with .Values.networkPolicy.clientsFrom }}
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 9000}
+        - {protocol: TCP, port: 9001}
+    {{- end }}
+  egress:
+    {{- if gt (len $nodes) 1 }}
+    - to:
+        - podSelector:
+            matchLabels: {{- include "cactusfs.selector" . | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: 9002}
+        - {protocol: TCP, port: 9003}
+    {{- end }}
+    {{- with .Values.networkPolicy.dns }}
+    - to: {{- toYaml . | nindent 8 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- end }}
+    {{- range .Values.networkPolicy.egressTo }}
+    - to:
+        - ipBlock: {cidr: {{ .cidr | quote }}}
+      ports:
+        - {protocol: TCP, port: {{ .port }}}
+    {{- end }}
+{{- end }}

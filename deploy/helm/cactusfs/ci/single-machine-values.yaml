@@ -1,0 +1,11 @@
+# A development cluster on the disks of one machine.
+secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
+kms:
+  type: local
+  local: {keyFileSecret: cactusfs-kms, passphraseSecret: cactusfs-kms-passphrase}
+dev: {localKMS: true}
+drives: {count: 2, size: 10Gi}
+metadata: {size: 2Gi}
+localVolumes: {enabled: true, basePath: /srv/cactusfs, nodeName: machine-1}
+spread: {whenUnsatisfiable: ScheduleAnyway}
+service: {type: NodePort, s3NodePort: 30900, adminNodePort: 30901}

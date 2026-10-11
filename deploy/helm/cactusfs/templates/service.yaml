@@ -1,0 +1,44 @@
+{{- include "cactusfs.validate" . -}}
+{{- $full := include "cactusfs.fullname" . -}}
+# How the nodes find each other: a name per pod, there before the pod is
+# ready - a node must reach its peers in order to become ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-nodes
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {{- include "cactusfs.selector" . | nindent 4 }}
+  ports:
+    - {name: rpc, port: 9002, targetPort: rpc}
+    - {name: raft, port: 9003, targetPort: raft}
+---
+# What clients use: the nodes with the gateway role that are ready.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "cactusfs.selector" . | nindent 4 }}
+    cactusfs.io/gateway: "true"
+  ports:
+    - name: s3
+      port: {{ .Values.service.s3Port }}
+      targetPort: s3
+      {{- if and .Values.service.s3NodePort (ne .Values.service.type "ClusterIP") }}
+      nodePort: {{ .Values.service.s3NodePort }}
+      {{- end }}
+    - name: admin
+      port: {{ .Values.service.adminPort }}
+      targetPort: admin
+      {{- if and .Values.service.adminNodePort (ne .Values.service.type "ClusterIP") }}
+      nodePort: {{ .Values.service.adminNodePort }}
+      {{- end }}

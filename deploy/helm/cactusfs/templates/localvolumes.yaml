@@ -1,0 +1,48 @@
+{{- if .Values.localVolumes.enabled }}
+{{- $root := . -}}
+{{- $full := include "cactusfs.fullname" . -}}
+{{- $class := include "cactusfs.storageClass" . }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $class }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+{{- range include "cactusfs.nodes" . | fromJsonArray }}
+{{- $id := .id -}}
+{{- $pool := index $root.Values.pools (int .pool) -}}
+{{- $volumes := list (dict "name" "meta" "size" $root.Values.metadata.size) -}}
+{{- if include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "storage") -}}
+{{- range $d := until (int $root.Values.drives.count) -}}
+{{- $volumes = append $volumes (dict "name" (printf "data%d" (add $d 1)) "size" $root.Values.drives.size) -}}
+{{- end -}}
+{{- end -}}
+{{- range $volumes }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ $root.Release.Namespace }}-{{ $id }}-{{ .name }}
+  labels: {{- include "cactusfs.labels" $root | nindent 4 }}
+spec:
+  capacity: {storage: {{ .size | quote }}}
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ $class }}
+  volumeMode: Filesystem
+  # For this node's claim, and no other.
+  claimRef:
+    namespace: {{ $root.Release.Namespace }}
+    name: {{ .name }}-{{ $id }}-0
+  local:
+    path: {{ $root.Values.localVolumes.basePath }}/{{ $id }}/{{ .name }}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [{{ $root.Values.localVolumes.nodeName | quote }}]}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,7 @@
+# Five nodes, all voters.
+pools:
+  - {name: node, replicas: 5, roles: ""}
+secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
+kms:
+  type: vault
+  vault: {addr: "https://vault.example.test:8200", key: cactusfs, tokenSecret: cactusfs-vault-token}

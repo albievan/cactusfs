@@ -1,0 +1,162 @@
+# CactusFS on Kubernetes.
+#
+# A cluster is a set of nodes in pools. Every node is a StatefulSet of one
+# pod: a node has an identity of its own - its ID, its certificate and key,
+# its drives - and keeps it for life.
+
+image:
+  repository: cactusfs
+  # The chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The domain of the cluster's DNS.
+clusterDomain: cluster.local
+
+# Pools of nodes. A node is named <release>-<pool>-<index>; that name is its
+# node ID, the name in its certificate, and the name of its Secret below.
+# roles: empty for all roles (the node votes in the metadata group), or a
+# list without "meta" for a node that stores and serves but does not vote.
+# Across all pools 3 or 5 nodes must vote, and at least 4 must store - or
+# exactly one node in all, which is a standalone deployment.
+pools:
+  - name: meta
+    replicas: 3
+    roles: ""
+    # region, zone, rack: where the pool's nodes are, for the placement of
+    # shards. Leave empty where there is nothing to tell apart.
+    topology: {}
+    nodeSelector: {}
+    tolerations: []
+  - name: data
+    replicas: 1
+    roles: gateway,storage,console
+    topology: {}
+    nodeSelector: {}
+    tolerations: []
+
+# Drives of every node that stores, and the volume of its metadata.
+drives:
+  count: 2
+  size: 100Gi
+metadata:
+  size: 10Gi
+# The storage class of the claims. Empty: the cluster's default. The chart
+# depends on no particular driver.
+storageClassName: ""
+
+# Volumes on the disks of one named machine, for a cluster that has no
+# storage driver to rely on - a single-machine k3s, a test bench. The
+# directories <basePath>/<node ID>/<volume> must exist and belong to the
+# user the pods run as. Not for production: every node's drives are then on
+# one machine.
+localVolumes:
+  enabled: false
+  basePath: ""
+  nodeName: ""
+
+# --- secrets: the chart makes none, and starts nothing without them ---------
+secrets:
+  # Root credentials: a Secret with the keys access-key and secret-key.
+  root: ""
+  # The certificate of the S3 and admin listeners: a kubernetes.io/tls Secret.
+  tls: ""
+  # The CA of node certificates: a Secret with the key ca.crt.
+  nodeCA: ""
+  # Each node's certificate and key: one kubernetes.io/tls Secret per node,
+  # named <node ID><nodeTLSSuffix>, whose certificate names the node ID. A
+  # pod mounts its own and no other. cert-manager can issue them; nothing
+  # here requires it.
+  nodeTLSSuffix: -node-tls
+
+kms:
+  # vault: HashiCorp Vault Transit - what a cluster uses in production.
+  # local: a sealed key file. For one node; for more only with dev.localKMS.
+  type: vault
+  vault:
+    addr: ""
+    transitMount: transit
+    key: ""
+    namespace: ""
+    # A Secret with the key token, mounted as a file. A Vault agent that
+    # writes the same file can take its place.
+    tokenSecret: ""
+    # Optional: a Secret with the key ca.crt, when Vault's CA is not public.
+    caSecret: ""
+  local:
+    # A Secret with the key kms.json (made by "cactusfs dev-init").
+    keyFileSecret: ""
+    # A Secret with the key passphrase.
+    passphraseSecret: ""
+
+dev:
+  # Lets a cluster of several nodes share one sealed local KMS key file. A
+  # development arrangement: every node can then open every key.
+  localKMS: false
+
+s3:
+  # The domain of virtual-hosted-style requests; empty for path-style only.
+  domain: ""
+  region: us-east-1
+
+service:
+  # The Service clients use: S3 on 9000; admin API, Swagger UI and console on
+  # 9001. ClusterIP by default: how it is published is the operator's choice.
+  type: ClusterIP
+  s3Port: 9000
+  adminPort: 9001
+  # Only with type NodePort or LoadBalancer.
+  s3NodePort: null
+  adminNodePort: null
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 4Gi
+
+probes:
+  periodSeconds: 5
+  failureThreshold: 3
+  timeoutSeconds: 3
+  # How long a node may take to start answering at all.
+  startupSeconds: 120
+# How long in-flight requests get to finish after the drain delay.
+shutdownTimeoutSeconds: 30
+
+# Pods of the cluster are kept apart by this key. DoNotSchedule is what a
+# cluster of several machines wants; ScheduleAnyway lets them share one.
+spread:
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: DoNotSchedule
+
+podDisruptionBudget:
+  # One node at a time: a cluster reads and writes with one node away.
+  maxUnavailable: 1
+
+logLevel: info
+otlpEndpoint: ""
+extraEnv: []
+podAnnotations: {}
+podLabels: {}
+
+# Default deny, with the exceptions a cluster needs.
+networkPolicy:
+  enabled: true
+  # Who may reach the S3 and admin ports: a list of NetworkPolicy peers
+  # (podSelector, namespaceSelector, ipBlock). Empty: nobody - name your
+  # clients, your ingress controller's namespace, or a network.
+  clientsFrom: []
+  # Where the pods may ask for names.
+  dns:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+  # What else the pods may reach: Vault, a collector of traces.
+  #   - {cidr: 10.0.0.5/32, port: 8200}
+  egressTo: []

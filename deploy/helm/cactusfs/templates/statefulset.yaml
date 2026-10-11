@@ -1,0 +1,241 @@
+{{- $root := . -}}
+{{- $full := include "cactusfs.fullname" . -}}
+{{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
+{{- $clustered := gt (len $nodes) 1 -}}
+{{- $peers := list -}}
+{{- range $nodes -}}
+{{- $peers = append $peers (printf "%s=%s:9002" .id (include "cactusfs.host" (dict "id" .id "root" $root))) -}}
+{{- end -}}
+{{- $drain := include "cactusfs.drainSeconds" . | int -}}
+{{- $class := include "cactusfs.storageClass" . -}}
+{{- range $nodes }}
+{{- $id := .id -}}
+{{- $pool := index $root.Values.pools (int .pool) -}}
+{{- $stores := include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "storage") -}}
+{{- $gateway := include "cactusfs.hasRole" (dict "roles" $pool.roles "role" "gateway") -}}
+{{- $host := include "cactusfs.host" (dict "id" $id "root" $root) }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $id }}
+  labels:
+    {{- include "cactusfs.labels" $root | nindent 4 }}
+    cactusfs.io/pool: {{ $pool.name }}
+spec:
+  serviceName: {{ $full }}-nodes
+  # A node is one pod, for life.
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "cactusfs.selector" $root | nindent 6 }}
+      cactusfs.io/node: {{ $id }}
+  template:
+    metadata:
+      labels:
+        {{- include "cactusfs.labels" $root | nindent 8 }}
+        cactusfs.io/node: {{ $id }}
+        cactusfs.io/pool: {{ $pool.name }}
+        {{- if $gateway }}
+        cactusfs.io/gateway: "true"
+        {{- end }}
+        {{- with $root.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $root.Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ add $drain (int $root.Values.shutdownTimeoutSeconds) 10 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pool.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $pool.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $clustered }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: {{ $root.Values.spread.topologyKey }}
+          whenUnsatisfiable: {{ $root.Values.spread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels: {{- include "cactusfs.selector" $root | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: cactusfs
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          args: ["server"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - {name: s3, containerPort: 9000}
+            - {name: admin, containerPort: 9001}
+            - {name: rpc, containerPort: 9002}
+            - {name: raft, containerPort: 9003}
+          env:
+            - {name: CACTUSFS_NODE_ID, value: {{ $id | quote }}}
+            {{- with $pool.roles }}
+            - {name: CACTUSFS_ROLES, value: {{ . | replace " " "" | quote }}}
+            {{- end }}
+            {{- if $clustered }}
+            - {name: CACTUSFS_PEERS, value: {{ join "," $peers | quote }}}
+            - {name: CACTUSFS_ADVERTISE_RPC, value: "{{ $host }}:9002"}
+            - {name: CACTUSFS_ADVERTISE_RAFT, value: "{{ $host }}:9003"}
+            - {name: CACTUSFS_NODE_TLS_CA, value: /etc/cactusfs/node-ca/ca.crt}
+            - {name: CACTUSFS_NODE_TLS_CERT, value: /etc/cactusfs/node-tls/tls.crt}
+            - {name: CACTUSFS_NODE_TLS_KEY, value: /etc/cactusfs/node-tls/tls.key}
+            {{- end }}
+            - {name: CACTUSFS_META_DIR, value: /var/lib/cactusfs/meta}
+            {{- if $stores }}
+            - name: CACTUSFS_DATA
+              value: "{{- range $d := until (int $root.Values.drives.count) }}{{ if $d }},{{ end }}/var/lib/cactusfs/data{{ add $d 1 }}{{- end }}"
+            {{- end }}
+            - {name: CACTUSFS_TLS_CERT, value: /etc/cactusfs/tls/tls.crt}
+            - {name: CACTUSFS_TLS_KEY, value: /etc/cactusfs/tls/tls.key}
+            - {name: CACTUSFS_REGION, value: {{ $root.Values.s3.region | quote }}}
+            {{- with $root.Values.s3.domain }}
+            - {name: CACTUSFS_S3_DOMAIN, value: {{ . | quote }}}
+            {{- end }}
+            - {name: CACTUSFS_KMS, value: {{ $root.Values.kms.type | quote }}}
+            {{- if eq $root.Values.kms.type "vault" }}
+            - {name: CACTUSFS_VAULT_ADDR, value: {{ $root.Values.kms.vault.addr | quote }}}
+            - {name: CACTUSFS_VAULT_TRANSIT_MOUNT, value: {{ $root.Values.kms.vault.transitMount | quote }}}
+            - {name: CACTUSFS_VAULT_KEY, value: {{ $root.Values.kms.vault.key | quote }}}
+            - {name: CACTUSFS_VAULT_TOKEN_FILE, value: /etc/cactusfs/vault/token}
+            {{- with $root.Values.kms.vault.namespace }}
+            - {name: CACTUSFS_VAULT_NAMESPACE, value: {{ . | quote }}}
+            {{- end }}
+            {{- if $root.Values.kms.vault.caSecret }}
+            - {name: CACTUSFS_VAULT_CA_CERT, value: /etc/cactusfs/vault-ca/ca.crt}
+            {{- end }}
+            {{- else }}
+            - {name: CACTUSFS_KMS_KEY_FILE, value: /etc/cactusfs/kms/kms.json}
+            - {name: CACTUSFS_KMS_PASSPHRASE_FILE, value: /etc/cactusfs/kms-passphrase/passphrase}
+            {{- end }}
+            - name: CACTUSFS_ROOT_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: {{ $root.Values.secrets.root | quote }}, key: access-key}}
+            - name: CACTUSFS_ROOT_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: {{ $root.Values.secrets.root | quote }}, key: secret-key}}
+            {{- range $key, $name := dict "region" "CACTUSFS_TOPOLOGY_REGION" "zone" "CACTUSFS_TOPOLOGY_ZONE" "rack" "CACTUSFS_TOPOLOGY_RACK" }}
+            {{- with index ($pool.topology | default dict) $key }}
+            - {name: {{ $name }}, value: {{ . | quote }}}
+            {{- end }}
+            {{- end }}
+            # The machine the pod is on: shards are kept apart by it.
+            - name: CACTUSFS_TOPOLOGY_HOST
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            # Long enough that the readiness probe has failed, and the
+            # Service stopped sending, before the listeners close.
+            - {name: CACTUSFS_DRAIN_DELAY, value: "{{ $drain }}s"}
+            - {name: CACTUSFS_SHUTDOWN_TIMEOUT, value: "{{ $root.Values.shutdownTimeoutSeconds }}s"}
+            - {name: CACTUSFS_LOG_LEVEL, value: {{ $root.Values.logLevel | quote }}}
+            {{- with $root.Values.otlpEndpoint }}
+            - {name: CACTUSFS_OTLP_ENDPOINT, value: {{ . | quote }}}
+            {{- end }}
+            {{- with $root.Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # The listeners are open while the node waits for its peers
+          # (alive, not ready), so a waiting node is not restarted.
+          startupProbe:
+            httpGet: {path: /healthz, port: admin, scheme: HTTPS}
+            periodSeconds: 2
+            failureThreshold: {{ div (int $root.Values.probes.startupSeconds) 2 }}
+            timeoutSeconds: {{ $root.Values.probes.timeoutSeconds }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin, scheme: HTTPS}
+            periodSeconds: {{ $root.Values.probes.periodSeconds }}
+            failureThreshold: {{ mul 2 (int $root.Values.probes.failureThreshold) }}
+            timeoutSeconds: {{ $root.Values.probes.timeoutSeconds }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin, scheme: HTTPS}
+            periodSeconds: {{ $root.Values.probes.periodSeconds }}
+            failureThreshold: {{ $root.Values.probes.failureThreshold }}
+            timeoutSeconds: {{ $root.Values.probes.timeoutSeconds }}
+          resources: {{- toYaml $root.Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: meta, mountPath: /var/lib/cactusfs/meta}
+            {{- if $stores }}
+            {{- range $d := until (int $root.Values.drives.count) }}
+            - {name: data{{ add $d 1 }}, mountPath: /var/lib/cactusfs/data{{ add $d 1 }}}
+            {{- end }}
+            {{- end }}
+            - {name: tls, mountPath: /etc/cactusfs/tls, readOnly: true}
+            {{- if $clustered }}
+            - {name: node-ca, mountPath: /etc/cactusfs/node-ca, readOnly: true}
+            - {name: node-tls, mountPath: /etc/cactusfs/node-tls, readOnly: true}
+            {{- end }}
+            {{- if eq $root.Values.kms.type "vault" }}
+            - {name: vault-token, mountPath: /etc/cactusfs/vault, readOnly: true}
+            {{- if $root.Values.kms.vault.caSecret }}
+            - {name: vault-ca, mountPath: /etc/cactusfs/vault-ca, readOnly: true}
+            {{- end }}
+            {{- else }}
+            - {name: kms, mountPath: /etc/cactusfs/kms, readOnly: true}
+            - {name: kms-passphrase, mountPath: /etc/cactusfs/kms-passphrase, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: tls
+          secret: {secretName: {{ $root.Values.secrets.tls | quote }}, defaultMode: 0440}
+        {{- if $clustered }}
+        - name: node-ca
+          secret: {secretName: {{ $root.Values.secrets.nodeCA | quote }}, defaultMode: 0440, items: [{key: ca.crt, path: ca.crt}]}
+        # This node's key, and no other node's.
+        - name: node-tls
+          secret: {secretName: "{{ $id }}{{ $root.Values.secrets.nodeTLSSuffix }}", defaultMode: 0440}
+        {{- end }}
+        {{- if eq $root.Values.kms.type "vault" }}
+        - name: vault-token
+          secret: {secretName: {{ $root.Values.kms.vault.tokenSecret | quote }}, defaultMode: 0440, items: [{key: token, path: token}]}
+        {{- if $root.Values.kms.vault.caSecret }}
+        - name: vault-ca
+          secret: {secretName: {{ $root.Values.kms.vault.caSecret | quote }}, defaultMode: 0440, items: [{key: ca.crt, path: ca.crt}]}
+        {{- end }}
+        {{- else }}
+        - name: kms
+          secret: {secretName: {{ $root.Values.kms.local.keyFileSecret | quote }}, defaultMode: 0440, items: [{key: kms.json, path: kms.json}]}
+        - name: kms-passphrase
+          secret: {secretName: {{ $root.Values.kms.local.passphraseSecret | quote }}, defaultMode: 0440, items: [{key: passphrase, path: passphrase}]}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: meta
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $class }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ $root.Values.metadata.size | quote }}}}
+    {{- if $stores }}
+    {{- range $d := until (int $root.Values.drives.count) }}
+    - metadata:
+        name: data{{ add $d 1 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $class }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ $root.Values.drives.size | quote }}}}
+    {{- end }}
+    {{- end }}
+{{- end }}

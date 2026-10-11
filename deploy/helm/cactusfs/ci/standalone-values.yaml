@@ -1,0 +1,8 @@
+# One node with a sealed local key file.
+pools:
+  - {name: node, replicas: 1, roles: ""}
+drives: {count: 4, size: 10Gi}
+secrets: {root: cactusfs-root, tls: cactusfs-tls}
+kms:
+  type: local
+  local: {keyFileSecret: cactusfs-kms, passphraseSecret: cactusfs-kms-passphrase}

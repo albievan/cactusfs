@@ -1,0 +1,5 @@
+# Four nodes, three of them voters, keys in Vault: the shape of production.
+secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
+kms:
+  type: vault
+  vault: {addr: "https://vault.example.test:8200", key: cactusfs, tokenSecret: cactusfs-vault-token}

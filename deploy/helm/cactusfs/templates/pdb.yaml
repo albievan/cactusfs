@@ -1,0 +1,12 @@
+{{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
+{{- if gt (len $nodes) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cactusfs.fullname" . }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels: {{- include "cactusfs.selector" . | nindent 6 }}
+{{- end }}
