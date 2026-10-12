@@ -13,6 +13,7 @@ run:
     - s3tools
     - chaos
     - console
+    - k8s
 
 linters:
   default: none

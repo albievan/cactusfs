@@ -1,0 +1,33 @@
+# What "make test-k8s" lays over ci/single-machine-values.yaml of the chart
+# (test/k8s). The image's repository and tag, and the machine and directory of
+# the volumes, are given on the command line: they belong to one run.
+
+# The image is loaded into the cluster by the test; no registry has it.
+image:
+  pullPolicy: Never
+
+# Four nodes beside whatever else the test machine runs: 400m and 512Mi are
+# requested in all.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
+
+# A loaded machine starts four nodes slowly, and each waits for the others.
+probes:
+  startupSeconds: 300
+
+# S3 is open to every address: the test's client comes in through the
+# NodePort from an address of the container engine that is not known
+# beforehand, and the probe of the policy needs a port it is let into - the
+# control that tells a refusal by the policy from a probe that cannot connect
+# at all. Every address is written as its two halves: a policy controller
+# that keeps address blocks in kernel sets cannot hold a block of length 0.
+# The admin port stays closed to everybody, as the chart has it.
+networkPolicy:
+  clientsFrom:
+    - ipBlock: {cidr: 0.0.0.0/1}
+    - ipBlock: {cidr: 128.0.0.0/1}

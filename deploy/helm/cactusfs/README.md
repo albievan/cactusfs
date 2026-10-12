@@ -169,3 +169,8 @@ asserts what this document promises (the Services, the claims, the security cont
 the probes, the placement, every rule of the NetworkPolicy, the drain delay); and a
 render of every file of `ci/refused/`, which must fail with the words its first line
 names. A new value set in `ci/` is picked up by its name.
+
+`make test-k8s` (`test/k8s`) installs the chart on k3s in one privileged container, with
+`ci/single-machine-values.yaml` and the image the tree builds, in a namespace that enforces
+the `restricted` standard, and holds the running cluster to this document. It is a CI job of
+its own and no part of `make check`.

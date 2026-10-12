@@ -652,3 +652,9 @@ asynchronous bucket replication; one Raft quorum is never stretched across a WAN
 `make check` runs every gate in `CLAUDE.md` §5. `PLAN.md` ("Gates that have nothing to
 check yet") lists the gates whose subject a later milestone introduces and how each
 behaves until then.
+
+- `make test-k8s` (`test/k8s`, build tag `k8s`) is outside `make check` and a CI job of
+  its own, because k3s needs a privileged container: the chart installed on k3s with the
+  image built here - pods admitted as `restricted` and ready, an S3 round trip, an object
+  read with a node away and after a pod was deleted, ports 9001-9003 closed to a pod that
+  is not of the release.

@@ -42,6 +42,19 @@ jobs:
           persist-credentials: false
       - run: make test-chaos
 
+  # The Helm chart on k3s, with the image built here: admitted as restricted,
+  # ready, read with a node away, closed to pods that are not its own. A job
+  # of its own, and no part of make check: k3s needs a privileged container.
+  k8s:
+    name: make test-k8s
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make test-k8s
+
   # The Go-only path on every supported OS: no make, no container engine.
   unit:
     name: unit (${{ matrix.os }})

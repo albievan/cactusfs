@@ -41,7 +41,7 @@ endif
 
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
-	s3-compat-record test-chaos test-rolling vuln contracts licences web-install web-lock web-check \
+	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
 	web-build build build-all image helm-lint observability-check verify-clone tidy check
 
 .PHONY: help builder shell run up down clean $(BUILDER_TARGETS)
@@ -66,6 +66,7 @@ help:
 	@echo "  tidy           go mod tidy                web-lock    rewrite web/pnpm-lock.yaml"
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
 	@echo "  up / down      4-node compose cluster     test-chaos  fault injection"
+	@echo "  test-k8s       the Helm chart on k3s (a privileged container; not part of check)"
 	@echo "  clean          remove build output"
 
 ifndef CACTUSFS_IN_BUILDER
@@ -204,7 +205,7 @@ lint: web-build
 # With the console tag the built console is embedded, so it must be built.
 vet: web-build
 	go vet ./...
-	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade ./...
+	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade,k8s ./...
 	@echo "vet: PASS"
 
 test:
@@ -247,6 +248,14 @@ test-rolling:
 	CACTUSFS_TEST_IMAGE_SCHEMA3=cactusfs-test:schema3 go test -race -count=1 -timeout 40m \
 		-tags=integration,rollingupgrade -run 'TestRollingUpgradeFromSchema3ToSchema4' ./test/integration/
 	@echo "test-rolling: PASS"
+
+# The Helm chart on a real Kubernetes: k3s in one container, the chart
+# installed with the image this tree builds, in a namespace that enforces the
+# restricted Pod Security Standard. No part of `make check`: k3s needs a
+# privileged container, which a rootless engine does not give.
+test-k8s:
+	go test -count=1 -tags=k8s -timeout 30m ./test/k8s/...
+	@echo "test-k8s: PASS"
 
 vuln:
 	go tool govulncheck ./...
