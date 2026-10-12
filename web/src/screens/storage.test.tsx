@@ -396,15 +396,22 @@ describe('object browser', () => {
     expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(2);
   });
 
-  it('uploads several files at a time, each with a bar of its own, and begins no more after a refusal', async () => {
+  it('uploads several files at a time, each with a bar of its own, and tries every one of them', async () => {
     const stored: string[] = [];
+    let allowA = false;
+    let flaky = 2;
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
         json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false }),
       'PUT /buckets/photos/object': (call) => {
         const key = call.query.get('key') ?? '';
-        if (key.endsWith('a.txt')) {
-          return problem(403, 'Access denied', undefined, 'req-3');
+        if (key.endsWith('a.txt') && !allowA) {
+          return problem(403, 'Access denied', 'Not this one.', 'req-3');
+        }
+        // A node that is restarting says "not now" twice, then stores it.
+        if (key.endsWith('c.txt') && flaky > 0) {
+          flaky -= 1;
+          return problem(503, 'No metadata leader');
         }
         stored.push(key);
         return json(200, {
@@ -421,42 +428,57 @@ describe('object browser', () => {
     render(<ObjectsScreen bucket="photos" prefix="notes/" />);
     await screen.findByText('There is nothing here.');
 
-    const names = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt'];
+    const names = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt'];
     const files = names.map((name) => new NodeFile([name], name, { type: 'text/plain' }));
     fireEvent.change(screen.getByLabelText('File'), { target: { files } });
     // Several files: the field is the prefix they go under.
     expect((screen.getByLabelText('Upload under this prefix') as HTMLInputElement).value).toBe('notes/');
-    expect(screen.getByText(/5 files chosen/)).toBeDefined();
+    expect(screen.getByText(/6 files chosen/)).toBeDefined();
     fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
 
-    // Four are on their way at once, each with a request of its own. The
-    // first is refused: the three beside it finish, the fifth is not begun.
-    expect((await screen.findByRole('alert')).textContent).toContain('Access denied');
-    expect(api.callsTo('PUT', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual([
-      'notes/a.txt',
-      'notes/b.txt',
-      'notes/c.txt',
-      'notes/d.txt',
-    ]);
-    const progress = within(screen.getByRole('list', { name: 'Upload progress' }));
-    await waitFor(() => {
-      expect(progress.getAllByText('Stored')).toHaveLength(3);
-    });
+    // Every file is tried. One is refused, and that does not hold the others
+    // up; one meets a node that says "not now" and is sent again.
+    const progress = within(await screen.findByRole('list', { name: 'Upload progress' }));
+    await waitFor(
+      () => {
+        expect(progress.getAllByText('Stored')).toHaveLength(5);
+      },
+      { timeout: 5000 },
+    );
     expect(progress.getByText('Not stored')).toBeDefined();
-    expect(progress.getByText('Waiting')).toBeDefined();
-    // Each file has a bar of its own: full for what was stored, empty for
-    // what was never begun.
-    expect((screen.getByRole('progressbar', { name: 'Upload of notes/b.txt' }) as HTMLProgressElement).value).toBe(1);
-    expect((screen.getByRole('progressbar', { name: 'Upload of notes/e.txt' }) as HTMLProgressElement).value).toBe(0);
-    // The request of an upload carries what every changing request does.
-    const sent = api.callsTo('PUT', '/buckets/photos/object')[1];
-    expect(sent?.headers.get('Idempotency-Key')).not.toBeNull();
-    expect(sent?.headers.get('Content-Type')).toBe('text/plain');
-    expect(sent?.body).toBe('b.txt');
+    expect(screen.getByText('5 of 6 stored')).toBeDefined();
+    expect(screen.getByText(/1 not stored/)).toBeDefined();
+    // Why, beside the file it is about.
+    expect(progress.getByText('Access denied: Not this one.')).toBeDefined();
+    const puts = () => api.callsTo('PUT', '/buckets/photos/object');
+    expect(puts().filter((call) => call.query.get('key') === 'notes/a.txt')).toHaveLength(1);
+    // The attempts at one file carry one Idempotency-Key: stored once, whatever happened to an answer.
+    const attempts = puts().filter((call) => call.query.get('key') === 'notes/c.txt');
+    expect(attempts).toHaveLength(3);
+    expect(new Set(attempts.map((call) => call.headers.get('Idempotency-Key'))).size).toBe(1);
+    expect(new Set(puts().map((call) => call.headers.get('Idempotency-Key'))).size).toBe(6);
+    // Each file has a bar of its own, under its name.
+    const bar = screen.getByRole('progressbar', { name: 'Upload of notes/b.txt' }) as HTMLProgressElement;
+    expect(bar.value).toBe(1);
+    expect(bar.previousElementSibling?.textContent).toContain('notes/b.txt');
+    expect((screen.getByRole('progressbar', { name: 'Upload of notes/a.txt' }) as HTMLProgressElement).value).toBeLessThan(1);
+    const sentB = puts().find((call) => call.query.get('key') === 'notes/b.txt');
+    expect(sentB?.headers.get('Content-Type')).toBe('text/plain');
+    expect(sentB?.body).toBe('b.txt');
     // What was stored is listed.
     await waitFor(() => {
       expect(screen.getByLabelText('Select b.txt')).toBeDefined();
     });
+
+    // What failed, and only that, can be sent again.
+    allowA = true;
+    const before = puts().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry failed' }));
+    await waitFor(() => {
+      expect(screen.getByText('6 of 6 stored')).toBeDefined();
+    });
+    expect(puts().slice(before).map((call) => call.query.get('key'))).toEqual(['notes/a.txt']);
+    expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull();
   });
 
   it('keeps the objects in a table, whatever the width of the screen', async () => {

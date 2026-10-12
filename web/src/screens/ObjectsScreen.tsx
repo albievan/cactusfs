@@ -1,6 +1,13 @@
 import { useCallback, useState, type FormEvent } from 'react';
 
-import { api, objectDownloadUrl, unwrap, uploadObjectWithProgress, type ObjectMetadata } from '../api/client';
+import {
+  api,
+  ApiError,
+  objectDownloadUrl,
+  unwrap,
+  uploadObjectWithProgress,
+  type ObjectMetadata,
+} from '../api/client';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatBytes, formatTime } from '../ui/format';
@@ -20,12 +27,36 @@ interface ObjectsScreenProps {
 /** How many files are on their way at once. */
 const UPLOADS_AT_ONCE = 4;
 
+/** How often an upload is tried when it fails for a reason that may pass. */
+const UPLOAD_ATTEMPTS = 3;
+const UPLOAD_RETRY_MS = 400;
+
 /** One file of an upload and how far it is. */
 interface Upload {
   name: string;
   state: 'waiting' | 'sending' | 'stored' | 'failed';
   sent: number;
   total: number;
+  /** Why it was not stored, in the words of the API. */
+  reason?: string;
+}
+
+/** Whether a failed attempt is worth making again: the connection, or a server that says "not now". */
+function mayPass(error: unknown): boolean {
+  if (!(error instanceof ApiError)) {
+    return false;
+  }
+  const { status } = error.problem;
+  return status === 0 || status === 502 || status === 503 || status === 504;
+}
+
+function reasonOf(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.problem.detail === undefined || error.problem.detail === ''
+      ? error.problem.title
+      : `${error.problem.title}: ${error.problem.detail}`;
+  }
+  return error instanceof Error ? error.message : 'The upload failed';
 }
 
 const UPLOAD_ICON = {
@@ -73,61 +104,96 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   const [key, setKey] = useState('');
   // What became of each file of the last upload.
   const [uploads, setUploads] = useState<Upload[]>([]);
+  // What the last upload was asked to send, so that what failed can be sent again.
+  const [sent, setSent] = useState<{ file: File; key: string; index: number }[]>([]);
   // The keys ticked for deletion, of this page.
   const [chosen, setChosen] = useState<string[]>([]);
 
   const several = files.length > 1;
 
-  // Uploads the chosen files, a few at a time, each with a request of its
-  // own, as the API has it. After a refusal no further file is begun; those
-  // on their way finish, and what was stored stays stored.
-  const upload = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    if (files.length === 0) {
-      return;
-    }
-    const sending = files.map((file) => ({ file, key: several ? key + file.name : key }));
-    setUploads(sending.map(({ file, key: objectKey }) => ({ name: objectKey, state: 'waiting', sent: 0, total: file.size })));
+  // Uploads files, a few at a time, each with a request of its own, as the
+  // API has it. Every file is tried: one that fails does not hold the others
+  // up. An attempt that fails for a reason that may pass - the connection, a
+  // node that is restarting, no leader for a moment - is made again, with the
+  // same Idempotency-Key, so that nothing is stored twice.
+  const send = (sending: { file: File; key: string; index: number }[], allStored?: () => void) => {
     const update = (index: number, change: Partial<Upload>) => {
       setUploads((list) => list.map((entry, i) => (i === index ? { ...entry, ...change } : entry)));
     };
     void action
       .run(async () => {
         let next = 0;
-        let refusal: unknown = null;
+        let failures = 0;
+        let firstFailure: unknown = null;
         const worker = async () => {
-          while (refusal === null && next < sending.length) {
-            const index = next;
+          while (next < sending.length) {
+            const item = sending[next];
             next += 1;
-            const item = sending[index];
             if (item === undefined) {
               return;
             }
-            update(index, { state: 'sending' });
-            try {
-              await uploadObjectWithProgress(bucket, item.key, item.file, (sent, total) => {
-                update(index, { sent, total });
-              });
-              update(index, { state: 'stored', sent: item.file.size, total: item.file.size });
-            } catch (error) {
-              update(index, { state: 'failed' });
-              refusal ??= error;
+            const idempotencyKey = crypto.randomUUID();
+            update(item.index, { state: 'sending', sent: 0, reason: undefined });
+            for (let attempt = 1; ; attempt += 1) {
+              try {
+                await uploadObjectWithProgress(
+                  bucket,
+                  item.key,
+                  item.file,
+                  (sent, total) => {
+                    update(item.index, { sent, total });
+                  },
+                  idempotencyKey,
+                );
+                update(item.index, { state: 'stored', sent: item.file.size, total: item.file.size });
+                break;
+              } catch (error) {
+                if (attempt < UPLOAD_ATTEMPTS && mayPass(error)) {
+                  await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_MS * attempt));
+                  continue;
+                }
+                failures += 1;
+                firstFailure ??= error;
+                update(item.index, { state: 'failed', reason: reasonOf(error) });
+                break;
+              }
             }
           }
         };
         await Promise.all(Array.from({ length: Math.min(UPLOADS_AT_ONCE, sending.length) }, worker));
-        if (refusal !== null) {
-          throw refusal instanceof Error ? refusal : new Error('The upload failed');
+        if (failures > 0) {
+          throw firstFailure instanceof Error ? firstFailure : new Error('The upload failed');
         }
-        form.reset();
-        setFiles([]);
-        setKey('');
+        allStored?.();
       })
       .then(() => {
         listing.reload();
       });
   };
+
+  const upload = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (files.length === 0) {
+      return;
+    }
+    const sending = files.map((file, index) => ({ file, key: several ? key + file.name : key, index }));
+    setSent(sending);
+    setUploads(sending.map(({ file, key: objectKey }) => ({ name: objectKey, state: 'waiting', sent: 0, total: file.size })));
+    send(sending, () => {
+      form.reset();
+      setFiles([]);
+      setKey('');
+    });
+  };
+
+  // Sends again what was not stored, and only that.
+  const retryFailed = () => {
+    send(sent.filter((item) => uploads[item.index]?.state === 'failed'));
+  };
+
+  const storedCount = uploads.filter((entry) => entry.state === 'stored').length;
+  const failedCount = uploads.filter((entry) => entry.state === 'failed').length;
 
   const remove = (objectKey: string) => {
     void action.run(async () => {
@@ -240,25 +306,41 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           </p>
         ) : null}
         {uploads.length > 0 ? (
-          <ul className="uploads" aria-label="Upload progress">
-            {uploads.map((entry) => (
-              <li key={entry.name} className={`upload upload-${entry.state}`}>
-                <i className={`bi ${UPLOAD_ICON[entry.state]}`} aria-hidden="true" />
-                <span className="upload-name">{entry.name}</span>
-                <progress
-                  className="upload-bar"
-                  aria-label={`Upload of ${entry.name}`}
-                  value={entry.state === 'stored' ? 1 : entry.total > 0 ? entry.sent / entry.total : 0}
-                  max={1}
-                />
-                <span className="upload-state">
-                  {entry.state === 'sending' && entry.total > 0
-                    ? `${String(Math.floor((entry.sent / entry.total) * 100))} %`
-                    : UPLOAD_WORD[entry.state]}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <>
+            <p className="uploads-summary" role="status">
+              <strong>
+                {storedCount} of {uploads.length} stored
+              </strong>
+              {failedCount > 0 ? <span className="uploads-failed"> · {failedCount} not stored</span> : null}
+              {failedCount > 0 && !action.busy ? (
+                <button type="button" className="btn btn-outline-danger btn-sm" onClick={retryFailed}>
+                  <i className="bi bi-arrow-repeat" aria-hidden="true" /> Retry failed
+                </button>
+              ) : null}
+            </p>
+            <ul className="uploads" aria-label="Upload progress">
+              {uploads.map((entry) => (
+                <li key={entry.name} className={`upload upload-${entry.state}`}>
+                  <div className="upload-head">
+                    <i className={`bi ${UPLOAD_ICON[entry.state]}`} aria-hidden="true" />
+                    <span className="upload-name">{entry.name}</span>
+                    <span className="upload-state">
+                      {entry.state === 'sending' && entry.total > 0
+                        ? `${String(Math.floor((entry.sent / entry.total) * 100))} %`
+                        : UPLOAD_WORD[entry.state]}
+                    </span>
+                  </div>
+                  <progress
+                    className="upload-bar"
+                    aria-label={`Upload of ${entry.name}`}
+                    value={entry.state === 'stored' ? 1 : entry.total > 0 ? entry.sent / entry.total : 0}
+                    max={1}
+                  />
+                  {entry.reason === undefined ? null : <p className="upload-reason">{entry.reason}</p>}
+                </li>
+              ))}
+            </ul>
+          </>
         ) : null}
       </section>
 

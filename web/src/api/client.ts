@@ -175,13 +175,15 @@ export type UploadProgress = (sent: number, total: number) => void;
  * much of a request body has been sent, so this one call is made with
  * XMLHttpRequest - to the same operation of the same contract, with what the
  * session middleware adds to every other call: the CSRF token, an
- * Idempotency-Key, the session cookie, and the report of a 401.
+ * Idempotency-Key, the session cookie, and the report of a 401. A failure of
+ * the connection is an ApiError of status 0.
  */
 export function uploadObjectWithProgress(
   bucket: string,
   key: string,
   file: File,
   onProgress: UploadProgress,
+  idempotencyKey: string = crypto.randomUUID(),
 ): Promise<ObjectMetadata> {
   const path: keyof paths = '/buckets/{bucket}/object';
   const query = new URLSearchParams({ key });
@@ -191,7 +193,9 @@ export function uploadObjectWithProgress(
     request.open('PUT', url);
     request.responseType = 'text';
     request.setRequestHeader('Content-Type', file.type === '' ? 'application/octet-stream' : file.type);
-    request.setRequestHeader('Idempotency-Key', crypto.randomUUID());
+    // The same key for every attempt at the same upload: an attempt that
+    // was stored, though its answer was lost, is then not stored twice.
+    request.setRequestHeader('Idempotency-Key', idempotencyKey);
     const token = readCsrfToken();
     if (token !== null) {
       request.setRequestHeader('X-CSRF-Token', token);
