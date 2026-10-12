@@ -42,9 +42,9 @@ endif
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
-	web-build build build-all image helm-lint observability-check verify-clone tidy check
+	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy check
 
-.PHONY: help builder shell run up down clean $(BUILDER_TARGETS)
+.PHONY: help builder shell run up down clean release $(BUILDER_TARGETS)
 
 help:
 	@echo "CactusFS make targets (run inside the builder image; ENGINE=docker|podman):"
@@ -59,6 +59,9 @@ help:
 	@echo "  build          cactusfs for this OS -> bin/"
 	@echo "  build-all      six OS/arch targets -> dist/"
 	@echo "  image          container images for linux/amd64 and linux/arm64 (< 60 MB)"
+	@echo "  sbom           SPDX SBOMs of both images and of the console's packages -> dist/sbom/ (after image)"
+	@echo "  sign-verify    sign, attest and verify against a throw-away registry; what must be refused, is"
+	@echo "  release        publish a release: the release workflow only, on a tag v<version>; refuses anywhere else"
 	@echo "  helm-lint      lint and render the Helm chart"
 	@echo "  observability-check  alerting rules and their tests, dashboards, the chart's monitoring templates"
 	@echo "  verify-clone   prove a clean export builds with Go alone and with a container engine alone"
@@ -131,6 +134,18 @@ $(BUILDER_TARGETS): builder
 shell: builder
 	$(BUILDER_RUN) -it $(BUILDER_IMAGE) bash
 
+# A release (scripts/release.sh --publish; PLAN 7.9, ADR-0021), after
+# `make build-all image sbom`. It is for .github/workflows/release.yml and
+# refuses everywhere else. Only this target hands the builder what says which
+# workflow runs, what an OIDC token is asked for with and the registry's token
+# - by name, so that no value is on a command line; no gate is given them.
+RELEASE_ENV := -e GITHUB_ACTIONS -e GITHUB_REPOSITORY -e GITHUB_REF_TYPE -e GITHUB_REF_NAME \
+	-e GITHUB_WORKFLOW_REF -e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+	-e RELEASE_REGISTRY_USER -e RELEASE_REGISTRY_TOKEN
+
+release: builder
+	@$(BUILDER_RUN) $(RELEASE_ENV) $(BUILDER_IMAGE) make $@
+
 # A development node on ./.data. The KMS passphrase comes from the environment:
 #   CACTUSFS_KMS_PASSPHRASE='...' make run
 run: build
@@ -180,7 +195,7 @@ builder:
 	@true
 
 check: fmt-check lint vet cover test-int s3-compat vuln contracts licences \
-	web-check build-all image helm-lint observability-check verify-clone
+	web-check build-all image sbom sign-verify helm-lint observability-check verify-clone
 	@echo "make check: PASS"
 
 # The web client is generated with a package of web/, so those are installed.
@@ -298,6 +313,21 @@ build-all: web-build
 
 image:
 	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image.sh
+
+# The SBOMs of the images `make image` made, and of web/pnpm-lock.yaml, as
+# SPDX JSON in dist/sbom/ (ADR-0021). Run `make image` first.
+sbom:
+	@VERSION=$(VERSION) BUILD=$(BUILD) scripts/sbom.sh
+
+# Signing and verifying, offline: a throw-away registry, a key pair made for
+# the run, signatures and SBOM attestations by digest, the refusals that must
+# be refusals, and the rehearsal of a release (scripts/release.sh --dry-run).
+sign-verify: sbom
+	@VERSION=$(VERSION) BUILD=$(BUILD) scripts/sign-verify.sh
+
+# See the host side: the release workflow, and nobody else.
+release:
+	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/release.sh --publish
 
 helm-lint:
 	@scripts/helm-lint.sh

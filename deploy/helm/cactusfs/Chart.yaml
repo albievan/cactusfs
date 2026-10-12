@@ -2,9 +2,25 @@ apiVersion: v2
 name: cactusfs
 description: CactusFS - an S3-compatible, erasure-coded, encrypted object store.
 type: application
+home: https://github.com/albievan/cactusfs
+sources:
+  - https://github.com/albievan/cactusfs
+# The version of the chart as it is in this tree. A release packages the chart
+# as the release: `helm package --version <release> --app-version <release>`
+# (scripts/release.sh), so a published chart has the version of what it deploys.
 version: 0.1.0
 # The release of CactusFS this chart deploys: what internal/buildinfo/VERSION
 # names (scripts/helm-lint.sh and a test of that package hold the two
 # together). A deployment names the build as well: image.tag=<version>-<build>.
 appVersion: "0.7.0"
 kubeVersion: ">=1.27.0-0"
+annotations:
+  # The licence of the chart and of CactusFS: the dedication to the public
+  # domain of LICENSE.md, in the project's own words, with a blessing. No
+  # identifier of the SPDX licence list is that text - not `blessing`
+  # (SQLite's notice), not `Unlicense`, not `CC0-1.0` - so it is named as SPDX
+  # names a licence that is not on its list, and the text is where the second
+  # line says. (There is no `artifacthub.io/license`: that annotation takes an
+  # identifier of the list, and none would be true.)
+  org.opencontainers.image.licenses: LicenseRef-CactusFS-Blessing
+  cactusfs.io/license-text: https://github.com/albievan/cactusfs/blob/main/LICENSE.md

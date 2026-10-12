@@ -1,0 +1,117 @@
+name: release
+
+# A release is made here and nowhere else (PLAN 7.9, ADR-0021): by pushing the
+# tag v<version> of a commit whose internal/buildinfo/VERSION is <version>.
+#
+# There is no workflow_dispatch and no branch trigger: nothing can be published
+# from a branch. The identity everything is signed as is this file at the tag,
+#
+#   https://github.com/albievan/cactusfs/.github/workflows/release.yml@refs/tags/v<version>
+#
+# so renaming or moving this file changes what every consumer verifies against
+# (README.md, "Verifying an image"; scripts/release.sh, RELEASE_WORKFLOW).
+#
+# Actions are pinned by commit SHA, the same pins as ci.yml. Everything else is
+# a `run:` step with the tools of the pinned builder image (cosign, syft, helm,
+# the docker CLI), through `make`; only `gh`, which GitHub's runner image has
+# and the builder has not, runs on the runner.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+# Nothing by default; each job says what it needs.
+permissions: {}
+
+# One release of a tag at a time, and never cut short half-published.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The whole quality bar, on the tagged commit, by a job that can neither
+  # push nor sign.
+  check:
+    name: make check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The build number is the count of commits, and the contract gate
+          # and the step below need the history.
+          fetch-depth: 0
+      # FIRST: the tag is v + internal/buildinfo/VERSION, the Dockerfile and
+      # the chart name the same release, this is the release workflow of
+      # albievan/cactusfs at that tag, and the tree is a clean commit. A
+      # release is never built from a tag that disagrees with the tree.
+      - name: The tag is the release the tree names
+        run: scripts/release.sh --preflight
+      # A tag can be put on any commit by whoever may push tags. Only a commit
+      # that is in the history of main is released.
+      - name: The tagged commit is on main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - run: make check
+
+  # As in ci.yml: fault injection against the built binary and a cluster.
+  chaos:
+    name: make test-chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make test-chaos
+
+  # Build, publish, sign, verify - and only then the GitHub Release.
+  release:
+    name: publish
+    needs: [check, chaos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # the GitHub Release and its files
+      packages: write # ghcr.io/albievan/cactusfs and ghcr.io/albievan/charts/cactusfs
+      id-token: write # the OIDC token cosign signs keyless with
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The tag is the release the tree names
+        run: scripts/release.sh --preflight
+      # The six binaries, the two images and the three SBOMs of this commit.
+      # These steps run in the builder container, which is given none of the
+      # job's tokens (Makefile, BUILDER_RUN).
+      - run: make build-all image sbom
+      # scripts/release.sh --publish, in the builder: pushes the images, makes
+      # the manifest list, signs and attests by digest, verifies what it
+      # published, pushes and signs the chart, signs SHA256SUMS. It refuses
+      # unless this is this workflow, on the tag of the tree's release.
+      - name: make release
+        run: make release
+        env:
+          RELEASE_REGISTRY_USER: ${{ github.actor }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Last, when everything it points to is published and verified.
+      - name: The GitHub Release
+        run: |
+          set -eu
+          prerelease=
+          case "$GITHUB_REF_NAME" in
+          *-*) prerelease=--prerelease ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag $prerelease \
+            --title "CactusFS ${GITHUB_REF_NAME#v}" --notes-file dist/release/NOTES.md \
+            dist/cactusfs-* \
+            dist/release/SHA256SUMS dist/release/SHA256SUMS.sigstore.json \
+            dist/release/digests.txt dist/release/sbom/*.spdx.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -491,6 +491,104 @@ Notes:
 - The builder runs as root inside its container. With rootful Docker on Linux, files it
   creates (`bin/`, `dist/`, `web/dist/`) are owned by root; `make clean` removes them.
 
+## Verifying an image
+
+**No release has been published yet.** Everything below applies from the first one;
+until then the names and commands are what the release workflow will produce, and
+nothing is there to verify ([ADR-0021](docs/adr/0021-sbom-and-signatures.md)).
+
+A release is published to `ghcr.io/albievan/cactusfs` and signed **keyless** with
+[cosign](https://github.com/sigstore/cosign) (Sigstore): there is no release key to
+fetch or to trust. A signature carries a short-lived certificate that names who signed
+- the release workflow of this repository, at the tag of the release - and is recorded
+in the public transparency log (Rekor). You verify that identity:
+
+```sh
+VERSION=0.7.0                 # the release, without the leading v
+IDENTITY=https://github.com/albievan/cactusfs/.github/workflows/release.yml@refs/tags/v$VERSION
+ISSUER=https://token.actions.githubusercontent.com
+
+# the image: the multi-arch manifest list, or the image of one platform - BY DIGEST
+cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+  ghcr.io/albievan/cactusfs@sha256:<digest>
+
+# what is in it: the SPDX SBOM of a platform image, attached to it and signed
+cosign verify-attestation --type spdxjson \
+  --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+  ghcr.io/albievan/cactusfs@sha256:<digest of the platform image> |
+  jq -r '.payload | @base64d | fromjson | .predicate.packages[].name'
+
+# the Helm chart, an OCI artifact
+cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+  ghcr.io/albievan/charts/cactusfs@sha256:<digest of the chart>
+
+# the binaries: the checksums are signed, the binaries are checked against them
+cosign verify-blob --new-bundle-format=true --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+- **Verify a digest and deploy that digest** (`image.digest` in the chart's values): a
+  tag can be moved, a digest cannot. A signature says "this digest is a release", so a
+  tag moved to another *released* image still verifies; only a digest pins which one
+  runs. The digests are in the notes of the GitHub Release and in its `digests.txt` -
+  which is a convenience and is not itself signed: what you trust is cosign's verdict
+  on the digest, not the file you read it from.
+- Give the identity **exactly**, with the version you mean. A pattern
+  (`--certificate-identity-regexp`) that accepts any tag accepts any release; one that
+  accepts any workflow or any ref accepts whatever anybody with write access can run.
+- The licence the SBOM declares for CactusFS itself is `LicenseRef-CactusFS-Blessing`,
+  with the text of [LICENSE.md](LICENSE.md) in the document: the dedication is in the
+  project's own words and is not a licence of the SPDX list.
+- **Without the internet.** Keyless verification asks Sigstore's public services for
+  the roots of trust and the log. For an air-gapped network, verify once where the
+  internet is reached and carry the *digest* across; mirror the image together with its
+  signature and attestation (`cosign copy`), and verify inside with Sigstore's trusted
+  root brought in as a file (`cosign verify --trusted-root <file> ...`, with the same
+  identity and issuer) - or sign the digest again with a key of your own, which
+  verifies with nothing but that key. CactusFS itself never calls out: it verifies
+  nothing at run time.
+
+`make sbom` and `make sign-verify` (both in `make check`) prove the procedure on every
+change, without the network: against a throw-away registry and with a key made for the
+run, including that an unsigned image, a moved tag, another key and a signature or SBOM
+copied from another image are refused. `scripts/release.sh --dry-run`, which that gate
+runs, rehearses a release with the same code that publishes one.
+
+## Releases
+
+A release is made by the workflow [`release.yml`](.github/workflows/release.yml), by a
+pushed tag, and by nothing else: `scripts/release.sh --publish` refuses outside that
+workflow, on anything but the tag `v<version>` of a clean commit whose tree names that
+version, and there is no manual trigger.
+
+1. Name the release in the three places that hold it, in one commit on `main`:
+   `internal/buildinfo/VERSION`, the default of `ARG VERSION` in the `Dockerfile` and
+   `appVersion` in `deploy/helm/cactusfs/Chart.yaml` (`go test ./internal/buildinfo` and
+   `make helm-lint` fail when they differ).
+2. When CI is green on that commit: `git tag v<version> && git push origin v<version>`.
+
+The workflow then checks that the tag is `v` + the tree's version and that the commit is
+on `main`, runs `make check` and `make test-chaos`, builds, and publishes:
+
+| What | Where |
+|---|---|
+| the image, `linux/amd64` + `linux/arm64` | `ghcr.io/albievan/cactusfs:<version>` and `:<version>-<build>` (one manifest list) |
+| the image of one platform | `ghcr.io/albievan/cactusfs:<version>-<build>-amd64`, `-arm64` |
+| the Helm chart, with the release as its version | `oci://ghcr.io/albievan/charts/cactusfs`, version `<version>` |
+| the six binaries, `SHA256SUMS` and its signature `SHA256SUMS.sigstore.json`, the SBOMs (`*.spdx.json`), `digests.txt` | the GitHub Release `v<version>` |
+
+The manifest list, the image of each platform and the chart are signed by digest; each
+platform image has its SBOM attached as a signed attestation; the workflow verifies all
+of it before it creates the GitHub Release. There is no `latest` tag: name a version,
+and deploy its digest.
+
+```sh
+helm install cactusfs oci://ghcr.io/albievan/charts/cactusfs --version <version> \
+  --set image.repository=ghcr.io/albievan/cactusfs \
+  --set image.digest=sha256:<digest of the manifest list>
+```
+
 ## Layout
 
 ```

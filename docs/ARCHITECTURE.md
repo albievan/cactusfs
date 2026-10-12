@@ -643,6 +643,42 @@ images. Developers and CI therefore use identical tool versions.
 The product image is distroless static, runs as UID 65532, has no shell, and is meant to
 run with a read-only root filesystem and all capabilities dropped.
 
+**Supply chain (ADR-0021; the gate and the release workflow are implemented, no release is published yet).**
+`make sbom` writes SPDX 2.3 JSON to `dist/sbom/` with `syft`: one document for the image
+of each architecture, read from the Go module list embedded in the binary, and one for
+the console's packages, read from `web/pnpm-lock.yaml`. An image's SBOM declares the
+licence of CactusFS itself as `LicenseRef-CactusFS-Blessing`, with the text of
+`LICENSE.md` in the document: no identifier of the SPDX list is that text. `make sign-verify` starts a
+throw-away registry, pushes both images, and with `cosign` and a key pair made for the
+run signs each **by digest**, attaches its SBOM as a signed attestation and verifies
+both - with the public key alone, no certificate authority, no transparency log, no
+network. It then proves what must be refused: an image never signed, a signed tag moved
+to another image, another public key, and one image's signature or attestation put on
+another. `scripts/release.sh --dry-run`, which the gate runs, rehearses a release
+against such a registry (manifest list, signatures, attestations, `dist/release/` with
+`SHA256SUMS`). The gate's key lives for one run: it proves the procedure, not where an
+image came from.
+
+A **release** is the same script with `--publish`, and is made only by
+`.github/workflows/release.yml` on a pushed tag `v<version>`: the script refuses
+anywhere else, and unless the tag is `v` + `internal/buildinfo/VERSION` on a clean
+commit. After `make check` and `make test-chaos` in jobs that can neither push nor
+sign, it publishes to `ghcr.io/albievan/cactusfs` the image of each platform
+(`<version>-<build>-<arch>`) and one manifest list (`<version>-<build>`, and
+`<version>` once it is signed and verified; never `latest`), the chart to
+`oci://ghcr.io/albievan/charts`, and to the GitHub Release the six binaries with
+`SHA256SUMS`, the SBOMs and the digests. Signing is **keyless** (Sigstore): the list,
+each platform manifest and the chart by digest, each SBOM as an attestation,
+`SHA256SUMS` as a file - under a certificate of Fulcio for the identity
+`https://github.com/albievan/cactusfs/.github/workflows/release.yml@refs/tags/v<version>`,
+recorded in Rekor - and each is verified against that identity before the next step.
+The two modes share the functions that push, list, sign, attest and verify
+(`SC_MODE` in `scripts/lib-supplychain.sh`); they differ in the cosign flags, in the
+registry (HTTPS and a token instead of the run's own) and in that a release does not
+set the proxy that keeps the gate off the network. cosign, syft and the registry are tools of the
+builder image (pinned by checksum and by digest in the `Dockerfile`); none is in the
+product, and the product verifies nothing at run time and calls nothing.
+
 **Build identity.** `internal/buildinfo` says which build runs: the release, embedded
 from `internal/buildinfo/VERSION` (the one place it is set), and the build number (the
 count of commits) and commit, which `make` and the `Dockerfile` pass with `-ldflags -X`;

@@ -69,6 +69,34 @@ ARG K8S_SCHEMAS_COMMIT=817113f21a2643311cbc3e992bb44ffe1c416c54
 ARG PROMETHEUS_VERSION=3.15.0
 ARG PROMTOOL_SHA256_AMD64=2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
 ARG PROMTOOL_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
+# What `make sbom` and `make sign-verify` work with (ADR-0021): syft, which
+# writes the SBOMs, cosign, which signs and verifies, and the registry the
+# gate starts as a throw-away container and pushes to. All three are
+# Apache-2.0, tools of the builder image and of the gate only; nothing of them
+# is in the product. cosign is the binary of the release and syft the archive
+# of the release (of it, the one file `syft`), each pinned by its checksum for
+# each architecture; the registry image is pinned by digest and is not a stage
+# here: scripts/lib-supplychain.sh reads the pin from this line. To move a pin,
+# change the version AND its checksums (or the tag AND the digest) together -
+# and for cosign read the release notes first: the flags for signing without a
+# transparency log are in scripts/lib-supplychain.sh and differ between major
+# versions (cosign 3 is not a drop-in).
+# The checksums are those of
+#   https://github.com/sigstore/cosign/releases/download/v<version>/cosign-linux-<arch>
+#   https://github.com/anchore/syft/releases/download/v<version>/syft_<version>_linux_<arch>.tar.gz
+# as the releases' own cosign_checksums.txt and syft_<version>_checksums.txt
+# list them; the digest is that of the index:
+#   docker buildx imagetools inspect registry:<tag>
+# TODO(PLAN 7.3): the four checksums and the digest below are placeholders -
+# the builder image does not build, and the gate does not start a registry,
+# until they are replaced with the real ones.
+ARG COSIGN_VERSION=2.6.1
+ARG COSIGN_SHA256_AMD64=064954c5d8c7e3b28188eee5b1727b31c411550bc5fefd41aa672d3c761d103a
+ARG COSIGN_SHA256_ARM64=56a16480bdd56ec789abaa65924402f6b92c0041f06885995853c05567b76f34
+ARG SYFT_VERSION=1.54.1
+ARG SYFT_SHA256_AMD64=c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+ARG SYFT_SHA256_ARM64=dfdf0537610113edbefe1f1fc6548bc957b2d77439636ec824fcf0e10d46d054
+ARG REGISTRY_IMAGE=registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
 
 # --- node: Node.js and pnpm, on the build host's architecture -----------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS node
@@ -201,6 +229,31 @@ RUN case "${TARGETARCH}" in \
  && rm -rf /tmp/prometheus \
  && /opt/promtools/bin/promtool --version
 
+# --- supplychain: cosign and syft, for the SBOM and signature gates ---------------
+FROM ${PYTHON_IMAGE} AS supplychain
+ARG TARGETARCH
+ARG COSIGN_VERSION
+ARG COSIGN_SHA256_AMD64
+ARG COSIGN_SHA256_ARM64
+ARG SYFT_VERSION
+ARG SYFT_SHA256_AMD64
+ARG SYFT_SHA256_ARM64
+COPY scripts/fetch.py /usr/local/bin/fetch.py
+# The binary of cosign's release and, of the archive of syft's, the one file
+# `syft`; each by its checksum.
+RUN case "${TARGETARCH}" in \
+      amd64) cosign_sum="${COSIGN_SHA256_AMD64}"; syft_sum="${SYFT_SHA256_AMD64}" ;; \
+      arm64) cosign_sum="${COSIGN_SHA256_ARM64}"; syft_sum="${SYFT_SHA256_ARM64}" ;; \
+      *) echo "no cosign or syft for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && python /usr/local/bin/fetch.py --file "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${TARGETARCH}" "$cosign_sum" /tmp/cosign/cosign \
+ && python /usr/local/bin/fetch.py "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${TARGETARCH}.tar.gz" "$syft_sum" /tmp/syft syft \
+ && mkdir -p /opt/supplychain/bin \
+ && install -m 0755 /tmp/cosign/cosign /opt/supplychain/bin/cosign \
+ && install -m 0755 /tmp/syft/syft /opt/supplychain/bin/syft \
+ && rm -rf /tmp/cosign /tmp/syft \
+ && /opt/supplychain/bin/cosign version && SYFT_CHECK_FOR_APP_UPDATE=false /opt/supplychain/bin/syft version
+
 # --- builder: the image every `make` target runs in ----------------------------
 # Go tools (gofumpt, goimports, govulncheck, go-licenses) are NOT installed
 # here: they are pinned by `tool` directives in go.mod and run with `go tool`.
@@ -234,6 +287,10 @@ RUN kubeconform -v && yq --version && ls -d /opt/kubernetes-schemas/v*-standalon
 # promtool, for the alerting rules (scripts/observability.sh).
 COPY --from=promtools /opt/promtools/bin/ /usr/local/bin/
 RUN promtool --version
+# cosign and syft, for the SBOMs and the signatures (scripts/lib-supplychain.sh).
+# Neither is asked whether a newer one exists: the builder calls nothing.
+COPY --from=supplychain /opt/supplychain/bin/ /usr/local/bin/
+RUN cosign version && SYFT_CHECK_FOR_APP_UPDATE=false syft version
 ENV CACTUSFS_IN_BUILDER=1 \
     GOTOOLCHAIN=local \
     GOCACHE=/cache/go-build \

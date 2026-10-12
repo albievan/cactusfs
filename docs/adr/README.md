@@ -56,3 +56,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0018](0018-tag-rules-and-catalogue.md) | Tag rules, lower-case tags, and a catalogue of tags | accepted |
 | [0019](0019-bucket-activity-and-schema-4.md) | Who created a bucket, its latest uploads and downloads, and entry schema 4 | accepted |
 | [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted |
+| [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; releases are signed keyless by the release workflow (PLAN 7.9) |
