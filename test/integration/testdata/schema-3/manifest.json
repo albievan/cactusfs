@@ -1,0 +1,225 @@
+{
+  "commit": "d2d6861",
+  "state_schema": 3,
+  "state_buckets": [
+    "access",
+    "accessflush"
+  ],
+  "writer": {
+    "user": "fixture-writer",
+    "actor": "user/fixture-writer",
+    "access_key_id": "DCYFYUFO4L3IIV2Y5W5J",
+    "secret_key": "UYKt7uidGrC39ugFI66nCRV3eOQh8bXQzkFYm22n"
+  },
+  "buckets": [
+    {
+      "name": "schema-three",
+      "versions": false,
+      "objects": [
+        {
+          "key": "reports/2026/q1.txt",
+          "latest": true,
+          "size": 13,
+          "sha256": "bba839c7e560cad6a466d0294dd6a57b0a26c58142694b8ee9944111f370e041",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 5,
+          "copies": 0,
+          "readers": [
+            {
+              "who": "root",
+              "presigned": false,
+              "downloads": 3,
+              "copies": 0
+            },
+            {
+              "who": "user/fixture-writer",
+              "presigned": false,
+              "downloads": 2,
+              "copies": 0
+            }
+          ]
+        },
+        {
+          "key": "reports/2026/q2.txt",
+          "latest": true,
+          "size": 14,
+          "sha256": "bada1c74fa4ba41ac32a8a70805540d64e460721374a279e6b736bf9f2c70f0f",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 1,
+          "copies": 0,
+          "readers": [
+            {
+              "who": "root",
+              "presigned": true,
+              "downloads": 1,
+              "copies": 0
+            }
+          ]
+        },
+        {
+          "key": "reports/summary.txt",
+          "latest": true,
+          "size": 3000,
+          "sha256": "64c3c7f3ac3fdd11304fc1b9b44c08194aa71120d9a928180f58d6a73554a055",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 2,
+          "copies": 0,
+          "readers": [
+            {
+              "who": "user/fixture-writer",
+              "presigned": false,
+              "downloads": 1,
+              "copies": 0
+            },
+            {
+              "who": "root",
+              "presigned": false,
+              "downloads": 1,
+              "copies": 0
+            }
+          ]
+        },
+        {
+          "key": "data/blob.bin",
+          "latest": true,
+          "size": 4096,
+          "sha256": "142dbb8ed2ce44a4be578634195847b1d174c9d66bfb546640da039ea4ceca59",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 0,
+          "copies": 1,
+          "readers": [
+            {
+              "who": "root",
+              "presigned": false,
+              "downloads": 0,
+              "copies": 1
+            }
+          ]
+        },
+        {
+          "key": "notes/unread.txt",
+          "latest": true,
+          "size": 17,
+          "sha256": "68b1eea5042ba757330a0a8c2be2afa2ee41270f7ba19f7f33920bd213db5431",
+          "uploaded_by": "root",
+          "downloads": 0,
+          "copies": 0,
+          "readers": []
+        },
+        {
+          "key": "copies/blob.bin",
+          "latest": true,
+          "size": 4096,
+          "sha256": "142dbb8ed2ce44a4be578634195847b1d174c9d66bfb546640da039ea4ceca59",
+          "uploaded_by": "root",
+          "downloads": 0,
+          "copies": 0,
+          "readers": []
+        }
+      ],
+      "markers": [],
+      "uploads": [
+        {
+          "key": "film",
+          "upload_id": "08b0f876cd5340caa3d2cfce1a4f3f4c",
+          "parts": [
+            {
+              "number": 1,
+              "size": 5000,
+              "sha256": "62b76678183a643234f5601e51983e4390e0bebd558a189308c45372e11fe0dd"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "schema-three-public",
+      "versions": false,
+      "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::schema-three-public/public/*\"}]}",
+      "objects": [
+        {
+          "key": "public/readme.txt",
+          "latest": true,
+          "size": 13,
+          "sha256": "d0c4c2a1053b509ce2d7d82ef47ebe3b6f6bf72940c730e06887ef3f27ef80dc",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 2,
+          "copies": 0,
+          "readers": [
+            {
+              "who": "anonymous",
+              "presigned": false,
+              "downloads": 2,
+              "copies": 0
+            }
+          ]
+        },
+        {
+          "key": "private/ledger.txt",
+          "latest": true,
+          "size": 15,
+          "sha256": "b443f9a70e31eb1c2f8e4043b1f62b0cd8543981bb7892be7175c75fc8605bb0",
+          "uploaded_by": "root",
+          "downloads": 0,
+          "copies": 0,
+          "readers": []
+        }
+      ],
+      "markers": [],
+      "uploads": []
+    },
+    {
+      "name": "schema-three-versions",
+      "versions": true,
+      "objects": [
+        {
+          "key": "doc",
+          "version_id": "32e44ea2839c9b2d655a8b56df945d5a",
+          "latest": false,
+          "size": 5,
+          "sha256": "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
+          "uploaded_by": "root",
+          "downloads": 1,
+          "copies": 0,
+          "readers": [
+            {
+              "who": "root",
+              "presigned": false,
+              "downloads": 1,
+              "copies": 0
+            }
+          ]
+        },
+        {
+          "key": "doc",
+          "version_id": "708417052de9feaba6312c3187dc2768",
+          "latest": true,
+          "size": 6,
+          "sha256": "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 0,
+          "copies": 0,
+          "readers": []
+        },
+        {
+          "key": "gone",
+          "version_id": "2475bb0f9fecbd8c25498808b0d64af0",
+          "latest": false,
+          "size": 4,
+          "sha256": "4a754148b88a68e18df1a02489950666d187e904cd88d2dc0aa16c103b94045f",
+          "uploaded_by": "user/fixture-writer",
+          "downloads": 0,
+          "copies": 0,
+          "readers": []
+        }
+      ],
+      "markers": [
+        {
+          "key": "gone",
+          "version_id": "7000adc53dd299e1321b627ee841d882"
+        }
+      ],
+      "uploads": []
+    }
+  ]
+}
