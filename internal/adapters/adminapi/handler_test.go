@@ -1174,6 +1174,66 @@ func TestSettingsOnANodeWithoutTheUseCase(t *testing.T) {
 	}
 }
 
+// TestOperationsThatAreNotWrittenYet: the operations of quotas, targets,
+// notifications and replication are in the contract before their use cases
+// (PLAN 8.0.3). Until each is written it answers 501 as a problem, to a
+// caller it has authenticated - to any such caller: the authorizer is not
+// asked, because there is nothing yet that it could let through - and says
+// nothing else. To a caller without a credential, or with one that is none,
+// each answers 401 like every operation. A step that writes one puts the
+// authorizer in front of it and takes its row out of this table.
+func TestOperationsThatAreNotWrittenYet(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
+	// The two requests without a body say the media type all the same: the
+	// adapter takes no POST that does not, and the contract says so.
+	for _, c := range []call{
+		{method: "GET", path: "/buckets/some-bucket/quota"},
+		{method: "PUT", path: "/buckets/some-bucket/quota", body: map[string]any{"quota_bytes": 1}},
+		{method: "DELETE", path: "/buckets/some-bucket/quota"},
+		{method: "POST", path: "/buckets/some-bucket/usage/recount", headers: map[string]string{"Content-Type": "application/json"}},
+		{method: "GET", path: "/targets"},
+		{method: "GET", path: "/targets/hook"},
+		{method: "PUT", path: "/targets/hook", body: map[string]any{"kind": "webhook", "endpoint": "https://hook.example", "buckets": []string{"*"}}},
+		{method: "DELETE", path: "/targets/hook"},
+		{method: "GET", path: "/targets/hook/status"},
+		{method: "GET", path: "/buckets/some-bucket/notifications"},
+		{method: "PUT", path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},
+		{method: "DELETE", path: "/buckets/some-bucket/notifications"},
+		{method: "GET", path: "/buckets/some-bucket/replication"},
+		{method: "PUT", path: "/buckets/some-bucket/replication", body: map[string]any{"target": "site-b", "destination_bucket": "copy", "rules": []any{}}},
+		{method: "DELETE", path: "/buckets/some-bucket/replication"},
+		{method: "GET", path: "/buckets/some-bucket/replication/status"},
+		{method: "POST", path: "/buckets/some-bucket/replication/resync", headers: map[string]string{"Content-Type": "application/json"}},
+		{method: "GET", path: "/buckets/some-bucket/replica"},
+		{method: "PUT", path: "/buckets/some-bucket/replica", body: map[string]any{"source": ""}},
+	} {
+		// Without a credential, and with one nobody has: 401, before
+		// anything is said of what the operation does or does not do.
+		for name, bearer := range map[string]string{"no credential": "", "a credential that is none": "AKIDNOBODY:not-a-secret"} {
+			c.bearer = bearer
+			r := f.do(c)
+			if r.status != http.StatusUnauthorized {
+				t.Errorf("%s %s with %s = %d, want 401: %s", c.method, c.path, name, r.status, r.body)
+				continue
+			}
+			if p := r.problem(t); p["code"] != "Unauthenticated" {
+				t.Errorf("%s %s with %s: problem = %s", c.method, c.path, name, r.body)
+			}
+		}
+		c.bearer = f.root
+		r := f.do(c)
+		if r.status != http.StatusNotImplemented {
+			t.Errorf("%s %s = %d, want 501: %s", c.method, c.path, r.status, r.body)
+			continue
+		}
+		if p := r.problem(t); p["code"] != "NotImplemented" || p["detail"] != nil {
+			t.Errorf("%s %s: problem = %s", c.method, c.path, r.body)
+		}
+	}
+}
+
 func TestClusterAndAudit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

@@ -48,6 +48,15 @@ service NodeService {
   // from the running node each time and stored nowhere. A node of a release
   // without this call answers the RPC with UNIMPLEMENTED.
   rpc Settings(SettingsRequest) returns (SettingsResponse);
+  // DeliveryStatus reports how delivery to the targets of the deployment
+  // stands: notifications, the export of the audit trail and replication to
+  // another deployment. Only the node that leads the metadata group
+  // delivers, so only it can say; a node that does not lead answers with the
+  // error "not_leader". What is reported is what the leader holds in memory
+  // since it came to lead, with the counts the metadata keeps. Neither an
+  // endpoint nor the text of an error is ever part of it. A node of a
+  // release without this call answers the RPC with UNIMPLEMENTED.
+  rpc DeliveryStatus(DeliveryStatusRequest) returns (DeliveryStatusResponse);
 }
 
 message InfoRequest {}
@@ -190,6 +199,58 @@ message Certificate {
   // Seconds since the Unix epoch.
   int64 not_before_unix = 6;
   int64 not_after_unix = 7;
+}
+
+message DeliveryStatusRequest {
+  // The targets to report on, by name. Empty asks for every target. A name
+  // that is not a target's is left out of the answer.
+  repeated string targets = 1;
+}
+
+message DeliveryStatusResponse {
+  Error error = 1;
+  // In name order.
+  repeated TargetDelivery targets = 2;
+}
+
+// TargetDelivery is how delivery to one target stands. The words of state
+// and of the class of an error travel as strings, so that a release that
+// adds one is still understood: a receiver shows a word it does not know as
+// it is.
+message TargetDelivery {
+  string name = 1;
+  // "webhook", "nats" or "s3".
+  string kind = 2;
+  // "ok", "retrying" or "stalled".
+  string state = 3;
+  // Rows of the outbox matched for the target and not yet acknowledged.
+  uint64 pending = 4;
+  // When the oldest of them was made, in seconds since the Unix epoch; 0
+  // when nothing waits.
+  int64 oldest_pending_unix = 5;
+  // When the leader last delivered something, in seconds since the Unix
+  // epoch; 0 when it has not since it came to lead.
+  int64 last_success_unix = 6;
+  // The class of the last failure, such as "timeout", "auth" or "rejected";
+  // empty when the last attempt succeeded. Never the text of the error.
+  string last_error_class = 7;
+  // Rows that were dropped before they were sent, as the metadata counts
+  // them.
+  uint64 lost = 8;
+  // Messages the target refused one by one - a webhook's 4xx other than 401,
+  // 403, 408 and 429 - which are not sent again, since the leader came to
+  // lead. A 401 and a 403 are of the credential: class "auth", tried again,
+  // and not counted here.
+  uint64 rejected = 9;
+  // Versions the leader gave up on because they cannot be replicated, of
+  // every bucket that uses the target, since it came to lead. Kind "s3"
+  // only. It is the leader's own count of what it did; the exact figure of
+  // one bucket is in that bucket's usage record, in the metadata, and is not
+  // sent here.
+  uint64 failed = 10;
+  // Whether rows for replication were lost, so that the other deployment
+  // lacks versions until a resync. Kind "s3" only.
+  bool resync_needed = 11;
 }
 
 // MetaService is what a node asks of the members of the metadata Raft group.

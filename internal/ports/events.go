@@ -44,6 +44,61 @@ const EventBucketConfigChanged = "cactusfs.bucket.configuration-changed.v1"
 // EventObjectTagsChanged tells that the tags of an object version changed.
 const EventObjectTagsChanged = "cactusfs.object.tags-changed.v1"
 
+// Events of quotas, targets and replication (ADR-0023 to ADR-0026). Like
+// every event they are derived from applied entries; a write that a quota
+// refused changed nothing and is no event.
+const (
+	// EventBucketQuotaChanged tells that the quota of a bucket was set,
+	// changed or removed. The payload is a BucketQuotaEvent.
+	EventBucketQuotaChanged = "cactusfs.bucket.quota-changed.v1"
+	// EventBucketReplicaModeChanged tells that a bucket became the replica
+	// of another deployment's bucket, or was promoted. The payload is a
+	// BucketReplicaModeEvent.
+	EventBucketReplicaModeChanged = "cactusfs.bucket.replica-mode-changed.v1"
+	// EventTargetChanged tells that a target the deployment sends to was
+	// defined or changed. The payload is a TargetEvent.
+	EventTargetChanged = "cactusfs.cluster.target-changed.v1"
+	// EventTargetDeleted tells that a target was deleted. The payload is a
+	// TargetEvent.
+	EventTargetDeleted = "cactusfs.cluster.target-deleted.v1"
+)
+
+// The messages that are sent to targets outside the deployment and nowhere
+// else: at least once, in order, without the envelope of an Event (ADR-0025).
+// Their bodies are defined by api/asyncapi/events.yaml.
+const (
+	// MessageNotificationObject is a bucket notification: an object was
+	// created or removed, told as an S3 event notification of one record.
+	MessageNotificationObject = "cactusfs.notification.object.v1"
+	// MessageAuditExported is one record of the audit trail, whole.
+	MessageAuditExported = "cactusfs.audit.exported.v1"
+)
+
+// BucketQuotaEvent is the payload of EventBucketQuotaChanged.
+type BucketQuotaEvent struct {
+	Bucket string `json:"bucket"`
+	// QuotaBytes is the most bytes the bucket may hold from now on; 0 when
+	// the quota was removed.
+	QuotaBytes int64 `json:"quota_bytes"`
+}
+
+// BucketReplicaModeEvent is the payload of EventBucketReplicaModeChanged.
+type BucketReplicaModeEvent struct {
+	Bucket string `json:"bucket"`
+	// Source is the ID of the deployment the bucket now takes its versions
+	// from; empty when it was promoted.
+	Source string `json:"source"`
+}
+
+// TargetEvent is the payload of EventTargetChanged and EventTargetDeleted.
+// It names the target and never carries its endpoint or anything of its
+// credentials.
+type TargetEvent struct {
+	Name string `json:"name"`
+	// Kind is "webhook", "nats" or "s3".
+	Kind string `json:"kind,omitempty"`
+}
+
 // BucketVersioningEvent is the payload of EventBucketVersioningChanged.
 type BucketVersioningEvent struct {
 	Bucket string `json:"bucket"`

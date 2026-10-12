@@ -90,10 +90,242 @@ export interface paths {
         };
         /**
          * How many objects a bucket holds, and their size together
-         * @description Counts the current versions of the bucket's objects and adds up their sizes, by reading the index: older versions and uploads in progress are not counted. For a very large bucket the count stops at a bound and `complete` is false; the figures are then of the keys counted so far.
+         * @description How many objects the bucket holds and their sizes together - the current versions; older versions and
+         *     uploads in progress are not part of `object_count` and `total_size`.
+         *
+         *     Where the metadata store keeps a count of the bucket, the answer is that count: `exact` and
+         *     `complete` are true, and `versions`, `stored_bytes` and `upload_bytes` say what the bucket keeps
+         *     beyond its current versions - which is what a quota counts. A bucket made by a release that counts is
+         *     counted from the start. One that is older is counted in the background, without being asked; until
+         *     that is done, and on a deployment that does not count yet, `exact` is false and the answer is made as
+         *     it always was, by reading the index: for a very large bucket that count stops at a bound and
+         *     `complete` is false; the figures are then of the keys counted so far.
          */
         get: operations["getBucketUsage"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/usage/recount": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Count a bucket's usage again
+         * @description Asks for the bucket's usage to be counted again from its index, as it was counted the first time: by
+         *     the metadata store, in steps, while the bucket is used. The answer is given as soon as the count is
+         *     asked for; `GET /buckets/{bucket}/usage` goes on answering from the figures there are until the new
+         *     ones take their place, and `exact` stays true meanwhile. A count that comes out other than the
+         *     figures that were kept is counted in `cactusfs_bucket_usage_drift_total`. Asking again while a count
+         *     is under way starts it again.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that counts usage.
+         *
+         *     The request has no body. Like every POST of this API it must still say
+         *     `Content-Type: application/json`, and is refused with 415 otherwise.
+         */
+        post: operations["recountBucketUsage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the quota of a bucket
+         * @description The most bytes the bucket may hold, and how many it holds. A bucket without a quota is answered too:
+         *     `quota_bytes` is then absent.
+         */
+        get: operations["getBucketQuota"];
+        /**
+         * Set the quota of a bucket
+         * @description Sets the most bytes the bucket may hold. What counts is what the bucket keeps: every version of every
+         *     object, current or not, by its size, and the parts of multipart uploads that are not completed. A
+         *     quota below what the bucket holds already is accepted: nothing is removed, and nothing more is taken
+         *     until enough was deleted.
+         *
+         *     Once it is set, an upload, a copy or a part that would take the bucket past it is refused - in S3
+         *     with `403 QuotaExceeded`, here with a 403 whose `code` is `QuotaExceeded`. Deleting is never refused.
+         *
+         *     Having `s3:*` on the bucket does not give this: a bucket's own administrator cannot lift its limit.
+         */
+        put: operations["putBucketQuota"];
+        post?: never;
+        /** Remove the quota of a bucket */
+        delete: operations["deleteBucketQuota"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the notification rules of a bucket
+         * @description The rules by which changes of the bucket's objects are told to targets - what S3 calls the
+         *     notification configuration, and the same document `GET /{bucket}?notification` gives. A bucket
+         *     without rules is answered with none.
+         */
+        get: operations["getBucketNotifications"];
+        /**
+         * Set the notification rules of a bucket
+         * @description Replaces the rules. A rule names a target by its name, never an address: targets are defined under
+         *     `/targets` by who may define them, and each lists the buckets that may use it. A rule that names a
+         *     target that is not there, is not of kind `webhook` or `nats`, or does not allow this bucket is refused
+         *     with 400. No rules at all removes the configuration.
+         *
+         *     From then on every change a rule matches is delivered to its target at least once, in the order the
+         *     changes were made; see `api/asyncapi/events.yaml`, `cactusfs.notification.object.v1`. Nothing of
+         *     before is delivered.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows notifications.
+         */
+        put: operations["putBucketNotifications"];
+        post?: never;
+        /**
+         * Remove the notification rules of a bucket
+         * @description What was matched before is still delivered; nothing after is.
+         */
+        delete: operations["deleteBucketNotifications"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/replication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the replication configuration of a bucket
+         * @description Where the versions of this bucket are copied to - the same document `GET /{bucket}?replication`
+         *     gives. 404 when the bucket has none.
+         */
+        get: operations["getBucketReplication"];
+        /**
+         * Set the replication configuration of a bucket
+         * @description Has every new version of the bucket that a rule matches copied to one bucket of another deployment,
+         *     through a target of kind `s3` that allows this bucket. The bucket must keep versions (400 otherwise,
+         *     and versioning cannot be suspended while the configuration is there) and must not itself be a replica
+         *     (409). The bucket at the other end must be put into replica mode there, with this deployment as its
+         *     source.
+         *
+         *     Versions that were there before are not sent until a resync is asked for. Versions removed for good
+         *     are never removed at the other end.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows replication.
+         */
+        put: operations["putBucketReplication"];
+        post?: never;
+        /**
+         * Remove the replication configuration of a bucket
+         * @description Nothing more is matched. What was matched and not yet sent is still sent. Nothing is removed at the
+         *     other end, and the bucket there stays a replica until it is promoted there.
+         */
+        delete: operations["deleteBucketReplication"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/replication/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How far the replication of a bucket has come
+         * @description What the node that leads the metadata group, which does the sending, says of the bucket's target, and
+         *     the resync of the bucket if one was asked for. Any node answers; it asks the leader. 404 when the
+         *     bucket has no replication configuration; 503 when there is no leader to ask.
+         */
+        get: operations["getBucketReplicationStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/replication/resync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send what the other deployment lacks
+         * @description Starts a walk of every version of the bucket, oldest key first, that asks the other deployment for
+         *     each and sends those it does not have - the versions that were there before the configuration, and
+         *     those that were lost to a target that could not be reached for too long (`resync_needed`). The walk
+         *     is the leader's, goes on across a change of leader from where it had come, and is followed in
+         *     `GET /buckets/{bucket}/replication/status`. Asking again starts it from the beginning. 404 when the
+         *     bucket has no replication configuration.
+         *
+         *     The request has no body. Like every POST of this API it must still say
+         *     `Content-Type: application/json`, and is refused with 415 otherwise.
+         */
+        post: operations["resyncBucketReplication"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/replica": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether a bucket is the replica of another deployment's */
+        get: operations["getBucketReplicaMode"];
+        /**
+         * Make a bucket a replica, or promote it
+         * @description With a `source`, the bucket becomes the replica of a bucket of that deployment: from then on it takes
+         *     new versions and delete markers from that source only, and refuses everybody else's - the root
+         *     identity's too - with `409 InvalidBucketState`. Reading is as before, and so is removing a version for
+         *     good, which stays governed by the permissions and locks of this deployment. The bucket must keep
+         *     versions, its usage must be exact, and it must have no replication configuration of its own (409
+         *     otherwise).
+         *
+         *     With an empty `source` the bucket is promoted: it takes writes again, and nothing more from the
+         *     source. Promotion is the whole of failing over; nothing is sent back.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows replication.
+         */
+        put: operations["putBucketReplicaMode"];
         post?: never;
         delete?: never;
         options?: never;
@@ -527,6 +759,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the targets
+         * @description Every place outside the deployment that it sends to: webhooks and NATS JetStream servers for
+         *     notifications and for the audit trail, and other deployments for replication. In name order, without
+         *     any credential.
+         */
+        get: operations["listTargets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/targets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a target */
+        get: operations["getTarget"];
+        /**
+         * Define a target, or change it
+         * @description A target is the only way an address outside the deployment is named: the rules of a bucket name a
+         *     target, never an address. So whoever may define targets decides where the deployment connects to, and
+         *     `buckets` decides which buckets may use each.
+         *
+         *     **The endpoint** is refused with 400 unless it is `https://` for the kinds `webhook` and `s3`, or
+         *     `tls://` for `nats`; it may carry no userinfo, no query
+         *     and no fragment. Where it leads is checked again each time a connection is made: an address that is
+         *     loopback, link-local, unspecified or multicast is refused unless the nodes were started with a range
+         *     that admits it (`--egress-allow`), and the addresses of cloud metadata services are refused whatever
+         *     was admitted. No redirect is followed, no proxy is used, and the certificate is verified against
+         *     `ca_pem` or the system's roots: there is no way to turn that off.
+         *
+         *     **The path of the endpoint is write-only.** The URL of a webhook often carries a token in its path,
+         *     so no answer of this API gives the path back - not to whoever defined the target either: a target is
+         *     shown with the scheme, the host and the port of its endpoint, and with `endpoint_path_set`. The whole
+         *     URL is sent here. Changing a target without `endpoint` keeps the endpoint it has, path and all; to
+         *     change any part of the endpoint - the host, the port or the path - the whole URL is sent again. A
+         *     target that is new needs one (400 without).
+         *
+         *     **Secrets are write-only.** `auth.secret` is sealed through the key service and is in no answer of
+         *     this API, in no log line, audit record or event. Changing a target without `auth.secret` keeps the
+         *     one it has, as long as `auth.mode` stays what it was. A target of kind `webhook` is given a signing
+         *     key, made here and returned once, in the answer to the request that made it or that asked for a new
+         *     one with `rotate_signing_key`.
+         *
+         *     The kind of a target cannot be changed (409); delete it and define it again. Nothing is connected to
+         *     by this request: whether the target can be reached is told by its status.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows targets.
+         */
+        put: operations["putTarget"];
+        post?: never;
+        /**
+         * Delete a target
+         * @description Refused with 409 (`code` `EntityInUse`) while a bucket's notification rules or replication
+         *     configuration name it. What was waiting to be sent to it is not sent.
+         */
+        delete: operations["deleteTarget"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/targets/{name}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether a target is being delivered to
+         * @description What the node that leads the metadata group, which does the delivering, knows of the target: any node
+         *     answers, and asks the leader. The figures are the leader's own and begin again when another node
+         *     comes to lead. Nothing of the endpoint and none of the words of an error are part of it - a failure is named by
+         *     its class, and the cause is in the leader's log. 503 when there is no leader to ask.
+         */
+        get: operations["getTargetStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -771,8 +1102,394 @@ export interface components {
              * @description Their sizes added up, in bytes.
              */
             total_size: number;
-            /** @description False when the bucket has more objects than are counted in one request. */
+            /** @description False when the bucket has more objects than are counted in one request. Never false when `exact` is true. */
             complete: boolean;
+            /**
+             * @description True when the figures are the count the metadata store keeps of the bucket, which every change
+             *     of the bucket keeps right. False when they were counted for this request, as far as one request
+             *     counts: `versions`, `stored_bytes` and `upload_bytes` are then absent.
+             */
+            exact: boolean;
+            /**
+             * Format: int64
+             * @description Versions the bucket keeps, current or not, delete markers among them. Present when `exact` is true.
+             */
+            versions?: number;
+            /**
+             * Format: int64
+             * @description The sizes of all those versions added up, in bytes - of the objects as they were sent, not of
+             *     what they take on the drives, which is more by the parity. Present when `exact` is true.
+             */
+            stored_bytes?: number;
+            /**
+             * Format: int64
+             * @description The sizes of the parts of multipart uploads that are neither completed nor aborted. Present when
+             *     `exact` is true.
+             */
+            upload_bytes?: number;
+            /**
+             * Format: int64
+             * @description The bucket's quota: the most `stored_bytes` and `upload_bytes` together may come to. Absent when
+             *     the bucket has none. Who may read the usage is told the quota; changing it needs
+             *     `admin:PutBucketQuota`.
+             */
+            quota_bytes?: number;
+        };
+        /** @description The quota of a bucket and what counts against it. */
+        BucketQuota: {
+            /**
+             * Format: int64
+             * @description The most bytes the bucket may hold. Absent when the bucket has no quota.
+             */
+            quota_bytes?: number;
+            /**
+             * Format: int64
+             * @description What counts against the quota: `stored_bytes` and `upload_bytes` of the bucket's usage, added. 0
+             *     while `exact` is false: it is not known yet.
+             */
+            used_bytes: number;
+            /**
+             * @description Whether the bucket's usage is counted. False while a bucket that is older than the count is
+             *     being counted for the first time; a quota cannot be set until then.
+             */
+            exact: boolean;
+        };
+        BucketQuotaPut: {
+            /**
+             * Format: int64
+             * @description The most bytes the bucket may hold, from 1 to 2^62 (4 611 686 018 427 387 904); more is refused
+             *     with 400. The bound is said here and not as `maximum`: it is beyond what JSON numbers hold exactly
+             *     in every reader of this document.
+             */
+            quota_bytes: number;
+        };
+        /** @description One rule of a bucket's notifications: which changes, of which keys, are told to which target. */
+        NotificationRule: {
+            /** @description The name of the rule, unique in the bucket - the `Id` of the configuration in the S3 API. */
+            id: string;
+            target: components["schemas"]["TargetNameValue"];
+            /**
+             * @description The kinds of change the rule is for: `put` (an object was put, or copied here - S3's
+             *     `s3:ObjectCreated:Put`), `complete` (a multipart upload was completed -
+             *     `s3:ObjectCreated:CompleteMultipartUpload`), `marker` (an object was deleted where versions are
+             *     kept, which leaves a delete marker - `s3:ObjectRemoved:DeleteMarkerCreated`) and `delete` (a
+             *     version was removed for good - `s3:ObjectRemoved:Delete`).
+             */
+            events: ("put" | "complete" | "marker" | "delete")[];
+            /** @description Only keys that begin with this, byte for byte. Absent or empty for every key. */
+            prefix?: string;
+            /** @description Only keys that end with this, byte for byte. Absent or empty for every key. */
+            suffix?: string;
+            /**
+             * @description Whether the S3 API shows the rule as a `QueueConfiguration` or as a `TopicConfiguration`. It
+             *     changes nothing of what is delivered.
+             * @enum {string}
+             */
+            as: "queue" | "topic";
+        };
+        NotificationRulePut: {
+            id: string;
+            target: components["schemas"]["TargetNameValue"];
+            events: ("put" | "complete" | "marker" | "delete")[];
+            prefix?: string;
+            suffix?: string;
+            /**
+             * @default queue
+             * @enum {string}
+             */
+            as: "queue" | "topic";
+        };
+        /** @description The notification rules of a bucket. No rules is no configuration. */
+        BucketNotifications: {
+            rules: components["schemas"]["NotificationRule"][];
+        };
+        BucketNotificationsPut: {
+            rules: components["schemas"]["NotificationRulePut"][];
+        };
+        /** @description One rule of a bucket's replication - which keys are copied, and whether their delete markers are. */
+        ReplicationRule: {
+            /** @description The name of the rule, unique in the bucket. */
+            id: string;
+            /** @description False for a rule that is kept and matches nothing (S3's `Status` `Disabled`). */
+            enabled: boolean;
+            /** @description Of the rules that match a key, the one with the greatest priority decides. */
+            priority: number;
+            /** @description Only keys that begin with this, byte for byte. Absent or empty for every key. */
+            prefix?: string;
+            /**
+             * @description Whether a delete marker made by a caller is copied too. A marker made by a lifecycle rule never
+             *     is; neither is the removal of a version for good.
+             */
+            delete_markers: boolean;
+        };
+        /** @description Where the versions of a bucket are copied to. One target and one bucket there. */
+        BucketReplication: {
+            target: components["schemas"]["TargetNameValue"];
+            /** @description The bucket of the other deployment, which must be a replica of this one. */
+            destination_bucket: string;
+            rules: components["schemas"]["ReplicationRule"][];
+        };
+        BucketReplicationPut: {
+            target: components["schemas"]["TargetNameValue"];
+            destination_bucket: string;
+            rules: components["schemas"]["ReplicationRule"][];
+        };
+        /**
+         * @description The walk that sends another deployment what it lacks of a bucket. Kept in the metadata, so it is the
+         *     same whichever node answers.
+         */
+        ReplicationResync: {
+            /**
+             * @description `running` while the walk goes on - also while it waits for a target that cannot be reached -
+             *     and `done` once it has been through every version. A newer release may add to the list.
+             */
+            state: string;
+            /**
+             * Format: int64
+             * @description Versions looked at so far.
+             */
+            scanned: number;
+            /**
+             * Format: int64
+             * @description Versions the other deployment did not have and was sent.
+             */
+            sent: number;
+        };
+        /**
+         * @description How far the replication of a bucket has come. `pending` and `failed` are of this bucket and exact:
+         *     they are counted in the bucket's usage record, in the metadata, and are the same whichever node
+         *     leads. `target_state`, `last_error_class`, `oldest_pending_at` and `lost` are of the bucket's
+         *     target, which other buckets may use too; the first three are what the node that leads the metadata
+         *     group has in memory, and begin again when another node comes to lead.
+         */
+        BucketReplicationStatus: {
+            target: components["schemas"]["TargetNameValue"];
+            /**
+             * @description `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is
+             *     tried again; `stalled` when the other deployment refuses everything - the credential, the
+             *     bucket, its versioning, its replica mode or its quota - and somebody has to act. A newer release
+             *     may add to the list.
+             */
+            target_state: string;
+            /**
+             * @description The class of the last failure - never its words, and never the endpoint. Among them `auth`,
+             *     `no_such_bucket`, `versioning`, `not_replica`, `quota`, `timeout`, `connect`, `tls`, `redirect`,
+             *     `egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment does not take
+             *     (a 401 or a 403): it is tried again and stalls the target. `rejected` is a refusal of one request
+             *     that says nothing of the others - a 4xx other than 401, 403, 408 and 429. The list is not closed.
+             *     Absent when the last attempt succeeded.
+             */
+            last_error_class?: string;
+            /**
+             * Format: int64
+             * @description The versions of this bucket that are still to be replicated: those that say `PENDING` in
+             *     `x-amz-replication-status`. Exact, from the bucket's usage record. While the usage of the bucket
+             *     is being counted for the first time it is 0 and says nothing yet (`exact` of the bucket's usage
+             *     is then false).
+             */
+            pending: number;
+            /**
+             * Format: date-time
+             * @description When the oldest change that waits for the bucket's target was made - of any bucket that uses
+             *     the target. Absent when nothing waits.
+             */
+            oldest_pending_at?: string;
+            /**
+             * Format: int64
+             * @description The versions of this bucket that cannot be replicated and were given up on - a version encrypted
+             *     with a key of the customer's, or one the other deployment refuses for itself: those that say
+             *     `FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin
+             *     again when another node comes to lead, and falls only when such a version is removed or a resync
+             *     replicates it.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Changes that were dropped before they were sent, because the target could not be reached while
+             *     more changes waited than the deployment keeps. Kept in the metadata; it does not begin again.
+             */
+            lost: number;
+            /** @description True when changes were lost - the other deployment lacks versions until a resync has been through. */
+            resync_needed: boolean;
+            resync?: components["schemas"]["ReplicationResync"];
+        };
+        BucketReplicaMode: {
+            /** @description Whether the bucket takes new versions from another deployment only. */
+            replica: boolean;
+            /** @description The ID of that deployment. Absent when the bucket is no replica. */
+            source?: string;
+        };
+        BucketReplicaModePut: {
+            /**
+             * @description The deployment ID of the source, as `GET /cluster` of the source gives it. Empty to promote the
+             *     bucket.
+             */
+            source: string;
+        };
+        /** @description The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses. */
+        TargetNameValue: string;
+        /** @description How the deployment proves who it is to a target. Never the secret itself. */
+        TargetAuth: {
+            /**
+             * @description `none`; `bearer` (webhook: the secret is sent as `Authorization: Bearer`); `basic` (nats: `id`
+             *     is the user and the secret the password); `token` (nats: the secret is the token); `sigv4` (s3:
+             *     `id` is the access key ID and the secret its secret key).
+             * @enum {string}
+             */
+            mode: "none" | "bearer" | "basic" | "token" | "sigv4";
+            /** @description The user name or the access key ID, for the modes that have one. Not a secret. */
+            id?: string;
+        };
+        TargetAuthPut: {
+            /** @enum {string} */
+            mode: "none" | "bearer" | "basic" | "token" | "sigv4";
+            id?: string;
+            /**
+             * Format: password
+             * @description The bearer token, the password, the token or the secret key. Written, never read. Without it a
+             *     change keeps the secret the target has; a change of `mode` needs it again, and the mode `none`
+             *     removes it.
+             */
+            secret?: string;
+        };
+        /**
+         * @description A place outside the deployment that it sends to, as it may be shown - with no credential, and
+         *     without the path of its endpoint, which may be one.
+         */
+        Target: {
+            name: components["schemas"]["TargetNameValue"];
+            /**
+             * @description `webhook`: an HTTPS endpoint that is posted to. `nats`: a NATS server with JetStream. `s3`:
+             *     another CactusFS deployment, for replication.
+             * @enum {string}
+             */
+            kind: "webhook" | "nats" | "s3";
+            /**
+             * @description Where it is: **the origin only** - the scheme, the host, and the port when the endpoint names
+             *     one - as in `https://hooks.example.com:8443`. The path is never part of it, for any caller: the
+             *     URL of a webhook may carry a token in its path.
+             */
+            endpoint: string;
+            /**
+             * @description Whether the endpoint has a path (anything after the host and the port but a single `/`). It is
+             *     all that is told of the path.
+             */
+            endpoint_path_set: boolean;
+            /** @description Kind `s3`. The region requests are signed for. */
+            region?: string;
+            /** @description Kind `nats`. The subject every message is published to. The stream that takes it is the operator's. */
+            subject?: string;
+            /**
+             * @description The certificates the target's own must chain to, in PEM. Absent when the system's roots are used.
+             *     Certificates are public; no key is ever part of a target.
+             */
+            ca_pem?: string;
+            /**
+             * @description The buckets whose rules may name the target: names, or patterns with `*`. Empty: none may - a
+             *     target that only exports the audit trail.
+             */
+            buckets: string[];
+            /** @description Whether every record of the audit trail is sent to the target as well. */
+            audit: boolean;
+            auth: components["schemas"]["TargetAuth"];
+            /** @description Whether the target has a secret. It is all that is told of it. */
+            secret_set: boolean;
+            /** @description Whether the target has a key that requests to it are signed with. Kind `webhook` only. */
+            signing_key_set: boolean;
+            /** @description How many bucket configurations name the target. It cannot be deleted while there are any. */
+            references: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        TargetPut: {
+            /** @enum {string} */
+            kind: "webhook" | "nats" | "s3";
+            /**
+             * @description The whole URL, with its path: `https://` for the kinds `webhook` and `s3`, `tls://` for `nats`,
+             *     without userinfo, query or fragment. Written, never read back whole - an answer holds its
+             *     scheme, host and port only. Required for a target that is new. Without it a change keeps the
+             *     endpoint the target has, path and all; to change any part of it, send the whole URL again.
+             */
+            endpoint?: string;
+            region?: string;
+            subject?: string;
+            ca_pem?: string;
+            /**
+             * @description The buckets whose rules may name the target: names, or patterns with `*`. It must be said; `["*"]`
+             *     is every bucket, and an empty list none.
+             */
+            buckets: string[];
+            /** @default false */
+            audit: boolean;
+            auth?: components["schemas"]["TargetAuthPut"];
+            /**
+             * @description Kind `webhook`. Makes a new signing key in place of the one the target has, and returns it once.
+             *     The old one stops being used with the next request that is sent.
+             * @default false
+             */
+            rotate_signing_key: boolean;
+        };
+        TargetPutResult: {
+            target: components["schemas"]["Target"];
+            /**
+             * Format: password
+             * @description The key requests to a webhook are signed with, when this request made one: the target is new, or
+             *     a new key was asked for. Shown once. It cannot be had again - only replaced.
+             */
+            signing_key?: string;
+        };
+        /**
+         * @description Delivery to one target, as the node that leads the metadata group has it in memory. A node of an
+         *     older release that leads cannot be asked: `state` is then `unsupported` and the figures are 0.
+         */
+        TargetStatus: {
+            name: components["schemas"]["TargetNameValue"];
+            /**
+             * @description `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried
+             *     again, with a growing pause; `stalled` when the target refuses everything and somebody has to
+             *     act; `unsupported` when the leader is of a release that cannot say. A newer release may add to
+             *     the list.
+             */
+            state: string;
+            /**
+             * Format: int64
+             * @description Messages matched for the target and not yet acknowledged by it.
+             */
+            pending: number;
+            /**
+             * Format: date-time
+             * @description When the oldest of them was made. Absent when nothing waits.
+             */
+            oldest_pending_at?: string;
+            /**
+             * Format: date-time
+             * @description When the leader last delivered something. Absent when it has not since it came to lead.
+             */
+            last_success_at?: string;
+            /**
+             * @description The class of the last failure - never its words, and never the endpoint. Among them `timeout`,
+             *     `connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`.
+             *     `auth` is a credential the target does not take - a 401 or a 403 from a webhook, a NATS server
+             *     that refuses the token: it is tried again, nothing is passed, and the target is `stalled`.
+             *     `rejected` is a refusal of one message. The list is not closed. Absent when the last attempt
+             *     succeeded.
+             */
+            last_error_class?: string;
+            /**
+             * Format: int64
+             * @description Messages that were dropped before they were sent, because the target could not be reached while
+             *     more waited than the deployment keeps. Kept in the metadata; it does not begin again.
+             */
+            lost: number;
+            /**
+             * Format: int64
+             * @description Messages the target answered with a refusal of that one message - a 4xx other than 401, 403, 408
+             *     and 429 - since the leader came to lead. They are not sent again. A 401 and a 403 are not counted
+             *     here: they are of the credential, class `auth`, and are tried again.
+             */
+            rejected: number;
         };
         ObjectList: {
             objects: components["schemas"]["ObjectSummary"][];
@@ -1315,6 +2032,7 @@ export interface components {
         /** @description The key of the object. */
         ObjectKey: string;
         EntityName: components["schemas"]["Name"];
+        TargetName: components["schemas"]["TargetNameValue"];
     };
     requestBodies: never;
     headers: never;
@@ -1528,6 +2246,403 @@ export interface operations {
             default: components["responses"]["Problem"];
         };
     };
+    recountBucketUsage: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The count was asked for. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketQuota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The quota, or that there is none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketQuota"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketQuota: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketQuotaPut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketQuota"];
+                };
+            };
+            /** @description The caller is not allowed `admin:PutBucketQuota`. The refusal is written to the audit trail. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The bucket's usage is still being counted (`code` is `Conflict`): a quota can be set once
+             *     `exact` is true. A bucket made by this release is exact from the start; one that was there before
+             *     is counted without being asked.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketQuota: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there was none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rules, in the order they were given. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketNotifications"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketNotifications: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketNotificationsPut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketNotifications"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketNotifications: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there were none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketReplication: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configuration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketReplication"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketReplication: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketReplicationPut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketReplication"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketReplication: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there was none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketReplicationStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The state of replication as the leader has it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketReplicationStatus"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    resyncBucketReplication: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The resync was started. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationResync"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketReplicaMode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The mode of the bucket. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketReplicaMode"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketReplicaMode: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketReplicaModePut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketReplicaMode"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
     listObjects: {
         parameters: {
             query?: {
@@ -1627,6 +2742,20 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ObjectMetadata"];
+                };
+            };
+            /**
+             * @description The caller is not allowed `s3:PutObject` on the object (`code` is `AccessDenied`), or the bucket
+             *     has a quota and the object would take it past it (`code` is `QuotaExceeded`). Nothing was
+             *     stored. Sending the same request again does not help until something was deleted or the quota
+             *     was raised.
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];
@@ -2435,6 +3564,131 @@ export interface operations {
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    listTargets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The targets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Target"][];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: components["parameters"]["TargetName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The target, without any credential and without the path of its endpoint. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Target"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putTarget: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                name: components["parameters"]["TargetName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TargetPut"];
+            };
+        };
+        responses: {
+            /** @description Defined or changed. A signing key that was made is in this response and nowhere else, ever. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TargetPutResult"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteTarget: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                name: components["parameters"]["TargetName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getTargetStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: components["parameters"]["TargetName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The state of delivery to the target. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TargetStatus"];
                 };
             };
             default: components["responses"]["Problem"];

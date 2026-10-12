@@ -3,7 +3,11 @@ package domain_test
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -22,7 +26,7 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 		domain.ErrInsufficientDrives, domain.ErrShardNotFound, domain.ErrUnsupportedFormat, domain.ErrUnavailable,
 		domain.ErrDriveOffline, domain.ErrEntityNotFound, domain.ErrEntityExists, domain.ErrEntityInUse,
 		domain.ErrCredentialNotFound, domain.ErrSubBucketNotFound, domain.ErrTooManySubBuckets, domain.ErrSubBucketNotEmpty,
-		domain.ErrTooManyRequests, domain.ErrTooManyBuckets,
+		domain.ErrTooManyRequests, domain.ErrTooManyBuckets, domain.ErrQuotaExceeded,
 	}
 	seen := map[string]bool{}
 	for i, sentinel := range sentinels {
@@ -77,5 +81,105 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 	plain := domain.FromCodes(nil, "node b: too many open files")
 	if plain == nil || errors.Is(plain, domain.ErrIntegrity) || errors.Is(plain, domain.ErrShardNotFound) {
 		t.Errorf("FromCodes without codes = %v", plain)
+	}
+}
+
+// TestSentinelsAreThoseWithAWireName: the list the inbound adapters hold
+// their mappings against is every sentinel that crosses a node boundary,
+// each once, each under a name of its own - and the names that are in
+// releases already are still the names.
+func TestSentinelsAreThoseWithAWireName(t *testing.T) {
+	t.Parallel()
+	sentinels := domain.Sentinels()
+	names := map[string]error{}
+	for _, sentinel := range sentinels {
+		codes := domain.Codes(sentinel)
+		if len(codes) != 1 {
+			t.Errorf("%v has the wire names %v", sentinel, codes)
+			continue
+		}
+		if other, taken := names[codes[0]]; taken {
+			t.Errorf("%v and %v share the wire name %s", sentinel, other, codes[0])
+		}
+		names[codes[0]] = sentinel
+		if back := domain.FromCodes(codes, "x"); !errors.Is(back, sentinel) {
+			t.Errorf("%s does not arrive as %v", codes[0], sentinel)
+		}
+	}
+	// Names are added, never changed: a node of another release reads them.
+	for name, sentinel := range map[string]error{
+		"conflict": domain.ErrConflict, "access_denied": domain.ErrAccessDenied, "invalid_bucket_state": domain.ErrInvalidBucketState,
+		"entity_in_use": domain.ErrEntityInUse, "unavailable": domain.ErrUnavailable, "bucket_not_empty": domain.ErrBucketNotEmpty,
+		"quota_exceeded": domain.ErrQuotaExceeded,
+	} {
+		if !errors.Is(names[name], sentinel) {
+			t.Errorf("the wire name %s is of %v, want %v", name, names[name], sentinel)
+		}
+	}
+	// A refusal for the quota is no denial, and the other way round.
+	quota := domain.FromCodes(domain.Codes(fmt.Errorf("object.Put: %w", domain.ErrQuotaExceeded)), "object.Put: quota")
+	if !errors.Is(quota, domain.ErrQuotaExceeded) || errors.Is(quota, domain.ErrAccessDenied) {
+		t.Errorf("a refusal for the quota arrives as %v", quota)
+	}
+	// What the list returns is the caller's.
+	sentinels[0] = nil
+	if domain.Sentinels()[0] == nil {
+		t.Error("Sentinels returns a list it keeps")
+	}
+}
+
+// TestEverySentinelIsInOneOfTheTwoLists reads the declarations themselves:
+// every sentinel that errors.go declares is in Sentinels or in
+// LocalSentinels, and in one of them only. The inbound adapters hold their
+// answers against the two lists, so a sentinel that is declared and listed
+// nowhere would be answered by default; this is what makes that impossible.
+func TestEverySentinelIsInOneOfTheTwoLists(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(token.NewFileSet(), "errors.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := 0
+	for _, decl := range file.Decls {
+		general, ok := decl.(*ast.GenDecl)
+		if !ok || general.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range general.Specs {
+			values, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range values.Names {
+				if strings.HasPrefix(name.Name, "Err") {
+					declared++
+				}
+			}
+		}
+	}
+	wired, local := domain.Sentinels(), domain.LocalSentinels()
+	if declared == 0 || declared != len(wired)+len(local) {
+		t.Errorf("errors.go declares %d sentinels; %d have a wire name and %d are listed as having none", declared, len(wired), len(local))
+	}
+	seen := map[error]bool{}
+	for _, sentinel := range append(wired, local...) {
+		if sentinel == nil || seen[sentinel] {
+			t.Errorf("%v is listed twice, or is none", sentinel)
+		}
+		seen[sentinel] = true
+	}
+	// One without a wire name crosses a node boundary as what it wraps, if
+	// it wraps anything: an invalid tag arrives as an invalid argument.
+	for _, sentinel := range local {
+		for _, code := range domain.Codes(sentinel) {
+			if back := domain.FromCodes([]string{code}, "x"); errors.Is(back, sentinel) {
+				t.Errorf("%v is listed as having no wire name and arrives by %s", sentinel, code)
+			}
+		}
+	}
+	// What the list returns is the caller's.
+	local[0] = nil
+	if domain.LocalSentinels()[0] == nil {
+		t.Error("LocalSentinels returns what it keeps")
 	}
 }

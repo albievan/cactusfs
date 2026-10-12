@@ -115,12 +115,12 @@ func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
 			if !strings.HasPrefix(strings.ToLower(action), "s3:") {
 				return BucketPolicy{}, invalidPolicy("statement %d: a bucket policy is about S3 actions, not %q", i, action)
 			}
-			// Lifting a governance retention is given by a policy of
-			// the user, by name, and by nothing else. Whoever may write
-			// a bucket's policy - by a wildcard, perhaps - must not be
-			// able to give it to themselves.
-			if s.Effect == Allow && strings.EqualFold(action, string(ActionOverrideGovernance)) {
-				return BucketPolicy{}, invalidPolicy("statement %d: a bucket policy cannot allow %s", i, ActionOverrideGovernance)
+			// Lifting a governance retention and committing a replica
+			// are given by a policy of the user, by name, and by nothing
+			// else. Whoever may write a bucket's policy - by a wildcard,
+			// perhaps - must not be able to give them to themselves.
+			if s.Effect == Allow && Action(action).byNameOnly() {
+				return BucketPolicy{}, invalidPolicy("statement %d: a bucket policy cannot allow %s", i, action)
 			}
 		}
 		for _, resource := range s.Resources {
@@ -185,6 +185,12 @@ func (p BucketPolicy) judge(principal Principal, action Action, resource string,
 		}
 		if s.Effect == Deny {
 			return denied
+		}
+		// What only a user's own policy gives, by name, no bucket policy
+		// gives - not even one that names it, should one have been stored
+		// before ParseBucketPolicy refused it.
+		if action.byNameOnly() {
+			continue
 		}
 		result = allowed
 	}

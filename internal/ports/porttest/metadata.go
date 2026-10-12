@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/domain/tagging"
@@ -59,7 +60,22 @@ type MemMetadata struct {
 	tagDefs map[string]tagging.Definition
 	// activity holds the latest uploads and downloads of every bucket.
 	activity map[string]bucket.Activity
+	// What entry schema 5 added (schema5.go): the usage record of every
+	// bucket that has one; the targets, each with its cursor; the outbox,
+	// oldest row first, with the count of the rows that were pushed out of
+	// it; and the resync record of every bucket that has one. row numbers
+	// the rows one change appends.
+	usage   map[string]*memUsage
+	targets map[string]delivery.Target
+	cursors map[string]delivery.Cursor
+	outbox  []delivery.Item
+	dropped uint64
+	row     delivery.Seq
+	resyncs map[string]bucket.Resync
 
+	// MaxOutboxRows, when set, is how many rows the outbox holds, in place
+	// of delivery.MaxOutboxRows: tests of the bound set it low.
+	MaxOutboxRows int
 	// Audit, when set, receives the audit records that changes to
 	// sub-buckets and to the catalogue of tags carry, as the real store
 	// appends them to its one trail. Without it they are checked and
@@ -91,6 +107,10 @@ func NewMemMetadata() *MemMetadata {
 		subs:     map[string]map[string]bucket.SubBucket{},
 		tagDefs:  map[string]tagging.Definition{},
 		activity: map[string]bucket.Activity{},
+		usage:    map[string]*memUsage{},
+		targets:  map[string]delivery.Target{},
+		cursors:  map[string]delivery.Cursor{},
+		resyncs:  map[string]bucket.Resync{},
 	}
 }
 
@@ -115,8 +135,13 @@ func (m *MemMetadata) CreateBucket(_ context.Context, b bucket.Bucket) error {
 	if b.ObjectLock {
 		b.Versioning = bucket.VersioningEnabled
 	}
+	// A quota and a source are given by changes of their own, and a bucket
+	// that is made where every member knows entry schema 5 is counted from
+	// the start: exact, and empty.
+	b.QuotaBytes, b.ReplicaFrom = 0, ""
 	m.buckets[b.Name] = b
 	m.objects[b.Name] = map[string][]object.Version{}
+	m.usage[b.Name] = &memUsage{exact: true}
 	return nil
 }
 
@@ -137,7 +162,15 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	delete(m.objects, name)
 	// Uploads that were never completed go with the bucket.
 	delete(m.uploads, name)
+	// The targets its rules named are named by one document fewer; the
+	// rows it left in the outbox stay for their targets.
+	for _, kind := range []string{bucket.ConfigNotification, bucket.ConfigReplication} {
+		m.refer(m.namedBy(kind, m.config[name][kind]), -1)
+	}
 	delete(m.config, name)
+	// Its usage record and the record of its resync go with it.
+	delete(m.usage, name)
+	delete(m.resyncs, name)
 	// So do its sub-buckets and what is known of who read its versions.
 	delete(m.subs, name)
 	delete(m.access, name)
@@ -213,12 +246,14 @@ func (m *MemMetadata) PutVersion(_ context.Context, v object.Version) (ports.Put
 	if err := object.ValidateTags(v.Tags, object.MaxObjectTags); err != nil {
 		return ports.PutResult{}, err
 	}
-	return m.commit(b, v)
+	return m.commit(b, v, delivery.EventPut, 0)
 }
 
 // commit puts a new version of a key into the store, as the bucket keeps
-// versions. When it refuses, nothing was changed.
-func (m *MemMetadata) commit(b bucket.Bucket, v object.Version) (ports.PutResult, error) {
+// versions. event says how it came about - a put or the completion of an
+// upload - and uploadBytes what the same change frees of the parts of an
+// upload. When it refuses, nothing was changed.
+func (m *MemMetadata) commit(b bucket.Bucket, v object.Version, event delivery.Event, uploadBytes int64) (ports.PutResult, error) {
 	lock := v.Lock
 	switch {
 	case !b.ObjectLock && !lock.IsZero():
@@ -230,28 +265,54 @@ func (m *MemMetadata) commit(b bucket.Bucket, v object.Version) (ports.PutResult
 	case b.ObjectLock && b.DefaultRetention != nil:
 		lock.Retention = &object.Retention{Mode: b.DefaultRetention.Mode, Until: b.DefaultRetention.Until(m.now())}
 	}
+	if err := m.replicaAllowed(b, v.Replica); err != nil {
+		return ports.PutResult{}, err
+	}
 	m.seq++
 	stored := CloneVersion(v)
-	stored.DeleteMarker, stored.Lock = false, lock
+	stored.DeleteMarker, stored.Lock, stored.Replica, stored.Replication = false, lock, nil, ""
 	versions := m.objects[v.Bucket][v.Key]
 	var removed *object.Version
-	switch b.Versioning {
-	case bucket.VersioningEnabled:
-		stored.Versioned, stored.Seq = true, m.seq
+	switch {
+	case v.Replica != nil:
+		// The copy of a version of the bucket's source: with the ID and
+		// the time it was given, at the sequence it has there.
+		stored.Versioned, stored.Seq, stored.Replication = !v.Replica.Null, v.Replica.Seq, object.ReplicationReplica
+		if has(versions, stored.Ref()) {
+			return ports.PutResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, stored.Ref())
+		}
+	case b.Versioning == bucket.VersioningEnabled:
+		stored.Versioned, stored.Seq = true, m.sequence(v.Bucket)
 		for _, existing := range versions {
 			if existing.Versioned && existing.VersionID == stored.VersionID {
 				return ports.PutResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, stored.VersionID)
 			}
 		}
-	case bucket.VersioningSuspended:
-		stored.Versioned, stored.Seq = false, m.seq
+	case b.Versioning == bucket.VersioningSuspended:
+		stored.Versioned, stored.Seq = false, m.sequence(v.Bucket)
 		versions, removed = take(versions, object.VersionRef{Null: true})
 	default:
 		stored.Versioned, stored.Seq = false, 0
 		versions, removed = take(versions, object.VersionRef{Null: true})
 	}
+	// What the change adds, less what the same change frees: the version it
+	// replaces where versions are not kept, and the parts of the upload it
+	// completes.
+	net := stored.Size - uploadBytes
+	if removed != nil {
+		net -= removed.Size
+	}
+	if !m.admits(b, net) {
+		return ports.PutResult{}, fmt.Errorf("%w: bucket %s", domain.ErrQuotaExceeded, v.Bucket)
+	}
+	to := m.consumers(event, stored, stored.CreatedBy, v.Replica != nil, "")
+	if replicated(to) {
+		stored.Replication = object.ReplicationPending
+	}
 	parts := m.forget(removed)
-	m.store(v.Bucket, v.Key, append([]object.Version{stored}, versions...))
+	m.store(v.Bucket, v.Key, placedBySeq(versions, stored, v.Replica != nil))
+	m.raise(v.Bucket, stored.Seq)
+	m.tell(event, stored, stored.CreatedBy, to)
 	// Every version that is committed - by a put, a copy, a completion - is
 	// an upload into its bucket, as of the store's time.
 	m.activity[v.Bucket] = m.activity[v.Bucket].Uploaded(m.now(), stored.CreatedBy, stored.Key)
@@ -282,6 +343,16 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 			return ports.DeleteResult{}, fmt.Errorf("%w: %s/%s is not the version the delete was decided for", domain.ErrConflict, bucketName, key)
 		}
 	}
+	if o.Version != nil && o.Replica != nil {
+		return ports.DeleteResult{}, fmt.Errorf("%w: a replica of a delete marker names no version to remove", domain.ErrInvalidArgument)
+	}
+	if o.Version == nil {
+		// What would leave a delete marker is, in a replica bucket, the
+		// source's to do and nobody else's.
+		if err := m.replicaAllowed(b, o.Replica); err != nil {
+			return ports.DeleteResult{}, err
+		}
+	}
 	m.seq++
 	if o.Version != nil {
 		for _, v := range versions {
@@ -293,30 +364,44 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		}
 		rest, removed := take(versions, *o.Version)
 		m.store(bucketName, key, rest)
+		m.gone(removed, o.By)
 		return ports.DeleteResult{Removed: removed, RemovedParts: m.forget(removed)}, nil
 	}
 	if b.Versioning == bucket.Unversioned {
 		rest, removed := take(versions, object.VersionRef{Null: true})
 		m.store(bucketName, key, rest)
+		m.gone(removed, o.By)
 		return ports.DeleteResult{Removed: removed, RemovedParts: m.forget(removed)}, nil
 	}
 	marker := object.Version{
-		Bucket: bucketName, Key: key, VersionID: o.MarkerID, ModifiedAt: o.At.UTC(), Seq: m.seq,
+		Bucket: bucketName, Key: key, VersionID: o.MarkerID, ModifiedAt: o.At.UTC(), Seq: m.sequence(bucketName),
 		DeleteMarker: true, Versioned: b.Versioning == bucket.VersioningEnabled,
 	}
 	var removed *object.Version
 	var parts []object.Part
-	if b.Versioning == bucket.VersioningSuspended {
+	switch {
+	case o.Replica != nil:
+		marker.Versioned, marker.Seq, marker.Replication = !o.Replica.Null, o.Replica.Seq, object.ReplicationReplica
+		if has(versions, marker.Ref()) {
+			return ports.DeleteResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, marker.Ref())
+		}
+	case b.Versioning == bucket.VersioningSuspended:
 		versions, removed = take(versions, object.VersionRef{Null: true})
 		parts = m.forget(removed)
-	} else {
+	default:
 		for _, existing := range versions {
 			if existing.Versioned && existing.VersionID == marker.VersionID {
 				return ports.DeleteResult{}, fmt.Errorf("%w: version %s exists", domain.ErrConflict, marker.VersionID)
 			}
 		}
 	}
-	m.store(bucketName, key, append([]object.Version{marker}, versions...))
+	to := m.consumers(delivery.EventMarker, marker, o.By, o.Replica != nil, "")
+	if replicated(to) {
+		marker.Replication = object.ReplicationPending
+	}
+	m.store(bucketName, key, placedBySeq(versions, marker, o.Replica != nil))
+	m.raise(bucketName, marker.Seq)
+	m.tell(delivery.EventMarker, marker, o.By, to)
 	return ports.DeleteResult{Marker: &marker, Removed: removed, RemovedParts: parts}, nil
 }
 
@@ -333,6 +418,11 @@ func (m *MemMetadata) SetBucketVersioning(_ context.Context, name string, state 
 	}
 	if err := bucket.ValidateVersioningChange(state, b.ObjectLock); err != nil {
 		return err
+	}
+	// A bucket that sends its versions to another deployment, or takes
+	// them from one, keeps versions.
+	if state != bucket.VersioningEnabled && (b.ReplicaFrom != "" || len(m.config[name][bucket.ConfigReplication]) > 0) {
+		return fmt.Errorf("%w: bucket %s is replicated, or is a replica, and keeps its versions", domain.ErrInvalidBucketState, name)
 	}
 	b.Versioning = state
 	m.buckets[name] = b
@@ -373,13 +463,17 @@ func (m *MemMetadata) SetBucketDefaultRetention(_ context.Context, name string, 
 }
 
 // locked finds the version a lock change is about and applies change to it.
-func (m *MemMetadata) locked(bucketName, key string, ref object.VersionRef, change func(v *object.Version) error) (object.Version, error) {
-	return m.changed(bucketName, key, ref, true, change)
+func (m *MemMetadata) locked(
+	bucketName, key string, ref object.VersionRef, event delivery.Event, change func(v *object.Version) error,
+) (object.Version, error) {
+	return m.changed(bucketName, key, ref, true, event, change)
 }
 
-// changed changes something that is kept with a version. needLock refuses a
-// bucket without Object Lock.
-func (m *MemMetadata) changed(bucketName, key string, ref object.VersionRef, needLock bool, change func(v *object.Version) error) (object.Version, error) {
+// changed changes something that is kept with a version, and tells of it as
+// a change of the kind event. needLock refuses a bucket without Object Lock.
+func (m *MemMetadata) changed(
+	bucketName, key string, ref object.VersionRef, needLock bool, event delivery.Event, change func(v *object.Version) error,
+) (object.Version, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
@@ -404,7 +498,11 @@ func (m *MemMetadata) changed(bucketName, key string, ref object.VersionRef, nee
 			return object.Version{}, err
 		}
 		m.seq++
-		return CloneVersion(versions[i]), nil
+		// A later change of a version that is being, or was, replicated
+		// is sent after it. Who made it is not said through this port.
+		v := versions[i]
+		m.tell(event, v, "", m.consumers(event, v, "", false, v.Replication))
+		return CloneVersion(v), nil
 	}
 	return object.Version{}, fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
 }
@@ -413,7 +511,7 @@ func (m *MemMetadata) changed(bucketName, key string, ref object.VersionRef, nee
 func (m *MemMetadata) SetRetention(
 	_ context.Context, bucketName, key string, ref object.VersionRef, r *object.Retention, bypassGovernance bool,
 ) (object.Version, error) {
-	return m.locked(bucketName, key, ref, func(v *object.Version) error {
+	return m.locked(bucketName, key, ref, delivery.EventRetention, func(v *object.Version) error {
 		if err := v.Lock.CheckRetention(r, m.now(), bypassGovernance); err != nil {
 			return err
 		}
@@ -428,7 +526,7 @@ func (m *MemMetadata) SetRetention(
 
 // SetLegalHold implements ports.ObjectIndex.
 func (m *MemMetadata) SetLegalHold(_ context.Context, bucketName, key string, ref object.VersionRef, on bool) (object.Version, error) {
-	return m.locked(bucketName, key, ref, func(v *object.Version) error {
+	return m.locked(bucketName, key, ref, delivery.EventLegalHold, func(v *object.Version) error {
 		v.Lock.LegalHold = on
 		return nil
 	})
@@ -670,6 +768,10 @@ func CloneVersion(v object.Version) object.Version {
 		retention := *v.Lock.Retention
 		v.Lock.Retention = &retention
 	}
+	if v.Replica != nil {
+		replica := *v.Replica
+		v.Replica = &replica
+	}
 	return v
 }
 
@@ -691,13 +793,25 @@ func (m *MemMetadata) SetBucketConfig(_ context.Context, name, kind string, docu
 	if m.FailWrites != nil {
 		return m.FailWrites
 	}
-	switch _, ok := m.buckets[name]; {
+	delivered := kind == bucket.ConfigNotification || kind == bucket.ConfigReplication
+	b, ok := m.buckets[name]
+	switch {
 	case !ok:
 		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
-	case !bucket.ValidConfigKind(kind) && kind != bucket.ConfigTagRules:
+	case !bucket.ValidConfigKind(kind) && kind != bucket.ConfigTagRules && !delivered:
 		return fmt.Errorf("%w: bucket configuration %q", domain.ErrInvalidArgument, kind)
 	case len(document) > bucket.MaxConfigBytes:
 		return fmt.Errorf("%w: bucket configuration of %d bytes", domain.ErrInvalidArgument, len(document))
+	}
+	if delivered {
+		// The two documents the store matches changes by: taken in their
+		// canonical form only, and only when every target they name is
+		// there, fits and admits the bucket.
+		if err := m.checkDelivered(b, kind, document); err != nil {
+			return err
+		}
+		m.refer(m.namedBy(kind, m.config[name][kind]), -1)
+		m.refer(m.namedBy(kind, document), 1)
 	}
 	if len(document) == 0 {
 		delete(m.config[name], kind)
@@ -785,7 +899,7 @@ func (m *MemMetadata) SetTags(_ context.Context, bucketName, key string, ref obj
 	if err := object.ValidateTags(tags, object.MaxObjectTags); err != nil {
 		return object.Version{}, err
 	}
-	return m.changed(bucketName, key, ref, false, func(v *object.Version) error {
+	return m.changed(bucketName, key, ref, false, delivery.EventTags, func(v *object.Version) error {
 		v.Tags = maps.Clone(tags)
 		if len(v.Tags) == 0 {
 			v.Tags = nil

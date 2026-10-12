@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,45 @@ func TestBuiltInRoles(t *testing.T) {
 		// No built-in role grants what only nodes may do.
 		if err := decide(user("u", policies[role]), iam.ActionNodeRPC, iam.Resource{}); err == nil {
 			t.Errorf("%s grants node RPC", role)
+		}
+	}
+	// The actions of quotas, targets, notifications and replication (PLAN
+	// 8.0.3), each on the resource its use case will name. What a role
+	// holds of them it holds by a wildcard, and that is the point of the
+	// table: all of administration for the cluster-admin; reading it, and
+	// nothing that changes anything, for the auditor; the two bucket
+	// configurations, which are S3's, for the bucket-admin - and neither the
+	// quota of its bucket, nor a target, nor the replica mode.
+	target := iam.Resource{Admin: "target/hook"}
+	hybrid := []struct {
+		action   iam.Action
+		resource iam.Resource
+		holders  []string
+	}{
+		{iam.ActionGetBucketQuota, bucket, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionPutBucketQuota, bucket, []string{iam.RoleClusterAdmin}},
+		{iam.ActionDeleteBucketQuota, bucket, []string{iam.RoleClusterAdmin}},
+		{iam.ActionRecountBucketUsage, bucket, []string{iam.RoleClusterAdmin}},
+		{iam.ActionListTargets, iam.Resource{Admin: "targets"}, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionGetTarget, target, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionPutTarget, target, []string{iam.RoleClusterAdmin}},
+		{iam.ActionDeleteTarget, target, []string{iam.RoleClusterAdmin}},
+		{iam.ActionGetTargetStatus, target, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionGetReplicationStatus, bucket, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionResyncReplication, bucket, []string{iam.RoleClusterAdmin}},
+		{iam.ActionGetBucketReplicaMode, bucket, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionPutBucketReplicaMode, bucket, []string{iam.RoleClusterAdmin}},
+		{iam.ActionGetBucketNotification, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
+		{iam.ActionPutBucketNotification, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
+		{iam.ActionGetReplication, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
+		{iam.ActionPutReplication, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
+	}
+	for _, tt := range hybrid {
+		for role := range policies {
+			err := decide(user("u", policies[role]), tt.action, tt.resource)
+			if want := slices.Contains(tt.holders, role); want != (err == nil) {
+				t.Errorf("%s: %s on %s allowed = %v, want %v", role, tt.action, tt.resource, err == nil, want)
+			}
 		}
 	}
 	if iam.IsBuiltIn("operator") {

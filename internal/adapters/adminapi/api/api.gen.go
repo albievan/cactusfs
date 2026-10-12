@@ -101,6 +101,90 @@ func (e NodeSettingsReason) Valid() bool {
 	}
 }
 
+// Defines values for NotificationRuleAs.
+const (
+	NotificationRuleAsQueue NotificationRuleAs = "queue"
+	NotificationRuleAsTopic NotificationRuleAs = "topic"
+)
+
+// Valid indicates whether the value is a known member of the NotificationRuleAs enum.
+func (e NotificationRuleAs) Valid() bool {
+	switch e {
+	case NotificationRuleAsQueue:
+		return true
+	case NotificationRuleAsTopic:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationRuleEvents.
+const (
+	NotificationRuleEventsComplete NotificationRuleEvents = "complete"
+	NotificationRuleEventsDelete   NotificationRuleEvents = "delete"
+	NotificationRuleEventsMarker   NotificationRuleEvents = "marker"
+	NotificationRuleEventsPut      NotificationRuleEvents = "put"
+)
+
+// Valid indicates whether the value is a known member of the NotificationRuleEvents enum.
+func (e NotificationRuleEvents) Valid() bool {
+	switch e {
+	case NotificationRuleEventsComplete:
+		return true
+	case NotificationRuleEventsDelete:
+		return true
+	case NotificationRuleEventsMarker:
+		return true
+	case NotificationRuleEventsPut:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationRulePutAs.
+const (
+	NotificationRulePutAsQueue NotificationRulePutAs = "queue"
+	NotificationRulePutAsTopic NotificationRulePutAs = "topic"
+)
+
+// Valid indicates whether the value is a known member of the NotificationRulePutAs enum.
+func (e NotificationRulePutAs) Valid() bool {
+	switch e {
+	case NotificationRulePutAsQueue:
+		return true
+	case NotificationRulePutAsTopic:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationRulePutEvents.
+const (
+	NotificationRulePutEventsComplete NotificationRulePutEvents = "complete"
+	NotificationRulePutEventsDelete   NotificationRulePutEvents = "delete"
+	NotificationRulePutEventsMarker   NotificationRulePutEvents = "marker"
+	NotificationRulePutEventsPut      NotificationRulePutEvents = "put"
+)
+
+// Valid indicates whether the value is a known member of the NotificationRulePutEvents enum.
+func (e NotificationRulePutEvents) Valid() bool {
+	switch e {
+	case NotificationRulePutEventsComplete:
+		return true
+	case NotificationRulePutEventsDelete:
+		return true
+	case NotificationRulePutEventsMarker:
+		return true
+	case NotificationRulePutEventsPut:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SearchResultKind.
 const (
 	SearchResultKindBucket SearchResultKind = "bucket"
@@ -134,6 +218,102 @@ func (e SearchResultsMatch) Valid() bool {
 	case Substring:
 		return true
 	case Wildcard:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TargetKind.
+const (
+	TargetKindNats    TargetKind = "nats"
+	TargetKindS3      TargetKind = "s3"
+	TargetKindWebhook TargetKind = "webhook"
+)
+
+// Valid indicates whether the value is a known member of the TargetKind enum.
+func (e TargetKind) Valid() bool {
+	switch e {
+	case TargetKindNats:
+		return true
+	case TargetKindS3:
+		return true
+	case TargetKindWebhook:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TargetAuthMode.
+const (
+	TargetAuthModeBasic  TargetAuthMode = "basic"
+	TargetAuthModeBearer TargetAuthMode = "bearer"
+	TargetAuthModeNone   TargetAuthMode = "none"
+	TargetAuthModeSigv4  TargetAuthMode = "sigv4"
+	TargetAuthModeToken  TargetAuthMode = "token"
+)
+
+// Valid indicates whether the value is a known member of the TargetAuthMode enum.
+func (e TargetAuthMode) Valid() bool {
+	switch e {
+	case TargetAuthModeBasic:
+		return true
+	case TargetAuthModeBearer:
+		return true
+	case TargetAuthModeNone:
+		return true
+	case TargetAuthModeSigv4:
+		return true
+	case TargetAuthModeToken:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TargetAuthPutMode.
+const (
+	TargetAuthPutModeBasic  TargetAuthPutMode = "basic"
+	TargetAuthPutModeBearer TargetAuthPutMode = "bearer"
+	TargetAuthPutModeNone   TargetAuthPutMode = "none"
+	TargetAuthPutModeSigv4  TargetAuthPutMode = "sigv4"
+	TargetAuthPutModeToken  TargetAuthPutMode = "token"
+)
+
+// Valid indicates whether the value is a known member of the TargetAuthPutMode enum.
+func (e TargetAuthPutMode) Valid() bool {
+	switch e {
+	case TargetAuthPutModeBasic:
+		return true
+	case TargetAuthPutModeBearer:
+		return true
+	case TargetAuthPutModeNone:
+		return true
+	case TargetAuthPutModeSigv4:
+		return true
+	case TargetAuthPutModeToken:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TargetPutKind.
+const (
+	TargetPutKindNats    TargetPutKind = "nats"
+	TargetPutKindS3      TargetPutKind = "s3"
+	TargetPutKindWebhook TargetPutKind = "webhook"
+)
+
+// Valid indicates whether the value is a known member of the TargetPutKind enum.
+func (e TargetPutKind) Valid() bool {
+	switch e {
+	case TargetPutKindNats:
+		return true
+	case TargetPutKindS3:
+		return true
+	case TargetPutKindWebhook:
 		return true
 	default:
 		return false
@@ -278,6 +458,16 @@ type BucketDetails struct {
 	PolicyIncluded bool `json:"policy_included"`
 }
 
+// BucketNotifications The notification rules of a bucket. No rules is no configuration.
+type BucketNotifications struct {
+	Rules []NotificationRule `json:"rules"`
+}
+
+// BucketNotificationsPut defines model for BucketNotificationsPut.
+type BucketNotificationsPut struct {
+	Rules []NotificationRulePut `json:"rules"`
+}
+
 // BucketPolicySummary What a bucket's policy is, without what it says.
 type BucketPolicySummary struct {
 	// OpenToAnyone True when some statement of the policy allows something to every caller: an `Allow` whose
@@ -291,16 +481,146 @@ type BucketPolicySummary struct {
 	Statements int `json:"statements"`
 }
 
+// BucketQuota The quota of a bucket and what counts against it.
+type BucketQuota struct {
+	// Exact Whether the bucket's usage is counted. False while a bucket that is older than the count is
+	// being counted for the first time; a quota cannot be set until then.
+	Exact bool `json:"exact"`
+
+	// QuotaBytes The most bytes the bucket may hold. Absent when the bucket has no quota.
+	QuotaBytes *int64 `json:"quota_bytes,omitempty"`
+
+	// UsedBytes What counts against the quota: `stored_bytes` and `upload_bytes` of the bucket's usage, added. 0
+	// while `exact` is false: it is not known yet.
+	UsedBytes int64 `json:"used_bytes"`
+}
+
+// BucketQuotaPut defines model for BucketQuotaPut.
+type BucketQuotaPut struct {
+	// QuotaBytes The most bytes the bucket may hold, from 1 to 2^62 (4 611 686 018 427 387 904); more is refused
+	// with 400. The bound is said here and not as `maximum`: it is beyond what JSON numbers hold exactly
+	// in every reader of this document.
+	QuotaBytes int64 `json:"quota_bytes"`
+}
+
+// BucketReplicaMode defines model for BucketReplicaMode.
+type BucketReplicaMode struct {
+	// Replica Whether the bucket takes new versions from another deployment only.
+	Replica bool `json:"replica"`
+
+	// Source The ID of that deployment. Absent when the bucket is no replica.
+	Source *string `json:"source,omitempty"`
+}
+
+// BucketReplicaModePut defines model for BucketReplicaModePut.
+type BucketReplicaModePut struct {
+	// Source The deployment ID of the source, as `GET /cluster` of the source gives it. Empty to promote the
+	// bucket.
+	Source string `json:"source"`
+}
+
+// BucketReplication Where the versions of a bucket are copied to. One target and one bucket there.
+type BucketReplication struct {
+	// DestinationBucket The bucket of the other deployment, which must be a replica of this one.
+	DestinationBucket string            `json:"destination_bucket"`
+	Rules             []ReplicationRule `json:"rules"`
+
+	// Target The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Target TargetNameValue `json:"target"`
+}
+
+// BucketReplicationPut defines model for BucketReplicationPut.
+type BucketReplicationPut struct {
+	DestinationBucket string            `json:"destination_bucket"`
+	Rules             []ReplicationRule `json:"rules"`
+
+	// Target The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Target TargetNameValue `json:"target"`
+}
+
+// BucketReplicationStatus How far the replication of a bucket has come. `pending` and `failed` are of this bucket and exact:
+// they are counted in the bucket's usage record, in the metadata, and are the same whichever node
+// leads. `target_state`, `last_error_class`, `oldest_pending_at` and `lost` are of the bucket's
+// target, which other buckets may use too; the first three are what the node that leads the metadata
+// group has in memory, and begin again when another node comes to lead.
+type BucketReplicationStatus struct {
+	// Failed The versions of this bucket that cannot be replicated and were given up on - a version encrypted
+	// with a key of the customer's, or one the other deployment refuses for itself: those that say
+	// `FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin
+	// again when another node comes to lead, and falls only when such a version is removed or a resync
+	// replicates it.
+	Failed int64 `json:"failed"`
+
+	// LastErrorClass The class of the last failure - never its words, and never the endpoint. Among them `auth`,
+	// `no_such_bucket`, `versioning`, `not_replica`, `quota`, `timeout`, `connect`, `tls`, `redirect`,
+	// `egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment does not take
+	// (a 401 or a 403): it is tried again and stalls the target. `rejected` is a refusal of one request
+	// that says nothing of the others - a 4xx other than 401, 403, 408 and 429. The list is not closed.
+	// Absent when the last attempt succeeded.
+	LastErrorClass *string `json:"last_error_class,omitempty"`
+
+	// Lost Changes that were dropped before they were sent, because the target could not be reached while
+	// more changes waited than the deployment keeps. Kept in the metadata; it does not begin again.
+	Lost int64 `json:"lost"`
+
+	// OldestPendingAt When the oldest change that waits for the bucket's target was made - of any bucket that uses
+	// the target. Absent when nothing waits.
+	OldestPendingAt *time.Time `json:"oldest_pending_at,omitempty"`
+
+	// Pending The versions of this bucket that are still to be replicated: those that say `PENDING` in
+	// `x-amz-replication-status`. Exact, from the bucket's usage record. While the usage of the bucket
+	// is being counted for the first time it is 0 and says nothing yet (`exact` of the bucket's usage
+	// is then false).
+	Pending int64 `json:"pending"`
+
+	// Resync The walk that sends another deployment what it lacks of a bucket. Kept in the metadata, so it is the
+	// same whichever node answers.
+	Resync *ReplicationResync `json:"resync,omitempty"`
+
+	// ResyncNeeded True when changes were lost - the other deployment lacks versions until a resync has been through.
+	ResyncNeeded bool `json:"resync_needed"`
+
+	// Target The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Target TargetNameValue `json:"target"`
+
+	// TargetState `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is
+	// tried again; `stalled` when the other deployment refuses everything - the credential, the
+	// bucket, its versioning, its replica mode or its quota - and somebody has to act. A newer release
+	// may add to the list.
+	TargetState string `json:"target_state"`
+}
+
 // BucketUsage defines model for BucketUsage.
 type BucketUsage struct {
-	// Complete False when the bucket has more objects than are counted in one request.
+	// Complete False when the bucket has more objects than are counted in one request. Never false when `exact` is true.
 	Complete bool `json:"complete"`
+
+	// Exact True when the figures are the count the metadata store keeps of the bucket, which every change
+	// of the bucket keeps right. False when they were counted for this request, as far as one request
+	// counts: `versions`, `stored_bytes` and `upload_bytes` are then absent.
+	Exact bool `json:"exact"`
 
 	// ObjectCount Objects in the bucket (current versions; delete markers are not objects).
 	ObjectCount int64 `json:"object_count"`
 
+	// QuotaBytes The bucket's quota: the most `stored_bytes` and `upload_bytes` together may come to. Absent when
+	// the bucket has none. Who may read the usage is told the quota; changing it needs
+	// `admin:PutBucketQuota`.
+	QuotaBytes *int64 `json:"quota_bytes,omitempty"`
+
+	// StoredBytes The sizes of all those versions added up, in bytes - of the objects as they were sent, not of
+	// what they take on the drives, which is more by the parity. Present when `exact` is true.
+	StoredBytes *int64 `json:"stored_bytes,omitempty"`
+
 	// TotalSize Their sizes added up, in bytes.
 	TotalSize int64 `json:"total_size"`
+
+	// UploadBytes The sizes of the parts of multipart uploads that are neither completed nor aborted. Present when
+	// `exact` is true.
+	UploadBytes *int64 `json:"upload_bytes,omitempty"`
+
+	// Versions Versions the bucket keeps, current or not, delete markers among them. Present when `exact` is true.
+	Versions *int64 `json:"versions,omitempty"`
 }
 
 // ClusterStatus defines model for ClusterStatus.
@@ -492,6 +812,57 @@ type NodeSettings struct {
 // not answer (`failed`). The cause itself is in the log of the answering node, not here.
 type NodeSettingsReason string
 
+// NotificationRule One rule of a bucket's notifications: which changes, of which keys, are told to which target.
+type NotificationRule struct {
+	// As Whether the S3 API shows the rule as a `QueueConfiguration` or as a `TopicConfiguration`. It
+	// changes nothing of what is delivered.
+	As NotificationRuleAs `json:"as"`
+
+	// Events The kinds of change the rule is for: `put` (an object was put, or copied here - S3's
+	// `s3:ObjectCreated:Put`), `complete` (a multipart upload was completed -
+	// `s3:ObjectCreated:CompleteMultipartUpload`), `marker` (an object was deleted where versions are
+	// kept, which leaves a delete marker - `s3:ObjectRemoved:DeleteMarkerCreated`) and `delete` (a
+	// version was removed for good - `s3:ObjectRemoved:Delete`).
+	Events []NotificationRuleEvents `json:"events"`
+
+	// Id The name of the rule, unique in the bucket - the `Id` of the configuration in the S3 API.
+	Id string `json:"id"`
+
+	// Prefix Only keys that begin with this, byte for byte. Absent or empty for every key.
+	Prefix *string `json:"prefix,omitempty"`
+
+	// Suffix Only keys that end with this, byte for byte. Absent or empty for every key.
+	Suffix *string `json:"suffix,omitempty"`
+
+	// Target The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Target TargetNameValue `json:"target"`
+}
+
+// NotificationRuleAs Whether the S3 API shows the rule as a `QueueConfiguration` or as a `TopicConfiguration`. It
+// changes nothing of what is delivered.
+type NotificationRuleAs string
+
+// NotificationRuleEvents defines model for NotificationRule.Events.
+type NotificationRuleEvents string
+
+// NotificationRulePut defines model for NotificationRulePut.
+type NotificationRulePut struct {
+	As     *NotificationRulePutAs      `json:"as,omitempty"`
+	Events []NotificationRulePutEvents `json:"events"`
+	Id     string                      `json:"id"`
+	Prefix *string                     `json:"prefix,omitempty"`
+	Suffix *string                     `json:"suffix,omitempty"`
+
+	// Target The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Target TargetNameValue `json:"target"`
+}
+
+// NotificationRulePutAs defines model for NotificationRulePut.As.
+type NotificationRulePutAs string
+
+// NotificationRulePutEvents defines model for NotificationRulePut.Events.
+type NotificationRulePutEvents string
+
 // ObjectAccess Who uploaded a version of an object and who read it. Best-effort counts, not an audit trail.
 type ObjectAccess struct {
 	// CopyCount How often the version was the source of a copy.
@@ -632,6 +1003,39 @@ type Problem struct {
 
 	// Type A URI reference that identifies the kind of problem.
 	Type string `json:"type"`
+}
+
+// ReplicationResync The walk that sends another deployment what it lacks of a bucket. Kept in the metadata, so it is the
+// same whichever node answers.
+type ReplicationResync struct {
+	// Scanned Versions looked at so far.
+	Scanned int64 `json:"scanned"`
+
+	// Sent Versions the other deployment did not have and was sent.
+	Sent int64 `json:"sent"`
+
+	// State `running` while the walk goes on - also while it waits for a target that cannot be reached -
+	// and `done` once it has been through every version. A newer release may add to the list.
+	State string `json:"state"`
+}
+
+// ReplicationRule One rule of a bucket's replication - which keys are copied, and whether their delete markers are.
+type ReplicationRule struct {
+	// DeleteMarkers Whether a delete marker made by a caller is copied too. A marker made by a lifecycle rule never
+	// is; neither is the removal of a version for good.
+	DeleteMarkers bool `json:"delete_markers"`
+
+	// Enabled False for a rule that is kept and matches nothing (S3's `Status` `Disabled`).
+	Enabled bool `json:"enabled"`
+
+	// Id The name of the rule, unique in the bucket.
+	Id string `json:"id"`
+
+	// Prefix Only keys that begin with this, byte for byte. Absent or empty for every key.
+	Prefix *string `json:"prefix,omitempty"`
+
+	// Priority Of the rules that match a key, the one with the greatest priority decides.
+	Priority int `json:"priority"`
 }
 
 // Role defines model for Role.
@@ -892,6 +1296,171 @@ type SignInRequest struct {
 	Username string `json:"username"`
 }
 
+// Target A place outside the deployment that it sends to, as it may be shown - with no credential, and
+// without the path of its endpoint, which may be one.
+type Target struct {
+	// Audit Whether every record of the audit trail is sent to the target as well.
+	Audit bool `json:"audit"`
+
+	// Auth How the deployment proves who it is to a target. Never the secret itself.
+	Auth TargetAuth `json:"auth"`
+
+	// Buckets The buckets whose rules may name the target: names, or patterns with `*`. Empty: none may - a
+	// target that only exports the audit trail.
+	Buckets []string `json:"buckets"`
+
+	// CaPem The certificates the target's own must chain to, in PEM. Absent when the system's roots are used.
+	// Certificates are public; no key is ever part of a target.
+	CaPem     *string   `json:"ca_pem,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+
+	// Endpoint Where it is: **the origin only** - the scheme, the host, and the port when the endpoint names
+	// one - as in `https://hooks.example.com:8443`. The path is never part of it, for any caller: the
+	// URL of a webhook may carry a token in its path.
+	Endpoint string `json:"endpoint"`
+
+	// EndpointPathSet Whether the endpoint has a path (anything after the host and the port but a single `/`). It is
+	// all that is told of the path.
+	EndpointPathSet bool `json:"endpoint_path_set"`
+
+	// Kind `webhook`: an HTTPS endpoint that is posted to. `nats`: a NATS server with JetStream. `s3`:
+	// another CactusFS deployment, for replication.
+	Kind TargetKind `json:"kind"`
+
+	// Name The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Name TargetNameValue `json:"name"`
+
+	// References How many bucket configurations name the target. It cannot be deleted while there are any.
+	References int `json:"references"`
+
+	// Region Kind `s3`. The region requests are signed for.
+	Region *string `json:"region,omitempty"`
+
+	// SecretSet Whether the target has a secret. It is all that is told of it.
+	SecretSet bool `json:"secret_set"`
+
+	// SigningKeySet Whether the target has a key that requests to it are signed with. Kind `webhook` only.
+	SigningKeySet bool `json:"signing_key_set"`
+
+	// Subject Kind `nats`. The subject every message is published to. The stream that takes it is the operator's.
+	Subject   *string   `json:"subject,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TargetKind `webhook`: an HTTPS endpoint that is posted to. `nats`: a NATS server with JetStream. `s3`:
+// another CactusFS deployment, for replication.
+type TargetKind string
+
+// TargetAuth How the deployment proves who it is to a target. Never the secret itself.
+type TargetAuth struct {
+	// Id The user name or the access key ID, for the modes that have one. Not a secret.
+	Id *string `json:"id,omitempty"`
+
+	// Mode `none`; `bearer` (webhook: the secret is sent as `Authorization: Bearer`); `basic` (nats: `id`
+	// is the user and the secret the password); `token` (nats: the secret is the token); `sigv4` (s3:
+	// `id` is the access key ID and the secret its secret key).
+	Mode TargetAuthMode `json:"mode"`
+}
+
+// TargetAuthMode `none`; `bearer` (webhook: the secret is sent as `Authorization: Bearer`); `basic` (nats: `id`
+// is the user and the secret the password); `token` (nats: the secret is the token); `sigv4` (s3:
+// `id` is the access key ID and the secret its secret key).
+type TargetAuthMode string
+
+// TargetAuthPut defines model for TargetAuthPut.
+type TargetAuthPut struct {
+	Id   *string           `json:"id,omitempty"`
+	Mode TargetAuthPutMode `json:"mode"`
+
+	// Secret The bearer token, the password, the token or the secret key. Written, never read. Without it a
+	// change keeps the secret the target has; a change of `mode` needs it again, and the mode `none`
+	// removes it.
+	Secret *string `json:"secret,omitempty"`
+}
+
+// TargetAuthPutMode defines model for TargetAuthPut.Mode.
+type TargetAuthPutMode string
+
+// TargetNameValue The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+type TargetNameValue = string
+
+// TargetPut defines model for TargetPut.
+type TargetPut struct {
+	Audit *bool          `json:"audit,omitempty"`
+	Auth  *TargetAuthPut `json:"auth,omitempty"`
+
+	// Buckets The buckets whose rules may name the target: names, or patterns with `*`. It must be said; `["*"]`
+	// is every bucket, and an empty list none.
+	Buckets []string `json:"buckets"`
+	CaPem   *string  `json:"ca_pem,omitempty"`
+
+	// Endpoint The whole URL, with its path: `https://` for the kinds `webhook` and `s3`, `tls://` for `nats`,
+	// without userinfo, query or fragment. Written, never read back whole - an answer holds its
+	// scheme, host and port only. Required for a target that is new. Without it a change keeps the
+	// endpoint the target has, path and all; to change any part of it, send the whole URL again.
+	Endpoint *string       `json:"endpoint,omitempty"`
+	Kind     TargetPutKind `json:"kind"`
+	Region   *string       `json:"region,omitempty"`
+
+	// RotateSigningKey Kind `webhook`. Makes a new signing key in place of the one the target has, and returns it once.
+	// The old one stops being used with the next request that is sent.
+	RotateSigningKey *bool   `json:"rotate_signing_key,omitempty"`
+	Subject          *string `json:"subject,omitempty"`
+}
+
+// TargetPutKind defines model for TargetPut.Kind.
+type TargetPutKind string
+
+// TargetPutResult defines model for TargetPutResult.
+type TargetPutResult struct {
+	// SigningKey The key requests to a webhook are signed with, when this request made one: the target is new, or
+	// a new key was asked for. Shown once. It cannot be had again - only replaced.
+	SigningKey *string `json:"signing_key,omitempty"`
+
+	// Target A place outside the deployment that it sends to, as it may be shown - with no credential, and
+	// without the path of its endpoint, which may be one.
+	Target Target `json:"target"`
+}
+
+// TargetStatus Delivery to one target, as the node that leads the metadata group has it in memory. A node of an
+// older release that leads cannot be asked: `state` is then `unsupported` and the figures are 0.
+type TargetStatus struct {
+	// LastErrorClass The class of the last failure - never its words, and never the endpoint. Among them `timeout`,
+	// `connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`.
+	// `auth` is a credential the target does not take - a 401 or a 403 from a webhook, a NATS server
+	// that refuses the token: it is tried again, nothing is passed, and the target is `stalled`.
+	// `rejected` is a refusal of one message. The list is not closed. Absent when the last attempt
+	// succeeded.
+	LastErrorClass *string `json:"last_error_class,omitempty"`
+
+	// LastSuccessAt When the leader last delivered something. Absent when it has not since it came to lead.
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+
+	// Lost Messages that were dropped before they were sent, because the target could not be reached while
+	// more waited than the deployment keeps. Kept in the metadata; it does not begin again.
+	Lost int64 `json:"lost"`
+
+	// Name The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+	Name TargetNameValue `json:"name"`
+
+	// OldestPendingAt When the oldest of them was made. Absent when nothing waits.
+	OldestPendingAt *time.Time `json:"oldest_pending_at,omitempty"`
+
+	// Pending Messages matched for the target and not yet acknowledged by it.
+	Pending int64 `json:"pending"`
+
+	// Rejected Messages the target answered with a refusal of that one message - a 4xx other than 401, 403, 408
+	// and 429 - since the leader came to lead. They are not sent again. A 401 and a 403 are not counted
+	// here: they are of the credential, class `auth`, and are tried again.
+	Rejected int64 `json:"rejected"`
+
+	// State `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried
+	// again, with a growing pause; `stalled` when the target refuses everything and somebody has to
+	// act; `unsupported` when the leader is of a release that cannot say. A newer release may add to
+	// the list.
+	State string `json:"state"`
+}
+
 // User defines model for User.
 type User struct {
 	CreatedAt time.Time `json:"created_at"`
@@ -942,6 +1511,9 @@ type IdempotencyKey = string
 // ObjectKey defines model for ObjectKey.
 type ObjectKey = string
 
+// TargetName The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
+type TargetName = TargetNameValue
+
 // apiKeyContextKey is the context key for apiKey security scheme
 type apiKeyContextKey string
 
@@ -973,6 +1545,24 @@ type CreateBucketParams struct {
 
 // DeleteBucketParams defines parameters for DeleteBucket.
 type DeleteBucketParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteBucketNotificationsParams defines parameters for DeleteBucketNotifications.
+type DeleteBucketNotificationsParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketNotificationsParams defines parameters for PutBucketNotifications.
+type PutBucketNotificationsParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -1044,6 +1634,69 @@ type ListObjectsParams struct {
 	// downloaded. It does so only for a caller who holds `admin:GetObjectAccess`; see
 	// `access_included`.
 	Access *bool `form:"access,omitempty" json:"access,omitempty"`
+}
+
+// DeleteBucketQuotaParams defines parameters for DeleteBucketQuota.
+type DeleteBucketQuotaParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketQuotaParams defines parameters for PutBucketQuota.
+type PutBucketQuotaParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketReplicaModeParams defines parameters for PutBucketReplicaMode.
+type PutBucketReplicaModeParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteBucketReplicationParams defines parameters for DeleteBucketReplication.
+type DeleteBucketReplicationParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketReplicationParams defines parameters for PutBucketReplication.
+type PutBucketReplicationParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// ResyncBucketReplicationParams defines parameters for ResyncBucketReplication.
+type ResyncBucketReplicationParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// RecountBucketUsageParams defines parameters for RecountBucketUsage.
+type RecountBucketUsageParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
 // CreateGroupParams defines parameters for CreateGroup.
@@ -1166,6 +1819,24 @@ type SignInParams struct {
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 
+// DeleteTargetParams defines parameters for DeleteTarget.
+type DeleteTargetParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutTargetParams defines parameters for PutTarget.
+type PutTargetParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // CreateUserParams defines parameters for CreateUser.
 type CreateUserParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -1205,6 +1876,18 @@ type CreateAPIKeyParams struct {
 // CreateBucketJSONRequestBody defines body for CreateBucket for application/json ContentType.
 type CreateBucketJSONRequestBody = BucketCreate
 
+// PutBucketNotificationsJSONRequestBody defines body for PutBucketNotifications for application/json ContentType.
+type PutBucketNotificationsJSONRequestBody = BucketNotificationsPut
+
+// PutBucketQuotaJSONRequestBody defines body for PutBucketQuota for application/json ContentType.
+type PutBucketQuotaJSONRequestBody = BucketQuotaPut
+
+// PutBucketReplicaModeJSONRequestBody defines body for PutBucketReplicaMode for application/json ContentType.
+type PutBucketReplicaModeJSONRequestBody = BucketReplicaModePut
+
+// PutBucketReplicationJSONRequestBody defines body for PutBucketReplication for application/json ContentType.
+type PutBucketReplicationJSONRequestBody = BucketReplicationPut
+
 // CreateGroupJSONRequestBody defines body for CreateGroup for application/json ContentType.
 type CreateGroupJSONRequestBody = GroupCreate
 
@@ -1225,6 +1908,9 @@ type UpdateRoleJSONRequestBody = RoleUpdate
 
 // SignInJSONRequestBody defines body for SignIn for application/json ContentType.
 type SignInJSONRequestBody = SignInRequest
+
+// PutTargetJSONRequestBody defines body for PutTarget for application/json ContentType.
+type PutTargetJSONRequestBody = TargetPut
 
 // CreateUserJSONRequestBody defines body for CreateUser for application/json ContentType.
 type CreateUserJSONRequestBody = UserCreate
@@ -1252,6 +1938,15 @@ type ServerInterface interface {
 	// GetBucket Get a bucket
 	// (GET /buckets/{bucket})
 	GetBucket(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// DeleteBucketNotifications Remove the notification rules of a bucket
+	// (DELETE /buckets/{bucket}/notifications)
+	DeleteBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketNotificationsParams)
+	// GetBucketNotifications Get the notification rules of a bucket
+	// (GET /buckets/{bucket}/notifications)
+	GetBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketNotifications Set the notification rules of a bucket
+	// (PUT /buckets/{bucket}/notifications)
+	PutBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketNotificationsParams)
 	// DeleteObject Delete an object
 	// (DELETE /buckets/{bucket}/object)
 	DeleteObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteObjectParams)
@@ -1270,9 +1965,42 @@ type ServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(w http.ResponseWriter, r *http.Request, bucket BucketName, params ListObjectsParams)
+	// DeleteBucketQuota Remove the quota of a bucket
+	// (DELETE /buckets/{bucket}/quota)
+	DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams)
+	// GetBucketQuota Get the quota of a bucket
+	// (GET /buckets/{bucket}/quota)
+	GetBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketQuota Set the quota of a bucket
+	// (PUT /buckets/{bucket}/quota)
+	PutBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketQuotaParams)
+	// GetBucketReplicaMode Whether a bucket is the replica of another deployment's
+	// (GET /buckets/{bucket}/replica)
+	GetBucketReplicaMode(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketReplicaMode Make a bucket a replica, or promote it
+	// (PUT /buckets/{bucket}/replica)
+	PutBucketReplicaMode(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketReplicaModeParams)
+	// DeleteBucketReplication Remove the replication configuration of a bucket
+	// (DELETE /buckets/{bucket}/replication)
+	DeleteBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketReplicationParams)
+	// GetBucketReplication Get the replication configuration of a bucket
+	// (GET /buckets/{bucket}/replication)
+	GetBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketReplication Set the replication configuration of a bucket
+	// (PUT /buckets/{bucket}/replication)
+	PutBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketReplicationParams)
+	// ResyncBucketReplication Send what the other deployment lacks
+	// (POST /buckets/{bucket}/replication/resync)
+	ResyncBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params ResyncBucketReplicationParams)
+	// GetBucketReplicationStatus How far the replication of a bucket has come
+	// (GET /buckets/{bucket}/replication/status)
+	GetBucketReplicationStatus(w http.ResponseWriter, r *http.Request, bucket BucketName)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// RecountBucketUsage Count a bucket's usage again
+	// (POST /buckets/{bucket}/usage/recount)
+	RecountBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName, params RecountBucketUsageParams)
 	// GetCluster The nodes and drives of the deployment
 	// (GET /cluster)
 	GetCluster(w http.ResponseWriter, r *http.Request)
@@ -1342,6 +2070,21 @@ type ServerInterface interface {
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(w http.ResponseWriter, r *http.Request)
+	// ListTargets List the targets
+	// (GET /targets)
+	ListTargets(w http.ResponseWriter, r *http.Request)
+	// DeleteTarget Delete a target
+	// (DELETE /targets/{name})
+	DeleteTarget(w http.ResponseWriter, r *http.Request, name TargetName, params DeleteTargetParams)
+	// GetTarget Get a target
+	// (GET /targets/{name})
+	GetTarget(w http.ResponseWriter, r *http.Request, name TargetName)
+	// PutTarget Define a target, or change it
+	// (PUT /targets/{name})
+	PutTarget(w http.ResponseWriter, r *http.Request, name TargetName, params PutTargetParams)
+	// GetTargetStatus Whether a target is being delivered to
+	// (GET /targets/{name}/status)
+	GetTargetStatus(w http.ResponseWriter, r *http.Request, name TargetName)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(w http.ResponseWriter, r *http.Request)
@@ -1634,6 +2377,191 @@ func (siw *ServerInterfaceWrapper) GetBucket(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetBucket(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBucketNotifications operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketNotifications(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketNotificationsParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketNotifications(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketNotifications operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketNotifications(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketNotifications(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketNotifications operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketNotifications(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketNotificationsParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketNotifications(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2101,6 +3029,594 @@ func (siw *ServerInterfaceWrapper) ListObjects(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// DeleteBucketQuota operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketQuota(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketQuotaParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketQuota(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketQuota operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketQuota(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketQuota(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketQuota operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketQuota(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketQuotaParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketQuota(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketReplicaMode operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketReplicaMode(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketReplicaMode(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketReplicaMode operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketReplicaMode(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketReplicaModeParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketReplicaMode(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBucketReplication operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketReplication(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketReplicationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketReplication(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketReplication operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketReplication(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketReplication(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketReplication operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketReplication(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketReplicationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketReplication(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ResyncBucketReplication operation middleware
+func (siw *ServerInterfaceWrapper) ResyncBucketReplication(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ResyncBucketReplicationParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResyncBucketReplication(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketReplicationStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketReplicationStatus(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketReplicationStatus(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetBucketUsage operation middleware
 func (siw *ServerInterfaceWrapper) GetBucketUsage(w http.ResponseWriter, r *http.Request) {
 	var err error
@@ -2125,6 +3641,82 @@ func (siw *ServerInterfaceWrapper) GetBucketUsage(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetBucketUsage(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RecountBucketUsage operation middleware
+func (siw *ServerInterfaceWrapper) RecountBucketUsage(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params RecountBucketUsageParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RecountBucketUsage(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3299,6 +4891,245 @@ func (siw *ServerInterfaceWrapper) GetSettings(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// ListTargets operation middleware
+func (siw *ServerInterfaceWrapper) ListTargets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTargets(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteTarget operation middleware
+func (siw *ServerInterfaceWrapper) DeleteTarget(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name TargetName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteTargetParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteTarget(w, r, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTarget operation middleware
+func (siw *ServerInterfaceWrapper) GetTarget(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name TargetName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTarget(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutTarget operation middleware
+func (siw *ServerInterfaceWrapper) PutTarget(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name TargetName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutTargetParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutTarget(w, r, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTargetStatus operation middleware
+func (siw *ServerInterfaceWrapper) GetTargetStatus(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name TargetName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTargetStatus(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListUsers operation middleware
 func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -3809,6 +5640,20 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}", wrapper.DeleteBucket)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}", wrapper.GetBucket)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/usage", wrapper.GetBucketUsage)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets/{bucket}/usage/recount", wrapper.RecountBucketUsage)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.DeleteBucketQuota)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.GetBucketQuota)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.PutBucketQuota)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.DeleteBucketNotifications)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.GetBucketNotifications)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.PutBucketNotifications)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/replication", wrapper.DeleteBucketReplication)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/replication", wrapper.GetBucketReplication)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/replication", wrapper.PutBucketReplication)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/replication/status", wrapper.GetBucketReplicationStatus)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets/{bucket}/replication/resync", wrapper.ResyncBucketReplication)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/replica", wrapper.GetBucketReplicaMode)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/replica", wrapper.PutBucketReplicaMode)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/objects", wrapper.ListObjects)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.DeleteObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.GetObject)
@@ -3842,6 +5687,11 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster", wrapper.GetCluster)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster/maintenance", wrapper.GetMaintenance)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/targets", wrapper.ListTargets)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/targets/{name}", wrapper.DeleteTarget)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/targets/{name}", wrapper.GetTarget)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/targets/{name}", wrapper.PutTarget)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/targets/{name}/status", wrapper.GetTargetStatus)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/audit", wrapper.ListAudit)
 
 	return m
@@ -4030,6 +5880,114 @@ func (response GetBucketdefaultApplicationProblemPlusJSONResponse) VisitGetBucke
 	return err
 }
 
+type DeleteBucketNotificationsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketNotificationsParams
+}
+
+type DeleteBucketNotificationsResponseObject interface {
+	VisitDeleteBucketNotificationsResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketNotifications204Response struct{}
+
+func (response DeleteBucketNotifications204Response) VisitDeleteBucketNotificationsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketNotificationsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketNotificationsdefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketNotificationsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketNotificationsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketNotificationsResponseObject interface {
+	VisitGetBucketNotificationsResponse(w http.ResponseWriter) error
+}
+
+type GetBucketNotifications200JSONResponse BucketNotifications
+
+func (response GetBucketNotifications200JSONResponse) VisitGetBucketNotificationsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketNotificationsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketNotificationsdefaultApplicationProblemPlusJSONResponse) VisitGetBucketNotificationsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketNotificationsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketNotificationsParams
+	Body   *PutBucketNotificationsJSONRequestBody
+}
+
+type PutBucketNotificationsResponseObject interface {
+	VisitPutBucketNotificationsResponse(w http.ResponseWriter) error
+}
+
+type PutBucketNotifications200JSONResponse BucketNotifications
+
+func (response PutBucketNotifications200JSONResponse) VisitPutBucketNotificationsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketNotificationsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketNotificationsdefaultApplicationProblemPlusJSONResponse) VisitPutBucketNotificationsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DeleteObjectRequestObject struct {
 	Bucket BucketName `json:"bucket"`
 	Params DeleteObjectParams
@@ -4145,6 +6103,19 @@ func (response PutObject200JSONResponse) VisitPutObjectResponse(w http.ResponseW
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObject403ApplicationProblemPlusJSONResponse Problem
+
+func (response PutObject403ApplicationProblemPlusJSONResponse) VisitPutObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -4279,6 +6250,399 @@ func (response ListObjectsdefaultApplicationProblemPlusJSONResponse) VisitListOb
 	return err
 }
 
+type DeleteBucketQuotaRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketQuotaParams
+}
+
+type DeleteBucketQuotaResponseObject interface {
+	VisitDeleteBucketQuotaResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketQuota204Response struct{}
+
+func (response DeleteBucketQuota204Response) VisitDeleteBucketQuotaResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketQuotadefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketQuotadefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketQuotaRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketQuotaResponseObject interface {
+	VisitGetBucketQuotaResponse(w http.ResponseWriter) error
+}
+
+type GetBucketQuota200JSONResponse BucketQuota
+
+func (response GetBucketQuota200JSONResponse) VisitGetBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketQuotadefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketQuotadefaultApplicationProblemPlusJSONResponse) VisitGetBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketQuotaRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketQuotaParams
+	Body   *PutBucketQuotaJSONRequestBody
+}
+
+type PutBucketQuotaResponseObject interface {
+	VisitPutBucketQuotaResponse(w http.ResponseWriter) error
+}
+
+type PutBucketQuota200JSONResponse BucketQuota
+
+func (response PutBucketQuota200JSONResponse) VisitPutBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketQuota403ApplicationProblemPlusJSONResponse Problem
+
+func (response PutBucketQuota403ApplicationProblemPlusJSONResponse) VisitPutBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketQuota409ApplicationProblemPlusJSONResponse Problem
+
+func (response PutBucketQuota409ApplicationProblemPlusJSONResponse) VisitPutBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketQuotadefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketQuotadefaultApplicationProblemPlusJSONResponse) VisitPutBucketQuotaResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicaModeRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketReplicaModeResponseObject interface {
+	VisitGetBucketReplicaModeResponse(w http.ResponseWriter) error
+}
+
+type GetBucketReplicaMode200JSONResponse BucketReplicaMode
+
+func (response GetBucketReplicaMode200JSONResponse) VisitGetBucketReplicaModeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicaModedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketReplicaModedefaultApplicationProblemPlusJSONResponse) VisitGetBucketReplicaModeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketReplicaModeRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketReplicaModeParams
+	Body   *PutBucketReplicaModeJSONRequestBody
+}
+
+type PutBucketReplicaModeResponseObject interface {
+	VisitPutBucketReplicaModeResponse(w http.ResponseWriter) error
+}
+
+type PutBucketReplicaMode200JSONResponse BucketReplicaMode
+
+func (response PutBucketReplicaMode200JSONResponse) VisitPutBucketReplicaModeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketReplicaModedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketReplicaModedefaultApplicationProblemPlusJSONResponse) VisitPutBucketReplicaModeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBucketReplicationRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketReplicationParams
+}
+
+type DeleteBucketReplicationResponseObject interface {
+	VisitDeleteBucketReplicationResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketReplication204Response struct{}
+
+func (response DeleteBucketReplication204Response) VisitDeleteBucketReplicationResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketReplicationdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketReplicationdefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicationRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketReplicationResponseObject interface {
+	VisitGetBucketReplicationResponse(w http.ResponseWriter) error
+}
+
+type GetBucketReplication200JSONResponse BucketReplication
+
+func (response GetBucketReplication200JSONResponse) VisitGetBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicationdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketReplicationdefaultApplicationProblemPlusJSONResponse) VisitGetBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketReplicationRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketReplicationParams
+	Body   *PutBucketReplicationJSONRequestBody
+}
+
+type PutBucketReplicationResponseObject interface {
+	VisitPutBucketReplicationResponse(w http.ResponseWriter) error
+}
+
+type PutBucketReplication200JSONResponse BucketReplication
+
+func (response PutBucketReplication200JSONResponse) VisitPutBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketReplicationdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketReplicationdefaultApplicationProblemPlusJSONResponse) VisitPutBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ResyncBucketReplicationRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params ResyncBucketReplicationParams
+}
+
+type ResyncBucketReplicationResponseObject interface {
+	VisitResyncBucketReplicationResponse(w http.ResponseWriter) error
+}
+
+type ResyncBucketReplication202JSONResponse ReplicationResync
+
+func (response ResyncBucketReplication202JSONResponse) VisitResyncBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ResyncBucketReplicationdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ResyncBucketReplicationdefaultApplicationProblemPlusJSONResponse) VisitResyncBucketReplicationResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicationStatusRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketReplicationStatusResponseObject interface {
+	VisitGetBucketReplicationStatusResponse(w http.ResponseWriter) error
+}
+
+type GetBucketReplicationStatus200JSONResponse BucketReplicationStatus
+
+func (response GetBucketReplicationStatus200JSONResponse) VisitGetBucketReplicationStatusResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketReplicationStatusdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketReplicationStatusdefaultApplicationProblemPlusJSONResponse) VisitGetBucketReplicationStatusResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetBucketUsageRequestObject struct {
 	Bucket BucketName `json:"bucket"`
 }
@@ -4306,6 +6670,38 @@ type GetBucketUsagedefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response GetBucketUsagedefaultApplicationProblemPlusJSONResponse) VisitGetBucketUsageResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RecountBucketUsageRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params RecountBucketUsageParams
+}
+
+type RecountBucketUsageResponseObject interface {
+	VisitRecountBucketUsageResponse(w http.ResponseWriter) error
+}
+
+type RecountBucketUsage202Response struct{}
+
+func (response RecountBucketUsage202Response) VisitRecountBucketUsageResponse(w http.ResponseWriter) error {
+	w.WriteHeader(202)
+	return nil
+}
+
+type RecountBucketUsagedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response RecountBucketUsagedefaultApplicationProblemPlusJSONResponse) VisitRecountBucketUsageResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -5192,6 +7588,186 @@ func (response GetSettingsdefaultApplicationProblemPlusJSONResponse) VisitGetSet
 	return err
 }
 
+type ListTargetsRequestObject struct{}
+
+type ListTargetsResponseObject interface {
+	VisitListTargetsResponse(w http.ResponseWriter) error
+}
+
+type ListTargets200JSONResponse []Target
+
+func (response ListTargets200JSONResponse) VisitListTargetsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListTargetsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ListTargetsdefaultApplicationProblemPlusJSONResponse) VisitListTargetsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteTargetRequestObject struct {
+	Name   TargetName `json:"name"`
+	Params DeleteTargetParams
+}
+
+type DeleteTargetResponseObject interface {
+	VisitDeleteTargetResponse(w http.ResponseWriter) error
+}
+
+type DeleteTarget204Response struct{}
+
+func (response DeleteTarget204Response) VisitDeleteTargetResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteTargetdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteTargetdefaultApplicationProblemPlusJSONResponse) VisitDeleteTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTargetRequestObject struct {
+	Name TargetName `json:"name"`
+}
+
+type GetTargetResponseObject interface {
+	VisitGetTargetResponse(w http.ResponseWriter) error
+}
+
+type GetTarget200JSONResponse Target
+
+func (response GetTarget200JSONResponse) VisitGetTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTargetdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetTargetdefaultApplicationProblemPlusJSONResponse) VisitGetTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutTargetRequestObject struct {
+	Name   TargetName `json:"name"`
+	Params PutTargetParams
+	Body   *PutTargetJSONRequestBody
+}
+
+type PutTargetResponseObject interface {
+	VisitPutTargetResponse(w http.ResponseWriter) error
+}
+
+type PutTarget200JSONResponse TargetPutResult
+
+func (response PutTarget200JSONResponse) VisitPutTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutTargetdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutTargetdefaultApplicationProblemPlusJSONResponse) VisitPutTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTargetStatusRequestObject struct {
+	Name TargetName `json:"name"`
+}
+
+type GetTargetStatusResponseObject interface {
+	VisitGetTargetStatusResponse(w http.ResponseWriter) error
+}
+
+type GetTargetStatus200JSONResponse TargetStatus
+
+func (response GetTargetStatus200JSONResponse) VisitGetTargetStatusResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTargetStatusdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetTargetStatusdefaultApplicationProblemPlusJSONResponse) VisitGetTargetStatusResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListUsersRequestObject struct{}
 
 type ListUsersResponseObject interface {
@@ -5466,6 +8042,15 @@ type StrictServerInterface interface {
 	// GetBucket Get a bucket
 	// (GET /buckets/{bucket})
 	GetBucket(ctx context.Context, request GetBucketRequestObject) (GetBucketResponseObject, error)
+	// DeleteBucketNotifications Remove the notification rules of a bucket
+	// (DELETE /buckets/{bucket}/notifications)
+	DeleteBucketNotifications(ctx context.Context, request DeleteBucketNotificationsRequestObject) (DeleteBucketNotificationsResponseObject, error)
+	// GetBucketNotifications Get the notification rules of a bucket
+	// (GET /buckets/{bucket}/notifications)
+	GetBucketNotifications(ctx context.Context, request GetBucketNotificationsRequestObject) (GetBucketNotificationsResponseObject, error)
+	// PutBucketNotifications Set the notification rules of a bucket
+	// (PUT /buckets/{bucket}/notifications)
+	PutBucketNotifications(ctx context.Context, request PutBucketNotificationsRequestObject) (PutBucketNotificationsResponseObject, error)
 	// DeleteObject Delete an object
 	// (DELETE /buckets/{bucket}/object)
 	DeleteObject(ctx context.Context, request DeleteObjectRequestObject) (DeleteObjectResponseObject, error)
@@ -5484,9 +8069,42 @@ type StrictServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(ctx context.Context, request ListObjectsRequestObject) (ListObjectsResponseObject, error)
+	// DeleteBucketQuota Remove the quota of a bucket
+	// (DELETE /buckets/{bucket}/quota)
+	DeleteBucketQuota(ctx context.Context, request DeleteBucketQuotaRequestObject) (DeleteBucketQuotaResponseObject, error)
+	// GetBucketQuota Get the quota of a bucket
+	// (GET /buckets/{bucket}/quota)
+	GetBucketQuota(ctx context.Context, request GetBucketQuotaRequestObject) (GetBucketQuotaResponseObject, error)
+	// PutBucketQuota Set the quota of a bucket
+	// (PUT /buckets/{bucket}/quota)
+	PutBucketQuota(ctx context.Context, request PutBucketQuotaRequestObject) (PutBucketQuotaResponseObject, error)
+	// GetBucketReplicaMode Whether a bucket is the replica of another deployment's
+	// (GET /buckets/{bucket}/replica)
+	GetBucketReplicaMode(ctx context.Context, request GetBucketReplicaModeRequestObject) (GetBucketReplicaModeResponseObject, error)
+	// PutBucketReplicaMode Make a bucket a replica, or promote it
+	// (PUT /buckets/{bucket}/replica)
+	PutBucketReplicaMode(ctx context.Context, request PutBucketReplicaModeRequestObject) (PutBucketReplicaModeResponseObject, error)
+	// DeleteBucketReplication Remove the replication configuration of a bucket
+	// (DELETE /buckets/{bucket}/replication)
+	DeleteBucketReplication(ctx context.Context, request DeleteBucketReplicationRequestObject) (DeleteBucketReplicationResponseObject, error)
+	// GetBucketReplication Get the replication configuration of a bucket
+	// (GET /buckets/{bucket}/replication)
+	GetBucketReplication(ctx context.Context, request GetBucketReplicationRequestObject) (GetBucketReplicationResponseObject, error)
+	// PutBucketReplication Set the replication configuration of a bucket
+	// (PUT /buckets/{bucket}/replication)
+	PutBucketReplication(ctx context.Context, request PutBucketReplicationRequestObject) (PutBucketReplicationResponseObject, error)
+	// ResyncBucketReplication Send what the other deployment lacks
+	// (POST /buckets/{bucket}/replication/resync)
+	ResyncBucketReplication(ctx context.Context, request ResyncBucketReplicationRequestObject) (ResyncBucketReplicationResponseObject, error)
+	// GetBucketReplicationStatus How far the replication of a bucket has come
+	// (GET /buckets/{bucket}/replication/status)
+	GetBucketReplicationStatus(ctx context.Context, request GetBucketReplicationStatusRequestObject) (GetBucketReplicationStatusResponseObject, error)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(ctx context.Context, request GetBucketUsageRequestObject) (GetBucketUsageResponseObject, error)
+	// RecountBucketUsage Count a bucket's usage again
+	// (POST /buckets/{bucket}/usage/recount)
+	RecountBucketUsage(ctx context.Context, request RecountBucketUsageRequestObject) (RecountBucketUsageResponseObject, error)
 	// GetCluster The nodes and drives of the deployment
 	// (GET /cluster)
 	GetCluster(ctx context.Context, request GetClusterRequestObject) (GetClusterResponseObject, error)
@@ -5556,6 +8174,21 @@ type StrictServerInterface interface {
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(ctx context.Context, request GetSettingsRequestObject) (GetSettingsResponseObject, error)
+	// ListTargets List the targets
+	// (GET /targets)
+	ListTargets(ctx context.Context, request ListTargetsRequestObject) (ListTargetsResponseObject, error)
+	// DeleteTarget Delete a target
+	// (DELETE /targets/{name})
+	DeleteTarget(ctx context.Context, request DeleteTargetRequestObject) (DeleteTargetResponseObject, error)
+	// GetTarget Get a target
+	// (GET /targets/{name})
+	GetTarget(ctx context.Context, request GetTargetRequestObject) (GetTargetResponseObject, error)
+	// PutTarget Define a target, or change it
+	// (PUT /targets/{name})
+	PutTarget(ctx context.Context, request PutTargetRequestObject) (PutTargetResponseObject, error)
+	// GetTargetStatus Whether a target is being delivered to
+	// (GET /targets/{name}/status)
+	GetTargetStatus(ctx context.Context, request GetTargetStatusRequestObject) (GetTargetStatusResponseObject, error)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(ctx context.Context, request ListUsersRequestObject) (ListUsersResponseObject, error)
@@ -5758,6 +8391,93 @@ func (sh *strictHandler) GetBucket(w http.ResponseWriter, r *http.Request, bucke
 	}
 }
 
+// DeleteBucketNotifications operation middleware
+func (sh *strictHandler) DeleteBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketNotificationsParams) {
+	var request DeleteBucketNotificationsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketNotifications(ctx, request.(DeleteBucketNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketNotificationsResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketNotifications operation middleware
+func (sh *strictHandler) GetBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketNotificationsRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketNotifications(ctx, request.(GetBucketNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketNotificationsResponseObject); ok {
+		if err := validResponse.VisitGetBucketNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketNotifications operation middleware
+func (sh *strictHandler) PutBucketNotifications(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketNotificationsParams) {
+	var request PutBucketNotificationsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketNotificationsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketNotifications(ctx, request.(PutBucketNotificationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketNotifications")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketNotificationsResponseObject); ok {
+		if err := validResponse.VisitPutBucketNotificationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // DeleteObject operation middleware
 func (sh *strictHandler) DeleteObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteObjectParams) {
 	var request DeleteObjectRequestObject
@@ -5922,6 +8642,293 @@ func (sh *strictHandler) ListObjects(w http.ResponseWriter, r *http.Request, buc
 	}
 }
 
+// DeleteBucketQuota operation middleware
+func (sh *strictHandler) DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams) {
+	var request DeleteBucketQuotaRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketQuota(ctx, request.(DeleteBucketQuotaRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketQuota")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketQuotaResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketQuotaResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketQuota operation middleware
+func (sh *strictHandler) GetBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketQuotaRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketQuota(ctx, request.(GetBucketQuotaRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketQuota")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketQuotaResponseObject); ok {
+		if err := validResponse.VisitGetBucketQuotaResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketQuota operation middleware
+func (sh *strictHandler) PutBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketQuotaParams) {
+	var request PutBucketQuotaRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketQuotaJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketQuota(ctx, request.(PutBucketQuotaRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketQuota")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketQuotaResponseObject); ok {
+		if err := validResponse.VisitPutBucketQuotaResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketReplicaMode operation middleware
+func (sh *strictHandler) GetBucketReplicaMode(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketReplicaModeRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketReplicaMode(ctx, request.(GetBucketReplicaModeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketReplicaMode")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketReplicaModeResponseObject); ok {
+		if err := validResponse.VisitGetBucketReplicaModeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketReplicaMode operation middleware
+func (sh *strictHandler) PutBucketReplicaMode(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketReplicaModeParams) {
+	var request PutBucketReplicaModeRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketReplicaModeJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketReplicaMode(ctx, request.(PutBucketReplicaModeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketReplicaMode")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketReplicaModeResponseObject); ok {
+		if err := validResponse.VisitPutBucketReplicaModeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteBucketReplication operation middleware
+func (sh *strictHandler) DeleteBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketReplicationParams) {
+	var request DeleteBucketReplicationRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketReplication(ctx, request.(DeleteBucketReplicationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketReplication")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketReplicationResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketReplicationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketReplication operation middleware
+func (sh *strictHandler) GetBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketReplicationRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketReplication(ctx, request.(GetBucketReplicationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketReplication")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketReplicationResponseObject); ok {
+		if err := validResponse.VisitGetBucketReplicationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketReplication operation middleware
+func (sh *strictHandler) PutBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketReplicationParams) {
+	var request PutBucketReplicationRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketReplicationJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketReplication(ctx, request.(PutBucketReplicationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketReplication")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketReplicationResponseObject); ok {
+		if err := validResponse.VisitPutBucketReplicationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ResyncBucketReplication operation middleware
+func (sh *strictHandler) ResyncBucketReplication(w http.ResponseWriter, r *http.Request, bucket BucketName, params ResyncBucketReplicationParams) {
+	var request ResyncBucketReplicationRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ResyncBucketReplication(ctx, request.(ResyncBucketReplicationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ResyncBucketReplication")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResyncBucketReplicationResponseObject); ok {
+		if err := validResponse.VisitResyncBucketReplicationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketReplicationStatus operation middleware
+func (sh *strictHandler) GetBucketReplicationStatus(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketReplicationStatusRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketReplicationStatus(ctx, request.(GetBucketReplicationStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketReplicationStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketReplicationStatusResponseObject); ok {
+		if err := validResponse.VisitGetBucketReplicationStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetBucketUsage operation middleware
 func (sh *strictHandler) GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName) {
 	var request GetBucketUsageRequestObject
@@ -5941,6 +8948,33 @@ func (sh *strictHandler) GetBucketUsage(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetBucketUsageResponseObject); ok {
 		if err := validResponse.VisitGetBucketUsageResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RecountBucketUsage operation middleware
+func (sh *strictHandler) RecountBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName, params RecountBucketUsageParams) {
+	var request RecountBucketUsageRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RecountBucketUsage(ctx, request.(RecountBucketUsageRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RecountBucketUsage")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RecountBucketUsageResponseObject); ok {
+		if err := validResponse.VisitRecountBucketUsageResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -6581,6 +9615,143 @@ func (sh *strictHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetSettingsResponseObject); ok {
 		if err := validResponse.VisitGetSettingsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListTargets operation middleware
+func (sh *strictHandler) ListTargets(w http.ResponseWriter, r *http.Request) {
+	var request ListTargetsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListTargets(ctx, request.(ListTargetsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListTargets")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListTargetsResponseObject); ok {
+		if err := validResponse.VisitListTargetsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteTarget operation middleware
+func (sh *strictHandler) DeleteTarget(w http.ResponseWriter, r *http.Request, name TargetName, params DeleteTargetParams) {
+	var request DeleteTargetRequestObject
+
+	request.Name = name
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteTarget(ctx, request.(DeleteTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteTargetResponseObject); ok {
+		if err := validResponse.VisitDeleteTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetTarget operation middleware
+func (sh *strictHandler) GetTarget(w http.ResponseWriter, r *http.Request, name TargetName) {
+	var request GetTargetRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetTarget(ctx, request.(GetTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetTargetResponseObject); ok {
+		if err := validResponse.VisitGetTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutTarget operation middleware
+func (sh *strictHandler) PutTarget(w http.ResponseWriter, r *http.Request, name TargetName, params PutTargetParams) {
+	var request PutTargetRequestObject
+
+	request.Name = name
+	request.Params = params
+
+	var body PutTargetJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutTarget(ctx, request.(PutTargetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutTarget")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutTargetResponseObject); ok {
+		if err := validResponse.VisitPutTargetResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetTargetStatus operation middleware
+func (sh *strictHandler) GetTargetStatus(w http.ResponseWriter, r *http.Request, name TargetName) {
+	var request GetTargetStatusRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetTargetStatus(ctx, request.(GetTargetStatusRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetTargetStatus")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetTargetStatusResponseObject); ok {
+		if err := validResponse.VisitGetTargetStatusResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

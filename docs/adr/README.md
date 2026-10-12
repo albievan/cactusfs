@@ -58,6 +58,10 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted; implemented |
 | [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; the gate is implemented; releases are signed keyless by the release workflow, which is written and has not run: no release is published yet |
 | [0022](0022-settings.md) | Settings - declared once, shown for every node | accepted; implemented |
+| [0023](0023-schema-5-usage-outbox-targets.md) | Entry schema 5 - bucket usage, the delivery outbox, targets, outbound connections | proposed; **not implemented** beyond the contracts (PLAN 8.0) |
+| [0024](0024-quotas.md) | Quotas | proposed; **not implemented** beyond the contract (PLAN 8A) |
+| [0025](0025-bucket-notifications.md) | Bucket notifications and the export of the audit trail | proposed; **not implemented** beyond the contracts (PLAN 8B) |
+| [0026](0026-replication-between-sites.md) | Replication between sites, and the conflict rule | proposed; **not implemented** beyond the contracts (PLAN 8C) |
 
 "Implemented" is the state of the code on 2026-10-12; `PLAN.md` has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a

@@ -57,12 +57,56 @@ const (
 	ActionAbortMultipartUpload       Action = "s3:AbortMultipartUpload"
 	ActionListMultipartUploadParts   Action = "s3:ListMultipartUploadParts"
 	ActionListBucketMultipartUploads Action = "s3:ListBucketMultipartUploads"
+	// ActionGetBucketNotification allows reading the notification rules of
+	// a bucket (ADR-0025).
+	ActionGetBucketNotification Action = "s3:GetBucketNotification"
+	// ActionPutBucketNotification allows setting and removing the
+	// notification rules of a bucket. A rule names a target; which targets
+	// there are is not for this action to say.
+	ActionPutBucketNotification Action = "s3:PutBucketNotification"
+	// ActionGetReplication allows reading the replication configuration of
+	// a bucket (ADR-0026).
+	ActionGetReplication Action = "s3:GetReplicationConfiguration"
+	// ActionPutReplication allows setting and removing the replication
+	// configuration of a bucket: as in S3, removing has no action of its
+	// own.
+	ActionPutReplication Action = "s3:PutReplicationConfiguration"
 	// ActionOverrideGovernance (s3:BypassGovernanceRetention) lifts a
 	// governance retention. It is granted
 	// only by a statement that names it: no wildcard includes it, so that
 	// no role holds it by having "everything".
 	ActionOverrideGovernance Action = "s3:BypassGovernanceRetention"
+	// ActionReplicateObject allows committing a version as the copy of a
+	// version of another deployment: with an ID, a time and a sequence of
+	// the caller's choosing (ADR-0026). It also covers the questions the
+	// source asks of the replica - whether the bucket is its replica,
+	// whether a version is there - and the multipart uploads it makes. Like
+	// ActionOverrideGovernance it is granted only by a statement that names
+	// it, and by no bucket policy.
+	ActionReplicateObject Action = "s3:ReplicateObject"
+	// ActionReplicateDelete allows committing a delete marker as the copy
+	// of one of another deployment. It is granted as ActionReplicateObject
+	// is.
+	ActionReplicateDelete Action = "s3:ReplicateDelete"
 )
+
+// byNameOnly reports whether the action is one that no wildcard grants: an
+// Allow covers it only by naming it, so that no role holds it by having
+// "everything", and no bucket policy can allow it at all - whoever may
+// write a bucket's policy must not be able to give it to themselves. A Deny
+// may still cover it with a wildcard: denying more is never wrong.
+//
+// These are the actions that undo what the store otherwise guarantees:
+// lifting a retention, and making a version with an identity and a time the
+// caller chose.
+func (a Action) byNameOnly() bool {
+	for _, named := range []Action{ActionOverrideGovernance, ActionReplicateObject, ActionReplicateDelete} {
+		if strings.EqualFold(string(a), string(named)) {
+			return true
+		}
+	}
+	return false
+}
 
 // The admin actions implemented so far. Reading actions begin with Get or
 // List, so that a policy can grant "admin:Get*" and "admin:List*".
@@ -102,6 +146,51 @@ const (
 	// directories, the certificates it serves. No secret is part of it,
 	// but the layout of a deployment is not for everybody either.
 	ActionGetSettings Action = "admin:GetSettings"
+)
+
+// The admin actions of quotas, targets and replication (ADR-0023 to
+// ADR-0026). None of them is an S3 action, so that "s3:*" on a bucket - the
+// built-in bucket-admin - gives none: who administers a bucket does not lift
+// its quota, define where the deployment connects to, or decide which
+// deployment a bucket takes its versions from.
+const (
+	// ActionGetBucketQuota allows reading the quota of a bucket.
+	ActionGetBucketQuota Action = "admin:GetBucketQuota"
+	// ActionPutBucketQuota allows setting the quota of a bucket.
+	ActionPutBucketQuota Action = "admin:PutBucketQuota"
+	// ActionDeleteBucketQuota allows removing the quota of a bucket.
+	ActionDeleteBucketQuota Action = "admin:DeleteBucketQuota"
+	// ActionRecountBucketUsage allows having the usage of a bucket counted
+	// again. It changes nothing a caller can see unless the count had
+	// drifted, and it is work for every member of the metadata group: it
+	// does not begin with Get.
+	ActionRecountBucketUsage Action = "admin:RecountBucketUsage"
+	// ActionListTargets allows listing the targets the deployment sends to.
+	ActionListTargets Action = "admin:ListTargets"
+	// ActionGetTarget allows reading a target, without its credentials:
+	// nothing allows reading those.
+	ActionGetTarget Action = "admin:GetTarget"
+	// ActionPutTarget allows defining and changing a target: an address
+	// outside the deployment that it will connect to, and the credential
+	// it shows there.
+	ActionPutTarget Action = "admin:PutTarget"
+	// ActionDeleteTarget allows deleting a target.
+	ActionDeleteTarget Action = "admin:DeleteTarget"
+	// ActionGetTargetStatus allows reading whether a target is being
+	// delivered to.
+	ActionGetTargetStatus Action = "admin:GetTargetStatus"
+	// ActionGetReplicationStatus allows reading how far the replication of
+	// a bucket has come.
+	ActionGetReplicationStatus Action = "admin:GetReplicationStatus"
+	// ActionResyncReplication allows starting the walk that sends another
+	// deployment what it lacks of a bucket.
+	ActionResyncReplication Action = "admin:ResyncReplication"
+	// ActionGetBucketReplicaMode allows reading whether a bucket is the
+	// replica of another deployment's.
+	ActionGetBucketReplicaMode Action = "admin:GetBucketReplicaMode"
+	// ActionPutBucketReplicaMode allows making a bucket a replica and
+	// promoting it.
+	ActionPutBucketReplicaMode Action = "admin:PutBucketReplicaMode"
 )
 
 // ARN prefixes of the two kinds of resource a policy can name.
@@ -262,7 +351,12 @@ type Request struct {
 //   - Nodes of the cluster and the cluster actions belong to each other and
 //     to nothing else.
 //   - The root identity may do everything a user could be allowed. It exists
-//     to set up and to recover a deployment; it has no policy to lose.
+//     to set up and to recover a deployment; it has no policy to lose. That
+//     includes the actions no wildcard grants (Action.byNameOnly): root
+//     lifts a governance retention and commits a replica as it does
+//     everything else, without a statement that names the action. What root
+//     cannot do is what the state refuses to everybody - remove a version
+//     under compliance, write a replica into a bucket that is none.
 //   - A user may do what some policy of theirs allows and none denies. An
 //     explicit Deny wins over every Allow.
 //   - An API key with an inline policy may do what its owner may do AND the

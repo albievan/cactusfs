@@ -32,9 +32,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeService_Info_FullMethodName     = "/cactusfs.node.v1.NodeService/Info"
-	NodeService_InFlight_FullMethodName = "/cactusfs.node.v1.NodeService/InFlight"
-	NodeService_Settings_FullMethodName = "/cactusfs.node.v1.NodeService/Settings"
+	NodeService_Info_FullMethodName           = "/cactusfs.node.v1.NodeService/Info"
+	NodeService_InFlight_FullMethodName       = "/cactusfs.node.v1.NodeService/InFlight"
+	NodeService_Settings_FullMethodName       = "/cactusfs.node.v1.NodeService/Settings"
+	NodeService_DeliveryStatus_FullMethodName = "/cactusfs.node.v1.NodeService/DeliveryStatus"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -57,6 +58,15 @@ type NodeServiceClient interface {
 	// from the running node each time and stored nowhere. A node of a release
 	// without this call answers the RPC with UNIMPLEMENTED.
 	Settings(ctx context.Context, in *SettingsRequest, opts ...grpc.CallOption) (*SettingsResponse, error)
+	// DeliveryStatus reports how delivery to the targets of the deployment
+	// stands: notifications, the export of the audit trail and replication to
+	// another deployment. Only the node that leads the metadata group
+	// delivers, so only it can say; a node that does not lead answers with the
+	// error "not_leader". What is reported is what the leader holds in memory
+	// since it came to lead, with the counts the metadata keeps. Neither an
+	// endpoint nor the text of an error is ever part of it. A node of a
+	// release without this call answers the RPC with UNIMPLEMENTED.
+	DeliveryStatus(ctx context.Context, in *DeliveryStatusRequest, opts ...grpc.CallOption) (*DeliveryStatusResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -97,6 +107,16 @@ func (c *nodeServiceClient) Settings(ctx context.Context, in *SettingsRequest, o
 	return out, nil
 }
 
+func (c *nodeServiceClient) DeliveryStatus(ctx context.Context, in *DeliveryStatusRequest, opts ...grpc.CallOption) (*DeliveryStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeliveryStatusResponse)
+	err := c.cc.Invoke(ctx, NodeService_DeliveryStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -117,6 +137,15 @@ type NodeServiceServer interface {
 	// from the running node each time and stored nowhere. A node of a release
 	// without this call answers the RPC with UNIMPLEMENTED.
 	Settings(context.Context, *SettingsRequest) (*SettingsResponse, error)
+	// DeliveryStatus reports how delivery to the targets of the deployment
+	// stands: notifications, the export of the audit trail and replication to
+	// another deployment. Only the node that leads the metadata group
+	// delivers, so only it can say; a node that does not lead answers with the
+	// error "not_leader". What is reported is what the leader holds in memory
+	// since it came to lead, with the counts the metadata keeps. Neither an
+	// endpoint nor the text of an error is ever part of it. A node of a
+	// release without this call answers the RPC with UNIMPLEMENTED.
+	DeliveryStatus(context.Context, *DeliveryStatusRequest) (*DeliveryStatusResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -137,6 +166,10 @@ func (UnimplementedNodeServiceServer) InFlight(context.Context, *InFlightRequest
 
 func (UnimplementedNodeServiceServer) Settings(context.Context, *SettingsRequest) (*SettingsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Settings not implemented")
+}
+
+func (UnimplementedNodeServiceServer) DeliveryStatus(context.Context, *DeliveryStatusRequest) (*DeliveryStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeliveryStatus not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -213,6 +246,24 @@ func _NodeService_Settings_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_DeliveryStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliveryStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).DeliveryStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_DeliveryStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).DeliveryStatus(ctx, req.(*DeliveryStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -231,6 +282,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Settings",
 			Handler:    _NodeService_Settings_Handler,
+		},
+		{
+			MethodName: "DeliveryStatus",
+			Handler:    _NodeService_DeliveryStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

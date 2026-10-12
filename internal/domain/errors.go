@@ -90,6 +90,10 @@ var (
 	// still holds an object, a version of one, a delete marker or an
 	// upload in progress.
 	ErrSubBucketNotEmpty = errors.New("sub-bucket is not empty")
+	// ErrQuotaExceeded reports a write that would take a bucket past its
+	// quota (ADR-0024). Nothing was stored. It is a limit and no denial:
+	// whoever may write the bucket is told so.
+	ErrQuotaExceeded = errors.New("the bucket quota has been reached")
 )
 
 // Object errors.
@@ -271,6 +275,42 @@ func wireCodes() []struct {
 		{"sub_bucket_not_empty", ErrSubBucketNotEmpty},
 		{"too_many_requests", ErrTooManyRequests},
 		{"too_many_buckets", ErrTooManyBuckets},
+		{"quota_exceeded", ErrQuotaExceeded},
+	}
+}
+
+// Sentinels returns every sentinel that has a wire name, in the order of
+// their names' first release. It is for the tests of the inbound adapters:
+// each of the two holds its mapping against this list, so that a sentinel
+// that is added is given an answer in both APIs by decision and not by
+// default.
+func Sentinels() []error {
+	entries := wireCodes()
+	sentinels := make([]error, len(entries))
+	for i, entry := range entries {
+		sentinels[i] = entry.err
+	}
+	return sentinels
+}
+
+// LocalSentinels returns every sentinel that has no wire name: one that is
+// made and answered on the node that met it, and that no node reports to
+// another. With Sentinels it is every sentinel there is - a test of this
+// package holds the two lists against the declarations - so that the tests
+// of the inbound adapters can ask what a caller is told of each, whichever
+// kind it is.
+func LocalSentinels() []error {
+	return []error{
+		ErrBadDigest,
+		ErrIncompleteBody,
+		ErrInvalidRange,
+		ErrKeyUnavailable,
+		ErrInvalidTag,
+		ErrTagRule,
+		ErrIdempotencyKeyReused,
+		ErrRequestInProgress,
+		ErrTooManyAttempts,
+		ErrNotSupported,
 	}
 }
 

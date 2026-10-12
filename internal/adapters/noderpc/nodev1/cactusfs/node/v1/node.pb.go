@@ -1138,6 +1138,255 @@ func (x *Certificate) GetNotAfterUnix() int64 {
 	return 0
 }
 
+type DeliveryStatusRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The targets to report on, by name. Empty asks for every target. A name
+	// that is not a target's is left out of the answer.
+	Targets       []string `protobuf:"bytes,1,rep,name=targets,proto3" json:"targets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeliveryStatusRequest) Reset() {
+	*x = DeliveryStatusRequest{}
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeliveryStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeliveryStatusRequest) ProtoMessage() {}
+
+func (x *DeliveryStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeliveryStatusRequest.ProtoReflect.Descriptor instead.
+func (*DeliveryStatusRequest) Descriptor() ([]byte, []int) {
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DeliveryStatusRequest) GetTargets() []string {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
+type DeliveryStatusResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Error *Error                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	// In name order.
+	Targets       []*TargetDelivery `protobuf:"bytes,2,rep,name=targets,proto3" json:"targets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeliveryStatusResponse) Reset() {
+	*x = DeliveryStatusResponse{}
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeliveryStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeliveryStatusResponse) ProtoMessage() {}
+
+func (x *DeliveryStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeliveryStatusResponse.ProtoReflect.Descriptor instead.
+func (*DeliveryStatusResponse) Descriptor() ([]byte, []int) {
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DeliveryStatusResponse) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
+
+func (x *DeliveryStatusResponse) GetTargets() []*TargetDelivery {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
+// TargetDelivery is how delivery to one target stands. The words of state
+// and of the class of an error travel as strings, so that a release that
+// adds one is still understood: a receiver shows a word it does not know as
+// it is.
+type TargetDelivery struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// "webhook", "nats" or "s3".
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// "ok", "retrying" or "stalled".
+	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	// Rows of the outbox matched for the target and not yet acknowledged.
+	Pending uint64 `protobuf:"varint,4,opt,name=pending,proto3" json:"pending,omitempty"`
+	// When the oldest of them was made, in seconds since the Unix epoch; 0
+	// when nothing waits.
+	OldestPendingUnix int64 `protobuf:"varint,5,opt,name=oldest_pending_unix,json=oldestPendingUnix,proto3" json:"oldest_pending_unix,omitempty"`
+	// When the leader last delivered something, in seconds since the Unix
+	// epoch; 0 when it has not since it came to lead.
+	LastSuccessUnix int64 `protobuf:"varint,6,opt,name=last_success_unix,json=lastSuccessUnix,proto3" json:"last_success_unix,omitempty"`
+	// The class of the last failure, such as "timeout", "auth" or "rejected";
+	// empty when the last attempt succeeded. Never the text of the error.
+	LastErrorClass string `protobuf:"bytes,7,opt,name=last_error_class,json=lastErrorClass,proto3" json:"last_error_class,omitempty"`
+	// Rows that were dropped before they were sent, as the metadata counts
+	// them.
+	Lost uint64 `protobuf:"varint,8,opt,name=lost,proto3" json:"lost,omitempty"`
+	// Messages the target refused one by one - a webhook's 4xx other than 401,
+	// 403, 408 and 429 - which are not sent again, since the leader came to
+	// lead. A 401 and a 403 are of the credential: class "auth", tried again,
+	// and not counted here.
+	Rejected uint64 `protobuf:"varint,9,opt,name=rejected,proto3" json:"rejected,omitempty"`
+	// Versions the leader gave up on because they cannot be replicated, of
+	// every bucket that uses the target, since it came to lead. Kind "s3"
+	// only. It is the leader's own count of what it did; the exact figure of
+	// one bucket is in that bucket's usage record, in the metadata, and is not
+	// sent here.
+	Failed uint64 `protobuf:"varint,10,opt,name=failed,proto3" json:"failed,omitempty"`
+	// Whether rows for replication were lost, so that the other deployment
+	// lacks versions until a resync. Kind "s3" only.
+	ResyncNeeded  bool `protobuf:"varint,11,opt,name=resync_needed,json=resyncNeeded,proto3" json:"resync_needed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TargetDelivery) Reset() {
+	*x = TargetDelivery{}
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TargetDelivery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TargetDelivery) ProtoMessage() {}
+
+func (x *TargetDelivery) ProtoReflect() protoreflect.Message {
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TargetDelivery.ProtoReflect.Descriptor instead.
+func (*TargetDelivery) Descriptor() ([]byte, []int) {
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *TargetDelivery) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *TargetDelivery) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *TargetDelivery) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *TargetDelivery) GetPending() uint64 {
+	if x != nil {
+		return x.Pending
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetOldestPendingUnix() int64 {
+	if x != nil {
+		return x.OldestPendingUnix
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetLastSuccessUnix() int64 {
+	if x != nil {
+		return x.LastSuccessUnix
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetLastErrorClass() string {
+	if x != nil {
+		return x.LastErrorClass
+	}
+	return ""
+}
+
+func (x *TargetDelivery) GetLost() uint64 {
+	if x != nil {
+		return x.Lost
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetRejected() uint64 {
+	if x != nil {
+		return x.Rejected
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetFailed() uint64 {
+	if x != nil {
+		return x.Failed
+	}
+	return 0
+}
+
+func (x *TargetDelivery) GetResyncNeeded() bool {
+	if x != nil {
+		return x.ResyncNeeded
+	}
+	return false
+}
+
 type ProposeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The entry in the metadata log format: one version byte, then the body.
@@ -1148,7 +1397,7 @@ type ProposeRequest struct {
 
 func (x *ProposeRequest) Reset() {
 	*x = ProposeRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[15]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1160,7 +1409,7 @@ func (x *ProposeRequest) String() string {
 func (*ProposeRequest) ProtoMessage() {}
 
 func (x *ProposeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[15]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1173,7 +1422,7 @@ func (x *ProposeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeRequest.ProtoReflect.Descriptor instead.
 func (*ProposeRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{15}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ProposeRequest) GetEntry() []byte {
@@ -1195,7 +1444,7 @@ type ProposeResponse struct {
 
 func (x *ProposeResponse) Reset() {
 	*x = ProposeResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[16]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1207,7 +1456,7 @@ func (x *ProposeResponse) String() string {
 func (*ProposeResponse) ProtoMessage() {}
 
 func (x *ProposeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[16]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1220,7 +1469,7 @@ func (x *ProposeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeResponse.ProtoReflect.Descriptor instead.
 func (*ProposeResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{16}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ProposeResponse) GetError() *Error {
@@ -1245,7 +1494,7 @@ type ReadIndexRequest struct {
 
 func (x *ReadIndexRequest) Reset() {
 	*x = ReadIndexRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[17]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1257,7 +1506,7 @@ func (x *ReadIndexRequest) String() string {
 func (*ReadIndexRequest) ProtoMessage() {}
 
 func (x *ReadIndexRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[17]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1270,7 +1519,7 @@ func (x *ReadIndexRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadIndexRequest.ProtoReflect.Descriptor instead.
 func (*ReadIndexRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{17}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{20}
 }
 
 type ReadIndexResponse struct {
@@ -1283,7 +1532,7 @@ type ReadIndexResponse struct {
 
 func (x *ReadIndexResponse) Reset() {
 	*x = ReadIndexResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[18]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1295,7 +1544,7 @@ func (x *ReadIndexResponse) String() string {
 func (*ReadIndexResponse) ProtoMessage() {}
 
 func (x *ReadIndexResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[18]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1308,7 +1557,7 @@ func (x *ReadIndexResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadIndexResponse.ProtoReflect.Descriptor instead.
 func (*ReadIndexResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{18}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReadIndexResponse) GetError() *Error {
@@ -1333,7 +1582,7 @@ type TermRequest struct {
 
 func (x *TermRequest) Reset() {
 	*x = TermRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[19]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1345,7 +1594,7 @@ func (x *TermRequest) String() string {
 func (*TermRequest) ProtoMessage() {}
 
 func (x *TermRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[19]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1358,7 +1607,7 @@ func (x *TermRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TermRequest.ProtoReflect.Descriptor instead.
 func (*TermRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{19}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{22}
 }
 
 type TermResponse struct {
@@ -1371,7 +1620,7 @@ type TermResponse struct {
 
 func (x *TermResponse) Reset() {
 	*x = TermResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[20]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1383,7 +1632,7 @@ func (x *TermResponse) String() string {
 func (*TermResponse) ProtoMessage() {}
 
 func (x *TermResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[20]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1396,7 +1645,7 @@ func (x *TermResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TermResponse.ProtoReflect.Descriptor instead.
 func (*TermResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{20}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *TermResponse) GetError() *Error {
@@ -1426,7 +1675,7 @@ type JoinRequest struct {
 
 func (x *JoinRequest) Reset() {
 	*x = JoinRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[21]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1438,7 +1687,7 @@ func (x *JoinRequest) String() string {
 func (*JoinRequest) ProtoMessage() {}
 
 func (x *JoinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[21]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1451,7 +1700,7 @@ func (x *JoinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinRequest.ProtoReflect.Descriptor instead.
 func (*JoinRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{21}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *JoinRequest) GetNodeId() string {
@@ -1484,7 +1733,7 @@ type JoinResponse struct {
 
 func (x *JoinResponse) Reset() {
 	*x = JoinResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[22]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1496,7 +1745,7 @@ func (x *JoinResponse) String() string {
 func (*JoinResponse) ProtoMessage() {}
 
 func (x *JoinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[22]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1509,7 +1758,7 @@ func (x *JoinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinResponse.ProtoReflect.Descriptor instead.
 func (*JoinResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{22}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *JoinResponse) GetError() *Error {
@@ -1528,7 +1777,7 @@ type LeaveRequest struct {
 
 func (x *LeaveRequest) Reset() {
 	*x = LeaveRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[23]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1540,7 +1789,7 @@ func (x *LeaveRequest) String() string {
 func (*LeaveRequest) ProtoMessage() {}
 
 func (x *LeaveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[23]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1553,7 +1802,7 @@ func (x *LeaveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaveRequest.ProtoReflect.Descriptor instead.
 func (*LeaveRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{23}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *LeaveRequest) GetNodeId() string {
@@ -1572,7 +1821,7 @@ type LeaveResponse struct {
 
 func (x *LeaveResponse) Reset() {
 	*x = LeaveResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[24]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1584,7 +1833,7 @@ func (x *LeaveResponse) String() string {
 func (*LeaveResponse) ProtoMessage() {}
 
 func (x *LeaveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[24]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1597,7 +1846,7 @@ func (x *LeaveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaveResponse.ProtoReflect.Descriptor instead.
 func (*LeaveResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{24}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *LeaveResponse) GetError() *Error {
@@ -1621,7 +1870,7 @@ type WriteShardRequest struct {
 
 func (x *WriteShardRequest) Reset() {
 	*x = WriteShardRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[25]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1633,7 +1882,7 @@ func (x *WriteShardRequest) String() string {
 func (*WriteShardRequest) ProtoMessage() {}
 
 func (x *WriteShardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[25]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1646,7 +1895,7 @@ func (x *WriteShardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteShardRequest.ProtoReflect.Descriptor instead.
 func (*WriteShardRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{25}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *WriteShardRequest) GetStep() isWriteShardRequest_Step {
@@ -1718,7 +1967,7 @@ type WriteShardHeader struct {
 
 func (x *WriteShardHeader) Reset() {
 	*x = WriteShardHeader{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[26]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1730,7 +1979,7 @@ func (x *WriteShardHeader) String() string {
 func (*WriteShardHeader) ProtoMessage() {}
 
 func (x *WriteShardHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[26]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1743,7 +1992,7 @@ func (x *WriteShardHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteShardHeader.ProtoReflect.Descriptor instead.
 func (*WriteShardHeader) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{26}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *WriteShardHeader) GetDriveId() string {
@@ -1775,7 +2024,7 @@ type WriteShardCommit struct {
 
 func (x *WriteShardCommit) Reset() {
 	*x = WriteShardCommit{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[27]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1787,7 +2036,7 @@ func (x *WriteShardCommit) String() string {
 func (*WriteShardCommit) ProtoMessage() {}
 
 func (x *WriteShardCommit) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[27]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1800,7 +2049,7 @@ func (x *WriteShardCommit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteShardCommit.ProtoReflect.Descriptor instead.
 func (*WriteShardCommit) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{27}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{30}
 }
 
 type WriteShardResponse struct {
@@ -1812,7 +2061,7 @@ type WriteShardResponse struct {
 
 func (x *WriteShardResponse) Reset() {
 	*x = WriteShardResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[28]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1824,7 +2073,7 @@ func (x *WriteShardResponse) String() string {
 func (*WriteShardResponse) ProtoMessage() {}
 
 func (x *WriteShardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[28]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1837,7 +2086,7 @@ func (x *WriteShardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteShardResponse.ProtoReflect.Descriptor instead.
 func (*WriteShardResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{28}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *WriteShardResponse) GetError() *Error {
@@ -1857,7 +2106,7 @@ type StatShardRequest struct {
 
 func (x *StatShardRequest) Reset() {
 	*x = StatShardRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[29]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1869,7 +2118,7 @@ func (x *StatShardRequest) String() string {
 func (*StatShardRequest) ProtoMessage() {}
 
 func (x *StatShardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[29]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1882,7 +2131,7 @@ func (x *StatShardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatShardRequest.ProtoReflect.Descriptor instead.
 func (*StatShardRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{29}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *StatShardRequest) GetDriveId() string {
@@ -1909,7 +2158,7 @@ type StatShardResponse struct {
 
 func (x *StatShardResponse) Reset() {
 	*x = StatShardResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[30]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1921,7 +2170,7 @@ func (x *StatShardResponse) String() string {
 func (*StatShardResponse) ProtoMessage() {}
 
 func (x *StatShardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[30]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1934,7 +2183,7 @@ func (x *StatShardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatShardResponse.ProtoReflect.Descriptor instead.
 func (*StatShardResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{30}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *StatShardResponse) GetError() *Error {
@@ -1964,7 +2213,7 @@ type ReadShardRequest struct {
 
 func (x *ReadShardRequest) Reset() {
 	*x = ReadShardRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[31]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1976,7 +2225,7 @@ func (x *ReadShardRequest) String() string {
 func (*ReadShardRequest) ProtoMessage() {}
 
 func (x *ReadShardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[31]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1989,7 +2238,7 @@ func (x *ReadShardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadShardRequest.ProtoReflect.Descriptor instead.
 func (*ReadShardRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{31}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ReadShardRequest) GetDriveId() string {
@@ -2032,7 +2281,7 @@ type ReadShardResponse struct {
 
 func (x *ReadShardResponse) Reset() {
 	*x = ReadShardResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[32]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2044,7 +2293,7 @@ func (x *ReadShardResponse) String() string {
 func (*ReadShardResponse) ProtoMessage() {}
 
 func (x *ReadShardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[32]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2057,7 +2306,7 @@ func (x *ReadShardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadShardResponse.ProtoReflect.Descriptor instead.
 func (*ReadShardResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{32}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ReadShardResponse) GetError() *Error {
@@ -2091,7 +2340,7 @@ type DeleteShardRequest struct {
 
 func (x *DeleteShardRequest) Reset() {
 	*x = DeleteShardRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[33]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2103,7 +2352,7 @@ func (x *DeleteShardRequest) String() string {
 func (*DeleteShardRequest) ProtoMessage() {}
 
 func (x *DeleteShardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[33]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2116,7 +2365,7 @@ func (x *DeleteShardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteShardRequest.ProtoReflect.Descriptor instead.
 func (*DeleteShardRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{33}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *DeleteShardRequest) GetDriveId() string {
@@ -2142,7 +2391,7 @@ type DeleteShardResponse struct {
 
 func (x *DeleteShardResponse) Reset() {
 	*x = DeleteShardResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[34]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2154,7 +2403,7 @@ func (x *DeleteShardResponse) String() string {
 func (*DeleteShardResponse) ProtoMessage() {}
 
 func (x *DeleteShardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[34]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2167,7 +2416,7 @@ func (x *DeleteShardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteShardResponse.ProtoReflect.Descriptor instead.
 func (*DeleteShardResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{34}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *DeleteShardResponse) GetError() *Error {
@@ -2186,7 +2435,7 @@ type ListShardsRequest struct {
 
 func (x *ListShardsRequest) Reset() {
 	*x = ListShardsRequest{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[35]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2198,7 +2447,7 @@ func (x *ListShardsRequest) String() string {
 func (*ListShardsRequest) ProtoMessage() {}
 
 func (x *ListShardsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[35]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2211,7 +2460,7 @@ func (x *ListShardsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListShardsRequest.ProtoReflect.Descriptor instead.
 func (*ListShardsRequest) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{35}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ListShardsRequest) GetDriveId() string {
@@ -2231,7 +2480,7 @@ type ListShardsResponse struct {
 
 func (x *ListShardsResponse) Reset() {
 	*x = ListShardsResponse{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[36]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2243,7 +2492,7 @@ func (x *ListShardsResponse) String() string {
 func (*ListShardsResponse) ProtoMessage() {}
 
 func (x *ListShardsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[36]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2256,7 +2505,7 @@ func (x *ListShardsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListShardsResponse.ProtoReflect.Descriptor instead.
 func (*ListShardsResponse) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{36}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ListShardsResponse) GetError() *Error {
@@ -2289,7 +2538,7 @@ type ShardInfo struct {
 
 func (x *ShardInfo) Reset() {
 	*x = ShardInfo{}
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[37]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2301,7 +2550,7 @@ func (x *ShardInfo) String() string {
 func (*ShardInfo) ProtoMessage() {}
 
 func (x *ShardInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_cactusfs_node_v1_node_proto_msgTypes[37]
+	mi := &file_cactusfs_node_v1_node_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2314,7 +2563,7 @@ func (x *ShardInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShardInfo.ProtoReflect.Descriptor instead.
 func (*ShardInfo) Descriptor() ([]byte, []int) {
-	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{37}
+	return file_cactusfs_node_v1_node_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ShardInfo) GetShard() *ShardId {
@@ -2433,7 +2682,25 @@ const file_cactusfs_node_v1_node_proto_rawDesc = "" +
 	"\tdns_names\x18\x04 \x03(\tR\bdnsNames\x12!\n" +
 	"\fip_addresses\x18\x05 \x03(\tR\vipAddresses\x12&\n" +
 	"\x0fnot_before_unix\x18\x06 \x01(\x03R\rnotBeforeUnix\x12$\n" +
-	"\x0enot_after_unix\x18\a \x01(\x03R\fnotAfterUnix\"&\n" +
+	"\x0enot_after_unix\x18\a \x01(\x03R\fnotAfterUnix\"1\n" +
+	"\x15DeliveryStatusRequest\x12\x18\n" +
+	"\atargets\x18\x01 \x03(\tR\atargets\"\x83\x01\n" +
+	"\x16DeliveryStatusResponse\x12-\n" +
+	"\x05error\x18\x01 \x01(\v2\x17.cactusfs.node.v1.ErrorR\x05error\x12:\n" +
+	"\atargets\x18\x02 \x03(\v2 .cactusfs.node.v1.TargetDeliveryR\atargets\"\xdb\x02\n" +
+	"\x0eTargetDelivery\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12\x18\n" +
+	"\apending\x18\x04 \x01(\x04R\apending\x12.\n" +
+	"\x13oldest_pending_unix\x18\x05 \x01(\x03R\x11oldestPendingUnix\x12*\n" +
+	"\x11last_success_unix\x18\x06 \x01(\x03R\x0flastSuccessUnix\x12(\n" +
+	"\x10last_error_class\x18\a \x01(\tR\x0elastErrorClass\x12\x12\n" +
+	"\x04lost\x18\b \x01(\x04R\x04lost\x12\x1a\n" +
+	"\brejected\x18\t \x01(\x04R\brejected\x12\x16\n" +
+	"\x06failed\x18\n" +
+	" \x01(\x04R\x06failed\x12#\n" +
+	"\rresync_needed\x18\v \x01(\bR\fresyncNeeded\"&\n" +
 	"\x0eProposeRequest\x12\x14\n" +
 	"\x05entry\x18\x01 \x01(\fR\x05entry\"X\n" +
 	"\x0fProposeResponse\x12-\n" +
@@ -2497,11 +2764,12 @@ const file_cactusfs_node_v1_node_proto_rawDesc = "" +
 	"\tShardInfo\x12/\n" +
 	"\x05shard\x18\x01 \x01(\v2\x19.cactusfs.node.v1.ShardIdR\x05shard\x12,\n" +
 	"\x12modified_unix_nano\x18\x02 \x01(\x03R\x10modifiedUnixNano\x12\x1b\n" +
-	"\tage_nanos\x18\x03 \x01(\x03R\bageNanos2\xfa\x01\n" +
+	"\tage_nanos\x18\x03 \x01(\x03R\bageNanos2\xdf\x02\n" +
 	"\vNodeService\x12E\n" +
 	"\x04Info\x12\x1d.cactusfs.node.v1.InfoRequest\x1a\x1e.cactusfs.node.v1.InfoResponse\x12Q\n" +
 	"\bInFlight\x12!.cactusfs.node.v1.InFlightRequest\x1a\".cactusfs.node.v1.InFlightResponse\x12Q\n" +
-	"\bSettings\x12!.cactusfs.node.v1.SettingsRequest\x1a\".cactusfs.node.v1.SettingsResponse2\x8b\x03\n" +
+	"\bSettings\x12!.cactusfs.node.v1.SettingsRequest\x1a\".cactusfs.node.v1.SettingsResponse\x12c\n" +
+	"\x0eDeliveryStatus\x12'.cactusfs.node.v1.DeliveryStatusRequest\x1a(.cactusfs.node.v1.DeliveryStatusResponse2\x8b\x03\n" +
 	"\vMetaService\x12N\n" +
 	"\aPropose\x12 .cactusfs.node.v1.ProposeRequest\x1a!.cactusfs.node.v1.ProposeResponse\x12T\n" +
 	"\tReadIndex\x12\".cactusfs.node.v1.ReadIndexRequest\x1a#.cactusfs.node.v1.ReadIndexResponse\x12E\n" +
@@ -2530,47 +2798,50 @@ func file_cactusfs_node_v1_node_proto_rawDescGZIP() []byte {
 }
 
 var (
-	file_cactusfs_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+	file_cactusfs_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 	file_cactusfs_node_v1_node_proto_goTypes  = []any{
-		(*Error)(nil),               // 0: cactusfs.node.v1.Error
-		(*ShardId)(nil),             // 1: cactusfs.node.v1.ShardId
-		(*InfoRequest)(nil),         // 2: cactusfs.node.v1.InfoRequest
-		(*InfoResponse)(nil),        // 3: cactusfs.node.v1.InfoResponse
-		(*Drive)(nil),               // 4: cactusfs.node.v1.Drive
-		(*InFlightRequest)(nil),     // 5: cactusfs.node.v1.InFlightRequest
-		(*InFlightResponse)(nil),    // 6: cactusfs.node.v1.InFlightResponse
-		(*SettingsRequest)(nil),     // 7: cactusfs.node.v1.SettingsRequest
-		(*SettingsResponse)(nil),    // 8: cactusfs.node.v1.SettingsResponse
-		(*Build)(nil),               // 9: cactusfs.node.v1.Build
-		(*Setting)(nil),             // 10: cactusfs.node.v1.Setting
-		(*Filesystem)(nil),          // 11: cactusfs.node.v1.Filesystem
-		(*Volume)(nil),              // 12: cactusfs.node.v1.Volume
-		(*DriveSettings)(nil),       // 13: cactusfs.node.v1.DriveSettings
-		(*Certificate)(nil),         // 14: cactusfs.node.v1.Certificate
-		(*ProposeRequest)(nil),      // 15: cactusfs.node.v1.ProposeRequest
-		(*ProposeResponse)(nil),     // 16: cactusfs.node.v1.ProposeResponse
-		(*ReadIndexRequest)(nil),    // 17: cactusfs.node.v1.ReadIndexRequest
-		(*ReadIndexResponse)(nil),   // 18: cactusfs.node.v1.ReadIndexResponse
-		(*TermRequest)(nil),         // 19: cactusfs.node.v1.TermRequest
-		(*TermResponse)(nil),        // 20: cactusfs.node.v1.TermResponse
-		(*JoinRequest)(nil),         // 21: cactusfs.node.v1.JoinRequest
-		(*JoinResponse)(nil),        // 22: cactusfs.node.v1.JoinResponse
-		(*LeaveRequest)(nil),        // 23: cactusfs.node.v1.LeaveRequest
-		(*LeaveResponse)(nil),       // 24: cactusfs.node.v1.LeaveResponse
-		(*WriteShardRequest)(nil),   // 25: cactusfs.node.v1.WriteShardRequest
-		(*WriteShardHeader)(nil),    // 26: cactusfs.node.v1.WriteShardHeader
-		(*WriteShardCommit)(nil),    // 27: cactusfs.node.v1.WriteShardCommit
-		(*WriteShardResponse)(nil),  // 28: cactusfs.node.v1.WriteShardResponse
-		(*StatShardRequest)(nil),    // 29: cactusfs.node.v1.StatShardRequest
-		(*StatShardResponse)(nil),   // 30: cactusfs.node.v1.StatShardResponse
-		(*ReadShardRequest)(nil),    // 31: cactusfs.node.v1.ReadShardRequest
-		(*ReadShardResponse)(nil),   // 32: cactusfs.node.v1.ReadShardResponse
-		(*DeleteShardRequest)(nil),  // 33: cactusfs.node.v1.DeleteShardRequest
-		(*DeleteShardResponse)(nil), // 34: cactusfs.node.v1.DeleteShardResponse
-		(*ListShardsRequest)(nil),   // 35: cactusfs.node.v1.ListShardsRequest
-		(*ListShardsResponse)(nil),  // 36: cactusfs.node.v1.ListShardsResponse
-		(*ShardInfo)(nil),           // 37: cactusfs.node.v1.ShardInfo
-		nil,                         // 38: cactusfs.node.v1.SettingsResponse.LabelsEntry
+		(*Error)(nil),                  // 0: cactusfs.node.v1.Error
+		(*ShardId)(nil),                // 1: cactusfs.node.v1.ShardId
+		(*InfoRequest)(nil),            // 2: cactusfs.node.v1.InfoRequest
+		(*InfoResponse)(nil),           // 3: cactusfs.node.v1.InfoResponse
+		(*Drive)(nil),                  // 4: cactusfs.node.v1.Drive
+		(*InFlightRequest)(nil),        // 5: cactusfs.node.v1.InFlightRequest
+		(*InFlightResponse)(nil),       // 6: cactusfs.node.v1.InFlightResponse
+		(*SettingsRequest)(nil),        // 7: cactusfs.node.v1.SettingsRequest
+		(*SettingsResponse)(nil),       // 8: cactusfs.node.v1.SettingsResponse
+		(*Build)(nil),                  // 9: cactusfs.node.v1.Build
+		(*Setting)(nil),                // 10: cactusfs.node.v1.Setting
+		(*Filesystem)(nil),             // 11: cactusfs.node.v1.Filesystem
+		(*Volume)(nil),                 // 12: cactusfs.node.v1.Volume
+		(*DriveSettings)(nil),          // 13: cactusfs.node.v1.DriveSettings
+		(*Certificate)(nil),            // 14: cactusfs.node.v1.Certificate
+		(*DeliveryStatusRequest)(nil),  // 15: cactusfs.node.v1.DeliveryStatusRequest
+		(*DeliveryStatusResponse)(nil), // 16: cactusfs.node.v1.DeliveryStatusResponse
+		(*TargetDelivery)(nil),         // 17: cactusfs.node.v1.TargetDelivery
+		(*ProposeRequest)(nil),         // 18: cactusfs.node.v1.ProposeRequest
+		(*ProposeResponse)(nil),        // 19: cactusfs.node.v1.ProposeResponse
+		(*ReadIndexRequest)(nil),       // 20: cactusfs.node.v1.ReadIndexRequest
+		(*ReadIndexResponse)(nil),      // 21: cactusfs.node.v1.ReadIndexResponse
+		(*TermRequest)(nil),            // 22: cactusfs.node.v1.TermRequest
+		(*TermResponse)(nil),           // 23: cactusfs.node.v1.TermResponse
+		(*JoinRequest)(nil),            // 24: cactusfs.node.v1.JoinRequest
+		(*JoinResponse)(nil),           // 25: cactusfs.node.v1.JoinResponse
+		(*LeaveRequest)(nil),           // 26: cactusfs.node.v1.LeaveRequest
+		(*LeaveResponse)(nil),          // 27: cactusfs.node.v1.LeaveResponse
+		(*WriteShardRequest)(nil),      // 28: cactusfs.node.v1.WriteShardRequest
+		(*WriteShardHeader)(nil),       // 29: cactusfs.node.v1.WriteShardHeader
+		(*WriteShardCommit)(nil),       // 30: cactusfs.node.v1.WriteShardCommit
+		(*WriteShardResponse)(nil),     // 31: cactusfs.node.v1.WriteShardResponse
+		(*StatShardRequest)(nil),       // 32: cactusfs.node.v1.StatShardRequest
+		(*StatShardResponse)(nil),      // 33: cactusfs.node.v1.StatShardResponse
+		(*ReadShardRequest)(nil),       // 34: cactusfs.node.v1.ReadShardRequest
+		(*ReadShardResponse)(nil),      // 35: cactusfs.node.v1.ReadShardResponse
+		(*DeleteShardRequest)(nil),     // 36: cactusfs.node.v1.DeleteShardRequest
+		(*DeleteShardResponse)(nil),    // 37: cactusfs.node.v1.DeleteShardResponse
+		(*ListShardsRequest)(nil),      // 38: cactusfs.node.v1.ListShardsRequest
+		(*ListShardsResponse)(nil),     // 39: cactusfs.node.v1.ListShardsResponse
+		(*ShardInfo)(nil),              // 40: cactusfs.node.v1.ShardInfo
+		nil,                            // 41: cactusfs.node.v1.SettingsResponse.LabelsEntry
 	}
 )
 
@@ -2584,58 +2855,62 @@ var file_cactusfs_node_v1_node_proto_depIdxs = []int32{
 	13, // 6: cactusfs.node.v1.SettingsResponse.drives:type_name -> cactusfs.node.v1.DriveSettings
 	12, // 7: cactusfs.node.v1.SettingsResponse.metadata:type_name -> cactusfs.node.v1.Volume
 	14, // 8: cactusfs.node.v1.SettingsResponse.certificates:type_name -> cactusfs.node.v1.Certificate
-	38, // 9: cactusfs.node.v1.SettingsResponse.labels:type_name -> cactusfs.node.v1.SettingsResponse.LabelsEntry
+	41, // 9: cactusfs.node.v1.SettingsResponse.labels:type_name -> cactusfs.node.v1.SettingsResponse.LabelsEntry
 	11, // 10: cactusfs.node.v1.Volume.filesystem:type_name -> cactusfs.node.v1.Filesystem
 	12, // 11: cactusfs.node.v1.DriveSettings.volume:type_name -> cactusfs.node.v1.Volume
-	0,  // 12: cactusfs.node.v1.ProposeResponse.error:type_name -> cactusfs.node.v1.Error
-	0,  // 13: cactusfs.node.v1.ReadIndexResponse.error:type_name -> cactusfs.node.v1.Error
-	0,  // 14: cactusfs.node.v1.TermResponse.error:type_name -> cactusfs.node.v1.Error
-	0,  // 15: cactusfs.node.v1.JoinResponse.error:type_name -> cactusfs.node.v1.Error
-	0,  // 16: cactusfs.node.v1.LeaveResponse.error:type_name -> cactusfs.node.v1.Error
-	26, // 17: cactusfs.node.v1.WriteShardRequest.header:type_name -> cactusfs.node.v1.WriteShardHeader
-	27, // 18: cactusfs.node.v1.WriteShardRequest.commit:type_name -> cactusfs.node.v1.WriteShardCommit
-	1,  // 19: cactusfs.node.v1.WriteShardHeader.shard:type_name -> cactusfs.node.v1.ShardId
-	0,  // 20: cactusfs.node.v1.WriteShardResponse.error:type_name -> cactusfs.node.v1.Error
-	1,  // 21: cactusfs.node.v1.StatShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
-	0,  // 22: cactusfs.node.v1.StatShardResponse.error:type_name -> cactusfs.node.v1.Error
-	1,  // 23: cactusfs.node.v1.ReadShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
-	0,  // 24: cactusfs.node.v1.ReadShardResponse.error:type_name -> cactusfs.node.v1.Error
-	1,  // 25: cactusfs.node.v1.DeleteShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
-	0,  // 26: cactusfs.node.v1.DeleteShardResponse.error:type_name -> cactusfs.node.v1.Error
-	0,  // 27: cactusfs.node.v1.ListShardsResponse.error:type_name -> cactusfs.node.v1.Error
-	37, // 28: cactusfs.node.v1.ListShardsResponse.shards:type_name -> cactusfs.node.v1.ShardInfo
-	1,  // 29: cactusfs.node.v1.ShardInfo.shard:type_name -> cactusfs.node.v1.ShardId
-	2,  // 30: cactusfs.node.v1.NodeService.Info:input_type -> cactusfs.node.v1.InfoRequest
-	5,  // 31: cactusfs.node.v1.NodeService.InFlight:input_type -> cactusfs.node.v1.InFlightRequest
-	7,  // 32: cactusfs.node.v1.NodeService.Settings:input_type -> cactusfs.node.v1.SettingsRequest
-	15, // 33: cactusfs.node.v1.MetaService.Propose:input_type -> cactusfs.node.v1.ProposeRequest
-	17, // 34: cactusfs.node.v1.MetaService.ReadIndex:input_type -> cactusfs.node.v1.ReadIndexRequest
-	19, // 35: cactusfs.node.v1.MetaService.Term:input_type -> cactusfs.node.v1.TermRequest
-	21, // 36: cactusfs.node.v1.MetaService.Join:input_type -> cactusfs.node.v1.JoinRequest
-	23, // 37: cactusfs.node.v1.MetaService.Leave:input_type -> cactusfs.node.v1.LeaveRequest
-	25, // 38: cactusfs.node.v1.StorageService.WriteShard:input_type -> cactusfs.node.v1.WriteShardRequest
-	29, // 39: cactusfs.node.v1.StorageService.StatShard:input_type -> cactusfs.node.v1.StatShardRequest
-	31, // 40: cactusfs.node.v1.StorageService.ReadShard:input_type -> cactusfs.node.v1.ReadShardRequest
-	33, // 41: cactusfs.node.v1.StorageService.DeleteShard:input_type -> cactusfs.node.v1.DeleteShardRequest
-	35, // 42: cactusfs.node.v1.StorageService.ListShards:input_type -> cactusfs.node.v1.ListShardsRequest
-	3,  // 43: cactusfs.node.v1.NodeService.Info:output_type -> cactusfs.node.v1.InfoResponse
-	6,  // 44: cactusfs.node.v1.NodeService.InFlight:output_type -> cactusfs.node.v1.InFlightResponse
-	8,  // 45: cactusfs.node.v1.NodeService.Settings:output_type -> cactusfs.node.v1.SettingsResponse
-	16, // 46: cactusfs.node.v1.MetaService.Propose:output_type -> cactusfs.node.v1.ProposeResponse
-	18, // 47: cactusfs.node.v1.MetaService.ReadIndex:output_type -> cactusfs.node.v1.ReadIndexResponse
-	20, // 48: cactusfs.node.v1.MetaService.Term:output_type -> cactusfs.node.v1.TermResponse
-	22, // 49: cactusfs.node.v1.MetaService.Join:output_type -> cactusfs.node.v1.JoinResponse
-	24, // 50: cactusfs.node.v1.MetaService.Leave:output_type -> cactusfs.node.v1.LeaveResponse
-	28, // 51: cactusfs.node.v1.StorageService.WriteShard:output_type -> cactusfs.node.v1.WriteShardResponse
-	30, // 52: cactusfs.node.v1.StorageService.StatShard:output_type -> cactusfs.node.v1.StatShardResponse
-	32, // 53: cactusfs.node.v1.StorageService.ReadShard:output_type -> cactusfs.node.v1.ReadShardResponse
-	34, // 54: cactusfs.node.v1.StorageService.DeleteShard:output_type -> cactusfs.node.v1.DeleteShardResponse
-	36, // 55: cactusfs.node.v1.StorageService.ListShards:output_type -> cactusfs.node.v1.ListShardsResponse
-	43, // [43:56] is the sub-list for method output_type
-	30, // [30:43] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	0,  // 12: cactusfs.node.v1.DeliveryStatusResponse.error:type_name -> cactusfs.node.v1.Error
+	17, // 13: cactusfs.node.v1.DeliveryStatusResponse.targets:type_name -> cactusfs.node.v1.TargetDelivery
+	0,  // 14: cactusfs.node.v1.ProposeResponse.error:type_name -> cactusfs.node.v1.Error
+	0,  // 15: cactusfs.node.v1.ReadIndexResponse.error:type_name -> cactusfs.node.v1.Error
+	0,  // 16: cactusfs.node.v1.TermResponse.error:type_name -> cactusfs.node.v1.Error
+	0,  // 17: cactusfs.node.v1.JoinResponse.error:type_name -> cactusfs.node.v1.Error
+	0,  // 18: cactusfs.node.v1.LeaveResponse.error:type_name -> cactusfs.node.v1.Error
+	29, // 19: cactusfs.node.v1.WriteShardRequest.header:type_name -> cactusfs.node.v1.WriteShardHeader
+	30, // 20: cactusfs.node.v1.WriteShardRequest.commit:type_name -> cactusfs.node.v1.WriteShardCommit
+	1,  // 21: cactusfs.node.v1.WriteShardHeader.shard:type_name -> cactusfs.node.v1.ShardId
+	0,  // 22: cactusfs.node.v1.WriteShardResponse.error:type_name -> cactusfs.node.v1.Error
+	1,  // 23: cactusfs.node.v1.StatShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
+	0,  // 24: cactusfs.node.v1.StatShardResponse.error:type_name -> cactusfs.node.v1.Error
+	1,  // 25: cactusfs.node.v1.ReadShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
+	0,  // 26: cactusfs.node.v1.ReadShardResponse.error:type_name -> cactusfs.node.v1.Error
+	1,  // 27: cactusfs.node.v1.DeleteShardRequest.shard:type_name -> cactusfs.node.v1.ShardId
+	0,  // 28: cactusfs.node.v1.DeleteShardResponse.error:type_name -> cactusfs.node.v1.Error
+	0,  // 29: cactusfs.node.v1.ListShardsResponse.error:type_name -> cactusfs.node.v1.Error
+	40, // 30: cactusfs.node.v1.ListShardsResponse.shards:type_name -> cactusfs.node.v1.ShardInfo
+	1,  // 31: cactusfs.node.v1.ShardInfo.shard:type_name -> cactusfs.node.v1.ShardId
+	2,  // 32: cactusfs.node.v1.NodeService.Info:input_type -> cactusfs.node.v1.InfoRequest
+	5,  // 33: cactusfs.node.v1.NodeService.InFlight:input_type -> cactusfs.node.v1.InFlightRequest
+	7,  // 34: cactusfs.node.v1.NodeService.Settings:input_type -> cactusfs.node.v1.SettingsRequest
+	15, // 35: cactusfs.node.v1.NodeService.DeliveryStatus:input_type -> cactusfs.node.v1.DeliveryStatusRequest
+	18, // 36: cactusfs.node.v1.MetaService.Propose:input_type -> cactusfs.node.v1.ProposeRequest
+	20, // 37: cactusfs.node.v1.MetaService.ReadIndex:input_type -> cactusfs.node.v1.ReadIndexRequest
+	22, // 38: cactusfs.node.v1.MetaService.Term:input_type -> cactusfs.node.v1.TermRequest
+	24, // 39: cactusfs.node.v1.MetaService.Join:input_type -> cactusfs.node.v1.JoinRequest
+	26, // 40: cactusfs.node.v1.MetaService.Leave:input_type -> cactusfs.node.v1.LeaveRequest
+	28, // 41: cactusfs.node.v1.StorageService.WriteShard:input_type -> cactusfs.node.v1.WriteShardRequest
+	32, // 42: cactusfs.node.v1.StorageService.StatShard:input_type -> cactusfs.node.v1.StatShardRequest
+	34, // 43: cactusfs.node.v1.StorageService.ReadShard:input_type -> cactusfs.node.v1.ReadShardRequest
+	36, // 44: cactusfs.node.v1.StorageService.DeleteShard:input_type -> cactusfs.node.v1.DeleteShardRequest
+	38, // 45: cactusfs.node.v1.StorageService.ListShards:input_type -> cactusfs.node.v1.ListShardsRequest
+	3,  // 46: cactusfs.node.v1.NodeService.Info:output_type -> cactusfs.node.v1.InfoResponse
+	6,  // 47: cactusfs.node.v1.NodeService.InFlight:output_type -> cactusfs.node.v1.InFlightResponse
+	8,  // 48: cactusfs.node.v1.NodeService.Settings:output_type -> cactusfs.node.v1.SettingsResponse
+	16, // 49: cactusfs.node.v1.NodeService.DeliveryStatus:output_type -> cactusfs.node.v1.DeliveryStatusResponse
+	19, // 50: cactusfs.node.v1.MetaService.Propose:output_type -> cactusfs.node.v1.ProposeResponse
+	21, // 51: cactusfs.node.v1.MetaService.ReadIndex:output_type -> cactusfs.node.v1.ReadIndexResponse
+	23, // 52: cactusfs.node.v1.MetaService.Term:output_type -> cactusfs.node.v1.TermResponse
+	25, // 53: cactusfs.node.v1.MetaService.Join:output_type -> cactusfs.node.v1.JoinResponse
+	27, // 54: cactusfs.node.v1.MetaService.Leave:output_type -> cactusfs.node.v1.LeaveResponse
+	31, // 55: cactusfs.node.v1.StorageService.WriteShard:output_type -> cactusfs.node.v1.WriteShardResponse
+	33, // 56: cactusfs.node.v1.StorageService.StatShard:output_type -> cactusfs.node.v1.StatShardResponse
+	35, // 57: cactusfs.node.v1.StorageService.ReadShard:output_type -> cactusfs.node.v1.ReadShardResponse
+	37, // 58: cactusfs.node.v1.StorageService.DeleteShard:output_type -> cactusfs.node.v1.DeleteShardResponse
+	39, // 59: cactusfs.node.v1.StorageService.ListShards:output_type -> cactusfs.node.v1.ListShardsResponse
+	46, // [46:60] is the sub-list for method output_type
+	32, // [32:46] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_cactusfs_node_v1_node_proto_init() }
@@ -2643,7 +2918,7 @@ func file_cactusfs_node_v1_node_proto_init() {
 	if File_cactusfs_node_v1_node_proto != nil {
 		return
 	}
-	file_cactusfs_node_v1_node_proto_msgTypes[25].OneofWrappers = []any{
+	file_cactusfs_node_v1_node_proto_msgTypes[28].OneofWrappers = []any{
 		(*WriteShardRequest_Header)(nil),
 		(*WriteShardRequest_Chunk)(nil),
 		(*WriteShardRequest_Commit)(nil),
@@ -2654,7 +2929,7 @@ func file_cactusfs_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cactusfs_node_v1_node_proto_rawDesc), len(file_cactusfs_node_v1_node_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   39,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

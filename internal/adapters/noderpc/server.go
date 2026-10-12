@@ -262,6 +262,16 @@ func (s *Server) Settings(ctx context.Context, _ *nodev1.SettingsRequest) (*node
 	return settingsToWire(bounded), nil
 }
 
+// DeliveryStatus implements nodev1.NodeServiceServer. The call is in the
+// contract before the worker that delivers to targets (PLAN 8.0.14). Until
+// that is written this node answers as a release without the call does -
+// the RPC fails with UNIMPLEMENTED - so that a node that asks reads "cannot
+// be asked" and never an answer that says nothing waits. Like every call it
+// has passed the authorizer first.
+func (s *Server) DeliveryStatus(context.Context, *nodev1.DeliveryStatusRequest) (*nodev1.DeliveryStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "delivery status is not served by this release")
+}
+
 // Propose implements nodev1.MetaServiceServer.
 func (s *Server) Propose(ctx context.Context, req *nodev1.ProposeRequest) (*nodev1.ProposeResponse, error) {
 	// Any node may propose changes to buckets and objects: that is what a

@@ -189,6 +189,11 @@ type Upload struct {
 	// Encryption holds the wrapped data key of the upload; it has no nonce
 	// prefix, because the key is used for no stream.
 	Encryption Encryption
+	// ReplicaFrom, when not empty, is the ID of the deployment whose
+	// version the upload is to become a copy of (ADR-0026): the upload is
+	// a replica upload, and only a completion that carries a Replica of
+	// that deployment completes it.
+	ReplicaFrom string
 }
 
 // CompletedPart names one part of a completion: its number, and the entity

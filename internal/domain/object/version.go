@@ -105,6 +105,110 @@ type Version struct {
 	// its parts, in order: DataID names the parts (it was the upload's ID)
 	// and addresses no stored data of its own, and Layout is empty.
 	Parts int
+	// Replication says where the version stands in replication between
+	// deployments (ADR-0026); empty for a version no rule is about.
+	Replication ReplicationStatus
+	// Replica, when not nil, says that the version is committed as the
+	// copy of a version of another deployment: with the ID and the time
+	// it has there, and at the sequence it has there. It is said by
+	// whoever commits the version and is not kept: what is stored of it
+	// is Seq, and Replication, which is ReplicationReplica.
+	Replica *Replica
+}
+
+// ReplicationStatus is where a version stands in replication between
+// deployments, as x-amz-replication-status tells it. The empty status is a
+// version no rule is about.
+type ReplicationStatus string
+
+// The replication statuses. They are stored with the version, not worked out
+// from how far delivery has come: after a rule was edited or rows were lost,
+// that would call versions replicated that never were.
+const (
+	// ReplicationPending is a version a rule matched when it was
+	// committed, and that the other deployment has not taken yet.
+	ReplicationPending ReplicationStatus = "PENDING"
+	// ReplicationCompleted is a version the other deployment took, or
+	// said it had.
+	ReplicationCompleted ReplicationStatus = "COMPLETED"
+	// ReplicationFailed is a version that cannot be replicated: one
+	// encrypted with a key of the customer's, or one the other deployment
+	// refuses for itself.
+	ReplicationFailed ReplicationStatus = "FAILED"
+	// ReplicationReplica is a version that arrived from another
+	// deployment. It is not replicated again.
+	ReplicationReplica ReplicationStatus = "REPLICA"
+)
+
+// Valid reports whether s is a status a version can have, the empty one
+// among them.
+func (s ReplicationStatus) Valid() bool {
+	switch s {
+	case "", ReplicationPending, ReplicationCompleted, ReplicationFailed, ReplicationReplica:
+		return true
+	}
+	return false
+}
+
+// MaxDeploymentIDLength is the longest ID of a deployment that a replica can
+// name as its source.
+const MaxDeploymentIDLength = 64
+
+// ValidateReplicaSource reports whether source can be the ID of the
+// deployment a bucket takes its versions from: 1 to 64 letters, digits and
+// hyphens. The error wraps domain.ErrInvalidArgument.
+//
+// It is part of the replicated format: the state machine of every member
+// refuses a source by it, and it looks at bytes only.
+func ValidateReplicaSource(source string) error {
+	valid := source != "" && len(source) <= MaxDeploymentIDLength
+	for i := 0; valid && i < len(source); i++ {
+		c := source[i]
+		valid = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+	}
+	if !valid {
+		return fmt.Errorf("%w: a deployment is named with 1 to %d letters, digits and hyphens", domain.ErrInvalidArgument, MaxDeploymentIDLength)
+	}
+	return nil
+}
+
+// MaxReplicaSeq is the greatest sequence a replica can have at its source:
+// 2^62. A copy is stored at the sequence of its source, and a version made
+// here afterwards is given one above the greatest the bucket holds; a replica
+// at the end of the numbers would leave nothing above it, and no version
+// could ever outrank it. No deployment comes near the bound by itself: a
+// sequence is the index of an entry of its log.
+const MaxReplicaSeq = 1 << 62
+
+// Replica says of a version, a delete marker or a multipart upload that it
+// is the copy of one of another deployment (ADR-0026).
+type Replica struct {
+	// From is the ID of the deployment the version comes from. A replica
+	// bucket takes versions from the one deployment it is a replica of.
+	From string
+	// Seq is the sequence the version has there, from 1 to MaxReplicaSeq.
+	// The copy is stored at it, so that the versions of a key are in the
+	// order of their source whatever order they arrive in.
+	Seq uint64
+	// Null says that the version is the null version of its key at the
+	// source - one written before the bucket there kept versions - and is
+	// stored as the null version here.
+	Null bool
+}
+
+// Validate reports whether r names a source and a sequence from 1 to
+// MaxReplicaSeq. The error wraps domain.ErrInvalidArgument.
+//
+// It is part of the replicated format: the state machine of every member
+// refuses a replica by it.
+func (r Replica) Validate() error {
+	if err := ValidateReplicaSource(r.From); err != nil {
+		return err
+	}
+	if r.Seq == 0 || r.Seq > MaxReplicaSeq {
+		return fmt.Errorf("%w: a replica has the sequence of its source, which is from 1 to 2^62", domain.ErrInvalidArgument)
+	}
+	return nil
 }
 
 // Multipart reports whether the version consists of parts.

@@ -1,0 +1,14 @@
+{
+  "magic": "cactusfs-kms-local",
+  "format_version": 1,
+  "key_id": "local:25ec24975dc65438",
+  "kdf": {
+    "algorithm": "argon2id",
+    "time": 3,
+    "memory_kib": 65536,
+    "threads": 4,
+    "salt": "sDbIRSqmJKYBJ8iJRsHOKw=="
+  },
+  "nonce": "vc3yBfC2EjEg9Y2N",
+  "ciphertext": "Mc5jc6lPPbz0njnNl28w7FGGFbeJh1xMtro8fzU6LlRRs+Av6Bf2ho88sfAlJRO5"
+}

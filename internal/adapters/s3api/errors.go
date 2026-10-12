@@ -70,6 +70,11 @@ func errorMappings() []mapping {
 		{domain.ErrEntityTooLarge, apiError{http.StatusBadRequest, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size."}},
 
 		// Buckets and objects.
+		// A quota is a limit, not a denial, and is told by its code - the
+		// one Ceph's gateway uses, AWS S3 having no bucket quota. It is a
+		// 403 so that an SDK tells its caller at once and does not try
+		// again, as it would after a 507 (ADR-0024).
+		{domain.ErrQuotaExceeded, apiError{http.StatusForbidden, "QuotaExceeded", "The bucket quota has been reached."}},
 		{domain.ErrObjectLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied because object protected by object lock."}},
 		{domain.ErrLockNotConfigured, apiError{http.StatusBadRequest, "InvalidRequest", "Bucket is missing Object Lock Configuration."}},
 		{domain.ErrCustomerKeyRequired, apiError{http.StatusBadRequest, "InvalidRequest", "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."}},

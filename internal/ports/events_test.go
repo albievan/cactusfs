@@ -97,16 +97,64 @@ func TestEventsMatchTheContract(t *testing.T) {
 		ports.EventBucketLockChanged:         {ports.BucketEvent{}, "Bucket"},
 		ports.EventBucketConfigChanged:       {ports.BucketEvent{}, "Bucket"},
 		ports.EventObjectTagsChanged:         {ports.ObjectEvent{}, "Object"},
+		ports.EventBucketQuotaChanged:        {ports.BucketQuotaEvent{}, "BucketQuota"},
+		ports.EventBucketReplicaModeChanged:  {ports.BucketReplicaModeEvent{}, "BucketReplicaMode"},
+		ports.EventTargetChanged:             {ports.TargetEvent{}, "Target"},
+		ports.EventTargetDeleted:             {ports.TargetEvent{}, "Target"},
+	}
+	// The messages that go to targets outside the deployment and are no
+	// events of the bus: they have a channel and a message of their name,
+	// and carry a body of their own instead of the envelope. Their bodies
+	// are built, and held to the document by golden files, where they are
+	// sent (PLAN 8.2.1, 8.2.8).
+	external := map[string]string{
+		ports.MessageNotificationObject: "NotificationRecords",
+		ports.MessageAuditExported:      "AuditExport",
 	}
 
 	var addresses []string
 	for _, match := range regexp.MustCompile(`(?m)^    address: (\S+)$`).FindAllStringSubmatch(doc, -1) {
 		addresses = append(addresses, match[1])
 	}
-	if len(addresses) != len(events) {
-		t.Errorf("the contract has %d channels, the code %d events", len(addresses), len(events))
+	if len(addresses) != len(events)+len(external) {
+		t.Errorf("the contract has %d channels, the code %d events and %d messages to targets", len(addresses), len(events), len(external))
 	}
 	name := regexp.MustCompile(`^cactusfs\.[a-z]+\.[a-z]+(-[a-z]+)*\.v[0-9]+$`)
+	for message, schema := range external {
+		if !name.MatchString(message) {
+			t.Errorf("message name %q is not cactusfs.<aggregate>.<event>.v<major>", message)
+		}
+		if _, isEvent := events[message]; isEvent {
+			t.Errorf("%s is both an event of the bus and a message to targets", message)
+		}
+		if !slices.Contains(addresses, message) {
+			t.Errorf("message %s has no channel in the contract", message)
+		}
+		_, block, found := strings.Cut(doc, "      name: "+message+"\n")
+		if !found {
+			t.Errorf("message %s has no message in the contract", message)
+			continue
+		}
+		if next := regexp.MustCompile(`\n {2,4}\S`).FindStringIndex(block); next != nil {
+			block = block[:next[0]+1]
+		}
+		// Its body, the headers that travel with it, and no envelope.
+		if !strings.Contains(block, "$ref: '#/components/schemas/"+schema+"'") ||
+			!strings.Contains(block, "$ref: '#/components/schemas/DeliveryHeaders'") ||
+			strings.Contains(block, "$ref: '#/components/schemas/Envelope'") {
+			t.Errorf("message %s does not carry %s with the delivery headers and without the envelope", message, schema)
+		}
+		if properties, _ := schemaProperties(t, doc, schema); len(properties) == 0 {
+			t.Errorf("%s: the contract defines no property of the body", schema)
+		}
+	}
+	// The headers a receiver verifies a webhook request by.
+	headers, required := schemaProperties(t, doc, "DeliveryHeaders")
+	slices.Sort(headers)
+	slices.Sort(required)
+	if want := []string{"X-Cactusfs-Event-Id", "X-Cactusfs-Event-Type", "X-Cactusfs-Signature", "X-Cactusfs-Timestamp"}; !slices.Equal(headers, want) || !slices.Equal(required, want) {
+		t.Errorf("delivery headers = %v (required %v), want %v", headers, required, want)
+	}
 	for event, want := range events {
 		if !name.MatchString(event) {
 			t.Errorf("event name %q is not cactusfs.<aggregate>.<event>.v<major>", event)

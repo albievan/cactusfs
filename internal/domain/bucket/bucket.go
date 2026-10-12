@@ -37,6 +37,14 @@ type Bucket struct {
 	// DefaultRetention, when not nil, is given to every version put into
 	// the bucket without a retention of its own.
 	DefaultRetention *DefaultRetention
+	// QuotaBytes, when not zero, is the most bytes the bucket may hold:
+	// what its stored versions and the parts of its unfinished uploads
+	// may come to together (ADR-0024).
+	QuotaBytes int64
+	// ReplicaFrom, when not empty, is the ID of the deployment the bucket
+	// takes its versions from, and from nobody else: it is a replica
+	// bucket (ADR-0026).
+	ReplicaFrom string
 }
 
 // DefaultRetention is the retention a bucket gives its new versions: a mode,

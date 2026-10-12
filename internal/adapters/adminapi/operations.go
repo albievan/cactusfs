@@ -1045,3 +1045,112 @@ func (o *operations) ListAudit(ctx context.Context, request api.ListAuditRequest
 	}
 	return api.ListAudit200JSONResponse(page), nil
 }
+
+// --- quotas, targets, notifications, replication (PLAN 8.0.3) ---
+//
+// The operations below are in the contract and have no use case yet: the
+// contract comes first, and each is written with the step of PLAN.md that
+// names it. Until then a caller that has authenticated is told 501, as for
+// any operation this node was not given the use case for - which says
+// nothing of any bucket or target, so it is said before anybody is asked
+// what the caller may do.
+
+// notYet is the answer of an operation that is not written yet.
+func notYet(operation string) error {
+	return fmt.Errorf("%s: %w", operation, errNotImplemented)
+}
+
+// GetBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
+func (o *operations) GetBucketQuota(context.Context, api.GetBucketQuotaRequestObject) (api.GetBucketQuotaResponseObject, error) {
+	return nil, notYet("quota")
+}
+
+// PutBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
+func (o *operations) PutBucketQuota(context.Context, api.PutBucketQuotaRequestObject) (api.PutBucketQuotaResponseObject, error) {
+	return nil, notYet("quota")
+}
+
+// DeleteBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
+func (o *operations) DeleteBucketQuota(context.Context, api.DeleteBucketQuotaRequestObject) (api.DeleteBucketQuotaResponseObject, error) {
+	return nil, notYet("quota")
+}
+
+// RecountBucketUsage implements api.StrictServerInterface (PLAN 8.3.3).
+func (o *operations) RecountBucketUsage(context.Context, api.RecountBucketUsageRequestObject) (api.RecountBucketUsageResponseObject, error) {
+	return nil, notYet("usage recount")
+}
+
+// ListTargets implements api.StrictServerInterface (PLAN 8.0.13).
+func (o *operations) ListTargets(context.Context, api.ListTargetsRequestObject) (api.ListTargetsResponseObject, error) {
+	return nil, notYet("targets")
+}
+
+// GetTarget implements api.StrictServerInterface (PLAN 8.0.13).
+func (o *operations) GetTarget(context.Context, api.GetTargetRequestObject) (api.GetTargetResponseObject, error) {
+	return nil, notYet("targets")
+}
+
+// PutTarget implements api.StrictServerInterface (PLAN 8.0.13).
+func (o *operations) PutTarget(context.Context, api.PutTargetRequestObject) (api.PutTargetResponseObject, error) {
+	return nil, notYet("targets")
+}
+
+// DeleteTarget implements api.StrictServerInterface (PLAN 8.0.13).
+func (o *operations) DeleteTarget(context.Context, api.DeleteTargetRequestObject) (api.DeleteTargetResponseObject, error) {
+	return nil, notYet("targets")
+}
+
+// GetTargetStatus implements api.StrictServerInterface (PLAN 8.0.14).
+func (o *operations) GetTargetStatus(context.Context, api.GetTargetStatusRequestObject) (api.GetTargetStatusResponseObject, error) {
+	return nil, notYet("target status")
+}
+
+// GetBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
+func (o *operations) GetBucketNotifications(context.Context, api.GetBucketNotificationsRequestObject) (api.GetBucketNotificationsResponseObject, error) {
+	return nil, notYet("notifications")
+}
+
+// PutBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
+func (o *operations) PutBucketNotifications(context.Context, api.PutBucketNotificationsRequestObject) (api.PutBucketNotificationsResponseObject, error) {
+	return nil, notYet("notifications")
+}
+
+// DeleteBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
+func (o *operations) DeleteBucketNotifications(context.Context, api.DeleteBucketNotificationsRequestObject) (api.DeleteBucketNotificationsResponseObject, error) {
+	return nil, notYet("notifications")
+}
+
+// GetBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
+func (o *operations) GetBucketReplication(context.Context, api.GetBucketReplicationRequestObject) (api.GetBucketReplicationResponseObject, error) {
+	return nil, notYet("replication")
+}
+
+// PutBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
+func (o *operations) PutBucketReplication(context.Context, api.PutBucketReplicationRequestObject) (api.PutBucketReplicationResponseObject, error) {
+	return nil, notYet("replication")
+}
+
+// DeleteBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
+func (o *operations) DeleteBucketReplication(context.Context, api.DeleteBucketReplicationRequestObject) (api.DeleteBucketReplicationResponseObject, error) {
+	return nil, notYet("replication")
+}
+
+// GetBucketReplicationStatus implements api.StrictServerInterface (PLAN 8.1.7).
+func (o *operations) GetBucketReplicationStatus(context.Context, api.GetBucketReplicationStatusRequestObject) (api.GetBucketReplicationStatusResponseObject, error) {
+	return nil, notYet("replication status")
+}
+
+// ResyncBucketReplication implements api.StrictServerInterface (PLAN 8.1.6).
+func (o *operations) ResyncBucketReplication(context.Context, api.ResyncBucketReplicationRequestObject) (api.ResyncBucketReplicationResponseObject, error) {
+	return nil, notYet("replication resync")
+}
+
+// GetBucketReplicaMode implements api.StrictServerInterface (PLAN 8.1.1).
+func (o *operations) GetBucketReplicaMode(context.Context, api.GetBucketReplicaModeRequestObject) (api.GetBucketReplicaModeResponseObject, error) {
+	return nil, notYet("replica mode")
+}
+
+// PutBucketReplicaMode implements api.StrictServerInterface (PLAN 8.1.1).
+func (o *operations) PutBucketReplicaMode(context.Context, api.PutBucketReplicaModeRequestObject) (api.PutBucketReplicaModeResponseObject, error) {
+	return nil, notYet("replica mode")
+}

@@ -1,0 +1,1 @@
+{"v":1,"target":"site-b","bucket":"photos-copy","rules":[{"id":"everything","enabled":true,"priority":1},{"id":"logs","enabled":true,"priority":5,"prefix":"logs/","markers":true},{"id":"kept for later","priority":9,"prefix":"logs/private/"}]}

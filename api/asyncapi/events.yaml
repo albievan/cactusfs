@@ -10,13 +10,30 @@
 # consumer could not read gets a new name with the next major version; fields
 # are otherwise only ever added.
 #
-# Delivery. In this version events are delivered inside each node's process,
-# at most once per node: an event can be missed (the node stops between
-# committing the change and delivering the event, or catches up from a
-# snapshot), and is never invented. Consumers must be idempotent and can
-# recognise a repeated event by its id. External delivery - NATS JetStream and
-# webhooks, for bucket notifications and audit export - is added by the
-# adapters of a later milestone, under the channel addresses below.
+# Delivery. There are two ways, and they promise different things.
+#
+# Inside each node's process, every event of this document but the two
+# messages named below: at most once per node. An event can be missed (the
+# node stops between committing the change and delivering the event, or
+# catches up from a snapshot), and is never invented. Consumers must be
+# idempotent and can recognise a repeated event by its id.
+#
+# To targets outside the deployment - webhooks and NATS JetStream servers that
+# an administrator defined (ADR-0023, ADR-0025) - the two messages
+# cactusfs.notification.object.v1 (a bucket notification) and
+# cactusfs.audit.exported.v1 (a record of the audit trail): at least once.
+# What is to be sent is kept in the replicated metadata until the target has
+# acknowledged it, and is sent by the node that leads the metadata group, to
+# each target in the order the changes were made. A message is sent again
+# when its acknowledgement was not recorded - after a failure, and up to a
+# batch of 100 after a change of leader - so a consumer must be idempotent:
+# it recognises a repeated message by its id (the header X-Cactusfs-Event-Id
+# of a webhook request, Nats-Msg-Id of a NATS message). A target that cannot
+# be reached delays its own messages and nobody else's, and never a write. A
+# message is lost in one case only, which is counted and said: more than
+# 1 000 000 changes waiting for targets, of which the oldest is then dropped.
+# Neither message is delivered inside the process, and neither carries the
+# envelope: receivers written for S3 read the first as it is.
 asyncapi: 3.0.0
 info:
   title: CactusFS events
@@ -106,6 +123,46 @@ channels:
     messages:
       event:
         $ref: '#/components/messages/AuditRecorded'
+  bucketQuotaChanged:
+    address: cactusfs.bucket.quota-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketQuotaChanged'
+  bucketReplicaModeChanged:
+    address: cactusfs.bucket.replica-mode-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/BucketReplicaModeChanged'
+  targetChanged:
+    address: cactusfs.cluster.target-changed.v1
+    messages:
+      event:
+        $ref: '#/components/messages/TargetChanged'
+  targetDeleted:
+    address: cactusfs.cluster.target-deleted.v1
+    messages:
+      event:
+        $ref: '#/components/messages/TargetDeleted'
+  notificationObject:
+    address: cactusfs.notification.object.v1
+    description: >-
+      Bucket notifications, to the targets the rules of a bucket name. External only. The address is the
+      name of the message, not where it is sent. A webhook target is sent it as the body of a POST to the
+      target's endpoint. A NATS target is sent it on the one subject the target was defined with, whatever
+      the bucket and the kind of change: the subject is the administrator's to choose and the stream that
+      takes it is the operator's, which CactusFS neither creates nor changes.
+    messages:
+      event:
+        $ref: '#/components/messages/NotificationObject'
+  auditExported:
+    address: cactusfs.audit.exported.v1
+    description: >-
+      The audit trail, record by record in the order of its sequence, to the targets that were defined to
+      take it. External only; sent to a webhook and to NATS as a notification is, on the same endpoint and
+      the same subject.
+    messages:
+      event:
+        $ref: '#/components/messages/AuditExported'
 
 operations:
   publishBucketCreated:
@@ -172,6 +229,30 @@ operations:
     action: send
     channel:
       $ref: '#/channels/auditRecorded'
+  publishBucketQuotaChanged:
+    action: send
+    channel:
+      $ref: '#/channels/bucketQuotaChanged'
+  publishBucketReplicaModeChanged:
+    action: send
+    channel:
+      $ref: '#/channels/bucketReplicaModeChanged'
+  publishTargetChanged:
+    action: send
+    channel:
+      $ref: '#/channels/targetChanged'
+  publishTargetDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/targetDeleted'
+  deliverNotificationObject:
+    action: send
+    channel:
+      $ref: '#/channels/notificationObject'
+  deliverAuditExported:
+    action: send
+    channel:
+      $ref: '#/channels/auditExported'
 
 components:
   messages:
@@ -367,6 +448,70 @@ components:
                 const: cactusfs.audit.recorded.v1
               data:
                 $ref: '#/components/schemas/Audit'
+    BucketQuotaChanged:
+      name: cactusfs.bucket.quota-changed.v1
+      title: The quota of a bucket was set, changed or removed. A write that a quota refused is no event
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.quota-changed.v1
+              data:
+                $ref: '#/components/schemas/BucketQuota'
+    BucketReplicaModeChanged:
+      name: cactusfs.bucket.replica-mode-changed.v1
+      title: A bucket became the replica of another deployment's bucket, or was promoted
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.bucket.replica-mode-changed.v1
+              data:
+                $ref: '#/components/schemas/BucketReplicaMode'
+    TargetChanged:
+      name: cactusfs.cluster.target-changed.v1
+      title: A target the deployment sends to was defined or changed
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.cluster.target-changed.v1
+              data:
+                $ref: '#/components/schemas/Target'
+    TargetDeleted:
+      name: cactusfs.cluster.target-deleted.v1
+      title: A target was deleted
+      payload:
+        allOf:
+          - $ref: '#/components/schemas/Envelope'
+          - type: object
+            properties:
+              type:
+                const: cactusfs.cluster.target-deleted.v1
+              data:
+                $ref: '#/components/schemas/Target'
+    NotificationObject:
+      name: cactusfs.notification.object.v1
+      title: An object of a bucket was created or removed, told to a target in the form of an S3 event notification
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/DeliveryHeaders'
+      payload:
+        $ref: '#/components/schemas/NotificationRecords'
+    AuditExported:
+      name: cactusfs.audit.exported.v1
+      title: One record of the audit trail, sent to a target
+      contentType: application/json
+      headers:
+        $ref: '#/components/schemas/DeliveryHeaders'
+      payload:
+        $ref: '#/components/schemas/AuditExport'
 
   schemas:
     Envelope:
@@ -479,6 +624,200 @@ components:
         outcome:
           type: string
           enum: [success, denied, failed]
+        hash:
+          type: string
+          description: SHA-256 of the record, which includes the hash of the record before it.
+    BucketQuota:
+      type: object
+      required: [bucket, quota_bytes]
+      additionalProperties: false
+      properties:
+        bucket:
+          type: string
+        quota_bytes:
+          type: integer
+          minimum: 0
+          description: The most bytes the bucket may hold from now on; 0 when the quota was removed.
+    BucketReplicaMode:
+      type: object
+      required: [bucket, source]
+      additionalProperties: false
+      properties:
+        bucket:
+          type: string
+        source:
+          type: string
+          description: The ID of the deployment the bucket now takes its versions from; empty when it was promoted.
+    Target:
+      type: object
+      required: [name]
+      additionalProperties: false
+      description: Which target. Neither its endpoint nor anything of its credentials is ever part of an event.
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [webhook, nats, s3]
+    DeliveryHeaders:
+      type: object
+      description: >-
+        What travels beside the body of a message to a target. To a webhook as HTTP headers of a POST, with
+        Content-Type application/json and User-Agent cactusfs/<version>, and with Authorization: Bearer
+        <secret> when the target was given one. To NATS as message headers: Nats-Msg-Id carries what
+        X-Cactusfs-Event-Id carries here - JetStream deduplicates by it - and Cactusfs-Event-Type what
+        X-Cactusfs-Event-Type does; a NATS message is not signed, the connection is TLS and authenticated.
+      required: [X-Cactusfs-Event-Id, X-Cactusfs-Event-Type, X-Cactusfs-Timestamp, X-Cactusfs-Signature]
+      properties:
+        X-Cactusfs-Event-Id:
+          type: string
+          description: >-
+            Unique within the deployment for a message to a target, and the same every time the message is
+            sent again: consumers deduplicate by it. For a notification it is the sequencer of the record
+            in another spelling; for an audit record, "audit-" and its sequence. It is not signed: where it
+            matters, read the sequencer or the sequence from the body.
+        X-Cactusfs-Event-Type:
+          type: string
+          enum: [cactusfs.notification.object.v1, cactusfs.audit.exported.v1]
+          description: Which of the two messages the body is. Not signed; the two bodies cannot be taken for each other.
+        X-Cactusfs-Timestamp:
+          type: string
+          pattern: '^[0-9]{1,12}$'
+          description: >-
+            When this attempt was made, in seconds since the Unix epoch - of the attempt, not of the change,
+            so that a message that waited is not refused for its age. A receiver refuses a request whose
+            timestamp is more than five minutes from its own clock.
+        X-Cactusfs-Signature:
+          type: string
+          pattern: '^v1=[0-9a-f]{64}$'
+          description: >-
+            "v1=" and, in lower-case hexadecimal, HMAC-SHA256 under the signing key of the target of: the
+            value of X-Cactusfs-Timestamp, a full stop, and the body exactly as it was sent. A receiver
+            computes the same over the bytes it received, compares in constant time, and refuses what does
+            not match. The signing key is shown once, when the target is defined.
+    NotificationRecords:
+      type: object
+      required: [Records]
+      additionalProperties: false
+      description: >-
+        An S3 event notification. Always exactly one record a message. Object contents are never part of
+        it, and neither is the address of the client: the metadata holds none.
+      properties:
+        Records:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            $ref: '#/components/schemas/NotificationRecord'
+    NotificationRecord:
+      type: object
+      required: [eventVersion, eventSource, eventTime, eventName, s3]
+      additionalProperties: false
+      properties:
+        eventVersion:
+          const: '2.1'
+        eventSource:
+          const: cactusfs:s3
+        eventTime:
+          type: string
+          format: date-time
+          description: When the change was made, as the change itself records it.
+        eventName:
+          type: string
+          enum:
+            - ObjectCreated:Put
+            - ObjectCreated:CompleteMultipartUpload
+            - ObjectRemoved:Delete
+            - ObjectRemoved:DeleteMarkerCreated
+          description: >-
+            What happened, as S3 names it. A copy arrives as a put and is told as one. ObjectRemoved:Delete
+            is a version removed for good; ObjectRemoved:DeleteMarkerCreated is an object deleted in a
+            bucket that keeps versions.
+        userIdentity:
+          type: object
+          required: [principalId]
+          additionalProperties: false
+          description: Who made the change. Absent when it was not recorded.
+          properties:
+            principalId:
+              type: string
+              description: The actor as the audit trail names actors - root, user/<name>, key/<access key ID>, service/lifecycle.
+        s3:
+          type: object
+          required: [bucket, object]
+          additionalProperties: false
+          properties:
+            bucket:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+            object:
+              type: object
+              required: [key, sequencer]
+              additionalProperties: false
+              properties:
+                key:
+                  type: string
+                  description: The key, URL-encoded as S3 encodes it in a notification - a space is "+".
+                size:
+                  type: integer
+                  minimum: 0
+                  description: The size of the version in bytes. Absent for a delete marker.
+                eTag:
+                  type: string
+                  description: The entity tag of the version, without quotes. Absent for a delete marker.
+                versionId:
+                  type: string
+                  description: The version, or the delete marker. Absent in a bucket that keeps no versions.
+                sequencer:
+                  type: string
+                  pattern: '^[0-9a-f]{20}$'
+                  description: >-
+                    Orders the changes of a deployment: of two records the one with the greater sequencer -
+                    compared as text - was made later. Records reach a target in ascending order of it,
+                    except where one is sent again.
+    AuditExport:
+      type: object
+      required: [stream, sequence, time, actor, action, outcome, hash]
+      additionalProperties: false
+      description: >-
+        One record of the audit trail, whole, as the node writes it to its own output. The hash of each
+        record covers the hash of the one before it, so a receiver that keeps every sequence can verify the
+        chain. No secret is ever part of a record.
+      properties:
+        stream:
+          const: audit
+        sequence:
+          type: integer
+          minimum: 1
+        time:
+          type: string
+          format: date-time
+        actor:
+          type: string
+        access_key_id:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        outcome:
+          type: string
+          enum: [success, denied, failed]
+        source_ip:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
+        previous_hash:
+          type: string
+          description: The hash of the record before this one. Absent on the first record.
         hash:
           type: string
           description: SHA-256 of the record, which includes the hash of the record before it.

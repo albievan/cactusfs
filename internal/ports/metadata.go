@@ -33,7 +33,9 @@ type BucketStore interface {
 	ListBuckets(ctx context.Context) ([]bucket.Bucket, error)
 	// SetBucketVersioning changes whether a bucket keeps versions. The
 	// error wraps domain.ErrBucketNotFound, or what
-	// bucket.ValidateVersioningChange refuses.
+	// bucket.ValidateVersioningChange refuses. A bucket that has a
+	// replication configuration, or is a replica, keeps versions: asking
+	// it to stop wraps domain.ErrInvalidBucketState (ADR-0026).
 	SetBucketVersioning(ctx context.Context, name string, state bucket.Versioning) error
 	// SetBucketDefaultRetention sets the retention the bucket gives its
 	// new versions; nil removes it. The error wraps
@@ -46,6 +48,19 @@ type BucketStore interface {
 	// bucket.ConfigTagRules: that one is refused with
 	// domain.ErrUnavailable while a member of the cluster does not know
 	// it (entry schema 3, ADR-0016).
+	//
+	// And, from entry schema 5 on (ADR-0023; domain.ErrUnavailable until
+	// every member knows it), bucket.ConfigNotification and
+	// bucket.ConfigReplication. Of these two the store takes the document
+	// in its canonical form only (bucket.ParseNotificationConfig,
+	// bucket.ParseReplicationConfig), because it matches changes by it;
+	// and every target the document names must exist, be of a kind that
+	// fits (delivery.Kind.Serves) and admit the bucket
+	// (delivery.Target.Admits) - all three decided when the change is
+	// committed, and refused with domain.ErrInvalidArgument. A replication
+	// document also needs a bucket that keeps versions and is no replica:
+	// domain.ErrInvalidBucketState otherwise. The store counts, in
+	// delivery.Target.Refs, the documents that name a target.
 	SetBucketConfig(ctx context.Context, name, kind string, document []byte) error
 	// GetBucketConfig returns one configuration document of a bucket, or
 	// nil when the bucket has none of that kind.
@@ -102,6 +117,23 @@ type ObjectIndex interface {
 	// member of the cluster knows the field (entry schema 3, ADR-0016).
 	// Until then the version is committed without it and the put still
 	// succeeds: PutResult.Stored says what was recorded.
+	//
+	// A put that would take the bucket past its quota wraps
+	// domain.ErrQuotaExceeded and changes nothing (ADR-0024): what counts
+	// is what the put adds less what the same put frees, decided when the
+	// change is committed.
+	//
+	// v.Replica commits the version as the copy of a version of another
+	// deployment (ADR-0026): with the ID and the time it is given, at the
+	// sequence of its source, and current exactly when no version of its
+	// key has a greater sequence - whatever order copies arrive in. The
+	// bucket must be a replica of that deployment; and into a replica
+	// bucket nothing else is put: either way the refusal wraps
+	// domain.ErrInvalidBucketState. A version whose ID the key already
+	// has wraps domain.ErrConflict, which a source reads as "it is
+	// there". v.Replication is not for the caller to say: the store sets
+	// it. Until every member knows entry schema 5 a replica wraps
+	// domain.ErrUnavailable.
 	PutVersion(ctx context.Context, v object.Version) (PutResult, error)
 	// DeleteObject deletes an object, or one of its versions. Without a
 	// version named, what happens is decided by the versioning state of
@@ -109,6 +141,11 @@ type ObjectIndex interface {
 	// delete marker becomes its newest version. With a version named, that
 	// version is removed for good. Deleting what does not exist is not an
 	// error. The error wraps domain.ErrBucketNotFound.
+	//
+	// In a replica bucket (ADR-0026) a delete that would leave a marker
+	// is refused with domain.ErrInvalidBucketState unless o.Replica says
+	// that it is the copy of a marker of the bucket's source; removing
+	// one version for good is judged there as everywhere.
 	DeleteObject(ctx context.Context, bucketName, key string, o DeleteOptions) (DeleteResult, error)
 	// GetVersion returns one version of an object, which may be a delete
 	// marker. The error wraps domain.ErrBucketNotFound or
@@ -198,6 +235,19 @@ type DeleteOptions struct {
 	// reading of the state that something is to go says here what it
 	// read.
 	Expect object.ID
+	// By is who deletes, as the audit trail names actors; empty when that
+	// is not known. It is told to whoever is notified of the change, and
+	// a delete marker made by the lifecycle service
+	// (bucket.LifecycleActor) is not sent to another deployment. It is
+	// recorded where every member of the cluster knows the field (entry
+	// schema 5, ADR-0023); until then the delete is carried out without
+	// it.
+	By string
+	// Replica, when not nil, says that the delete marker to be made is
+	// the copy of a marker of another deployment: MarkerID and At are
+	// those it has there, and it is stored at the sequence it has there.
+	// It is for a delete that names no version.
+	Replica *object.Replica
 }
 
 // DeleteResult is what committing a delete did.
@@ -256,13 +306,18 @@ type UploadStore interface {
 	// domain.ErrConflict when the ID is in use. An upload with tags is
 	// refused with domain.ErrUnavailable while a member of the cluster
 	// does not know them (entry schema 3): they could not be kept, and
-	// the bucket's rules may require them.
+	// the bucket's rules may require them. In a replica bucket only an
+	// upload of the bucket's source is begun (u.ReplicaFrom), and such an
+	// upload nowhere else: domain.ErrInvalidBucketState otherwise.
 	CreateUpload(ctx context.Context, u object.Upload) error
 	// GetUpload returns an upload in progress. The error wraps
 	// domain.ErrUploadNotFound when there is none with that ID for the key.
 	GetUpload(ctx context.Context, bucketName, key string, id object.ID) (object.Upload, error)
 	// PutPart records a part of an upload, in place of the part that had
 	// its number, which it returns: nothing refers to that one any more.
+	// A part that would take the bucket past its quota - by what it adds
+	// less the part it replaces - wraps domain.ErrQuotaExceeded and
+	// changes nothing.
 	PutPart(ctx context.Context, bucketName, key string, id object.ID, p object.Part) (replaced *object.Part, err error)
 	// ListParts returns up to limit parts of an upload with a number
 	// greater than after, in ascending order of number.
@@ -272,7 +327,11 @@ type UploadStore interface {
 	// not listed are gone. Whether the listed parts make an object is
 	// decided against the parts as they are stored at that moment
 	// (object.CheckCompletion). The error wraps domain.ErrConflict when a
-	// listed part is no longer the one that was sealed.
+	// listed part is no longer the one that was sealed. A completion is
+	// never refused for a quota: it moves bytes from the upload to the
+	// version and adds none. An upload of a source (object.Upload.
+	// ReplicaFrom) is completed only with c.Replica of that source, and
+	// no other upload with one: domain.ErrInvalidBucketState otherwise.
 	CompleteUpload(ctx context.Context, c Completion) (PutResult, error)
 	// AbortUpload removes an upload and its parts, and returns the parts:
 	// nothing refers to their data any more. The list may be cut short.
@@ -308,4 +367,8 @@ type Completion struct {
 	// Checksums as the client named them, the DataID of the stored part
 	// that was sealed, and the Seal of its place.
 	Parts []object.Part
+	// Replica, when not nil, completes the upload as the copy of a
+	// version of another deployment, as object.Version.Replica does for a
+	// put: VersionID and At are those the version has there.
+	Replica *object.Replica
 }

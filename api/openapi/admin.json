@@ -3,7 +3,7 @@
   "info": {
     "title": "CactusFS management API",
     "version": "1.0.0",
-    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\n"
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\n"
   },
   "servers": [
     {
@@ -48,6 +48,10 @@
     {
       "name": "keys",
       "description": "API keys."
+    },
+    {
+      "name": "targets",
+      "description": "The places outside the deployment that it sends to - webhooks, NATS servers, other deployments."
     },
     {
       "name": "cluster"
@@ -308,7 +312,7 @@
           "buckets"
         ],
         "summary": "How many objects a bucket holds, and their size together",
-        "description": "Counts the current versions of the bucket's objects and adds up their sizes, by reading the index: older versions and uploads in progress are not counted. For a very large bucket the count stops at a bound and `complete` is false; the figures are then of the keys counted so far.",
+        "description": "How many objects the bucket holds and their sizes together - the current versions; older versions and\nuploads in progress are not part of `object_count` and `total_size`.\n\nWhere the metadata store keeps a count of the bucket, the answer is that count: `exact` and\n`complete` are true, and `versions`, `stored_bytes` and `upload_bytes` say what the bucket keeps\nbeyond its current versions - which is what a quota counts. A bucket made by a release that counts is\ncounted from the start. One that is older is counted in the background, without being asked; until\nthat is done, and on a deployment that does not count yet, `exact` is false and the answer is made as\nit always was, by reading the index: for a very large bucket that count stops at a bound and\n`complete` is false; the figures are then of the keys counted so far.\n",
         "x-cactusfs-action": "s3:ListBucket",
         "parameters": [
           {
@@ -322,6 +326,510 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BucketUsage"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/usage/recount": {
+      "post": {
+        "operationId": "recountBucketUsage",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Count a bucket's usage again",
+        "description": "Asks for the bucket's usage to be counted again from its index, as it was counted the first time: by\nthe metadata store, in steps, while the bucket is used. The answer is given as soon as the count is\nasked for; `GET /buckets/{bucket}/usage` goes on answering from the figures there are until the new\nones take their place, and `exact` stays true meanwhile. A count that comes out other than the\nfigures that were kept is counted in `cactusfs_bucket_usage_drift_total`. Asking again while a count\nis under way starts it again.\n\nAnswers 503 until every member of the metadata group is of a release that counts usage.\n\nThe request has no body. Like every POST of this API it must still say\n`Content-Type: application/json`, and is refused with 415 otherwise.\n",
+        "x-cactusfs-action": "admin:RecountBucketUsage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The count was asked for."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/quota": {
+      "get": {
+        "operationId": "getBucketQuota",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the quota of a bucket",
+        "description": "The most bytes the bucket may hold, and how many it holds. A bucket without a quota is answered too:\n`quota_bytes` is then absent.\n",
+        "x-cactusfs-action": "admin:GetBucketQuota",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The quota, or that there is none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketQuota"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketQuota",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the quota of a bucket",
+        "description": "Sets the most bytes the bucket may hold. What counts is what the bucket keeps: every version of every\nobject, current or not, by its size, and the parts of multipart uploads that are not completed. A\nquota below what the bucket holds already is accepted: nothing is removed, and nothing more is taken\nuntil enough was deleted.\n\nOnce it is set, an upload, a copy or a part that would take the bucket past it is refused - in S3\nwith `403 QuotaExceeded`, here with a 403 whose `code` is `QuotaExceeded`. Deleting is never refused.\n\nHaving `s3:*` on the bucket does not give this: a bucket's own administrator cannot lift its limit.\n",
+        "x-cactusfs-action": "admin:PutBucketQuota",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketQuotaPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketQuota"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not allowed `admin:PutBucketQuota`. The refusal is written to the audit trail.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The bucket's usage is still being counted (`code` is `Conflict`): a quota can be set once\n`exact` is true. A bucket made by this release is exact from the start; one that was there before\nis counted without being asked.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketQuota",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the quota of a bucket",
+        "x-cactusfs-action": "admin:DeleteBucketQuota",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there was none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/notifications": {
+      "get": {
+        "operationId": "getBucketNotifications",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the notification rules of a bucket",
+        "description": "The rules by which changes of the bucket's objects are told to targets - what S3 calls the\nnotification configuration, and the same document `GET /{bucket}?notification` gives. A bucket\nwithout rules is answered with none.\n",
+        "x-cactusfs-action": "s3:GetBucketNotification",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rules, in the order they were given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketNotifications"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketNotifications",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the notification rules of a bucket",
+        "description": "Replaces the rules. A rule names a target by its name, never an address: targets are defined under\n`/targets` by who may define them, and each lists the buckets that may use it. A rule that names a\ntarget that is not there, is not of kind `webhook` or `nats`, or does not allow this bucket is refused\nwith 400. No rules at all removes the configuration.\n\nFrom then on every change a rule matches is delivered to its target at least once, in the order the\nchanges were made; see `api/asyncapi/events.yaml`, `cactusfs.notification.object.v1`. Nothing of\nbefore is delivered.\n\nAnswers 503 until every member of the metadata group is of a release that knows notifications.\n",
+        "x-cactusfs-action": "s3:PutBucketNotification",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketNotificationsPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketNotifications"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketNotifications",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the notification rules of a bucket",
+        "description": "What was matched before is still delivered; nothing after is.\n",
+        "x-cactusfs-action": "s3:PutBucketNotification",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there were none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/replication": {
+      "get": {
+        "operationId": "getBucketReplication",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the replication configuration of a bucket",
+        "description": "Where the versions of this bucket are copied to - the same document `GET /{bucket}?replication`\ngives. 404 when the bucket has none.\n",
+        "x-cactusfs-action": "s3:GetReplicationConfiguration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The configuration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketReplication"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketReplication",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the replication configuration of a bucket",
+        "description": "Has every new version of the bucket that a rule matches copied to one bucket of another deployment,\nthrough a target of kind `s3` that allows this bucket. The bucket must keep versions (400 otherwise,\nand versioning cannot be suspended while the configuration is there) and must not itself be a replica\n(409). The bucket at the other end must be put into replica mode there, with this deployment as its\nsource.\n\nVersions that were there before are not sent until a resync is asked for. Versions removed for good\nare never removed at the other end.\n\nAnswers 503 until every member of the metadata group is of a release that knows replication.\n",
+        "x-cactusfs-action": "s3:PutReplicationConfiguration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketReplicationPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketReplication"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketReplication",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the replication configuration of a bucket",
+        "description": "Nothing more is matched. What was matched and not yet sent is still sent. Nothing is removed at the\nother end, and the bucket there stays a replica until it is promoted there.\n",
+        "x-cactusfs-action": "s3:PutReplicationConfiguration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there was none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/replication/status": {
+      "get": {
+        "operationId": "getBucketReplicationStatus",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "How far the replication of a bucket has come",
+        "description": "What the node that leads the metadata group, which does the sending, says of the bucket's target, and\nthe resync of the bucket if one was asked for. Any node answers; it asks the leader. 404 when the\nbucket has no replication configuration; 503 when there is no leader to ask.\n",
+        "x-cactusfs-action": "admin:GetReplicationStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The state of replication as the leader has it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketReplicationStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/replication/resync": {
+      "post": {
+        "operationId": "resyncBucketReplication",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Send what the other deployment lacks",
+        "description": "Starts a walk of every version of the bucket, oldest key first, that asks the other deployment for\neach and sends those it does not have - the versions that were there before the configuration, and\nthose that were lost to a target that could not be reached for too long (`resync_needed`). The walk\nis the leader's, goes on across a change of leader from where it had come, and is followed in\n`GET /buckets/{bucket}/replication/status`. Asking again starts it from the beginning. 404 when the\nbucket has no replication configuration.\n\nThe request has no body. Like every POST of this API it must still say\n`Content-Type: application/json`, and is refused with 415 otherwise.\n",
+        "x-cactusfs-action": "admin:ResyncReplication",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The resync was started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplicationResync"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/replica": {
+      "get": {
+        "operationId": "getBucketReplicaMode",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Whether a bucket is the replica of another deployment's",
+        "x-cactusfs-action": "admin:GetBucketReplicaMode",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The mode of the bucket.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketReplicaMode"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketReplicaMode",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Make a bucket a replica, or promote it",
+        "description": "With a `source`, the bucket becomes the replica of a bucket of that deployment: from then on it takes\nnew versions and delete markers from that source only, and refuses everybody else's - the root\nidentity's too - with `409 InvalidBucketState`. Reading is as before, and so is removing a version for\ngood, which stays governed by the permissions and locks of this deployment. The bucket must keep\nversions, its usage must be exact, and it must have no replication configuration of its own (409\notherwise).\n\nWith an empty `source` the bucket is promoted: it takes writes again, and nothing more from the\nsource. Promotion is the whole of failing over; nothing is sent back.\n\nAnswers 503 until every member of the metadata group is of a release that knows replication.\n",
+        "x-cactusfs-action": "admin:PutBucketReplicaMode",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketReplicaModePut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketReplicaMode"
                 }
               }
             }
@@ -514,6 +1022,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ObjectMetadata"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not allowed `s3:PutObject` on the object (`code` is `AccessDenied`), or the bucket\nhas a quota and the object would take it past it (`code` is `QuotaExceeded`). Nothing was\nstored. Sending the same request again does not help until something was deleted or the quota\nwas raised.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -1603,6 +2121,169 @@
         }
       }
     },
+    "/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "tags": [
+          "targets"
+        ],
+        "summary": "List the targets",
+        "description": "Every place outside the deployment that it sends to: webhooks and NATS JetStream servers for\nnotifications and for the audit trail, and other deployments for replication. In name order, without\nany credential.\n",
+        "x-cactusfs-action": "admin:ListTargets",
+        "responses": {
+          "200": {
+            "description": "The targets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Target"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/targets/{name}": {
+      "get": {
+        "operationId": "getTarget",
+        "tags": [
+          "targets"
+        ],
+        "summary": "Get a target",
+        "x-cactusfs-action": "admin:GetTarget",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The target, without any credential and without the path of its endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putTarget",
+        "tags": [
+          "targets"
+        ],
+        "summary": "Define a target, or change it",
+        "description": "A target is the only way an address outside the deployment is named: the rules of a bucket name a\ntarget, never an address. So whoever may define targets decides where the deployment connects to, and\n`buckets` decides which buckets may use each.\n\n**The endpoint** is refused with 400 unless it is `https://` for the kinds `webhook` and `s3`, or\n`tls://` for `nats`; it may carry no userinfo, no query\nand no fragment. Where it leads is checked again each time a connection is made: an address that is\nloopback, link-local, unspecified or multicast is refused unless the nodes were started with a range\nthat admits it (`--egress-allow`), and the addresses of cloud metadata services are refused whatever\nwas admitted. No redirect is followed, no proxy is used, and the certificate is verified against\n`ca_pem` or the system's roots: there is no way to turn that off.\n\n**The path of the endpoint is write-only.** The URL of a webhook often carries a token in its path,\nso no answer of this API gives the path back - not to whoever defined the target either: a target is\nshown with the scheme, the host and the port of its endpoint, and with `endpoint_path_set`. The whole\nURL is sent here. Changing a target without `endpoint` keeps the endpoint it has, path and all; to\nchange any part of the endpoint - the host, the port or the path - the whole URL is sent again. A\ntarget that is new needs one (400 without).\n\n**Secrets are write-only.** `auth.secret` is sealed through the key service and is in no answer of\nthis API, in no log line, audit record or event. Changing a target without `auth.secret` keeps the\none it has, as long as `auth.mode` stays what it was. A target of kind `webhook` is given a signing\nkey, made here and returned once, in the answer to the request that made it or that asked for a new\none with `rotate_signing_key`.\n\nThe kind of a target cannot be changed (409); delete it and define it again. Nothing is connected to\nby this request: whether the target can be reached is told by its status.\n\nAnswers 503 until every member of the metadata group is of a release that knows targets.\n",
+        "x-cactusfs-action": "admin:PutTarget",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Defined or changed. A signing key that was made is in this response and nowhere else, ever.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetPutResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteTarget",
+        "tags": [
+          "targets"
+        ],
+        "summary": "Delete a target",
+        "description": "Refused with 409 (`code` `EntityInUse`) while a bucket's notification rules or replication\nconfiguration name it. What was waiting to be sent to it is not sent.\n",
+        "x-cactusfs-action": "admin:DeleteTarget",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/targets/{name}/status": {
+      "get": {
+        "operationId": "getTargetStatus",
+        "tags": [
+          "targets"
+        ],
+        "summary": "Whether a target is being delivered to",
+        "description": "What the node that leads the metadata group, which does the delivering, knows of the target: any node\nanswers, and asks the leader. The figures are the leader's own and begin again when another node\ncomes to lead. Nothing of the endpoint and none of the words of an error are part of it - a failure is named by\nits class, and the cause is in the leader's log. 503 when there is no leader to ask.\n",
+        "x-cactusfs-action": "admin:GetTargetStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The state of delivery to the target.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/audit": {
       "get": {
         "operationId": "listAudit",
@@ -1764,6 +2445,14 @@
         "required": true,
         "schema": {
           "$ref": "#/components/schemas/Name"
+        }
+      },
+      "TargetName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/TargetNameValue"
         }
       }
     },
@@ -2120,7 +2809,8 @@
         "required": [
           "object_count",
           "total_size",
-          "complete"
+          "complete",
+          "exact"
         ],
         "properties": {
           "object_count": {
@@ -2137,7 +2827,688 @@
           },
           "complete": {
             "type": "boolean",
-            "description": "False when the bucket has more objects than are counted in one request."
+            "description": "False when the bucket has more objects than are counted in one request. Never false when `exact` is true."
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "True when the figures are the count the metadata store keeps of the bucket, which every change\nof the bucket keeps right. False when they were counted for this request, as far as one request\ncounts: `versions`, `stored_bytes` and `upload_bytes` are then absent.\n"
+          },
+          "versions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Versions the bucket keeps, current or not, delete markers among them. Present when `exact` is true."
+          },
+          "stored_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "The sizes of all those versions added up, in bytes - of the objects as they were sent, not of\nwhat they take on the drives, which is more by the parity. Present when `exact` is true.\n"
+          },
+          "upload_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "The sizes of the parts of multipart uploads that are neither completed nor aborted. Present when\n`exact` is true.\n"
+          },
+          "quota_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "The bucket's quota: the most `stored_bytes` and `upload_bytes` together may come to. Absent when\nthe bucket has none. Who may read the usage is told the quota; changing it needs\n`admin:PutBucketQuota`.\n"
+          }
+        }
+      },
+      "BucketQuota": {
+        "type": "object",
+        "description": "The quota of a bucket and what counts against it.",
+        "required": [
+          "used_bytes",
+          "exact"
+        ],
+        "properties": {
+          "quota_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "The most bytes the bucket may hold. Absent when the bucket has no quota."
+          },
+          "used_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "What counts against the quota: `stored_bytes` and `upload_bytes` of the bucket's usage, added. 0\nwhile `exact` is false: it is not known yet.\n"
+          },
+          "exact": {
+            "type": "boolean",
+            "description": "Whether the bucket's usage is counted. False while a bucket that is older than the count is\nbeing counted for the first time; a quota cannot be set until then.\n"
+          }
+        }
+      },
+      "BucketQuotaPut": {
+        "type": "object",
+        "required": [
+          "quota_bytes"
+        ],
+        "properties": {
+          "quota_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "The most bytes the bucket may hold, from 1 to 2^62 (4 611 686 018 427 387 904); more is refused\nwith 400. The bound is said here and not as `maximum`: it is beyond what JSON numbers hold exactly\nin every reader of this document.\n"
+          }
+        }
+      },
+      "NotificationRule": {
+        "type": "object",
+        "description": "One rule of a bucket's notifications: which changes, of which keys, are told to which target.\n",
+        "required": [
+          "id",
+          "target",
+          "events",
+          "as"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "The name of the rule, unique in the bucket - the `Id` of the configuration in the S3 API."
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "description": "The kinds of change the rule is for: `put` (an object was put, or copied here - S3's\n`s3:ObjectCreated:Put`), `complete` (a multipart upload was completed -\n`s3:ObjectCreated:CompleteMultipartUpload`), `marker` (an object was deleted where versions are\nkept, which leaves a delete marker - `s3:ObjectRemoved:DeleteMarkerCreated`) and `delete` (a\nversion was removed for good - `s3:ObjectRemoved:Delete`).\n",
+            "items": {
+              "type": "string",
+              "enum": [
+                "put",
+                "complete",
+                "marker",
+                "delete"
+              ]
+            }
+          },
+          "prefix": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Only keys that begin with this, byte for byte. Absent or empty for every key."
+          },
+          "suffix": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Only keys that end with this, byte for byte. Absent or empty for every key."
+          },
+          "as": {
+            "type": "string",
+            "enum": [
+              "queue",
+              "topic"
+            ],
+            "description": "Whether the S3 API shows the rule as a `QueueConfiguration` or as a `TopicConfiguration`. It\nchanges nothing of what is delivered.\n"
+          }
+        }
+      },
+      "NotificationRulePut": {
+        "type": "object",
+        "required": [
+          "id",
+          "target",
+          "events"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "put",
+                "complete",
+                "marker",
+                "delete"
+              ]
+            }
+          },
+          "prefix": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "suffix": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "as": {
+            "type": "string",
+            "enum": [
+              "queue",
+              "topic"
+            ],
+            "default": "queue"
+          }
+        }
+      },
+      "BucketNotifications": {
+        "type": "object",
+        "description": "The notification rules of a bucket. No rules is no configuration.",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/NotificationRule"
+            }
+          }
+        }
+      },
+      "BucketNotificationsPut": {
+        "type": "object",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/NotificationRulePut"
+            }
+          }
+        }
+      },
+      "ReplicationRule": {
+        "type": "object",
+        "description": "One rule of a bucket's replication - which keys are copied, and whether their delete markers are.",
+        "required": [
+          "id",
+          "enabled",
+          "priority",
+          "delete_markers"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "The name of the rule, unique in the bucket."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "False for a rule that is kept and matches nothing (S3's `Status` `Disabled`)."
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "description": "Of the rules that match a key, the one with the greatest priority decides."
+          },
+          "prefix": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Only keys that begin with this, byte for byte. Absent or empty for every key."
+          },
+          "delete_markers": {
+            "type": "boolean",
+            "description": "Whether a delete marker made by a caller is copied too. A marker made by a lifecycle rule never\nis; neither is the removal of a version for good.\n"
+          }
+        }
+      },
+      "BucketReplication": {
+        "type": "object",
+        "description": "Where the versions of a bucket are copied to. One target and one bucket there.",
+        "required": [
+          "target",
+          "destination_bucket",
+          "rules"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "destination_bucket": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 63,
+            "description": "The bucket of the other deployment, which must be a replica of this one."
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ReplicationRule"
+            }
+          }
+        }
+      },
+      "BucketReplicationPut": {
+        "type": "object",
+        "required": [
+          "target",
+          "destination_bucket",
+          "rules"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "destination_bucket": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 63
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ReplicationRule"
+            }
+          }
+        }
+      },
+      "ReplicationResync": {
+        "type": "object",
+        "description": "The walk that sends another deployment what it lacks of a bucket. Kept in the metadata, so it is the\nsame whichever node answers.\n",
+        "required": [
+          "state",
+          "scanned",
+          "sent"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "`running` while the walk goes on - also while it waits for a target that cannot be reached -\nand `done` once it has been through every version. A newer release may add to the list.\n"
+          },
+          "scanned": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Versions looked at so far."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Versions the other deployment did not have and was sent."
+          }
+        }
+      },
+      "BucketReplicationStatus": {
+        "type": "object",
+        "description": "How far the replication of a bucket has come. `pending` and `failed` are of this bucket and exact:\nthey are counted in the bucket's usage record, in the metadata, and are the same whichever node\nleads. `target_state`, `last_error_class`, `oldest_pending_at` and `lost` are of the bucket's\ntarget, which other buckets may use too; the first three are what the node that leads the metadata\ngroup has in memory, and begin again when another node comes to lead.\n",
+        "required": [
+          "target",
+          "target_state",
+          "pending",
+          "failed",
+          "lost",
+          "resync_needed"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "target_state": {
+            "type": "string",
+            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is\ntried again; `stalled` when the other deployment refuses everything - the credential, the\nbucket, its versioning, its replica mode or its quota - and somebody has to act. A newer release\nmay add to the list.\n"
+          },
+          "last_error_class": {
+            "type": "string",
+            "description": "The class of the last failure - never its words, and never the endpoint. Among them `auth`,\n`no_such_bucket`, `versioning`, `not_replica`, `quota`, `timeout`, `connect`, `tls`, `redirect`,\n`egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment does not take\n(a 401 or a 403): it is tried again and stalls the target. `rejected` is a refusal of one request\nthat says nothing of the others - a 4xx other than 401, 403, 408 and 429. The list is not closed.\nAbsent when the last attempt succeeded.\n"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "The versions of this bucket that are still to be replicated: those that say `PENDING` in\n`x-amz-replication-status`. Exact, from the bucket's usage record. While the usage of the bucket\nis being counted for the first time it is 0 and says nothing yet (`exact` of the bucket's usage\nis then false).\n"
+          },
+          "oldest_pending_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the oldest change that waits for the bucket's target was made - of any bucket that uses\nthe target. Absent when nothing waits.\n"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "The versions of this bucket that cannot be replicated and were given up on - a version encrypted\nwith a key of the customer's, or one the other deployment refuses for itself: those that say\n`FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin\nagain when another node comes to lead, and falls only when such a version is removed or a resync\nreplicates it.\n"
+          },
+          "lost": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Changes that were dropped before they were sent, because the target could not be reached while\nmore changes waited than the deployment keeps. Kept in the metadata; it does not begin again.\n"
+          },
+          "resync_needed": {
+            "type": "boolean",
+            "description": "True when changes were lost - the other deployment lacks versions until a resync has been through."
+          },
+          "resync": {
+            "$ref": "#/components/schemas/ReplicationResync"
+          }
+        }
+      },
+      "BucketReplicaMode": {
+        "type": "object",
+        "required": [
+          "replica"
+        ],
+        "properties": {
+          "replica": {
+            "type": "boolean",
+            "description": "Whether the bucket takes new versions from another deployment only."
+          },
+          "source": {
+            "type": "string",
+            "description": "The ID of that deployment. Absent when the bucket is no replica."
+          }
+        }
+      },
+      "BucketReplicaModePut": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9-]*$",
+            "description": "The deployment ID of the source, as `GET /cluster` of the source gives it. Empty to promote the\nbucket.\n"
+          }
+        }
+      },
+      "TargetNameValue": {
+        "type": "string",
+        "description": "The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.",
+        "minLength": 1,
+        "maxLength": 63,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "TargetAuth": {
+        "type": "object",
+        "description": "How the deployment proves who it is to a target. Never the secret itself.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "none",
+              "bearer",
+              "basic",
+              "token",
+              "sigv4"
+            ],
+            "description": "`none`; `bearer` (webhook: the secret is sent as `Authorization: Bearer`); `basic` (nats: `id`\nis the user and the secret the password); `token` (nats: the secret is the token); `sigv4` (s3:\n`id` is the access key ID and the secret its secret key).\n"
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "The user name or the access key ID, for the modes that have one. Not a secret."
+          }
+        }
+      },
+      "TargetAuthPut": {
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "none",
+              "bearer",
+              "basic",
+              "token",
+              "sigv4"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "secret": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "The bearer token, the password, the token or the secret key. Written, never read. Without it a\nchange keeps the secret the target has; a change of `mode` needs it again, and the mode `none`\nremoves it.\n"
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "description": "A place outside the deployment that it sends to, as it may be shown - with no credential, and\nwithout the path of its endpoint, which may be one.\n",
+        "required": [
+          "name",
+          "kind",
+          "endpoint",
+          "endpoint_path_set",
+          "buckets",
+          "audit",
+          "auth",
+          "secret_set",
+          "signing_key_set",
+          "references",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "webhook",
+              "nats",
+              "s3"
+            ],
+            "description": "`webhook`: an HTTPS endpoint that is posted to. `nats`: a NATS server with JetStream. `s3`:\nanother CactusFS deployment, for replication.\n"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Where it is: **the origin only** - the scheme, the host, and the port when the endpoint names\none - as in `https://hooks.example.com:8443`. The path is never part of it, for any caller: the\nURL of a webhook may carry a token in its path.\n"
+          },
+          "endpoint_path_set": {
+            "type": "boolean",
+            "description": "Whether the endpoint has a path (anything after the host and the port but a single `/`). It is\nall that is told of the path.\n"
+          },
+          "region": {
+            "type": "string",
+            "description": "Kind `s3`. The region requests are signed for."
+          },
+          "subject": {
+            "type": "string",
+            "description": "Kind `nats`. The subject every message is published to. The stream that takes it is the operator's."
+          },
+          "ca_pem": {
+            "type": "string",
+            "description": "The certificates the target's own must chain to, in PEM. Absent when the system's roots are used.\nCertificates are public; no key is ever part of a target.\n"
+          },
+          "buckets": {
+            "type": "array",
+            "description": "The buckets whose rules may name the target: names, or patterns with `*`. Empty: none may - a\ntarget that only exports the audit trail.\n",
+            "items": {
+              "type": "string"
+            }
+          },
+          "audit": {
+            "type": "boolean",
+            "description": "Whether every record of the audit trail is sent to the target as well."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/TargetAuth"
+          },
+          "secret_set": {
+            "type": "boolean",
+            "description": "Whether the target has a secret. It is all that is told of it."
+          },
+          "signing_key_set": {
+            "type": "boolean",
+            "description": "Whether the target has a key that requests to it are signed with. Kind `webhook` only."
+          },
+          "references": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many bucket configurations name the target. It cannot be deleted while there are any."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TargetPut": {
+        "type": "object",
+        "required": [
+          "kind",
+          "buckets"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "webhook",
+              "nats",
+              "s3"
+            ]
+          },
+          "endpoint": {
+            "type": "string",
+            "writeOnly": true,
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "The whole URL, with its path: `https://` for the kinds `webhook` and `s3`, `tls://` for `nats`,\nwithout userinfo, query or fragment. Written, never read back whole - an answer holds its\nscheme, host and port only. Required for a target that is new. Without it a change keeps the\nendpoint the target has, path and all; to change any part of it, send the whole URL again.\n"
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "ca_pem": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "buckets": {
+            "type": "array",
+            "maxItems": 1000,
+            "description": "The buckets whose rules may name the target: names, or patterns with `*`. It must be said; `[\"*\"]`\nis every bucket, and an empty list none.\n",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 63
+            }
+          },
+          "audit": {
+            "type": "boolean",
+            "default": false
+          },
+          "auth": {
+            "$ref": "#/components/schemas/TargetAuthPut"
+          },
+          "rotate_signing_key": {
+            "type": "boolean",
+            "default": false,
+            "description": "Kind `webhook`. Makes a new signing key in place of the one the target has, and returns it once.\nThe old one stops being used with the next request that is sent.\n"
+          }
+        }
+      },
+      "TargetPutResult": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "signing_key": {
+            "type": "string",
+            "format": "password",
+            "description": "The key requests to a webhook are signed with, when this request made one: the target is new, or\na new key was asked for. Shown once. It cannot be had again - only replaced.\n"
+          }
+        }
+      },
+      "TargetStatus": {
+        "type": "object",
+        "description": "Delivery to one target, as the node that leads the metadata group has it in memory. A node of an\nolder release that leads cannot be asked: `state` is then `unsupported` and the figures are 0.\n",
+        "required": [
+          "name",
+          "state",
+          "pending",
+          "lost",
+          "rejected"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/TargetNameValue"
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried\nagain, with a growing pause; `stalled` when the target refuses everything and somebody has to\nact; `unsupported` when the leader is of a release that cannot say. A newer release may add to\nthe list.\n"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Messages matched for the target and not yet acknowledged by it."
+          },
+          "oldest_pending_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the oldest of them was made. Absent when nothing waits."
+          },
+          "last_success_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the leader last delivered something. Absent when it has not since it came to lead."
+          },
+          "last_error_class": {
+            "type": "string",
+            "description": "The class of the last failure - never its words, and never the endpoint. Among them `timeout`,\n`connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`.\n`auth` is a credential the target does not take - a 401 or a 403 from a webhook, a NATS server\nthat refuses the token: it is tried again, nothing is passed, and the target is `stalled`.\n`rejected` is a refusal of one message. The list is not closed. Absent when the last attempt\nsucceeded.\n"
+          },
+          "lost": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Messages that were dropped before they were sent, because the target could not be reached while\nmore waited than the deployment keeps. Kept in the metadata; it does not begin again.\n"
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Messages the target answered with a refusal of that one message - a 4xx other than 401, 403, 408\nand 429 - since the leader came to lead. They are not sent again. A 401 and a 403 are not counted\nhere: they are of the credential, class `auth`, and are tried again.\n"
           }
         }
       },

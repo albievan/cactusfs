@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -57,6 +58,12 @@ func (m *MemMetadata) CreateUpload(_ context.Context, u object.Upload) error {
 		return fmt.Errorf("%w: bucket %s", domain.ErrLockNotConfigured, u.Bucket)
 	case u.Encryption.KeyMode != object.KeyModePartHKDF:
 		return fmt.Errorf("%w: key mode %q of an upload", domain.ErrInvalidArgument, u.Encryption.KeyMode)
+	case u.ReplicaFrom != "" && object.ValidateReplicaSource(u.ReplicaFrom) != nil:
+		return fmt.Errorf("%w: the source of a replica upload", domain.ErrInvalidArgument)
+	case u.ReplicaFrom != b.ReplicaFrom:
+		// A replica bucket takes the uploads of its source and no others;
+		// no other bucket takes the upload of a source.
+		return fmt.Errorf("%w: bucket %s and an upload from %q", domain.ErrInvalidBucketState, u.Bucket, u.ReplicaFrom)
 	}
 	if err := object.ValidateTags(u.Tags, object.MaxObjectTags); err != nil {
 		return err
@@ -110,8 +117,13 @@ func (m *MemMetadata) PutPart(_ context.Context, bucketName, key string, id obje
 		return nil, fmt.Errorf("%w: part data %s is in use", domain.ErrConflict, p.DataID)
 	}
 	var replaced *object.Part
+	net := p.Size
 	if old, ok := u.parts[p.Number]; ok {
 		replaced = &old
+		net -= old.Size
+	}
+	if !m.admits(m.buckets[bucketName], net) {
+		return nil, fmt.Errorf("%w: bucket %s", domain.ErrQuotaExceeded, bucketName)
 	}
 	stored := clonePart(p)
 	stored.Index, stored.Offset, stored.Seal = 0, 0, nil
@@ -184,13 +196,20 @@ func (m *MemMetadata) CompleteUpload(_ context.Context, c ports.Completion) (por
 		offset += stored.Size
 	}
 	up := u.upload
+	if (c.Replica == nil) != (up.ReplicaFrom == "") || (c.Replica != nil && c.Replica.From != up.ReplicaFrom) {
+		return ports.PutResult{}, fmt.Errorf("%w: an upload of a source is completed as a replica of it, and no other upload is", domain.ErrInvalidBucketState)
+	}
+	var uploadBytes int64
+	for _, part := range u.parts {
+		uploadBytes += part.Size
+	}
 	result, err := m.commit(b, object.Version{
 		Bucket: up.Bucket, Key: up.Key, VersionID: c.VersionID, DataID: up.ID, Size: total, ETag: c.ETag,
 		ModifiedAt: c.At.UTC(), Parts: len(parts), Lock: up.Lock, Encryption: up.Encryption,
 		ContentType: up.ContentType, ContentEncoding: up.ContentEncoding, ContentDisposition: up.ContentDisposition,
 		ContentLanguage: up.ContentLanguage, CacheControl: up.CacheControl, UserMetadata: up.UserMetadata,
-		Tags: maps.Clone(up.Tags), CreatedBy: c.CreatedBy,
-	})
+		Tags: maps.Clone(up.Tags), CreatedBy: c.CreatedBy, Replica: c.Replica,
+	}, delivery.EventComplete, uploadBytes)
 	if err != nil {
 		return ports.PutResult{}, err
 	}

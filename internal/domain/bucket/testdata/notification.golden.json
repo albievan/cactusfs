@@ -1,0 +1,1 @@
+{"v":1,"targets":["bus","hook"],"rules":[{"id":"archives","as":"queue","target":"hook","on":["put","complete","delete"],"prefix":"logs/","suffix":".gz"},{"id":"everything <&>","as":"topic","target":"bus","on":["marker"]},{"id":"again","as":"queue","target":"bus","on":["put"],"suffix":".jpg"}]}

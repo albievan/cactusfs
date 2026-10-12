@@ -480,6 +480,10 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusTooManyRequests, code: codeTooManyRequests, title: "Too many requests at once"}
 	case is(domain.ErrAccessDenied):
 		return problem{status: http.StatusForbidden, code: "AccessDenied", title: "Access denied"}
+	case is(domain.ErrQuotaExceeded):
+		// A limit and no denial: told apart from one by its code, never by
+		// its status (ADR-0024).
+		return problem{status: http.StatusForbidden, code: "QuotaExceeded", title: "The bucket quota has been reached"}
 	case is(domain.ErrBucketNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchBucket", title: "No such bucket"}
 	case is(domain.ErrObjectNotFound):
