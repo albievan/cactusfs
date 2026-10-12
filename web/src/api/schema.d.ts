@@ -553,14 +553,34 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        /**
+         * @description Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+         *     else: no answer to a request without a credential names it, and no response header does.
+         */
+        ServerVersion: {
+            /** @description The release, a semantic version without a leading "v". */
+            version: string;
+            /**
+             * @description The number of the build: the count of commits it was made from. "0" is a build that was not numbered -
+             *     one made with plain `go build`, say.
+             */
+            build: string;
+            /**
+             * @description The short hash of the commit the build was made from, followed by "-dirty" when the tree had
+             *     uncommitted changes. Absent when the build does not know it.
+             */
+            commit?: string;
+        };
         Session: {
             user: string;
             /** @description Send it back in `X-CSRF-Token` with every request that changes something. */
             csrf_token: string;
             /** Format: date-time */
             expires_at: string;
+            server: components["schemas"]["ServerVersion"];
         };
         Identity: {
+            server: components["schemas"]["ServerVersion"];
             /** @enum {string} */
             kind: "root" | "user";
             /** @enum {string} */
@@ -864,8 +884,12 @@ export interface components {
         };
         ClusterStatus: {
             deployment_id: string;
-            /** @description The node that answered. */
+            /**
+             * @description The node that answered. `server` is its build; the builds of the other nodes are not known to it:
+             *     during a rolling upgrade, ask each node.
+             */
             answered_by: string;
+            server: components["schemas"]["ServerVersion"];
             /** @description The node that leads the metadata group, or empty when there is none. */
             leader: string;
             nodes: components["schemas"]["Node"][];

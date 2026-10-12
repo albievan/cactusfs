@@ -36,6 +36,13 @@ func who(ctx context.Context) iam.Principal { return infoOf(ctx).principal }
 
 // --- session ---
 
+// server is the build of this node, as the contract says it. Only answers
+// to authenticated callers carry it.
+func (o *operations) server() api.ServerVersion {
+	build := o.h.cfg.Build
+	return api.ServerVersion{Version: build.Version, Build: build.Build, Commit: stringOrNil(build.Commit)}
+}
+
 // SignIn implements api.StrictServerInterface.
 func (o *operations) SignIn(ctx context.Context, request api.SignInRequestObject) (api.SignInResponseObject, error) {
 	if request.Body == nil {
@@ -51,7 +58,7 @@ func (o *operations) SignIn(ctx context.Context, request api.SignInRequestObject
 	}
 	cookie := httpsession.Cookie(signed.Token, signed.ExpiresAt).String()
 	return api.SignIn200JSONResponse{
-		Body:    api.Session{User: signed.User, CsrfToken: signed.CSRFToken, ExpiresAt: signed.ExpiresAt},
+		Body:    api.Session{User: signed.User, CsrfToken: signed.CSRFToken, ExpiresAt: signed.ExpiresAt, Server: o.server()},
 		Headers: api.SignIn200ResponseHeaders{SetCookie: &cookie},
 	}, nil
 }
@@ -59,7 +66,7 @@ func (o *operations) SignIn(ctx context.Context, request api.SignInRequestObject
 // GetSession implements api.StrictServerInterface.
 func (o *operations) GetSession(ctx context.Context, _ api.GetSessionRequestObject) (api.GetSessionResponseObject, error) {
 	info := infoOf(ctx)
-	identity := api.Identity{Kind: api.IdentityKindUser, Via: api.IdentityViaApiKey}
+	identity := api.Identity{Kind: api.IdentityKindUser, Via: api.IdentityViaApiKey, Server: o.server()}
 	if info.principal.Root {
 		identity.Kind = api.IdentityKindRoot
 	} else {
@@ -759,7 +766,7 @@ func (o *operations) GetCluster(ctx context.Context, _ api.GetClusterRequestObje
 		return nil, err
 	}
 	out := api.ClusterStatus{
-		DeploymentId: status.DeploymentID, AnsweredBy: status.AnsweredBy, Leader: status.Leader,
+		DeploymentId: status.DeploymentID, AnsweredBy: status.AnsweredBy, Server: o.server(), Leader: status.Leader,
 		Nodes: make([]api.Node, len(status.Nodes)), ErasureSets: make([]api.ErasureSet, len(status.Sets)),
 		NodeFailuresTolerated: status.NodeFailuresTolerated, DrivesOnline: status.DrivesOnline, DrivesTotal: status.DrivesTotal,
 	}

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/albievan/cactusfs/internal/buildinfo"
 )
 
 // TestListenersOpenBeforeTheNodeHasJoined: a member of a cluster whose
@@ -162,6 +164,11 @@ func TestNodeServesOnceItHasStarted(t *testing.T) {
 	open, started, listening := strings.Index(text, "listener open; the node is starting"), strings.Index(text, `"msg":"node started"`), strings.Index(text, `"msg":"listening","listener":"admin"`)
 	if open < 0 || started < open || listening < started {
 		t.Errorf("the log does not say, in this order, listener open, node started, listening:\n%s", text)
+	}
+	// And which build it is that listens.
+	build := buildinfo.Get()
+	if want := `"version":"` + build.Version + `","build":"` + build.Build + `","commit":"` + build.Commit + `"`; !strings.Contains(text, want) {
+		t.Errorf("the log does not say which build is listening (%s):\n%s", want, text)
 	}
 
 	// Told to stop, it drains: not ready, still alive, for the drain delay.

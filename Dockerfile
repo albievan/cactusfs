@@ -4,6 +4,13 @@
 #   docker build -t cactusfs .                 (or: podman build -t cactusfs .)
 #   docker build --target builder -t cactusfs-builder .
 #
+# A build that is numbered is told so (`make image` does it; .git is not in
+# the build context, so nothing here can count commits):
+#
+#   docker build --build-arg BUILD=412 --build-arg COMMIT=330028134523 -t cactusfs:0.7.0-412 .
+#
+# Without the arguments the binary says the release and "local build".
+#
 # Every base image is public and pinned by digest. To move a pin, change the
 # tag AND the digest together.
 
@@ -16,6 +23,13 @@ ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e
 ARG BUF_IMAGE=bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608
 ARG OASDIFF_IMAGE=tufin/oasdiff:v1.33.0@sha256:6263a96dd2ef0726c54e21fea9b8e1607eac4841add0079324b424c1f52b819c
 ARG PNPM_VERSION=12.9.1
+# Which build this is. VERSION is the release: internal/buildinfo/VERSION is
+# where it is set, and a test of that package holds this default to it. BUILD
+# numbers the build (0: not numbered) and COMMIT is the commit it was made
+# from; both come from whoever builds.
+ARG VERSION=0.7.0
+ARG BUILD=0
+ARG COMMIT=
 # What the S3 compatibility suite drives the server with, besides the AWS SDK
 # for Go: the AWS CLI and the S3 tests of Ceph. They are test tools of the
 # builder image only; nothing of them is in the product. Each is pinned by
@@ -44,13 +58,18 @@ RUN pnpm build
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=dev
+ARG VERSION
+ARG BUILD
+ARG COMMIT
 WORKDIR /src
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOTOOLCHAIN=local \
     go build -trimpath -buildvcs=false -tags console \
-      -ldflags "-s -w -X main.version=${VERSION}" \
+      -ldflags "-s -w \
+        -X github.com/albievan/cactusfs/internal/buildinfo.version=${VERSION} \
+        -X github.com/albievan/cactusfs/internal/buildinfo.build=${BUILD} \
+        -X github.com/albievan/cactusfs/internal/buildinfo.commit=${COMMIT}" \
       -o /out/cactusfs ./cmd/cactusfs \
  # The directories a volume is mounted on. A volume takes the ownership of the
  # directory it is first mounted on, and the image runs as a user that is not
@@ -128,11 +147,14 @@ WORKDIR /src
 # Distroless static, non-root, no shell. Run it with a read-only root
 # filesystem and all capabilities dropped.
 FROM ${RUNTIME_IMAGE}
-ARG VERSION=dev
+ARG VERSION
+ARG BUILD
+ARG COMMIT
 LABEL org.opencontainers.image.title="cactusfs" \
       org.opencontainers.image.description="S3-compatible, erasure-coded object store" \
       org.opencontainers.image.source="https://github.com/albievan/cactusfs" \
-      org.opencontainers.image.version="${VERSION}"
+      org.opencontainers.image.version="${VERSION}-${BUILD}" \
+      org.opencontainers.image.revision="${COMMIT}"
 COPY --from=build /out/cactusfs /cactusfs
 COPY --from=build --chown=65532:65532 /out/var/ /var/lib/cactusfs/
 USER 65532:65532

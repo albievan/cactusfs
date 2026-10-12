@@ -8,6 +8,18 @@ set -eu
 
 CHART=deploy/helm/cactusfs
 
+# The chart deploys the release this tree builds: its appVersion is what
+# internal/buildinfo/VERSION names.
+if [ -f "$CHART/Chart.yaml" ]; then
+	release=$(tr -d ' \t\r\n' <internal/buildinfo/VERSION)
+	app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CHART/Chart.yaml")
+	if [ -z "$release" ] || [ "$app" != "$release" ]; then
+		echo "helm-lint: FAIL - $CHART/Chart.yaml has appVersion '$app', internal/buildinfo/VERSION names '$release'" >&2
+		exit 1
+	fi
+	echo "helm-lint: appVersion $app is the release"
+fi
+
 if [ ! -f "$CHART/Chart.yaml" ]; then
 	if [ -n "$(find deploy/helm -type f 2>/dev/null | head -n 1)" ]; then
 		echo "helm-lint: FAIL - deploy/helm has files but $CHART/Chart.yaml is missing" >&2

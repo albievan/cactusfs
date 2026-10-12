@@ -3,16 +3,25 @@
 {{- .Release.Name -}}
 {{- end -}}
 
+{{/* The version that is deployed: the tag of the image - <version>-<build> -
+     or the chart's appVersion when no tag is given; as a label value, so what
+     a label may not hold is replaced and it is at most 63 characters. */}}
+{{- define "cactusfs.version" -}}
+{{- regexReplaceAll "[^A-Za-z0-9_.-]+" (.Values.image.tag | default .Chart.AppVersion | toString) "_" | trunc 63 | trimAll "-_." -}}
+{{- end -}}
+
 {{- define "cactusfs.labels" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "cactusfs.version" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
 {{/* Labels of pods: nothing that changes when only the chart does, or every
-     node would be restarted by an upgrade that changes nothing of theirs. */}}
+     node would be restarted by an upgrade that changes nothing of theirs.
+     These select the pods; a pod also says the version it runs (see the
+     StatefulSet), which changes when its image does and never selects. */}}
 {{- define "cactusfs.selector" -}}
 app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}

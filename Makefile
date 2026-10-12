@@ -16,11 +16,28 @@ SHELL := /bin/sh
 MODULE        := github.com/albievan/cactusfs
 ENGINE        ?= docker
 ENGINE_SOCKET ?= /var/run/docker.sock
-VERSION       ?= dev
 IMAGE         ?= cactusfs
 BUILDER_IMAGE ?= cactusfs-builder:local
 CACHE_VOLUME  ?= cactusfs-builder-cache
 NODE_VOLUME   ?= cactusfs-builder-node-modules
+
+# Which build this is (scripts/buildid.sh). VERSION is the release, read from
+# internal/buildinfo/VERSION, the one place it is set; BUILD numbers the build, by the
+# count of commits; COMMIT is the commit, with -dirty when the tree has
+# uncommitted changes. Each can be given: make image VERSION=1.0.0 BUILD=7.
+# They are worked out here, on the host, and handed to the builder, which
+# works them out itself only if it is started without them. Without git, or
+# outside a repository, BUILD is 0 and COMMIT is empty - never an error.
+BUILDINFO := $(MODULE)/internal/buildinfo
+ifeq ($(strip $(VERSION)),)
+VERSION := $(shell sh scripts/buildid.sh version)
+endif
+ifeq ($(strip $(BUILD)),)
+BUILD := $(shell sh scripts/buildid.sh build)
+endif
+ifeq ($(origin COMMIT),undefined)
+COMMIT := $(shell sh scripts/buildid.sh commit)
+endif
 
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
@@ -97,7 +114,7 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-v $(CACHE_VOLUME):/cache \
 	-v $(NODE_VOLUME):/src/web/node_modules \
 	$(SOCKET_MOUNT) $(BUILDKIT_ENV) $(subst $(comma), ,$(BUILDER_LIMITS)) \
-	-e VERSION=$(VERSION) -e IMAGE=$(IMAGE) \
+	-e VERSION=$(VERSION) -e BUILD=$(BUILD) -e COMMIT=$(COMMIT) -e IMAGE=$(IMAGE) \
 	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
 	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE \
 	$(if $(GO_P),-e GOFLAGS=-p=$(GO_P) -e GOMAXPROCS=$(GO_P))
@@ -124,7 +141,7 @@ run: build
 COMPOSE := $(ENGINE) compose -f deploy/compose/compose.yaml
 
 up:
-	$(COMPOSE) up -d --build
+	CACTUSFS_BUILD=$(BUILD) CACTUSFS_COMMIT=$(COMMIT) $(COMPOSE) up -d --build
 	@echo "make up: S3 on https://localhost:9000 (node1), :9010, :9020, :9030 - see deploy/compose/compose.yaml"
 
 # Stops the cluster and keeps its volumes. To delete the data as well:
@@ -152,7 +169,8 @@ else
 HOST_GOOS   ?= $(shell go env GOOS)
 HOST_GOARCH ?= $(shell go env GOARCH)
 PLATFORMS   := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
-GO_BUILD    := CGO_ENABLED=0 go build -trimpath -tags console -ldflags "-s -w -X main.version=$(VERSION)"
+GO_BUILD    := CGO_ENABLED=0 go build -trimpath -tags console \
+	-ldflags "-s -w -X $(BUILDINFO).version=$(VERSION) -X $(BUILDINFO).build=$(BUILD) -X $(BUILDINFO).commit=$(COMMIT)"
 GO_FILES     = $$(git ls-files -co --exclude-standard -- '*.go')
 PNPM        := pnpm -C web
 
@@ -255,7 +273,7 @@ build-all: web-build
 	echo "build-all: PASS"
 
 image:
-	@scripts/image.sh
+	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image.sh
 
 helm-lint:
 	@scripts/helm-lint.sh

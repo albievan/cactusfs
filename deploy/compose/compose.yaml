@@ -37,6 +37,10 @@ x-node: &node
   image: ${CACTUSFS_IMAGE:-cactusfs:dev}
   build:
     context: ../..
+    # Which build the image is (`make up` says; otherwise a local build).
+    args: &build-args
+      BUILD: ${CACTUSFS_BUILD:-0}
+      COMMIT: ${CACTUSFS_COMMIT:-}
   command: ["server"]
   # A node that starts before the certificates exist, or before its peers,
   # fails or waits; either way it is simply started again.
@@ -70,6 +74,7 @@ services:
     image: ${CACTUSFS_IMAGE:-cactusfs:dev}
     build:
       context: ../..
+      args: *build-args
     command: ["dev-init", "--dir", "/var/lib/cactusfs/config", "--nodes", "node1,node2,node3,node4"]
     environment:
       CACTUSFS_KMS_PASSPHRASE: ${CACTUSFS_KMS_PASSPHRASE:?set CACTUSFS_KMS_PASSPHRASE to a passphrase of at least 12 characters}

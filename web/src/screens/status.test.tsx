@@ -29,6 +29,7 @@ describe('cluster', () => {
   const cluster = {
     deployment_id: 'dep-1',
     answered_by: 'node-1',
+    server: { version: '0.7.0', build: '412', commit: '3300281abcde' },
     leader: 'node-2',
     nodes: [
       { id: 'node-1', roles: ['gateway', 'storage'], labels: { zone: 'a' }, leader: false },
@@ -64,6 +65,8 @@ describe('cluster', () => {
 
     expect(await screen.findByText('dep-1')).toBeDefined();
     expect(screen.getByText('1 of 2')).toBeDefined();
+    // The build of the node that answered, beside its name.
+    expect(screen.getByText('node-1 (0.7.0, build 412)')).toBeDefined();
     const offline = within(screen.getByText('drive-b').closest('tr') as HTMLElement);
     expect(offline.getByText('offline')).toBeDefined();
     expect(screen.getByRole('heading', { name: 'Erasure set 0' })).toBeDefined();

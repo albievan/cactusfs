@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
@@ -47,7 +48,8 @@ func TestRun(t *testing.T) {
 		{name: "unknown command", args: fixed("frobnicate"), wantCode: exitUsage, wantStderr: `unknown command "frobnicate"`},
 		{name: "help", args: fixed("help"), wantCode: exitOK, wantStdout: "Usage:"},
 		{name: "help flag", args: fixed("--help"), wantCode: exitOK, wantStdout: "Usage:"},
-		{name: "version", args: fixed("version"), wantCode: exitOK, wantStdout: "cactusfs " + version + " (" + runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + ")"},
+		{name: "version", args: fixed("version"), wantCode: exitOK, wantStdout: "cactusfs " + buildinfo.Release() + " "},
+		{name: "version names the toolchain and the platform", args: fixed("version"), wantCode: exitOK, wantStdout: runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + ")"},
 		{name: "server help", args: fixed("server", "--help"), wantCode: exitOK, wantStderr: "-admin-addr"},
 		{name: "server unknown flag", args: fixed("server", "--nope"), wantCode: exitUsage, wantStderr: "flag provided but not defined"},
 		{name: "server without TLS refuses to start", args: fixed("server"), wantCode: exitUsage, wantStderr: "TLS is required"},

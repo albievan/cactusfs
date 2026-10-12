@@ -289,10 +289,30 @@ code {
   overflow-y: auto;
 }
 
+/* The logo and, right under it, which version and build this is. */
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
 .sidebar-brand {
   display: flex;
   align-items: center;
   padding: 0.25rem 0.5rem;
+}
+
+.sidebar-version {
+  margin: 0;
+  padding: 0 0.5rem;
+  color: var(--dune);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-logo {
@@ -449,6 +469,12 @@ code {
 
 .layout-folded .sidebar-logo {
   height: 32px;
+}
+
+/* Folded, there is no room for the version line: it is in the unfolded
+   navigation. */
+.layout-folded .sidebar-version {
+  display: none;
 }
 
 /* A screen takes the whole width beside the navigation, with a small margin:
@@ -1301,6 +1327,23 @@ textarea[readonly] {
     height: 30px;
   }
 
+  /* The version is beside the logo, in the room the bar has between the
+     logo and the session: it takes none of its own, so the bar is no taller
+     for it, and the line is cut short where the room ends. */
+  .sidebar-head,
+  .layout-folded .sidebar-head {
+    display: contents;
+  }
+
+  .sidebar-version,
+  .layout-folded .sidebar-version {
+    display: block;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0;
+    font-size: 0.68rem;
+  }
+
   /* The search field: a row of its own under the logo and the session,
      folded or not - folding is for a wide screen. */
   .sidebar,
@@ -1555,4 +1598,10 @@ textarea[readonly] {
   align-items: center;
   gap: 0.5rem;
   color: var(--bs-danger-text-emphasis, #842029);
+}
+
+/* In the wide grid the buttons of a row stay on one line: the table scrolls
+   sideways, a row does not grow taller for them. */
+.grid-wide td[data-label='Actions'] > .d-flex {
+  flex-wrap: nowrap !important;
 }

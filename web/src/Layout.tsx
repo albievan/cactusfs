@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
-import type { Identity } from './api/client';
+import type { Identity, ServerVersion } from './api/client';
 import logo from './assets/brand/cactusfs-logo-reversed.svg';
 import mark from './assets/brand/cactusfs-mark.svg';
 import { navigate, routeHref, useRoute } from './router';
@@ -33,6 +33,19 @@ function rememberFolded(folded: boolean): void {
   }
 }
 
+/**
+ * Which build the console talks to, as the line under the logo says it and
+ * as its hint does. A build "0" was not numbered: a local build.
+ */
+export function describeBuild(server: ServerVersion): { line: string; hint: string } {
+  const build = server.build === '0' || server.build === '' ? 'local build' : `build ${server.build}`;
+  const commit = server.commit === undefined || server.commit === '' ? '' : `, commit ${server.commit}`;
+  return {
+    line: `v${server.version} \u00b7 ${build}`,
+    hint: `Version ${server.version}, ${build}${commit}`,
+  };
+}
+
 interface LayoutProps {
   /** Who is signed in, as the API reported it. */
   identity: Identity;
@@ -44,9 +57,11 @@ interface LayoutProps {
 
 /**
  * The frame around every screen: the navigation down the left side - the
- * logo, the search field, the sections, who is signed in - and the screen
- * beside it. The navigation folds to its icons, and remembers that it was
- * folded; the search field is then a magnifier that unfolds it.
+ * logo, under it the version and the build of what answers, the search
+ * field, the sections, who is signed in - and the screen beside it. The
+ * navigation folds to its icons, and remembers that it was folded; the
+ * search field is then a magnifier that unfolds it, and the version line is
+ * not shown. On a phone the line is beside the logo.
  */
 export function Layout({ identity, onSignOut, children }: LayoutProps) {
   const route = useRoute();
@@ -68,6 +83,11 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
   }
   const searchField = useRef<HTMLInputElement>(null);
   const focusSearch = useRef(false);
+  // A node of the release before this line was added answers without
+  // `server`, and during a rolling upgrade it may be the one that answers:
+  // then there is no line, and nothing else is the worse for it.
+  const server: ServerVersion | undefined = identity.server;
+  const build = server === undefined ? null : describeBuild(server);
 
   const fold = () => {
     rememberFolded(!folded);
@@ -100,9 +120,16 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
   return (
     <div className={folded ? 'layout layout-folded' : 'layout'}>
       <header className="sidebar">
-        <a className="sidebar-brand" href={routeHref(['buckets'])}>
-          <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
-        </a>
+        <div className="sidebar-head">
+          <a className="sidebar-brand" href={routeHref(['buckets'])}>
+            <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
+          </a>
+          {build !== null && (
+            <p className="sidebar-version" title={build.hint}>
+              {build.line}
+            </p>
+          )}
+        </div>
         <form className="sidebar-search" role="search" aria-label="Search" onSubmit={search}>
           <label className="visually-hidden" htmlFor="sidebar-search-field">
             Search buckets and objects

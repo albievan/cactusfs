@@ -1,4 +1,4 @@
-import { api, unwrap } from '../api/client';
+import { api, unwrap, type ClusterStatus, type ServerVersion } from '../api/client';
 import { formatBytes, formatTime } from '../ui/format';
 import { useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
@@ -10,6 +10,17 @@ function loadCluster() {
 
 function loadMaintenance() {
   return unwrap(api.GET('/cluster/maintenance'));
+}
+
+// The node that answered and, when it says so, the build it runs. A node of
+// an earlier release, which may answer during a rolling upgrade, does not.
+function answeredBy(status: ClusterStatus): string {
+  const server: ServerVersion | undefined = status.server;
+  if (server === undefined) {
+    return status.answered_by;
+  }
+  const build = server.build === '0' || server.build === '' ? 'local build' : `build ${server.build}`;
+  return `${status.answered_by} (${server.version}, ${build})`;
 }
 
 /**
@@ -62,7 +73,7 @@ export function ClusterScreen() {
               </div>
               <div className="stat">
                 <dt>Answered by</dt>
-                <dd>{status.answered_by}</dd>
+                <dd>{answeredBy(status)}</dd>
               </div>
               <div className="stat stat-wide">
                 <dt>Deployment ID</dt>

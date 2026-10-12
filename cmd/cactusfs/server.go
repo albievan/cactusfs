@@ -21,6 +21,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -69,6 +70,8 @@ type serveOptions struct {
 	// then the listeners are open and serve refusals; "listening" is logged
 	// when they serve the node. Nil means that they do from the start.
 	ready <-chan struct{}
+	// build is which build this is; the listeners say it when they open.
+	build buildinfo.Info
 }
 
 // runServer runs a node until ctx is cancelled, then shuts it down
@@ -83,11 +86,15 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		cfg.auditOut = logOutput
 	}
 
+	// Which build this is: what the log, the metrics and - to a caller who
+	// has signed in - the management API say.
+	build := buildinfo.Get()
+
 	tlsConfig, err := loadTLSConfig(cfg)
 	if err != nil {
 		return err
 	}
-	tel, err := telemetry.New(ctx, telemetry.Config{Version: version, OTLPEndpoint: cfg.OTLPEndpoint})
+	tel, err := telemetry.New(ctx, telemetry.Config{Version: build.Tag(), OTLPEndpoint: cfg.OTLPEndpoint})
 	if err != nil {
 		return fmt.Errorf("server.Open: %w", err)
 	}
@@ -133,6 +140,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		defer stopOpening()
 		served <- serve(serveCtx, endpoints, serveOptions{
 			tlsConfig:       tlsConfig,
+			build:           build,
 			drainDelay:      cfg.DrainDelay,
 			shutdownTimeout: cfg.ShutdownTimeout,
 			ready:           ready,
@@ -166,6 +174,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
 			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
+			Build: build,
 		})))
 		swaggerui.Register(admin)
 	}
@@ -345,7 +354,9 @@ func serve(ctx context.Context, endpoints []endpoint, opts serveOptions, gate *h
 				slog.String("listener", e.name),
 				slog.String("addr", e.listener.Addr().String()),
 				slog.Bool("tls", opts.tlsConfig != nil),
-				slog.String("version", version),
+				slog.String("version", opts.build.Version),
+				slog.String("build", opts.build.Build),
+				slog.String("commit", opts.build.Commit),
 			)
 		}
 	}

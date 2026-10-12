@@ -14,6 +14,7 @@ export type Problem = Schemas['Problem'];
 export type Session = Schemas['Session'];
 /** Who the API says is making the requests. */
 export type Identity = Schemas['Identity'];
+export type ServerVersion = Schemas['ServerVersion'];
 /** A bucket. */
 export type Bucket = Schemas['Bucket'];
 /** One page of an object listing. */

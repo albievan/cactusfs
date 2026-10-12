@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 
@@ -41,7 +42,7 @@ func nodeConfig(dir string) serverConfig {
 
 func newTelemetry(t *testing.T) *telemetry.Telemetry {
 	t.Helper()
-	tel, err := telemetry.New(t.Context(), telemetry.Config{Version: version})
+	tel, err := telemetry.New(t.Context(), telemetry.Config{Version: buildinfo.Get().Tag()})
 	if err != nil {
 		t.Fatalf("telemetry.New: %v", err)
 	}

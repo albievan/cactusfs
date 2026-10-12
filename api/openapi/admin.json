@@ -1794,12 +1794,35 @@
           }
         }
       },
+      "ServerVersion": {
+        "type": "object",
+        "description": "Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody\nelse: no answer to a request without a credential names it, and no response header does.\n",
+        "required": [
+          "version",
+          "build"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The release, a semantic version without a leading \"v\"."
+          },
+          "build": {
+            "type": "string",
+            "description": "The number of the build: the count of commits it was made from. \"0\" is a build that was not numbered -\none made with plain `go build`, say.\n"
+          },
+          "commit": {
+            "type": "string",
+            "description": "The short hash of the commit the build was made from, followed by \"-dirty\" when the tree had\nuncommitted changes. Absent when the build does not know it.\n"
+          }
+        }
+      },
       "Session": {
         "type": "object",
         "required": [
           "user",
           "csrf_token",
-          "expires_at"
+          "expires_at",
+          "server"
         ],
         "properties": {
           "user": {
@@ -1812,6 +1835,9 @@
           "expires_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServerVersion"
           }
         }
       },
@@ -1819,9 +1845,13 @@
         "type": "object",
         "required": [
           "kind",
-          "via"
+          "via",
+          "server"
         ],
         "properties": {
+          "server": {
+            "$ref": "#/components/schemas/ServerVersion"
+          },
           "kind": {
             "type": "string",
             "enum": [
@@ -2655,6 +2685,7 @@
         "required": [
           "deployment_id",
           "answered_by",
+          "server",
           "leader",
           "nodes",
           "erasure_sets",
@@ -2668,7 +2699,10 @@
           },
           "answered_by": {
             "type": "string",
-            "description": "The node that answered."
+            "description": "The node that answered. `server` is its build; the builds of the other nodes are not known to it:\nduring a rolling upgrade, ask each node.\n"
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServerVersion"
           },
           "leader": {
             "type": "string",

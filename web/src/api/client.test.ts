@@ -54,7 +54,13 @@ describe('the API client', () => {
 
   it('sends no CSRF header when there is no session', async () => {
     const fake = fakeApi({
-      'POST /session': () => json(200, { user: 'alice', csrf_token: 't', expires_at: '2026-10-08T12:00:00Z' }),
+      'POST /session': () =>
+        json(200, {
+          user: 'alice',
+          csrf_token: 't',
+          expires_at: '2026-10-08T12:00:00Z',
+          server: { version: '0.7.0', build: '412' },
+        }),
     });
 
     await unwrap(api.POST('/session', { body: { username: 'alice', password: 'secret' } }));

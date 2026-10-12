@@ -3,5 +3,8 @@ name: cactusfs
 description: CactusFS - an S3-compatible, erasure-coded, encrypted object store.
 type: application
 version: 0.1.0
-appVersion: "dev"
+# The release of CactusFS this chart deploys: what internal/buildinfo/VERSION
+# names (scripts/helm-lint.sh and a test of that package hold the two
+# together). A deployment names the build as well: image.tag=<version>-<build>.
+appVersion: "0.7.0"
 kubeVersion: ">=1.27.0-0"

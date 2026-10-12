@@ -45,6 +45,50 @@ The image is distroless, runs as a non-root user and has no shell.
 The image, and the binary of `make build`, carry the web console; a binary built with
 plain `go build` serves the APIs and says that it has no console.
 
+## Versions and builds
+
+Every build says three things about itself: the **version**, the **build** and the
+**commit**.
+
+- **The version is the release**, a semantic version without a leading `v`. It is set in
+  one place: the one line of [`internal/buildinfo/VERSION`](internal/buildinfo/VERSION).
+  The file is embedded in the binary, so a plain `go build` reports it as well. Two files
+  that cannot read it repeat it - the default of `ARG VERSION` in the `Dockerfile` and
+  `appVersion` in `deploy/helm/cactusfs/Chart.yaml` - and `go test ./internal/buildinfo`
+  and `make helm-lint` fail when they differ. To make a release, change those three.
+- **The build is a number**: the count of commits the binary was made from
+  (`git rev-list --count HEAD`), so it grows with every commit and two builds of one
+  release are told apart. It needs the whole history: a shallow clone counts short.
+- **The commit** is the first 12 characters of the hash, followed by `-dirty` when files
+  that git tracks had uncommitted changes. A new file git does not track yet is not
+  counted by `make`: add it before a build that is to be told from its commit.
+
+`make build`, `make build-all`, `make image` and `make up` work the three out
+(`scripts/buildid.sh`) and pass them to the linker; each can be given instead:
+`make image VERSION=1.0.0 BUILD=7 COMMIT=0123456789ab`. A build that nobody numbered -
+plain `go build`, or `docker build .` without arguments, where git is not to be had -
+is build `0`, a *local build*; in a checkout, the Go toolchain still records the commit.
+
+```console
+$ cactusfs version
+cactusfs 0.7.0 build 412 (commit 330028134523, go1.27.2 linux/amd64)
+$ go build ./cmd/cactusfs && ./cactusfs version
+cactusfs 0.7.0 local build (commit 330028134523-dirty, go1.27.2 darwin/arm64)
+```
+
+| Where | What it says |
+|---|---|
+| `cactusfs version` | version, build, commit, Go toolchain, platform |
+| the log, when a listener opens | `"version"`, `"build"`, `"commit"` |
+| `cactusfs_build_info` in `/metrics`, `service.version` in traces | `<version>-<build>` |
+| the management API | `server {version, build, commit}` in the answers of `POST /session`, `GET /session` and `GET /cluster` - to a caller who has been authenticated, and to nobody else: no sign-in page, probe, refusal or response header names it |
+| the console | `v0.7.0 · build 412` under the logo of the navigation, the commit in its hint (`local build` for build `0`); beside the logo on a phone; not shown while the navigation is folded to icons |
+| an image of `make image` | tag `cactusfs:<version>-<build>-<arch>`; labels `org.opencontainers.image.version=<version>-<build>` and `org.opencontainers.image.revision=<commit>` |
+| a deployment with the chart | `image.tag=<version>-<build>` names the build to run; pods and the chart's other objects are labelled `app.kubernetes.io/version` with it. Without a tag the chart runs `appVersion`, the release |
+
+`GET /cluster` says the build of the node that answered. During a rolling upgrade, ask
+each node, or read the label: `kubectl -n cactusfs get pods -L app.kubernetes.io/version`.
+
 ## Run
 
 A node needs a drive, a key management service and TLS. For local development,
@@ -363,9 +407,13 @@ The chart makes no Secret and renders nothing until you name the ones it needs:
 | `kms.vault.tokenSecret` | the Vault token, key `token` - or, for development, `kms.local.*` with `dev.localKMS=true` |
 
 ```sh
-helm install cactusfs deploy/helm/cactusfs -n cactusfs -f my-values.yaml
+helm install cactusfs deploy/helm/cactusfs -n cactusfs -f my-values.yaml --set image.tag=0.7.0-412
 kubectl -n cactusfs get pods        # alive at once, ready when the cluster has formed
 ```
+
+`image.tag` names the build to run, `<version>-<build>` as `make image` tags it (push it
+to your registry under that tag, without the architecture or as a manifest of both);
+pods carry it in the label `app.kubernetes.io/version`.
 
 `deploy/helm/cactusfs/ci/` has value sets to start from: a cluster with Vault, five
 voters, one node, and a development cluster on the disks of one machine
@@ -414,7 +462,7 @@ make help                  # all targets
 | `make fmt` | format Go sources |
 | `make build` | `bin/cactusfs` for this OS |
 | `make build-all` | six OS/arch binaries in `dist/` |
-| `make image` | `cactusfs:<version>-amd64` and `-arm64` |
+| `make image` | `cactusfs:<version>-<build>-amd64` and `-arm64` (see [Versions and builds](#versions-and-builds)) |
 | `make verify-clone` | proves both build paths above from a clean export |
 | `make test-chaos` | fault injection against the built binary: corruption, lost shards, replaced drives, kill during writes |
 | `make run` | build and run a development node on `./.data` (set `CACTUSFS_KMS_PASSPHRASE`) |

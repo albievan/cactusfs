@@ -105,6 +105,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Internal state disclosed through errors | Integrity, key and storage failures all answer `InternalError`; the cause is logged, not returned | **implemented** |
 | Metrics disclose tenants | `/metrics` is authenticated and authorized (`admin:GetMetrics`); no label holds a bucket, key or access key | **implemented** |
 | Existence of buckets or keys probed anonymously | Authentication precedes routing: an unsigned request is refused the same way whether or not its target exists | **implemented** |
+| The version of the software told to anybody, to choose an attack by | The release, build and commit are named only in answers to authenticated callers (`server` in the session answers and `GET /cluster`), in `/metrics`, which is authenticated and authorized, and in the log. Nothing answered without a credential names them: not the sign-in page, a probe, a refusal, the contract, nor a response header | **implemented**, tested for the probes and for the refusals, the contract and the starting answers of the admin API; the documentation page, the console's files and the S3 API are given no build to name |
 | Probe endpoints reveal internals | `/healthz` and `/readyz` return only `ok` or `unavailable`; the reason is logged, not returned | **implemented** |
 | Eavesdropping | See TLS above | **implemented** (admin listener) |
 | Data leaves an air-gapped site | No runtime call to the internet, no telemetry, no CDN asset | **implemented** |

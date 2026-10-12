@@ -28,6 +28,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/adminapi/api"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -94,6 +95,10 @@ type Config struct {
 	SpecJSON []byte
 	// Observe, when not nil, is called after every request.
 	Observe func(ctx context.Context, o Observation)
+	// Build is which build this node runs. It is told to callers who have
+	// been authenticated and to nobody else: only the operations of the
+	// contract that need a credential name it.
+	Build buildinfo.Info
 }
 
 // Handler serves the management API.

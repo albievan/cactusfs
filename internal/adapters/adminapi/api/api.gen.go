@@ -196,7 +196,8 @@ type BucketUsage struct {
 
 // ClusterStatus defines model for ClusterStatus.
 type ClusterStatus struct {
-	// AnsweredBy The node that answered.
+	// AnsweredBy The node that answered. `server` is its build; the builds of the other nodes are not known to it:
+	// during a rolling upgrade, ask each node.
 	AnsweredBy   string       `json:"answered_by"`
 	DeploymentId string       `json:"deployment_id"`
 	DrivesOnline int          `json:"drives_online"`
@@ -207,6 +208,10 @@ type ClusterStatus struct {
 	Leader                string `json:"leader"`
 	NodeFailuresTolerated int    `json:"node_failures_tolerated"`
 	Nodes                 []Node `json:"nodes"`
+
+	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+	// else: no answer to a request without a credential names it, and no response header does.
+	Server ServerVersion `json:"server"`
 }
 
 // CollectionStatus defines model for CollectionStatus.
@@ -268,8 +273,12 @@ type HealStatus struct {
 type Identity struct {
 	AccessKeyId *string      `json:"access_key_id,omitempty"`
 	Kind        IdentityKind `json:"kind"`
-	User        *string      `json:"user,omitempty"`
-	Via         IdentityVia  `json:"via"`
+
+	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+	// else: no answer to a request without a credential names it, and no response header does.
+	Server ServerVersion `json:"server"`
+	User   *string       `json:"user,omitempty"`
+	Via    IdentityVia   `json:"via"`
 }
 
 // IdentityKind defines model for Identity.Kind.
@@ -529,12 +538,31 @@ type SearchResults struct {
 // SearchResultsMatch How `q` was read.
 type SearchResultsMatch string
 
+// ServerVersion Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+// else: no answer to a request without a credential names it, and no response header does.
+type ServerVersion struct {
+	// Build The number of the build: the count of commits it was made from. "0" is a build that was not numbered -
+	// one made with plain `go build`, say.
+	Build string `json:"build"`
+
+	// Commit The short hash of the commit the build was made from, followed by "-dirty" when the tree had
+	// uncommitted changes. Absent when the build does not know it.
+	Commit *string `json:"commit,omitempty"`
+
+	// Version The release, a semantic version without a leading "v".
+	Version string `json:"version"`
+}
+
 // Session defines model for Session.
 type Session struct {
 	// CsrfToken Send it back in `X-CSRF-Token` with every request that changes something.
 	CsrfToken string    `json:"csrf_token"`
 	ExpiresAt time.Time `json:"expires_at"`
-	User      string    `json:"user"`
+
+	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+	// else: no answer to a request without a credential names it, and no response header does.
+	Server ServerVersion `json:"server"`
+	User   string        `json:"user"`
 }
 
 // SignInRequest defines model for SignInRequest.

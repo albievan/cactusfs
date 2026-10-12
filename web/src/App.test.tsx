@@ -2,7 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, expect, it } from 'vitest';
 
 import { App } from './App';
-import { CSRF_TOKEN, fakeApi, json, noContent, problem, signedIn } from './test/fakeApi';
+import { describeBuild } from './Layout';
+import { CSRF_TOKEN, fakeApi, json, noContent, problem, SERVER, signedIn } from './test/fakeApi';
 
 function typeInto(label: string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -39,10 +40,17 @@ describe('session', () => {
     let signedInNow = false;
     const api = fakeApi({
       'GET /session': () =>
-        signedInNow ? json(200, { kind: 'user', via: 'session', user: 'alice' }) : problem(401, 'Not signed in'),
+        signedInNow
+          ? json(200, { kind: 'user', via: 'session', user: 'alice', server: SERVER })
+          : problem(401, 'Not signed in'),
       'POST /session': () => {
         signedInNow = true;
-        return json(200, { user: 'alice', csrf_token: 'fresh-token', expires_at: '2026-10-08T12:00:00Z' });
+        return json(200, {
+          user: 'alice',
+          csrf_token: 'fresh-token',
+          expires_at: '2026-10-08T12:00:00Z',
+          server: SERVER,
+        });
       },
       'GET /buckets': () => json(200, []),
     });
@@ -94,7 +102,7 @@ describe('session', () => {
   });
 
   it('asks to sign in again when the session has no CSRF token in this tab', async () => {
-    fakeApi({ 'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice' }) });
+    fakeApi({ 'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice', server: SERVER }) });
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
@@ -133,6 +141,66 @@ describe('session', () => {
     fireEvent.click(fold);
     expect(fold.getAttribute('aria-pressed')).toBe('false');
     expect(window.localStorage.getItem('cactusfs.nav.folded')).toBe('0');
+  });
+
+  it('says the version and the build under the logo, and the commit in the hint', async () => {
+    signedIn({ 'GET /buckets': () => json(200, []) });
+    render(<App />);
+
+    const line = await screen.findByText('v0.7.0 \u00b7 build 412');
+    expect(line.getAttribute('title')).toBe('Version 0.7.0, build 412, commit 3300281abcde');
+    expect(line.className).toBe('sidebar-version');
+    // Right after the logo, inside the navigation's head.
+    const logo = screen.getByAltText('CactusFS');
+    expect(logo.closest('.sidebar-head')).toBe(line.parentElement);
+    expect(logo.closest('a')?.nextElementSibling).toBe(line);
+  });
+
+  it('calls a build without a number a local build', async () => {
+    signedIn({
+      'GET /session': () =>
+        json(200, { kind: 'user', via: 'session', user: 'alice', server: { version: '0.7.0', build: '0' } }),
+      'GET /buckets': () => json(200, []),
+    });
+    render(<App />);
+
+    const line = await screen.findByText('v0.7.0 \u00b7 local build');
+    expect(line.getAttribute('title')).toBe('Version 0.7.0, local build');
+  });
+
+  it('describes a build as the API reported it', () => {
+    expect(describeBuild({ version: '0.7.0', build: '412', commit: '3300281abcde-dirty' })).toEqual({
+      line: 'v0.7.0 \u00b7 build 412',
+      hint: 'Version 0.7.0, build 412, commit 3300281abcde-dirty',
+    });
+    expect(describeBuild({ version: '1.0.0', build: '0', commit: 'abcdef123456' })).toEqual({
+      line: 'v1.0.0 \u00b7 local build',
+      hint: 'Version 1.0.0, local build, commit abcdef123456',
+    });
+    expect(describeBuild({ version: '1.0.0', build: '7' })).toEqual({
+      line: 'v1.0.0 \u00b7 build 7',
+      hint: 'Version 1.0.0, build 7',
+    });
+  });
+
+  it('shows no version line when a node that does not say its build answers', async () => {
+    signedIn({
+      'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice' }),
+      'GET /buckets': () => json(200, []),
+    });
+    render(<App />);
+
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+    expect(document.querySelector('.sidebar-version')).toBeNull();
+  });
+
+  it('does not say the version before anybody has signed in', async () => {
+    fakeApi({ 'GET /session': () => problem(401, 'Not signed in') });
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Sign in' });
+    expect(document.querySelector('.sidebar-version')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/v\d+\.\d+\.\d+|local build|build \d/);
   });
 
   it('signs out with the CSRF token and forgets it', async () => {

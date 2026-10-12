@@ -98,6 +98,9 @@ export function fakeApi(routes: Record<string, Handler> = {}): FakeApi {
 /** The CSRF token of the session that signedIn starts. */
 export const CSRF_TOKEN = 'csrf-token-of-the-test';
 
+/** The build the fake API says it is, in the session answers. */
+export const SERVER = { version: '0.7.0', build: '412', commit: '3300281abcde' };
+
 /**
  * Answers for a console that is already signed in: the CSRF token is in
  * sessionStorage and `GET /session` knows the caller.
@@ -105,7 +108,7 @@ export const CSRF_TOKEN = 'csrf-token-of-the-test';
 export function signedIn(routes: Record<string, Handler> = {}): FakeApi {
   window.sessionStorage.setItem('cactusfs.csrf', CSRF_TOKEN);
   return fakeApi({
-    'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice' }),
+    'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice', server: SERVER }),
     ...routes,
   });
 }

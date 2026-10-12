@@ -480,6 +480,19 @@ images. Developers and CI therefore use identical tool versions.
 The product image is distroless static, runs as UID 65532, has no shell, and is meant to
 run with a read-only root filesystem and all capabilities dropped.
 
+**Build identity.** `internal/buildinfo` says which build runs: the release, embedded
+from `internal/buildinfo/VERSION` (the one place it is set), and the build number (the
+count of commits) and commit, which `make` and the `Dockerfile` pass with `-ldflags -X`;
+a plain `go build` is build `0`, a local build, with the commit the Go toolchain
+recorded. The package has no state and `internal/domain` does not import it; the
+composition root reads it once and hands it to telemetry, the start-up log and the
+management API, which names it only in answers to authenticated callers
+(`ServerVersion` in the session answers and in `GET /cluster`, for the answering node).
+Images are tagged and labelled `<version>-<build>`; the chart's `appVersion` is the
+release and pods are labelled with the image tag deployed. A node's build is not
+replicated: knowing every node's build from one answer needs a field in the node
+record, a schema change that goes with schema 4.
+
 The console (`web/`, React + TypeScript + Vite) is a placeholder until milestone 5. It is
 built by the `Dockerfile` and `make build` but is not embedded or served yet (PLAN 5.4),
 so the `console` build tag has no effect today. Logos come from the brand assets:

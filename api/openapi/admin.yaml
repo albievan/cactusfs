@@ -1149,9 +1149,29 @@ components:
           format: password
           minLength: 1
           maxLength: 1024
+    ServerVersion:
+      type: object
+      description: |
+        Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+        else: no answer to a request without a credential names it, and no response header does.
+      required: [version, build]
+      properties:
+        version:
+          type: string
+          description: The release, a semantic version without a leading "v".
+        build:
+          type: string
+          description: |
+            The number of the build: the count of commits it was made from. "0" is a build that was not numbered -
+            one made with plain `go build`, say.
+        commit:
+          type: string
+          description: |
+            The short hash of the commit the build was made from, followed by "-dirty" when the tree had
+            uncommitted changes. Absent when the build does not know it.
     Session:
       type: object
-      required: [user, csrf_token, expires_at]
+      required: [user, csrf_token, expires_at, server]
       properties:
         user:
           type: string
@@ -1161,10 +1181,14 @@ components:
         expires_at:
           type: string
           format: date-time
+        server:
+          $ref: '#/components/schemas/ServerVersion'
     Identity:
       type: object
-      required: [kind, via]
+      required: [kind, via, server]
       properties:
+        server:
+          $ref: '#/components/schemas/ServerVersion'
         kind:
           type: string
           enum: [root, user]
@@ -1676,13 +1700,17 @@ components:
             $ref: '#/components/schemas/Drive'
     ClusterStatus:
       type: object
-      required: [deployment_id, answered_by, leader, nodes, erasure_sets, node_failures_tolerated, drives_online, drives_total]
+      required: [deployment_id, answered_by, server, leader, nodes, erasure_sets, node_failures_tolerated, drives_online, drives_total]
       properties:
         deployment_id:
           type: string
         answered_by:
           type: string
-          description: The node that answered.
+          description: |
+            The node that answered. `server` is its build; the builds of the other nodes are not known to it:
+            during a rolling upgrade, ask each node.
+        server:
+          $ref: '#/components/schemas/ServerVersion'
         leader:
           type: string
           description: The node that leads the metadata group, or empty when there is none.

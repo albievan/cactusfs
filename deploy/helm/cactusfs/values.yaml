@@ -6,7 +6,10 @@
 
 image:
   repository: cactusfs
-  # The chart's appVersion when empty.
+  # The build to run: <version>-<build>, as `make image` tags it and
+  # `cactusfs version` says it (0.7.0-412). When empty, the chart's appVersion:
+  # the release, of whatever build. Pods are labelled app.kubernetes.io/version
+  # with it.
   tag: ""
   # A digest (sha256:...) to run exactly that image; it wins over the tag.
   digest: ""

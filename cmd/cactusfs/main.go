@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/albievan/cactusfs/internal/buildinfo"
 )
 
 const (
@@ -51,7 +53,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 
 	switch args[0] {
 	case "version":
-		_, _ = fmt.Fprintln(stdout, versionString())
+		_, _ = fmt.Fprintln(stdout, versionString(buildinfo.Get()))
 		return exitOK
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)

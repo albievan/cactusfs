@@ -161,7 +161,7 @@ func newFixture(t *testing.T) *fixture {
 		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
-		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(),
+		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
 		Observe: func(_ context.Context, o adminapi.Observation) {
 			f.seenMu.Lock()
 			defer f.seenMu.Unlock()

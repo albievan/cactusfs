@@ -41,6 +41,8 @@ spec:
     metadata:
       labels:
         {{- include "cactusfs.selector" $root | nindent 8 }}
+        # The version the pod runs: it follows the image, and selects nothing.
+        app.kubernetes.io/version: {{ include "cactusfs.version" $root | quote }}
         cactusfs.io/node: {{ $id }}
         cactusfs.io/pool: {{ $pool.name }}
         {{- if $voter }}
