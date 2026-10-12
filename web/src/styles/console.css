@@ -1334,6 +1334,118 @@ textarea[readonly] {
   min-width: 14rem;
 }
 
+/* Settings: what holds for the deployment, and a card a node that opens */
+
+.settings-toolbar {
+  align-items: flex-end;
+}
+
+.settings-filter {
+  flex: 1 1 14rem;
+  max-width: 24rem;
+}
+
+.settings-toolbar .btn {
+  margin-left: auto;
+}
+
+.settings-warning {
+  margin: 0 0 0.85rem;
+}
+
+/* The line of a node: which it is, what it runs, whether it answered. */
+.node-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+summary.node-card-head {
+  list-style: none;
+  cursor: pointer;
+}
+
+summary.node-card-head::-webkit-details-marker {
+  display: none;
+}
+
+/* The mark of a card that opens: it points down once the card is open. */
+.node-card-mark {
+  color: var(--muted);
+}
+
+details[open] > summary .node-card-mark {
+  transform: rotate(90deg);
+}
+
+.node-card-id {
+  color: var(--night-green);
+  font-size: 1.05rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.node-card-build {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-card-body {
+  margin-top: 1rem;
+}
+
+.node-card-stats .stat dd {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+/* A state says itself in a word; the sign before the word is for the eye. */
+.state .bi {
+  margin-right: 0.15rem;
+}
+
+.state-warning {
+  background: #fff3cd;
+  color: #664d03;
+}
+
+/* The heading of a group of rows inside a grid. */
+.grid .grid-group th {
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  background: var(--sand);
+  color: var(--night-green);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.grid .settings-name {
+  color: var(--night-green);
+  font-weight: 600;
+}
+
+/* A value as it came: a long one wraps, a longer one scrolls in its cell. */
+.settings-value {
+  display: block;
+  max-width: 34rem;
+  max-height: 7.5rem;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.settings-muted,
+.badge.settings-default {
+  color: var(--muted) !important;
+  font-weight: 400;
+}
+
 /*
  * On a narrow screen the navigation lies across the top, icons alone, and a
  * table becomes a list of cards: every row a block, every cell under the name
@@ -1419,15 +1531,27 @@ textarea[readonly] {
     background: var(--night-green);
   }
 
+  /* The tabs share the bar, each as wide as its name needs and no
+     narrower than a thumb: eight of them fit a phone of 390 px, and on a
+     narrower one the bar is scrolled sideways - the page never is. */
   .sections .nav {
     flex-direction: row !important;
     flex-wrap: nowrap;
     gap: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
   }
 
   .sections .nav-item {
-    flex: 1 1 0;
-    min-width: 0;
+    flex: 1 0 auto;
+    min-width: 2.75rem;
+  }
+
+  /* A bar that scrolls cuts off what stands out of it: the outline of the
+     tab the keyboard is on is drawn inside the tab. */
+  .sections .nav-link:focus-visible {
+    outline-offset: -3px;
   }
 
   .sections .nav-link,

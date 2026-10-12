@@ -34,6 +34,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	NodeService_Info_FullMethodName     = "/cactusfs.node.v1.NodeService/Info"
 	NodeService_InFlight_FullMethodName = "/cactusfs.node.v1.NodeService/InFlight"
+	NodeService_Settings_FullMethodName = "/cactusfs.node.v1.NodeService/Settings"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -50,6 +51,12 @@ type NodeServiceClient interface {
 	// collector of every storage node asks every node before it removes a
 	// shard.
 	InFlight(ctx context.Context, in *InFlightRequest, opts ...grpc.CallOption) (*InFlightResponse, error)
+	// Settings returns how the node was configured, what it stores on and
+	// which certificates it serves, as it may be shown: the node that answers
+	// has redacted it, and the node that asked redacts it again. It is read
+	// from the running node each time and stored nowhere. A node of a release
+	// without this call answers the RPC with UNIMPLEMENTED.
+	Settings(ctx context.Context, in *SettingsRequest, opts ...grpc.CallOption) (*SettingsResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -80,6 +87,16 @@ func (c *nodeServiceClient) InFlight(ctx context.Context, in *InFlightRequest, o
 	return out, nil
 }
 
+func (c *nodeServiceClient) Settings(ctx context.Context, in *SettingsRequest, opts ...grpc.CallOption) (*SettingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SettingsResponse)
+	err := c.cc.Invoke(ctx, NodeService_Settings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -94,6 +111,12 @@ type NodeServiceServer interface {
 	// collector of every storage node asks every node before it removes a
 	// shard.
 	InFlight(context.Context, *InFlightRequest) (*InFlightResponse, error)
+	// Settings returns how the node was configured, what it stores on and
+	// which certificates it serves, as it may be shown: the node that answers
+	// has redacted it, and the node that asked redacts it again. It is read
+	// from the running node each time and stored nowhere. A node of a release
+	// without this call answers the RPC with UNIMPLEMENTED.
+	Settings(context.Context, *SettingsRequest) (*SettingsResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -110,6 +133,10 @@ func (UnimplementedNodeServiceServer) Info(context.Context, *InfoRequest) (*Info
 
 func (UnimplementedNodeServiceServer) InFlight(context.Context, *InFlightRequest) (*InFlightResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InFlight not implemented")
+}
+
+func (UnimplementedNodeServiceServer) Settings(context.Context, *SettingsRequest) (*SettingsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Settings not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -168,6 +195,24 @@ func _NodeService_InFlight_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_Settings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).Settings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_Settings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).Settings(ctx, req.(*SettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -182,6 +227,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InFlight",
 			Handler:    _NodeService_InFlight_Handler,
+		},
+		{
+			MethodName: "Settings",
+			Handler:    _NodeService_Settings_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

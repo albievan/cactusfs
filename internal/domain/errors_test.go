@@ -64,6 +64,12 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 	if codes := domain.Codes(nil); len(codes) != 0 {
 		t.Errorf("Codes(nil) = %v", codes)
 	}
+	// That a node's release cannot be asked something is the judgement of
+	// the node that asked. No node says it of itself, so it has no code -
+	// and a node cannot make another believe it is an older release.
+	if codes := domain.Codes(fmt.Errorf("%w: node b", domain.ErrNotSupported)); len(codes) != 0 {
+		t.Errorf("Codes of ErrNotSupported = %v", codes)
+	}
 	unknown := domain.FromCodes([]string{"invented_in_a_later_release", "integrity"}, "node b: bad block")
 	if unknown == nil || !errors.Is(unknown, domain.ErrIntegrity) || unknown.Error() != "node b: bad block" {
 		t.Errorf("FromCodes with an unknown code = %v", unknown)

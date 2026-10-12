@@ -12,6 +12,7 @@ const SECTIONS = [
   { segment: 'roles', label: 'Roles', icon: 'bi-person-badge' },
   { segment: 'policies', label: 'Policies', icon: 'bi-shield-lock' },
   { segment: 'cluster', label: 'Cluster', icon: 'bi-hdd-network' },
+  { segment: 'settings', label: 'Settings', icon: 'bi-gear' },
   { segment: 'audit', label: 'Audit log', icon: 'bi-journal-text' },
 ];
 

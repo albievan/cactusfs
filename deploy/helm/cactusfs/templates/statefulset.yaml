@@ -142,6 +142,10 @@ spec:
             {{- if $stores }}
             - name: CACTUSFS_DATA
               value: "{{- range $d := until (int $root.Values.drives.count) }}{{ if $d }},{{ end }}/var/lib/cactusfs/data{{ add $d 1 }}{{- end }}"
+            # The claim behind each drive, as the StatefulSet names it: what
+            # the node shows beside each directory, and uses for nothing else.
+            - name: CACTUSFS_DRIVE_LABELS
+              value: "{{- range $d := until (int $root.Values.drives.count) }}{{ if $d }},{{ end }}data{{ add $d 1 }}-{{ $id }}-0{{- end }}"
             {{- end }}
             - {name: CACTUSFS_TLS_CERT, value: /etc/cactusfs/tls/tls.crt}
             - {name: CACTUSFS_TLS_KEY, value: /etc/cactusfs/tls/tls.key}

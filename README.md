@@ -145,24 +145,171 @@ curl --cacert ca.crt https://localhost:9001/readyz      # {"status":"ok"}
 **Back up the KMS key file (`<first drive>/meta/kms-local.json` by default) and its
 passphrase.** Without both, nothing stored can be decrypted.
 
-Every setting is a flag with a matching `CACTUSFS_*` variable; the flag wins. Secrets are
-the exception: they are read from the environment or a file, never from the command line.
-`./cactusfs server --help` lists everything; the main ones:
+### Settings
 
-| Flag | Variable | Default |
-|---|---|---|
-| `--data` | `CACTUSFS_DATA` | — (required; repeat for several drives) |
-| `--kms` | `CACTUSFS_KMS` | — (required: `local`) |
-| — | `CACTUSFS_KMS_PASSPHRASE` | — (required, or `--kms-passphrase-file`) |
-| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` |
-| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` |
-| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — (enables `<bucket>.<domain>`) |
-| `--tls-cert`, `--tls-key` | `CACTUSFS_TLS_CERT`, `CACTUSFS_TLS_KEY` | — |
-| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` (at least `5s`; `0` is off): how often the certificate and key files, the node's too, are read again. A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular files (not pipes) |
-| `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` |
-| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` |
-| `--peers`, `--node-id`, `--roles` | `CACTUSFS_PEERS`, `CACTUSFS_NODE_ID`, `CACTUSFS_ROLES` | — (cluster, see below) |
-| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — (no traces exported) |
+Every setting is a flag with a matching `CACTUSFS_*` variable (`--s3-addr` is
+`CACTUSFS_S3_ADDR`); the flag wins over the variable, and the variable over the default. A
+variable that is set to nothing counts as not set. Secrets are the exception: they are
+read from the environment or from a file, never from the command line, which every user
+of the machine can see.
+
+The settings are declared once, in the binary. `./cactusfs server --help` lists them, and
+so does the table below, which the binary prints (`cactusfs config --format markdown`;
+`make settings-docs` writes it here, and a test fails when the two differ). A running
+deployment shows the settings of every node - where each value came from, the drives and
+what they are mounted on, the certificates served - under **Settings** in the console and
+at `GET /api/v1/settings`, to a caller allowed `admin:GetSettings`; a secret is shown
+there as "set" or "not set" and nothing else.
+
+<!-- settings:begin -->
+
+**Listeners: where clients reach the node**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` | listen address of the S3 API |
+| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | listen address of the admin listener: probes, `/metrics`, the management API, Swagger UI and the console |
+| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — | domain for virtual-hosted-style requests, \<bucket>.\<domain>. The same on every node |
+| `--region` | `CACTUSFS_REGION` | `us-east-1` | region name reported to S3 clients; default us-east-1. The same on every node |
+| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, keep serving this long with /readyz answering 503 before closing the listeners |
+| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` | time allowed for in-flight requests to finish once the listeners have closed |
+
+**Storage: drives and the metadata directory**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--data` | `CACTUSFS_DATA` | required on a node that stores | drive directory; repeat the flag or separate directories with commas |
+| `--drive-labels` | `CACTUSFS_DRIVE_LABELS` | — | what the deployment calls the volume behind each drive directory - a compose volume, a claim - as labels separated by commas, one for each --data entry in the same order, or none; shown with the node's settings and used for nothing else |
+| `--meta-dir` | `CACTUSFS_META_DIR` | `<first data directory>/meta` | metadata directory; default \<first data directory>/meta |
+| `--allow-drive-replacement` | `CACTUSFS_ALLOW_DRIVE_REPLACEMENT` | `false` | confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is refused afterwards |
+
+**Cluster: the node among its peers**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--node-id` | `CACTUSFS_NODE_ID` | generated on a node on its own | name of this node: lowercase letters, digits and hyphens; required in a cluster, where it must be the name in the node certificate |
+| `--roles` | `CACTUSFS_ROLES` | all | roles of this node: gateway, meta, storage, console; default all. For members of a cluster only: a node on its own has every role |
+| `--peers` | `CACTUSFS_PEERS` | — | every node of the cluster, this one included, as id=host:port of its node RPC, separated by commas; makes the node a member of a cluster. The same on every node |
+| `--rpc-addr` | `CACTUSFS_RPC_ADDR` | `:9002` | listen address of node RPC |
+| `--raft-addr` | `CACTUSFS_RAFT_ADDR` | `:9003` | listen address of the Raft transport |
+| `--advertise-rpc` | `CACTUSFS_ADVERTISE_RPC` | the node's entry in `--peers` | host:port at which other nodes reach this node's RPC; default its entry in --peers |
+| `--advertise-raft` | `CACTUSFS_ADVERTISE_RAFT` | the host of `--advertise-rpc`, the port of `--raft-addr` | host:port at which other nodes reach this node's Raft transport; default the host of --advertise-rpc with the port of --raft-addr |
+| `--topology-region` | `CACTUSFS_TOPOLOGY_REGION` | — | region this node is in, for placement |
+| `--topology-zone` | `CACTUSFS_TOPOLOGY_ZONE` | — | zone this node is in, for placement |
+| `--topology-rack` | `CACTUSFS_TOPOLOGY_RACK` | — | rack this node is in, for placement |
+| `--topology-host` | `CACTUSFS_TOPOLOGY_HOST` | — | host this node runs on, for placement |
+
+**TLS: certificates of the listeners and of the node**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--tls-cert` | `CACTUSFS_TLS_CERT` | required, unless `--dev-plaintext` | path of the PEM certificate chain of the S3 and admin listeners |
+| `--tls-key` | `CACTUSFS_TLS_KEY` | required, unless `--dev-plaintext` | path of the PEM private key of that certificate. The file holds a secret: its path is not shown with the node's settings |
+| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`; `0` never reads them again). A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular files (not pipes) |
+| `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only |
+| `--node-tls-cert` | `CACTUSFS_NODE_TLS_CERT` | required in a cluster | path of the node certificate for mutual TLS between nodes |
+| `--node-tls-key` | `CACTUSFS_NODE_TLS_KEY` | required in a cluster | path of the node certificate's private key. The file holds a secret: its path is not shown with the node's settings |
+| `--node-tls-ca` | `CACTUSFS_NODE_TLS_CA` | required in a cluster | path of the CA certificate that issues the cluster's node certificates, and nothing else |
+
+**KMS: the key that wraps data keys**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--kms` | `CACTUSFS_KMS` | required | key management service: `vault` for HashiCorp Vault Transit, `local` for a sealed local key file. There is no default and no unencrypted mode. The same on every node |
+| `--kms-key-file` | `CACTUSFS_KMS_KEY_FILE` | `<metadata directory>/kms-local.json`; required in a cluster | path of the local KMS key file; default \<metadata directory>/kms-local.json. The file holds a secret: its path is not shown with the node's settings |
+| — (no flag: a secret) | `CACTUSFS_KMS_PASSPHRASE` | required with the local KMS, or `--kms-passphrase-file` | passphrase that opens the local KMS key file. A secret: from the environment only, never shown |
+| `--kms-passphrase-file` | `CACTUSFS_KMS_PASSPHRASE_FILE` | — | path of a file holding the local KMS passphrase, instead of $CACTUSFS_KMS_PASSPHRASE. The file holds a secret: its path is not shown with the node's settings |
+| `--vault-addr` | `CACTUSFS_VAULT_ADDR` | required with `--kms vault` | URL of Vault, https://host:port. The same on every node |
+| `--vault-transit-mount` | `CACTUSFS_VAULT_TRANSIT_MOUNT` | `transit` | path of Vault's Transit engine; default transit. The same on every node |
+| `--vault-key` | `CACTUSFS_VAULT_KEY` | required with `--kms vault` | name of the Transit key, of an AEAD type such as aes256-gcm96. The same on every node |
+| `--vault-token-file` | `CACTUSFS_VAULT_TOKEN_FILE` | required with `--kms vault` | path of a file holding the Vault token; read at every use, so it can be renewed in place. The file holds a secret: its path is not shown with the node's settings |
+| `--vault-ca-cert` | `CACTUSFS_VAULT_CA_CERT` | the system's CAs | path of the CA certificate that issued Vault's certificate; default the system's CAs |
+| `--vault-server-name` | `CACTUSFS_VAULT_SERVER_NAME` | — | name expected in Vault's certificate, when Vault is reached under another |
+| `--vault-namespace` | `CACTUSFS_VAULT_NAMESPACE` | — | Vault Enterprise namespace. The same on every node |
+
+**Bootstrap: the root credentials of a new deployment**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| — (no flag: a secret) | `CACTUSFS_ROOT_ACCESS_KEY` | generated, and shown once, by a new deployment | access key ID of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_SECRET_KEY. A secret: from the environment only, never shown |
+| — (no flag: a secret) | `CACTUSFS_ROOT_SECRET_KEY` | generated, and shown once, by a new deployment | secret key of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_ACCESS_KEY. A secret: from the environment only, never shown |
+
+**Maintenance: background work**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between two passes of the scrubber, which verifies and heals every object; 0 disables it. The same on every node |
+| `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | limit on how fast the scrubber reads, in MiB per second; 0 is no limit. The same on every node |
+| `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between two passes of the worker that carries out the lifecycle rules of buckets; 0 disables it. The same on every node |
+| `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between two passes of the garbage collector for unreferenced shards; 0 disables it |
+| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`). The same on every node |
+| `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads this node counted are recorded with the objects, at least 5s; a node that crashes loses up to this much of the count |
+
+**Observability: log, audit export and traces**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | minimum log level: debug, info, warn or error |
+| `--audit-export` | `CACTUSFS_AUDIT_EXPORT` | `false` | write every audit record to standard output as a JSON line with "stream":"audit" |
+| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | URL of an OTLP/HTTP trace collector, `https` unless the host is a loopback IP address; traces are not exported when empty. A URL with userinfo, a query or a fragment is refused: a credential does not belong in it, and a credential for the collector is not a setting of CactusFS |
+
+<!-- settings:end -->
+
+#### An environment file
+
+[`deploy/cactusfs.env.example`](deploy/cactusfs.env.example) lists every variable with
+its meaning and its default, each commented out (`cactusfs config --format env` prints
+it). Copy it, take the `#` off what you set, and hand it to whatever starts the node. **The
+binary itself reads no file**: only its environment and its flags, so that there is one
+order of precedence wherever it runs.
+
+```sh
+cp deploy/cactusfs.env.example /etc/cactusfs/cactusfs.env     # outside the repository
+
+docker run --env-file /etc/cactusfs/cactusfs.env ... cactusfs      # a container (or podman run)
+
+# a systemd unit:
+#   [Service]
+#   EnvironmentFile=/etc/cactusfs/cactusfs.env
+#   ExecStart=/usr/local/bin/cactusfs server
+
+# a shell (sh, bash, zsh): export what the file sets, then start the node
+while IFS= read -r line || [ -n "$line" ]; do
+  case $line in CACTUSFS_*=*) export "$line" ;; esac
+done </etc/cactusfs/cactusfs.env
+cactusfs server
+```
+
+```powershell
+# PowerShell: set what the file sets, for this session, then start the node
+Get-Content cactusfs.env | Where-Object { $_ -match '^[A-Z0-9_]+=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "Env:$k" $v }
+.\cactusfs.exe server
+```
+
+A line of the file is `NAME=value`. Both loops take a line that begins with a variable's
+name and leave every other alone - comments, empty lines - and, like
+`docker run --env-file`, take the value as it stands: everything after the first `=`, so
+a value may hold `=`, spaces, `$` or `#`. What none of them does: take quotes off a value (a quote becomes part
+of it), read a value over several lines, drop a comment after a value, or accept
+`export NAME=value` or spaces before the name. Write values without quotes and the file
+reads the same everywhere. A systemd `EnvironmentFile=` does take quotes off, and so does
+a shell that sources the file (`set -a; . file; set +a`), which besides runs what follows
+a space in a value as a command and expands `$`: use the loop.
+
+Keep secrets out of that file: `CACTUSFS_KMS_PASSPHRASE` and the root credentials come
+from a secret store (a Kubernetes Secret, the secrets of the container engine, the
+service manager), and the files that hold a key or a token (`--tls-key`, `--node-tls-key`,
+`--kms-key-file`, `--kms-passphrase-file`, `--vault-token-file`) stay outside the
+repository. A file named `.env`, `.env.<anything>` or `<anything>.env` - `cactusfs.env`,
+say - is ignored by git in every directory and is left out of the build context of the
+image (`.gitignore`, `.dockerignore`); `*.example` files are the exception, and hold no
+value of a secret. That keeps a copy out of a commit and out of an image; it does not
+make the checkout the place for one.
+
+The URL of the trace collector (`--otlp-endpoint`) holds no credential: one with
+userinfo, a query or a fragment is refused at start, and the refusal names the URL
+without them. CactusFS has no setting that gives the collector a credential; put a
+collector that needs none on the nodes' network, or one beside each node that forwards.
 
 Operations:
 
@@ -359,6 +506,17 @@ aws --endpoint-url https://localhost:9000 --ca-bundle s3-ca.pem s3 mb s3://photo
 aws --endpoint-url https://localhost:9030 --ca-bundle s3-ca.pem s3 ls        # another node, same answer
 make down
 ```
+
+What else the development cluster can be told - the log level, the intervals of the
+background work, a trace collector, the ports on this machine - is listed in
+[`deploy/compose/.env.example`](deploy/compose/.env.example). Copy it to
+`deploy/compose/.env` and take the `#` off what you set: `make up` hands the file to
+compose when it exists, and starts the cluster the same without one. Compose puts the
+values into the environment of the nodes, which read no file themselves; a variable
+exported in the shell wins over the file, and the secrets are exported, not written into
+it. Each node is told the name of the volume behind each of its drives
+(`CACTUSFS_DRIVE_LABELS`: `cactusfs_node1-data1`, ...; with the chart, the claims
+`data1-<node>-0`, ...), which the Settings screen shows beside the directory.
 
 Eight drives on four nodes make one erasure set of 4 data and 4 parity shards, two per
 node. With any one node down the cluster reads and writes; with two down, objects stay

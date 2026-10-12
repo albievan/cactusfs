@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,6 +272,64 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 	wantNothingOf(t, tel, recorder, "sentinel", "hash-of-", "garbage")
 }
 
+// TestNodeSettingsAreCountedAndTraced: the reader of other nodes' settings
+// keeps its contract through the decorator, every question is counted and
+// is a span, an error is counted as one - and nothing of an answer, nor the
+// node that gave it, is in a metric or a span.
+func TestNodeSettingsAreCountedAndTraced(t *testing.T) {
+	t.Parallel()
+	recorder := tracetest.NewSpanRecorder()
+	tel := newTelemetry(t, recorder)
+	// The contract opens a reader for each of its cases, side by side; the
+	// script is the same for all of them.
+	var (
+		mu     sync.Mutex
+		script porttest.NodeSettingsScript
+	)
+	t.Run("contract", func(t *testing.T) {
+		porttest.NodeSettingsContract(t, func(_ *testing.T, given porttest.NodeSettingsScript) ports.NodeSettingsReader {
+			mu.Lock()
+			script = given
+			mu.Unlock()
+			return tel.InstrumentNodeSettings(porttest.ScriptedNodeSettingsReader(given))
+		})
+	})
+
+	metrics := scrape(t, tel)
+	wantEveryMethod(t, metrics, "node_settings", methodsOf[ports.NodeSettingsReader]())
+	for _, want := range []string{
+		"cactusfs_port_calls_total method=NodeSettings port=node_settings result=ok",
+		"cactusfs_port_calls_total method=NodeSettings port=node_settings result=error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	if !contains(spanNames(recorder), "node_settings.NodeSettings") {
+		t.Errorf("no span named node_settings.NodeSettings among %v", spanNames(recorder))
+	}
+	// What the script names: the nodes, the secret, and of the answer the
+	// directories, the devices, the labels, the settings and their values,
+	// the key, the certificates.
+	words := []string{
+		porttest.SettingsMark, porttest.SettingsNodeAnswering, porttest.SettingsNodeOld, porttest.SettingsNodeSilent,
+		porttest.SettingsNodeFailing, porttest.SettingsNodeGone, script.Settings.KMSKeyID, "CACTUSFS_", "otel.example",
+	}
+	for _, drive := range script.Settings.Drives {
+		words = append(words, drive.Directory)
+	}
+	for _, setting := range script.Settings.Settings {
+		words = append(words, setting.Name)
+	}
+	for _, certificate := range script.Settings.Certificates {
+		words = append(words, certificate.Subject)
+	}
+	if len(words) < 15 {
+		t.Fatalf("the script names only %v", words)
+	}
+	wantNothingOf(t, tel, recorder, words...)
+}
+
 // TestEveryDecoratorIsMarked: the composition root's test knows a decorated
 // port by telemetry.Instrumented; every decorator must be one, the writer of
 // a decorated shard store included.
@@ -297,6 +356,7 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"AuditLog": tel.InstrumentAuditLog(identities), "EventPublisher": tel.InstrumentEventPublisher(refusing{}),
 		"IdentityProvider": tel.InstrumentIdentityProvider(fixedProvider{}), "Passwords": tel.InstrumentPasswords(fixedHasher{}),
 		"ClusterView": tel.InstrumentClusterView(fixedView{}), "LocalConfig": tel.InstrumentLocalConfig(mem),
+		"NodeSettings": tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
 	}
 	for name, value := range decorated {
 		if _, ok := value.(telemetry.Instrumented); !ok {

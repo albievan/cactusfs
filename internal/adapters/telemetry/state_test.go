@@ -3,6 +3,7 @@ package telemetry_test
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,9 +15,19 @@ import (
 // to its value.
 func gauges(t *testing.T, tel *telemetry.Telemetry) map[string]float64 {
 	t.Helper()
-	families, err := tel.Gatherer().Gather()
+	samples, err := samplesOf(tel)
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
+	}
+	return samples
+}
+
+// samplesOf is gauges for a goroutine that is not the test's own, which may
+// fail a test and not stop it.
+func samplesOf(tel *telemetry.Telemetry) (map[string]float64, error) {
+	families, err := tel.Gatherer().Gather()
+	if err != nil {
+		return nil, err
 	}
 	samples := map[string]float64{}
 	for _, family := range families {
@@ -34,7 +45,7 @@ func gauges(t *testing.T, tel *telemetry.Telemetry) map[string]float64 {
 			}
 		}
 	}
-	return samples
+	return samples, nil
 }
 
 type fixedRaft struct {
@@ -694,5 +705,79 @@ func TestHandshakeSourceThatHangsDoesNotHoldUpTheScrape(t *testing.T) {
 			t.Fatalf("%s did not grow after the source answered", name)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// slowRaft answers after a while, as a store under load does.
+type slowRaft time.Duration
+
+func (r slowRaft) RaftState() (telemetry.RaftState, bool) {
+	time.Sleep(time.Duration(r))
+	return telemetry.RaftState{Leader: true, Term: 3, Voters: 3}, true
+}
+
+// countingTLS has refused one more content of its files each time it is
+// asked.
+type countingTLS struct{ refused atomic.Uint64 }
+
+func (c *countingTLS) TLSState() telemetry.TLSState {
+	return telemetry.TLSState{NotAfter: time.Unix(1_900_000_000, 0), Refused: map[string]uint64{"expired": c.refused.Add(1)}}
+}
+
+// TestConcurrentScrapesSeeTheSameState: two scrapers at the same moment - two
+// Prometheus servers, or one and somebody with curl - are told the same of
+// sources that answer. A scrape that comes while a question is out waits for
+// that answer: no drive is reported offline and no series is left out because
+// somebody else asked first, and a count read by two scrapes is counted once.
+func TestConcurrentScrapesSeeTheSameState(t *testing.T) {
+	t.Parallel()
+	tel, err := telemetry.New(t.Context(), telemetry.Config{Version: "test", StateTimeout: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &countingTLS{}
+	// The metadata store takes its time, so that every scrape finds
+	// questions out that another put.
+	tel.ObserveRaft(slowRaft(2 * time.Millisecond))
+	tel.ObserveDrives(fixedDrives{{ID: "drive-a", Online: true, FreeBytes: 1, TotalBytes: 2}, {ID: "drive-b", Online: true, FreeBytes: 3, TotalBytes: 4}})
+	tel.ObserveNodeCertificate(fixedCertificate{notAfter: time.Unix(1_900_000_000, 0), present: true})
+	tel.ObserveReadiness(readyWhen(true))
+	tel.ObserveTLS(telemetry.TLSUseNode, certificate)
+
+	want := map[string]float64{
+		"cactusfs_raft_is_leader{}": 1, "cactusfs_raft_peers{}": 3, "cactusfs_ready{}": 1,
+		"cactusfs_drive_online{drive=drive-a}": 1, "cactusfs_drive_total_bytes{drive=drive-a}": 2,
+		"cactusfs_drive_online{drive=drive-b}": 1, "cactusfs_drive_free_bytes{drive=drive-b}": 3,
+		"cactusfs_node_certificate_not_after_seconds{}":        1_900_000_000,
+		"cactusfs_tls_certificate_not_after_seconds{use=node}": 1_900_000_000,
+	}
+	const refused = "cactusfs_tls_reload_refused_total{reason=expired,use=node}"
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 100 {
+				samples, err := samplesOf(tel)
+				if err != nil {
+					t.Errorf("Gather: %v", err)
+					return
+				}
+				for name, value := range want {
+					if got, ok := samples[name]; !ok || got != value {
+						t.Errorf("%s = %v (exposed: %t) in a scrape beside others, want %v", name, got, ok, value)
+						return
+					}
+				}
+				// What was counted is never more than the source has said.
+				if got, said := samples[refused], float64(certificate.refused.Load()); got < 1 || got > said {
+					t.Errorf("%s = %v in a scrape beside others; the source has counted %v", refused, got, said)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	// Alone again, a scrape reads the count as the source has it.
+	if got, said := gauges(t, tel)[refused], float64(certificate.refused.Load()); got != said {
+		t.Errorf("%s = %v after the scrapes, the source has counted %v", refused, got, said)
 	}
 }

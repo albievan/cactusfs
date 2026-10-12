@@ -8,6 +8,11 @@
 // configured OTLP endpoint no exporter exists and no connection is ever made,
 // which keeps the node air-gap safe.
 //
+// The one thing of the process that is set is OpenTelemetry's own error
+// handler, and only by a Telemetry that exports (see ExportErrors): the
+// library has no other place to be told where its errors go, and where it
+// sends them when it is told nothing is standard error, whole.
+//
 // Metrics carry no tenant data: no label holds a bucket name, an object key or
 // an access key ID.
 package telemetry
@@ -16,13 +21,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -33,6 +41,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -48,8 +57,14 @@ type Config struct {
 	// Version is the release version, reported in cactusfs_build_info.
 	Version string
 	// OTLPEndpoint is the URL of an OTLP/HTTP trace collector, for example
-	// "https://collector.internal:4318". Empty disables trace export.
+	// "https://collector.internal:4318". Empty disables trace export. It
+	// holds no credential: one with userinfo, a query or a fragment is
+	// refused.
 	OTLPEndpoint string
+	// Logger is told, at WARN and at most once a minute, that spans could
+	// not be exported (see ExportErrors). Nil, nothing is logged; the
+	// errors still do not reach standard error.
+	Logger *slog.Logger
 	// SpanProcessor, when not nil, receives every span instead of an OTLP
 	// exporter. Tests use it to record spans.
 	SpanProcessor sdktrace.SpanProcessor
@@ -214,10 +229,21 @@ func (t *Telemetry) initTracing(ctx context.Context, cfg Config) error {
 		if err := validateEndpoint(cfg.OTLPEndpoint); err != nil {
 			return err
 		}
+		// The endpoint was parsed above, so the exporter does not fail on
+		// it - which it would report through the library's own log, with
+		// the URL. What else it fails on is named by its class: the text of
+		// an error of the library may hold the URL.
 		exporter, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(cfg.OTLPEndpoint))
 		if err != nil {
-			return fmt.Errorf("OTLP exporter: %w", err)
+			return fmt.Errorf("OTLP exporter for %q: %s", cluster.RedactURL(cfg.OTLPEndpoint), exportErrorClass(err))
 		}
+		// From here on the library reports what it cannot export, and it
+		// has one place to report to for the whole process.
+		logger := cfg.Logger
+		if logger == nil {
+			logger = slog.New(slog.DiscardHandler)
+		}
+		otel.SetErrorHandler(NewExportErrors(logger, time.Now))
 		processor = sdktrace.NewBatchSpanProcessor(exporter)
 		t.exporting = true
 	default:
@@ -241,11 +267,23 @@ func (t *Telemetry) initTracing(ctx context.Context, cfg Config) error {
 }
 
 // validateEndpoint requires TLS to the collector, except on loopback: span
-// names and timings describe what a deployment is doing.
+// names and timings describe what a deployment is doing. And it requires an
+// endpoint that holds no credential, by the characters cluster.RedactURL
+// takes for one - "@", "?" and "#": the endpoint is shown with the node's
+// settings and named in its errors, so what is used is what may be shown.
+//
+// Every error names the endpoint as cluster.RedactURL leaves it, and none
+// carries the words of the parser, which quote what they were given.
 func validateEndpoint(endpoint string) error {
+	shown := cluster.RedactURL(endpoint)
+	if strings.ContainsAny(endpoint, "@?#") {
+		return fmt.Errorf("%w: OTLP endpoint %q (shown without them) must not carry userinfo, a query or a fragment: "+
+			"credentials do not belong in the endpoint URL, and a credential for the collector is not a setting of CactusFS",
+			domain.ErrInvalidArgument, shown)
+	}
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
-		return fmt.Errorf("%w: OTLP endpoint %q is not a URL", domain.ErrInvalidArgument, endpoint)
+		return fmt.Errorf("%w: OTLP endpoint %q is not a URL", domain.ErrInvalidArgument, shown)
 	}
 	switch u.Scheme {
 	case "https":
@@ -255,9 +293,9 @@ func validateEndpoint(endpoint string) error {
 			return nil
 		}
 		return fmt.Errorf("%w: OTLP endpoint %q must use https unless it is a loopback IP address",
-			domain.ErrInvalidArgument, endpoint)
+			domain.ErrInvalidArgument, shown)
 	default:
-		return fmt.Errorf("%w: OTLP endpoint %q must be an https URL", domain.ErrInvalidArgument, endpoint)
+		return fmt.Errorf("%w: OTLP endpoint %q must be an https URL", domain.ErrInvalidArgument, shown)
 	}
 }
 

@@ -97,6 +97,11 @@ const (
 	// ActionGetClusterStatus allows reading the nodes, drives and
 	// background work of the deployment.
 	ActionGetClusterStatus Action = "admin:GetClusterStatus"
+	// ActionGetSettings allows reading how every node of the deployment
+	// was configured: its settings as they may be shown, its drives and
+	// directories, the certificates it serves. No secret is part of it,
+	// but the layout of a deployment is not for everybody either.
+	ActionGetSettings Action = "admin:GetSettings"
 )
 
 // ARN prefixes of the two kinds of resource a policy can name.

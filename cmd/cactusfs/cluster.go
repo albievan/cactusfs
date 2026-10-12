@@ -95,6 +95,7 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		return nil, err
 	}
 	n.identity, n.reloader = identity, reloader
+	n.local.serve(cluster.CertificateNode, reloader)
 	// The gauges read the certificate in use, whichever that is by then,
 	// and what became of the files it is read from again.
 	n.telemetry.ObserveNodeCertificate(certificateGauge{reloader: reloader})
@@ -108,7 +109,7 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 	// the caller's trace travels with the call.
 	observed := n.telemetry.NodeRPC(noderpc.Methods())
 	n.rpc = noderpc.NewClient(identity.Client, n.resolver(cfg), n.clock).
-		WithInterceptors(observed.UnaryClient(), observed.StreamClient())
+		WithInterceptors(observed.UnaryClient(), observed.StreamClient()).WithLogger(logger)
 
 	// Raft trusts what its messages say about who sent them, so the
 	// listener admits only the nodes that may send any: the voters. A
@@ -135,10 +136,13 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 			objects := n.inFlight.Load()
 			return objects != nil && objects.InFlight(id)
 		},
-		Meta:   metaRPC{node: n},
-		Drive:  n.localDrive,
-		Clock:  n.clock,
-		Logger: logger,
+		// How this node was configured, for the node that is asked for the
+		// settings of all of them.
+		Settings: n.local.Local,
+		Meta:     metaRPC{node: n},
+		Drive:    n.localDrive,
+		Clock:    n.clock,
+		Logger:   logger,
 
 		UnaryInterceptor: observed.UnaryServer(), StreamInterceptor: observed.StreamServer(),
 		OnHandshakeRefused: n.telemetry.ObserveHandshakeRefused,

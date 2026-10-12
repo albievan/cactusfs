@@ -206,6 +206,13 @@ var (
 	// ErrDriveOffline means that a drive could not be reached. It says
 	// nothing about what is stored on it.
 	ErrDriveOffline = errors.New("drive is offline")
+	// ErrNotSupported means that a node was asked something its release
+	// cannot answer: during a rolling upgrade the nodes are not all of one
+	// release, and a newer one may ask what an older one has never heard
+	// of. It is the judgement of the node that asked, made from how the
+	// call was refused; no node reports it of itself, so it has no wire
+	// code.
+	ErrNotSupported = errors.New("not supported by the release of the node that was asked")
 )
 
 // wireCodes names the sentinels that cross a node boundary. The names are

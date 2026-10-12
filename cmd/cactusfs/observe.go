@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/disk"
@@ -9,6 +10,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
 )
 
 // The sources of the gauges that say how the node is. Each stands between
@@ -30,6 +32,41 @@ func (g raftGauges) RaftState() (telemetry.RaftState, bool) {
 		Leader: o.Leader, Term: o.Term, AppliedIndex: o.AppliedIndex, CommitIndex: o.CommitIndex, Voters: o.Voters,
 		SchemaLevel: o.Level, SchemaSupported: o.Supported, StateSchema: o.StateSchema,
 	}, true
+}
+
+// metadataLevel returns what tells the entry schema the deployment writes
+// now, for the settings: the level the gauge cactusfs_metadata_schema_level
+// shows, from the same reading of the store. It is 1 or more. The error
+// wraps domain.ErrUnavailable when the store is closed or cannot tell, and
+// the error of ctx when the reading - which waits for the lock of the state
+// machine (raftmeta.Store.Observe) - took longer than the caller had.
+func metadataLevel(store *raftmeta.Store) func(ctx context.Context) (int, error) {
+	return func(ctx context.Context) (int, error) {
+		type reading struct {
+			observation raftmeta.Observation
+			ok          bool
+		}
+		// Room for the one reading, so that one nobody waits for any more
+		// can still finish and be forgotten.
+		done := make(chan reading, 1)
+		go func() {
+			var r reading
+			r.observation, r.ok = store.Observe()
+			done <- r
+		}()
+		select {
+		case r := <-done:
+			if !r.ok {
+				return 0, fmt.Errorf("metadata level: %w: the metadata store is closed", domain.ErrUnavailable)
+			}
+			if r.observation.Level < 1 {
+				return 0, fmt.Errorf("metadata level: %w: the metadata store cannot tell", domain.ErrUnavailable)
+			}
+			return r.observation.Level, nil
+		case <-ctx.Done():
+			return 0, fmt.Errorf("metadata level: %w", ctx.Err())
+		}
+	}
 }
 
 // driveGauges is this node's drives as the drive gauges read them: by their

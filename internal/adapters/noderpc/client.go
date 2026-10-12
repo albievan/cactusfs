@@ -5,15 +5,18 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	nodev1 "github.com/albievan/cactusfs/internal/adapters/noderpc/nodev1/cactusfs/node/v1"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -47,6 +50,8 @@ type Client struct {
 	// unary and stream, when not nil, see every call this node makes.
 	unary  grpc.UnaryClientInterceptor
 	stream grpc.StreamClientInterceptor
+	// logger, when not nil, is told what was dropped of an answer.
+	logger *slog.Logger
 
 	mu     sync.Mutex
 	closed bool
@@ -341,4 +346,68 @@ func (c *Client) InFlight(ctx context.Context, nodeID string, dataID object.ID) 
 		return false, err
 	}
 	return resp.GetInFlight(), nil
+}
+
+var _ ports.NodeSettingsReader = (*Client)(nil)
+
+// WithLogger has the client log what it drops of an answer that exceeds the
+// bounds of Settings, and returns the client. It is for the composition
+// root, before the first call; without it nothing is logged.
+func (c *Client) WithLogger(logger *slog.Logger) *Client {
+	c.logger = logger
+	return c
+}
+
+// NodeSettings implements ports.NodeSettingsReader: it asks the node for its
+// settings. The answer is bounded and normalized here, whatever the node
+// sent - a node that is wrong, or is not what it says, gets no secret value
+// and no endless list through.
+//
+// The error wraps domain.ErrNotSupported when the node's release has no such
+// call, context.DeadlineExceeded when the node was reached and did not answer
+// in the time of ctx, domain.ErrUnavailable when it could not be reached, and
+// none of them when it was reached and could not, or may not, say.
+func (c *Client) NodeSettings(ctx context.Context, nodeID string) (cluster.NodeSettings, error) {
+	conn, err := c.ready(ctx, nodeID)
+	if err != nil {
+		return cluster.NodeSettings{}, fmt.Errorf("noderpc.NodeSettings: %w", err)
+	}
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	resp, err := nodev1.NewNodeServiceClient(conn).Settings(ctx, &nodev1.SettingsRequest{})
+	if err != nil {
+		return cluster.NodeSettings{}, fmt.Errorf("noderpc.NodeSettings: %w", settingsCallError(nodeID, err))
+	}
+	if err := fromWire(nodeID, resp.GetError()); err != nil {
+		return cluster.NodeSettings{}, fmt.Errorf("noderpc.NodeSettings: %w", err)
+	}
+	if resp.GetNodeId() != nodeID {
+		return cluster.NodeSettings{}, fmt.Errorf("noderpc.NodeSettings: %w: node %s answers as %q",
+			domain.ErrInvalidArgument, nodeID, clipName(resp.GetNodeId()))
+	}
+	bounded, dropped := boundSettings(settingsFromWire(resp))
+	if dropped > 0 && c.logger != nil {
+		c.logger.WarnContext(ctx, "a node sent more settings than are taken; the excess is dropped",
+			slog.String("node", nodeID), slog.Int("dropped", dropped))
+	}
+	return bounded.Normalized(), nil
+}
+
+// settingsCallError sorts a call that got no answer by how gRPC says it
+// failed.
+func settingsCallError(nodeID string, err error) error {
+	switch status.Code(err) {
+	case codes.Unimplemented:
+		// The node was reached and does not know the call: it runs a
+		// release from before the call existed.
+		return fmt.Errorf("%w: node %s: %w", domain.ErrNotSupported, nodeID, err)
+	case codes.DeadlineExceeded:
+		return fmt.Errorf("%w: node %s did not answer in time: %w", context.DeadlineExceeded, nodeID, err)
+	case codes.Canceled:
+		return fmt.Errorf("%w: node %s: %w", context.Canceled, nodeID, err)
+	case codes.Unavailable:
+		return unreachable(nodeID, err)
+	default:
+		return fmt.Errorf("node %s: %w", nodeID, err)
+	}
 }

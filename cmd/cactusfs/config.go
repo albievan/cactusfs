@@ -9,7 +9,6 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +27,7 @@ const (
 	envS3Domain        = "CACTUSFS_S3_DOMAIN"
 	envRegion          = "CACTUSFS_REGION"
 	envData            = "CACTUSFS_DATA"
+	envDriveLabels     = "CACTUSFS_DRIVE_LABELS"
 	envMetaDir         = "CACTUSFS_META_DIR"
 	envKMS             = "CACTUSFS_KMS"
 	envKMSKeyFile      = "CACTUSFS_KMS_KEY_FILE"
@@ -119,6 +119,10 @@ type serverConfig struct {
 	Region string
 	// Data lists the drive directories.
 	Data []string
+	// DriveLabels says what the deployment calls the volume behind each
+	// drive directory, by position: one for each entry of Data, or none.
+	// They are shown with the node's settings and used for nothing else.
+	DriveLabels []string
 	// MetaDir is the metadata directory.
 	MetaDir string
 	// KMS names the key management service; KMSKeyFile and
@@ -207,6 +211,10 @@ type serverConfig struct {
 	Labels cluster.Labels
 	// secrets come from the environment and are never logged or printed.
 	secrets secrets
+	// sources says where the value of each setting came from. It has no
+	// flag: the command sets it to what parsing the settings recorded. It is
+	// nil in a configuration that was not parsed.
+	sources settingSources
 	// auditOut is where exported audit records go. It has no flag: the
 	// server sets it to its log stream when AuditExport is on.
 	auditOut io.Writer
@@ -244,197 +252,84 @@ func (l *stringList) Set(value string) error {
 
 // parseServerConfig builds the server configuration from, in order of
 // precedence, command-line flags, CACTUSFS_* variables and defaults. Usage and
-// flag errors are written to stderr.
+// flag errors are written to stderr. It is parseServerSettings without the
+// record of where each value came from.
 func parseServerConfig(args []string, getenv func(string) string, stderr io.Writer) (serverConfig, error) {
-	cfg := serverConfig{secrets: secrets{
-		kmsPassphrase: getenv(envKMSPhrase),
-		rootAccessKey: getenv(envRootKeyID),
-		rootSecretKey: getenv(envRootKeyValue),
-	}}
+	cfg, _, err := parseServerSettings(args, getenv, stderr)
+	return cfg, err
+}
 
-	devPlaintext, err := envBool(getenv, envDevPlaintext, false)
-	if err != nil {
-		return cfg, err
-	}
-	drainDelay, err := envDuration(getenv, envDrainDelay, 0)
-	if err != nil {
-		return cfg, err
-	}
-	shutdownTimeout, err := envDuration(getenv, envShutdownTimeout, defaultShutdownTimeout)
-	if err != nil {
-		return cfg, err
-	}
-
-	tlsReload, err := envDuration(getenv, envTLSReload, nodetls.DefaultReloadInterval)
-	if err != nil {
-		return cfg, err
-	}
-	scrubInterval, err := envDuration(getenv, envScrubInterval, defaultScrubInterval)
-	if err != nil {
-		return cfg, err
-	}
-	lifecycleInterval, err := envDuration(getenv, envLifecycle, defaultLifecycle)
-	if err != nil {
-		return cfg, err
-	}
-	gcInterval, err := envDuration(getenv, envGCInterval, defaultGCInterval)
-	if err != nil {
-		return cfg, err
-	}
-	gcGrace, err := envDuration(getenv, envGCGrace, defaultGCGrace)
-	if err != nil {
-		return cfg, err
-	}
-	accessFlush, err := envDuration(getenv, envAccessFlush, app.DefaultAccessFlushInterval)
-	if err != nil {
-		return cfg, err
-	}
-	scrubRate, err := envInt(getenv, envScrubRate, defaultScrubRateMiB)
-	if err != nil {
-		return cfg, err
-	}
-
-	allowReplace, err := envBool(getenv, envAllowReplace, false)
-	if err != nil {
-		return cfg, err
-	}
-
-	auditExport, err := envBool(getenv, envAuditExport, false)
-	if err != nil {
-		return cfg, err
-	}
+// parseServerSettings builds the server configuration from the settings of
+// serverSettings: each has its default, then what its CACTUSFS_* variable
+// says, then what its flag says. It returns the configuration and, by the
+// name of the setting, where each value came from. Usage and flag errors are
+// written to stderr.
+func parseServerSettings(args []string, getenv func(string) string, stderr io.Writer) (serverConfig, settingSources, error) {
+	var cfg serverConfig
+	targets := settingTargets{cfg: &cfg}
+	specs := serverSettings()
+	sources := make(settingSources, len(specs))
 
 	fs := flag.NewFlagSet("cactusfs server", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var data stringList
-	fs.Var(&data, "data", "drive `directory`; repeat the flag or separate directories with commas ($"+envData+")")
-	fs.StringVar(&cfg.MetaDir, "meta-dir", getenv(envMetaDir),
-		"metadata `directory`; default <first data directory>/"+metaDirName+" ($"+envMetaDir+")")
-	fs.StringVar(&cfg.KMS, "kms", getenv(envKMS),
-		"key management `service`: \""+kmsVault+"\" for HashiCorp Vault Transit, \""+kmsLocal+
-			"\" for a sealed local key file; there is no default ($"+envKMS+")")
-	fs.StringVar(&cfg.VaultAddr, "vault-addr", getenv(envVaultAddr), "`URL` of Vault, https://host:port ($"+envVaultAddr+")")
-	fs.StringVar(&cfg.VaultMount, "vault-transit-mount", getenv(envVaultMount),
-		"`path` of Vault's Transit engine; default transit ($"+envVaultMount+")")
-	fs.StringVar(&cfg.VaultKey, "vault-key", getenv(envVaultKey),
-		"`name` of the Transit key, of an AEAD type such as aes256-gcm96 ($"+envVaultKey+")")
-	fs.StringVar(&cfg.VaultTokenFile, "vault-token-file", getenv(envVaultAuthFile),
-		"`path` of a file holding the Vault token; read at every use, so it can be renewed in place ($"+envVaultAuthFile+")")
-	fs.StringVar(&cfg.VaultCACert, "vault-ca-cert", getenv(envVaultCACert),
-		"`path` of the CA certificate that issued Vault's certificate; default the system's CAs ($"+envVaultCACert+")")
-	fs.StringVar(&cfg.VaultServerName, "vault-server-name", getenv(envVaultServerName),
-		"`name` expected in Vault's certificate, when Vault is reached under another ($"+envVaultServerName+")")
-	fs.StringVar(&cfg.VaultNamespace, "vault-namespace", getenv(envVaultNamespace),
-		"Vault Enterprise `namespace` ($"+envVaultNamespace+")")
-	fs.BoolVar(&cfg.AuditExport, "audit-export", auditExport,
-		"write every audit record to standard output as a JSON line with \"stream\":\"audit\" ($"+envAuditExport+")")
-	fs.StringVar(&cfg.KMSKeyFile, "kms-key-file", getenv(envKMSKeyFile),
-		"`path` of the local KMS key file; default <metadata directory>/"+kmsKeyFileName+" ($"+envKMSKeyFile+")")
-	fs.StringVar(&cfg.KMSPassphraseFile, "kms-passphrase-file", getenv(envKMSPhraseFile),
-		"`path` of a file holding the local KMS passphrase, instead of $"+envKMSPhrase+" ($"+envKMSPhraseFile+")")
-	fs.StringVar(&cfg.S3Addr, "s3-addr", envString(getenv, envS3Addr, defaultS3Addr),
-		"listen `address` of the S3 API ($"+envS3Addr+")")
-	fs.StringVar(&cfg.S3Domain, "s3-domain", getenv(envS3Domain),
-		"`domain` for virtual-hosted-style requests, <bucket>.<domain> ($"+envS3Domain+")")
-	fs.StringVar(&cfg.Region, "region", getenv(envRegion),
-		"`region` name reported to S3 clients; default us-east-1 ($"+envRegion+")")
-	fs.StringVar(&cfg.AdminAddr, "admin-addr", envString(getenv, envAdminAddr, defaultAdminAddr),
-		"listen `address` of the admin listener ($"+envAdminAddr+")")
-	fs.StringVar(&cfg.TLSCert, "tls-cert", getenv(envTLSCert),
-		"`path` of the PEM certificate chain ($"+envTLSCert+")")
-	fs.StringVar(&cfg.TLSKey, "tls-key", getenv(envTLSKey),
-		"`path` of the PEM private key ($"+envTLSKey+")")
-	fs.DurationVar(&cfg.TLSReloadInterval, "tls-reload-interval", tlsReload,
-		"how often the certificate and key files, the node's too, are read again, so that a certificate is replaced "+
-			"without a restart; at least "+nodetls.MinReloadInterval.String()+", 0 never reads them again; "+
-			"the node CA is read at start only ($"+envTLSReload+")")
-	fs.BoolVar(&cfg.DevPlaintext, "dev-plaintext", devPlaintext,
-		"DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only ($"+envDevPlaintext+")")
-	fs.DurationVar(&cfg.DrainDelay, "drain-delay", drainDelay,
-		"on shutdown, keep serving this long with /readyz answering 503 before closing the listeners ($"+envDrainDelay+")")
-	fs.DurationVar(&cfg.ShutdownTimeout, "shutdown-timeout", shutdownTimeout,
-		"time allowed for in-flight requests to finish once the listeners have closed ($"+envShutdownTimeout+")")
-	fs.DurationVar(&cfg.ScrubInterval, "scrub-interval", scrubInterval,
-		"pause between two passes of the scrubber, which verifies and heals every object; 0 disables it ($"+envScrubInterval+")")
-	fs.DurationVar(&cfg.LifecycleInterval, "lifecycle-interval", lifecycleInterval,
-		"pause between two passes of the worker that carries out the lifecycle rules of buckets; 0 disables it ($"+envLifecycle+")")
-	fs.IntVar(&cfg.ScrubRateMiB, "scrub-rate-mib", scrubRate,
-		"limit on how fast the scrubber reads, in MiB per second; 0 is no limit ($"+envScrubRate+")")
-	fs.DurationVar(&cfg.GCInterval, "gc-interval", gcInterval,
-		"pause between two passes of the garbage collector for unreferenced shards; 0 disables it ($"+envGCInterval+")")
-	fs.DurationVar(&cfg.GCGrace, "gc-grace", gcGrace,
-		"minimum age of an unreferenced shard before it is removed ($"+envGCGrace+")")
-	fs.DurationVar(&cfg.AccessFlushInterval, "access-flush-interval", accessFlush,
-		"how often the downloads this node counted are recorded with the objects, at least "+app.MinAccessFlushInterval.String()+
-			"; a node that crashes loses up to this much of the count ($"+envAccessFlush+")")
-	fs.BoolVar(&cfg.AllowDriveReplacement, "allow-drive-replacement", allowReplace,
-		"confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is "+
-			"refused afterwards ($"+envAllowReplace+")")
-	fs.StringVar(&cfg.NodeID, "node-id", getenv(envNodeID),
-		"`name` of this node: lowercase letters, digits and hyphens; required in a cluster, where it must be "+
-			"the name in the node certificate ($"+envNodeID+")")
-	roles := fs.String("roles", getenv(envRoles),
-		"`roles` of this node: gateway, meta, storage, console; default all ($"+envRoles+")")
-	peers := fs.String("peers", getenv(envPeers),
-		"every node of the cluster, this one included, as `id=host:port` of its node RPC, separated by commas; "+
-			"makes the node a member of a cluster ($"+envPeers+")")
-	fs.StringVar(&cfg.RPCAddr, "rpc-addr", envString(getenv, envRPCAddr, defaultRPCAddr),
-		"listen `address` of node RPC ($"+envRPCAddr+")")
-	fs.StringVar(&cfg.RaftAddr, "raft-addr", envString(getenv, envRaftAddr, defaultRaftAddr),
-		"listen `address` of the Raft transport ($"+envRaftAddr+")")
-	fs.StringVar(&cfg.AdvertiseRPC, "advertise-rpc", getenv(envAdvertiseRPC),
-		"`host:port` at which other nodes reach this node's RPC; default its entry in --peers ($"+envAdvertiseRPC+")")
-	fs.StringVar(&cfg.AdvertiseRaft, "advertise-raft", getenv(envAdvertiseRaft),
-		"`host:port` at which other nodes reach this node's Raft transport; default the host of "+
-			"--advertise-rpc with the port of --raft-addr ($"+envAdvertiseRaft+")")
-	fs.StringVar(&cfg.NodeTLSCert, "node-tls-cert", getenv(envNodeTLSCert),
-		"`path` of the node certificate for mutual TLS between nodes ($"+envNodeTLSCert+")")
-	fs.StringVar(&cfg.NodeTLSKey, "node-tls-key", getenv(envNodeTLSKey),
-		"`path` of the node certificate's private key ($"+envNodeTLSKey+")")
-	fs.StringVar(&cfg.NodeTLSCA, "node-tls-ca", getenv(envNodeTLSCA),
-		"`path` of the CA certificate that issues the cluster's node certificates, and nothing else ($"+envNodeTLSCA+")")
-	fs.StringVar(&cfg.Labels.Region, "topology-region", getenv(envTopologyRegion),
-		"`region` this node is in, for placement ($"+envTopologyRegion+")")
-	fs.StringVar(&cfg.Labels.Zone, "topology-zone", getenv(envTopologyZone),
-		"`zone` this node is in, for placement ($"+envTopologyZone+")")
-	fs.StringVar(&cfg.Labels.Rack, "topology-rack", getenv(envTopologyRack),
-		"`rack` this node is in, for placement ($"+envTopologyRack+")")
-	fs.StringVar(&cfg.Labels.Host, "topology-host", getenv(envTopologyHost),
-		"`host` this node runs on, for placement ($"+envTopologyHost+")")
-	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", getenv(envOTLPEndpoint),
-		"`URL` of an OTLP/HTTP trace collector; traces are not exported when empty ($"+envOTLPEndpoint+")")
-	logLevel := fs.String("log-level", envString(getenv, envLogLevel, defaultLogLevel),
-		"minimum log `level`: debug, info, warn or error ($"+envLogLevel+")")
+	for _, spec := range specs {
+		source, err := spec.declare(fs, &targets, getenv)
+		if err != nil {
+			return cfg, nil, err
+		}
+		sources[spec.Name] = source
+	}
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return cfg, err
+			return cfg, nil, err
 		}
-		return cfg, errFlagParse
+		return cfg, nil, errFlagParse
 	}
 	if fs.NArg() > 0 {
-		return cfg, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return cfg, nil, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if len(data) == 0 {
-		// The flag was not given: fall back to the variable.
-		if err := data.Set(getenv(envData)); err != nil {
-			return cfg, err
+	fs.Visit(func(given *flag.Flag) { sources[given.Name] = cluster.SourceFlag })
+	for _, spec := range specs {
+		list, isList := spec.bind(&targets).(*stringList)
+		if !isList || len(*list) > 0 {
+			continue
+		}
+		// The flag was not given, or named nothing: fall back to the
+		// variable.
+		sources[spec.Name] = cluster.SourceDefault
+		if err := list.Set(getenv(spec.Env)); err != nil {
+			return cfg, nil, err
+		}
+		if len(*list) > 0 {
+			sources[spec.Name] = cluster.SourceEnvironment
 		}
 	}
-	cfg.Data = data
-	if cfg.Roles, err = cluster.ParseRoles(*roles); err != nil {
-		return cfg, err
+	cfg.Data, cfg.DriveLabels = targets.data, targets.driveLabels
+	var err error
+	if cfg.Roles, err = cluster.ParseRoles(targets.roles); err != nil {
+		return cfg, nil, err
 	}
-	if cfg.Peers, err = parsePeers(*peers); err != nil {
-		return cfg, err
+	if cfg.Peers, err = parsePeers(targets.peers); err != nil {
+		return cfg, nil, err
 	}
-	if err := cfg.LogLevel.UnmarshalText([]byte(*logLevel)); err != nil {
-		return cfg, fmt.Errorf("log level %q: want debug, info, warn or error", *logLevel)
+	if err := cfg.LogLevel.UnmarshalText([]byte(targets.logLevel)); err != nil {
+		return cfg, nil, fmt.Errorf("log level %q: want debug, info, warn or error", targets.logLevel)
 	}
+
+	// What validate fills in for a setting nobody gave is derived: the
+	// metadata directory inside the first drive, the addresses a node
+	// advertises, the loopback address of a development listener.
+	given := settingTexts(cfg, specs)
 	if err := cfg.validate(); err != nil {
-		return cfg, err
+		return cfg, nil, err
 	}
-	return cfg, nil
+	for name, text := range settingTexts(cfg, specs) {
+		if text != given[name] && sources[name] == cluster.SourceDefault {
+			sources[name] = cluster.SourceDerived
+		}
+	}
+	return cfg, sources, nil
 }
 
 // validate rejects configurations that would break a data-security rule and
@@ -605,6 +500,9 @@ func (c *serverConfig) validateStorage() error {
 		seen[abs] = true
 		c.Data[i] = abs
 	}
+	if err := c.validateDriveLabels(); err != nil {
+		return err
+	}
 	if c.MetaDir == "" {
 		c.MetaDir = filepath.Join(c.Data[0], metaDirName)
 	}
@@ -639,6 +537,25 @@ func (c *serverConfig) validateStorage() error {
 	return nil
 }
 
+// validateDriveLabels checks the labels of the drives: none, or one for each
+// data directory, each a name and nothing else.
+func (c *serverConfig) validateDriveLabels() error {
+	if len(c.DriveLabels) == 0 {
+		return nil
+	}
+	if len(c.DriveLabels) != len(c.Data) {
+		return fmt.Errorf("--drive-labels names %d volumes for %d data directories: give one label for each --data entry, "+
+			"in the same order, or none", len(c.DriveLabels), len(c.Data))
+	}
+	for i, label := range c.DriveLabels {
+		if !validDriveLabel(label) {
+			return fmt.Errorf("drive label %d (%q): want 1 to %d letters, digits, dots, underscores, slashes and hyphens",
+				i+1, label, maxDriveLabel)
+		}
+	}
+	return nil
+}
+
 func (c *serverConfig) validateSecrets() error {
 	if (c.secrets.rootAccessKey == "") != (c.secrets.rootSecretKey == "") {
 		return errors.New("set both $" + envRootKeyID + " and $" + envRootKeyValue + ", or neither")
@@ -656,47 +573,4 @@ func (c *serverConfig) validateSecrets() error {
 		return errors.New("set both $" + envRootKeyID + " and $" + envRootKeyValue + ", or neither")
 	}
 	return nil
-}
-
-func envString(getenv func(string) string, key, fallback string) string {
-	if v := getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func envBool(getenv func(string) string, key string, fallback bool) (bool, error) {
-	v := getenv(key)
-	if v == "" {
-		return fallback, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("%s=%q: want true or false", key, v)
-	}
-	return b, nil
-}
-
-func envDuration(getenv func(string) string, key string, fallback time.Duration) (time.Duration, error) {
-	v := getenv(key)
-	if v == "" {
-		return fallback, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s=%q: want a duration such as 30s", key, v)
-	}
-	return d, nil
-}
-
-func envInt(getenv func(string) string, key string, fallback int) (int, error) {
-	v := getenv(key)
-	if v == "" {
-		return fallback, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s=%q: want a whole number", key, v)
-	}
-	return n, nil
 }

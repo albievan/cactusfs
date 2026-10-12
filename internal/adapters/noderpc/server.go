@@ -55,6 +55,9 @@ type ServerConfig struct {
 	// InFlight reports whether this node has an unresolved write that uses
 	// the stored data.
 	InFlight func(object.ID) bool
+	// Settings says how this node was configured, for the Settings call. A
+	// nil one is a node that cannot say, and answers so.
+	Settings ports.LocalSettings
 	Meta     Meta
 	// Drive returns one of this node's drives.
 	Drive  func(driveID string) (ports.ShardStore, bool)
@@ -222,6 +225,41 @@ func (s *Server) InFlight(_ context.Context, req *nodev1.InFlightRequest) (*node
 		return &nodev1.InFlightResponse{Error: toWire(err)}, nil
 	}
 	return &nodev1.InFlightResponse{InFlight: s.cfg.InFlight(dataID)}, nil
+}
+
+// The answers of a node that cannot give its settings. They carry no code,
+// so the node that asked knows only that it was reached and got nothing.
+var (
+	errNoSettings     = errors.New("this node does not say how it is configured")
+	errSettingsFailed = errors.New("this node could not read how it is configured")
+)
+
+// Settings implements nodev1.NodeServiceServer. Like every call it has
+// passed the authorizer as the node whose certificate the caller showed.
+//
+// What is sent is what ServerConfig.Settings says, normalized - which
+// redacts every setting again, whatever made it - and bounded. A node that
+// was given no source answers that it cannot say; that is not the answer of
+// a release without the call, which is the RPC failing with UNIMPLEMENTED.
+func (s *Server) Settings(ctx context.Context, _ *nodev1.SettingsRequest) (*nodev1.SettingsResponse, error) {
+	if s.cfg.Settings == nil {
+		return &nodev1.SettingsResponse{Error: toWire(errNoSettings)}, nil
+	}
+	settings, err := s.cfg.Settings(ctx)
+	if err != nil {
+		// Why is this node's business, and is in its log: an error of
+		// reading a configuration can name the file it was read from.
+		if s.cfg.Logger != nil {
+			s.cfg.Logger.WarnContext(ctx, "the settings of this node could not be read for another node", slog.Any("error", err))
+		}
+		return &nodev1.SettingsResponse{Error: &nodev1.Error{Codes: domain.Codes(err), Message: errSettingsFailed.Error()}}, nil
+	}
+	bounded, dropped := boundSettings(settings.Normalized())
+	if dropped > 0 && s.cfg.Logger != nil {
+		s.cfg.Logger.WarnContext(ctx, "this node has more settings than are sent to another node; the excess is dropped",
+			slog.Int("dropped", dropped))
+	}
+	return settingsToWire(bounded), nil
 }
 
 // Propose implements nodev1.MetaServiceServer.

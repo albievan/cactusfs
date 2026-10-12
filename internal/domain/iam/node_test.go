@@ -37,6 +37,7 @@ func TestNodesAndClusterActionsBelongToEachOther(t *testing.T) {
 		{"node reads an object", node, iam.ActionGetObject, iam.Resource{Bucket: "b", Key: "k"}, false},
 		{"node writes an object", node, iam.ActionPutObject, iam.Resource{Bucket: "b", Key: "k"}, false},
 		{"node reads metrics", node, iam.ActionGetMetrics, iam.Resource{}, false},
+		{"node reads the settings", node, iam.ActionGetSettings, iam.Resource{Admin: "settings"}, false},
 		{"root speaks node RPC", root, iam.ActionNodeRPC, iam.Resource{}, false},
 		{"root joins a node", root, iam.ActionJoinNode, iam.Resource{Node: "n1"}, false},
 		{"user speaks node RPC", user, iam.ActionNodeRPC, iam.Resource{}, false},

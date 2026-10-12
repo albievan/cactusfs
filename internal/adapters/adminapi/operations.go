@@ -19,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -868,6 +869,132 @@ func (o *operations) GetMaintenance(ctx context.Context, _ api.GetMaintenanceReq
 			Passes: m.GCPasses, LastPassAt: timeOrNil(m.LastGCAt), Shards: int64(m.LastGC.Shards), Removed: int64(m.LastGC.Removed),
 		},
 	}, nil
+}
+
+// --- settings ---
+
+// bytesOf carries a number of bytes into the contract's signed integer.
+func bytesOf(n uint64) int64 {
+	if n > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(n)
+}
+
+func filesystemOf(fs cluster.Filesystem) *api.SettingsFilesystem {
+	if fs == (cluster.Filesystem{}) {
+		return nil
+	}
+	return &api.SettingsFilesystem{Type: fs.Type, Device: fs.Device, MountPoint: fs.MountPoint}
+}
+
+// stringsOf returns list as an array of the contract, which is never null.
+func stringsOf(list []string) []string {
+	return append([]string{}, list...)
+}
+
+// nodeSettingsOf translates the answer of one node. A node that did not
+// answer has its reason and nothing else; of what went wrong the use case
+// has told this adapter nothing.
+func nodeSettingsOf(answer cluster.NodeAnswer) api.NodeSettings {
+	if !answer.Answered {
+		reason := api.Failed
+		switch answer.Reason {
+		case cluster.ReasonUnreachable:
+			reason = api.Unreachable
+		case cluster.ReasonTimeout:
+			reason = api.Timeout
+		case cluster.ReasonUnsupported:
+			reason = api.Unsupported
+		case cluster.ReasonFailed, cluster.ReasonNone:
+		}
+		return api.NodeSettings{NodeId: answer.NodeID, Reason: &reason}
+	}
+	n := answer.Settings
+	roles, labels := stringsOf(n.Roles), map[string]string{}
+	for name, value := range n.Labels {
+		labels[name] = value
+	}
+	settings := make([]api.Setting, len(n.Settings))
+	for i, setting := range n.Settings {
+		settings[i] = api.Setting{
+			Name: setting.Name, Env: stringOrNil(setting.Env), Flag: stringOrNil(setting.Flag), Group: stringOrNil(setting.Group),
+			Kind: string(setting.Kind), Scope: string(setting.Scope), Source: string(setting.Source),
+			Set: setting.Set, Value: stringOrNil(setting.Value),
+		}
+	}
+	drives := make([]api.DriveSettings, len(n.Drives))
+	for i, drive := range n.Drives {
+		drives[i] = api.DriveSettings{
+			Id: drive.ID, Directory: drive.Directory, Label: stringOrNil(drive.Label), Filesystem: filesystemOf(drive.Filesystem),
+			TotalBytes: bytesOf(drive.TotalBytes), FreeBytes: bytesOf(drive.FreeBytes), Online: drive.Online,
+		}
+		if set := drive.ErasureSet; set >= 0 {
+			drives[i].ErasureSet = &set
+		}
+	}
+	certificates := make([]api.SettingsCertificate, len(n.Certificates))
+	for i, certificate := range n.Certificates {
+		certificates[i] = api.SettingsCertificate{
+			Use: certificate.Use, Subject: certificate.Subject, Issuer: certificate.Issuer,
+			DnsNames: stringsOf(certificate.DNSNames), IpAddresses: stringsOf(certificate.IPAddresses),
+			NotBefore: certificate.NotBefore, NotAfter: certificate.NotAfter,
+		}
+	}
+	out := api.NodeSettings{
+		NodeId: answer.NodeID, Answered: true, Roles: &roles, Labels: &labels,
+		StartedAt: timeOrNil(n.StartedAt), KmsKeyId: stringOrNil(n.KMSKeyID),
+		Settings: &settings, Drives: &drives, Certificates: &certificates,
+	}
+	if n.Build != (cluster.Build{}) {
+		out.Server = &api.ServerVersion{Version: n.Build.Version, Build: n.Build.Build, Commit: stringOrNil(n.Build.Commit)}
+	}
+	if n.Metadata != (cluster.Volume{}) {
+		out.Metadata = &api.SettingsVolume{
+			Directory: n.Metadata.Directory, Filesystem: filesystemOf(n.Metadata.Filesystem),
+			TotalBytes: bytesOf(n.Metadata.TotalBytes), FreeBytes: bytesOf(n.Metadata.FreeBytes),
+		}
+	}
+	return out
+}
+
+// GetSettings implements api.StrictServerInterface. It translates what the
+// use case gathered and decides nothing: who may read it, what is redacted
+// and what a node that did not answer is said to be are the use case's.
+func (o *operations) GetSettings(ctx context.Context, _ api.GetSettingsRequestObject) (api.GetSettingsResponseObject, error) {
+	if o.h.cfg.Settings == nil {
+		return nil, fmt.Errorf("settings: %w", errNotImplemented)
+	}
+	view, err := o.h.cfg.Settings.Get(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	out := api.Settings{
+		AnsweredBy: view.AnsweredBy,
+		Cluster: api.SettingsCluster{
+			DeploymentId: view.Cluster.DeploymentID, MetadataLevel: view.Cluster.MetadataLevel, Leader: stringOrNil(view.Cluster.Leader),
+			Nodes: view.Cluster.Nodes, Voters: view.Cluster.Voters,
+			ErasureSets: make([]api.SettingsErasureSet, len(view.Cluster.ErasureSets)),
+		},
+		Nodes: make([]api.NodeSettings, len(view.Nodes)), Mismatches: make([]api.SettingsMismatch, len(view.Mismatches)),
+	}
+	for i, set := range view.Cluster.ErasureSets {
+		out.Cluster.ErasureSets[i] = api.SettingsErasureSet{
+			Index: set.Index, Drives: set.Drives, Data: set.Data, Parity: set.Parity,
+			ReadQuorum: set.ReadQuorum, WriteQuorum: set.WriteQuorum,
+		}
+	}
+	for i, answer := range view.Nodes {
+		out.Nodes[i] = nodeSettingsOf(answer)
+	}
+	for i, mismatch := range view.Mismatches {
+		values := make([]api.SettingsMismatchValue, len(mismatch.Values))
+		for j, value := range mismatch.Values {
+			values[j] = api.SettingsMismatchValue{NodeId: value.NodeID, Value: value.Value}
+		}
+		out.Mismatches[i] = api.SettingsMismatch{Setting: mismatch.Setting, Values: values}
+	}
+	return api.GetSettings200JSONResponse(out), nil
 }
 
 // --- audit ---

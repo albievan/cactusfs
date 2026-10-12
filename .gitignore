@@ -10,6 +10,16 @@
 /.cache/
 /.data/
 
+# environment files, in any directory: they hold a deployment's own values,
+# and too easily a secret. That is every file named .env, .env.<anything> or
+# <anything>.env - cactusfs.env is the name deploy/cactusfs.env.example
+# suggests for a copy. The examples are tracked, and hold no value of a
+# secret.
+.env
+.env.*
+*.env
+!.env*.example
+
 # console
 /web/node_modules/
 /web/dist/

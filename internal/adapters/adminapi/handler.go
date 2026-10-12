@@ -80,12 +80,15 @@ type Observation struct {
 
 // Config lists what a Handler depends on.
 type Config struct {
-	Buckets     *app.BucketService
-	Objects     *app.ObjectService
-	Search      *app.SearchService
-	IAM         *app.IAMService
-	Sessions    *app.SessionService
-	Cluster     *app.ClusterService
+	Buckets  *app.BucketService
+	Objects  *app.ObjectService
+	Search   *app.SearchService
+	IAM      *app.IAMService
+	Sessions *app.SessionService
+	Cluster  *app.ClusterService
+	// Settings answers how the nodes are configured. It may be nil on a
+	// node that was not given the use case: the operation then answers 501.
+	Settings    *app.SettingsService
 	Idempotency *app.IdempotencyService
 	Identities  Identities
 	Clock       ports.Clock
@@ -283,6 +286,10 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 }
 
 var errUnauthenticated = errors.New("not authenticated")
+
+// errNotImplemented is the error of an operation of the contract that this
+// node was not given the use case for.
+var errNotImplemented = errors.New("not available on this node")
 
 // authenticate establishes who makes the request: the owner of an API key
 // sent as a bearer credential, or the user of a console session.
@@ -504,6 +511,8 @@ func problemOf(err error) problem {
 	case is(domain.ErrInvalidArgument), is(domain.ErrIncompleteBody), is(domain.ErrBadDigest), is(domain.ErrInvalidRange),
 		is(domain.ErrCustomerKeyRequired):
 		return problem{status: http.StatusBadRequest, code: "InvalidArgument", title: "Invalid request"}
+	case is(errNotImplemented):
+		return problem{status: http.StatusNotImplemented, code: "NotImplemented", title: "Not available on this node"}
 	case is(domain.ErrUnavailable), is(domain.ErrNotLeader), is(domain.ErrOutcomeUnknown), is(domain.ErrInsufficientDrives),
 		is(domain.ErrKeyUnavailable), is(domain.ErrShuttingDown), is(domain.ErrDriveOffline), is(domain.ErrNoTopology),
 		is(context.DeadlineExceeded), is(context.Canceled):

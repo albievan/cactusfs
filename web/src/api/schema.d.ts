@@ -496,6 +496,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How every node of the deployment is configured
+         * @description The settings of every node, its drives and the directories they are in, the certificates it serves, and
+         *     what holds for the deployment as a whole. The node that answers asks every other node as the request is
+         *     served, each at most once and all at the same time, and waits for none of them longer than three
+         *     seconds: the view is live, and nothing of it is stored anywhere.
+         *
+         *     **Nothing secret is part of it.** A setting of kind `secret` or `secret-file` is listed with `set` and
+         *     never with a `value`; a setting of kind `url` is given without userinfo, query and fragment; no mount
+         *     option of a file system and nothing of a private key is given. A value is cut at 4096 bytes. Each node
+         *     redacts what it says of itself, and the node that answers redacts all of it again.
+         *
+         *     A node that did not answer is listed with `answered: false` and the `reason`, and nothing else. A node
+         *     of an older release, which cannot be asked, has the reason `unsupported`.
+         */
+        get: operations["getSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -994,6 +1025,197 @@ export interface components {
             node_failures_tolerated: number;
             drives_online: number;
             drives_total: number;
+        };
+        /**
+         * @description How the deployment is configured, read from its nodes as the request was served. Nothing of it is
+         *     stored.
+         */
+        Settings: {
+            /** @description The node that answered and asked the others. */
+            answered_by: string;
+            cluster: components["schemas"]["SettingsCluster"];
+            /** @description Every node of the deployment, by ID, with its answer or the reason there is none. */
+            nodes: components["schemas"]["NodeSettings"][];
+            /**
+             * @description The settings of scope `cluster` in which the nodes that answered differ, by name. Besides the
+             *     settings, `kms-key-id` and `version` are compared. Empty when the nodes agree, and when fewer than
+             *     two answered.
+             */
+            mismatches: components["schemas"]["SettingsMismatch"][];
+        };
+        /**
+         * @description What holds for the deployment as a whole, from the replicated record of the answering node and its part
+         *     of the metadata group. A node that runs on its own is a deployment of one node.
+         */
+        SettingsCluster: {
+            /** @description Empty while the deployment has no drive topology. */
+            deployment_id: string;
+            /**
+             * @description The format of metadata entry the deployment writes now: the newest every member of the metadata
+             *     group can apply, as the metadata store of the answering node works it out - the number its metric
+             *     `cactusfs_metadata_schema_level` shows. A member that has not said what it can apply holds the level
+             *     back. It is 1 or more; when it cannot be read there is no answer, and the request fails.
+             */
+            metadata_level: number;
+            /** @description The node that leads the metadata group. Absent when there is none. */
+            leader?: string;
+            /** @description How many nodes are recorded. 1 when none is: the answering node, which runs on its own. */
+            nodes: number;
+            /**
+             * @description How many of them have the role `meta` and vote in the metadata group. 1 when no node is recorded: a
+             *     node on its own is the one member of its metadata group.
+             */
+            voters: number;
+            erasure_sets: components["schemas"]["SettingsErasureSet"][];
+        };
+        /** @description The coding of one erasure set. */
+        SettingsErasureSet: {
+            index: number;
+            /** @description The number of drives in the set. */
+            drives: number;
+            /** @description The number of data shards of an object. */
+            data: number;
+            /** @description The number of parity shards; as many drives can be lost. */
+            parity: number;
+            read_quorum: number;
+            write_quorum: number;
+        };
+        /**
+         * @description What one node says of itself. A node that did not answer has `node_id`, `answered: false` and `reason`
+         *     and nothing else; one that answered has no `reason`, and has `roles`, `labels`, `settings`, `drives`
+         *     and `certificates`, each of which may be empty.
+         */
+        NodeSettings: {
+            node_id: string;
+            answered: boolean;
+            /**
+             * @description Why the node did not answer: it could not be reached (`unreachable`), it did not answer in time
+             *     (`timeout`), it is of a release that cannot be asked (`unsupported`), or it was reached and could
+             *     not answer (`failed`). The cause itself is in the log of the answering node, not here.
+             * @enum {string}
+             */
+            reason?: "unreachable" | "timeout" | "unsupported" | "failed";
+            /** @description The roles the node runs. */
+            roles?: string[];
+            /** @description The placement labels that are set, by name - `region`, `zone`, `rack`, `host`. */
+            labels?: {
+                [key: string]: string;
+            };
+            server?: components["schemas"]["ServerVersion"];
+            /**
+             * Format: date-time
+             * @description When the process started.
+             */
+            started_at?: string;
+            /** @description The name of the key that wraps data keys. A name, never key material. */
+            kms_key_id?: string;
+            /** @description The settings of the node, by name. */
+            settings?: components["schemas"]["Setting"][];
+            /** @description The drives of the node, by ID. */
+            drives?: components["schemas"]["DriveSettings"][];
+            metadata?: components["schemas"]["SettingsVolume"];
+            certificates?: components["schemas"]["SettingsCertificate"][];
+        };
+        /** @description One setting of one node, as it may be shown. */
+        Setting: {
+            /** @description The name of the setting, which is that of its flag where it has one. */
+            name: string;
+            /** @description The environment variable that sets it. */
+            env?: string;
+            /** @description The flag that sets it, without dashes. A secret has none. */
+            flag?: string;
+            /** @description The heading the setting is listed under. */
+            group?: string;
+            /**
+             * @description What the value is, and with that how much of it is shown: `plain`, `path`, `url` (shown without
+             *     userinfo, query and fragment), `secret` or `secret-file` (never shown). The list is not closed: a
+             *     node of a newer release may name a kind this document does not, and its value is then never
+             *     shown either. Read a kind you do not know as a secret.
+             */
+            kind: string;
+            /**
+             * @description Whose the setting is: `node` for what each node has for itself, `cluster` for what must be the
+             *     same on every node. A newer release may add to the list.
+             */
+            scope: string;
+            /**
+             * @description How the value arrived: `default`, `environment`, `flag`, or `derived` from other settings. A newer
+             *     release may add to the list.
+             */
+            source: string;
+            /** @description Whether the setting has a value. For the kinds `secret` and `secret-file` it is all that is told. */
+            set: boolean;
+            /**
+             * @description The redacted value. Never present for the kinds `secret` and `secret-file`, nor for a kind that is
+             *     not known; absent when there is nothing to show.
+             */
+            value?: string;
+        };
+        /** @description The file system behind a directory, where the node can tell - on Linux. Mount options are never given. */
+        SettingsFilesystem: {
+            type: string;
+            /** @description What is mounted, without any credential it names. */
+            device: string;
+            /** @description Where it is mounted, as the node sees it. */
+            mount_point: string;
+        };
+        /** @description A directory a node stores in. */
+        SettingsVolume: {
+            /** @description The directory as the node sees it - inside a container, the path in the container. */
+            directory: string;
+            filesystem?: components["schemas"]["SettingsFilesystem"];
+            /** Format: int64 */
+            total_bytes: number;
+            /** Format: int64 */
+            free_bytes: number;
+        };
+        /** @description One drive of a node - where it is and what it belongs to. */
+        DriveSettings: {
+            id: string;
+            /** @description The directory as the node sees it - inside a container, the path in the container. */
+            directory: string;
+            /** @description What the deployment calls the volume, as the node was told. Absent when it was told nothing. */
+            label?: string;
+            filesystem?: components["schemas"]["SettingsFilesystem"];
+            /** Format: int64 */
+            total_bytes: number;
+            /** Format: int64 */
+            free_bytes: number;
+            /** @description Whether the node can use the drive. */
+            online: boolean;
+            /** @description The index of the erasure set the drive is in. Absent for a drive that is in none. */
+            erasure_set?: number;
+        };
+        /** @description What may be said of a certificate a node serves - who it names and until when. Nothing of the key. */
+        SettingsCertificate: {
+            /**
+             * @description `s3` for the certificate of the listeners clients reach, `node` for the one a node shows other
+             *     nodes. A newer release may add to the list.
+             */
+            use: string;
+            subject: string;
+            issuer: string;
+            dns_names: string[];
+            ip_addresses: string[];
+            /** Format: date-time */
+            not_before: string;
+            /** Format: date-time */
+            not_after: string;
+        };
+        /** @description A setting that should be the same on every node and is not. */
+        SettingsMismatch: {
+            /** @description The name of the setting, or `kms-key-id` or `version`. */
+            setting: string;
+            /** @description What each node that answered has, by node ID. */
+            values: components["schemas"]["SettingsMismatchValue"][];
+        };
+        SettingsMismatchValue: {
+            node_id: string;
+            /**
+             * @description The redacted value; `set` or `not set` for a secret; empty, or `not set` for a secret, on a node
+             *     that does not have the setting.
+             */
+            value: string;
         };
         ScrubStatus: {
             /** Format: int64 */
@@ -2183,6 +2405,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MaintenanceStatus"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The settings of the deployment as the answering node could gather them. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Settings"];
+                };
+            };
+            /** @description The caller is not allowed `admin:GetSettings`. The refusal is written to the audit trail. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];

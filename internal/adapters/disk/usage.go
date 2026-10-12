@@ -2,6 +2,7 @@ package disk
 
 import (
 	"fmt"
+	"os"
 )
 
 // Usage is the space of the file system a drive is on, in bytes. The numbers
@@ -30,6 +31,25 @@ func (d *Drive) Usage() (Usage, error) {
 	usage, err := fileSystemUsage(d.opened)
 	if err != nil {
 		return Usage{}, fmt.Errorf("disk.Usage: %w", err)
+	}
+	return usage, nil
+}
+
+// UsageOf asks the operating system how much room the file system dir is on
+// has: for a directory that is no drive, such as the one the metadata is kept
+// in. The directory is opened for the question and closed again.
+func UsageOf(dir string) (usage Usage, err error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return Usage{}, fmt.Errorf("disk.UsageOf: %w", err)
+	}
+	defer func() {
+		if closeErr := root.Close(); err == nil && closeErr != nil {
+			usage, err = Usage{}, fmt.Errorf("disk.UsageOf: %w", closeErr)
+		}
+	}()
+	if usage, err = fileSystemUsage(root); err != nil {
+		return Usage{}, fmt.Errorf("disk.UsageOf: %w", err)
 	}
 	return usage, nil
 }

@@ -42,6 +42,12 @@ service NodeService {
   // collector of every storage node asks every node before it removes a
   // shard.
   rpc InFlight(InFlightRequest) returns (InFlightResponse);
+  // Settings returns how the node was configured, what it stores on and
+  // which certificates it serves, as it may be shown: the node that answers
+  // has redacted it, and the node that asked redacts it again. It is read
+  // from the running node each time and stored nowhere. A node of a release
+  // without this call answers the RPC with UNIMPLEMENTED.
+  rpc Settings(SettingsRequest) returns (SettingsResponse);
 }
 
 message InfoRequest {}
@@ -87,6 +93,103 @@ message InFlightRequest {
 message InFlightResponse {
   Error error = 1;
   bool in_flight = 2;
+}
+
+message SettingsRequest {}
+
+message SettingsResponse {
+  Error error = 1;
+  string node_id = 2;
+  Build build = 3;
+  // When the process started, in seconds since the Unix epoch; 0 when the
+  // node does not say.
+  int64 started_at_unix = 4;
+  // The name of the key that wraps data keys. A name, never key material.
+  string kms_key_id = 5;
+  repeated Setting settings = 6;
+  repeated DriveSettings drives = 7;
+  // Where the node keeps its metadata. Absent on a node that keeps none.
+  Volume metadata = 8;
+  repeated Certificate certificates = 9;
+  repeated string roles = 10;
+  // The placement labels that are set: region, zone, rack, host.
+  map<string, string> labels = 11;
+}
+
+// Build names the build of a binary.
+message Build {
+  string version = 1;
+  // The number of the build.
+  string build = 2;
+  string commit = 3;
+}
+
+// Setting is one setting of a node. The words of kind, scope and source
+// travel as strings, so that a release that adds one is still understood: a
+// receiver treats a kind it does not know as a secret.
+message Setting {
+  string name = 1;
+  // The environment variable, such as "CACTUSFS_S3_ADDR".
+  string env = 2;
+  // The flag, without dashes; empty for a setting that has none.
+  string flag = 3;
+  // The heading the setting is listed under.
+  string group = 4;
+  // "plain", "path", "url", "secret" or "secret-file".
+  string kind = 5;
+  // "node" or "cluster".
+  string scope = 6;
+  // "default", "environment", "flag" or "derived".
+  string source = 7;
+  // Whether the setting has a value. For the secret kinds it is all that is
+  // sent.
+  bool set = 8;
+  // The redacted value: always empty for the kinds "secret" and
+  // "secret-file"; without userinfo, query and fragment for "url"; at most
+  // 4096 bytes.
+  string value = 9;
+}
+
+// Filesystem is the file system behind a directory, where the node can
+// tell. Mount options are never sent: they can hold credentials.
+message Filesystem {
+  string type = 1;
+  string device = 2;
+  string mount_point = 3;
+}
+
+// Volume is a directory a node stores in.
+message Volume {
+  // The directory as the node sees it.
+  string directory = 1;
+  // What the deployment calls the volume, as the node was told; empty when
+  // it was told nothing.
+  string label = 2;
+  Filesystem filesystem = 3;
+  uint64 total_bytes = 4;
+  uint64 free_bytes = 5;
+}
+
+// DriveSettings is one drive of a node and where it is.
+message DriveSettings {
+  string id = 1;
+  Volume volume = 2;
+  // Whether the node can use the drive.
+  bool online = 3;
+}
+
+// Certificate is what may be said of a certificate a node serves. Nothing
+// of the key.
+message Certificate {
+  // "s3" for the listeners clients reach, "node" for node RPC and Raft.
+  string use = 1;
+  string subject = 2;
+  string issuer = 3;
+  repeated string dns_names = 4;
+  repeated string ip_addresses = 5;
+  // Seconds since the Unix epoch.
+  int64 not_before_unix = 6;
+  int64 not_after_unix = 7;
 }
 
 // MetaService is what a node asks of the members of the metadata Raft group.

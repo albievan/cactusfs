@@ -3,6 +3,8 @@ package disk_test
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/albievan/cactusfs/internal/adapters/disk"
 )
 
 // TestUsage: a drive says how much room its file system has, for as long as
@@ -25,5 +27,23 @@ func TestUsage(t *testing.T) {
 	}
 	if _, err := drive.Usage(); err == nil {
 		t.Error("Usage of a drive that is closed succeeded")
+	}
+}
+
+// TestUsageOf: a directory that is no drive says how much room its file
+// system has; one that is not there says so.
+func TestUsageOf(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	usage, err := disk.UsageOf(dir)
+	if err != nil {
+		t.Fatalf("UsageOf: %v", err)
+	}
+	if usage.TotalBytes <= 0 || usage.FreeBytes < 0 || usage.FreeBytes > usage.TotalBytes {
+		t.Errorf("UsageOf = %+v, want room within the size of a file system", usage)
+	}
+	if _, err := disk.UsageOf(filepath.Join(dir, "absent")); err == nil {
+		t.Error("UsageOf a directory that is not there succeeded")
 	}
 }

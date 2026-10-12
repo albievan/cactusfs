@@ -379,11 +379,13 @@ while read -r id voter stores gateway <&4; do
 	# each mounted where the node is told its directories are.
 	claims=meta
 	paths=
+	labels=
 	if [ "$stores" = yes ]; then
 		i=1
 		while [ "$i" -le "$drives" ]; do
 			claims="$claims,data$i"
 			paths="$paths${paths:+,}/var/lib/cactusfs/data$i"
+			labels="$labels${labels:+,}data$i-$id-0"
 			i=$((i + 1))
 		done
 		claims_total=$((claims_total + drives))
@@ -394,6 +396,7 @@ while read -r id voter stores gateway <&4; do
 	want "$R" "the metadata claim mounted at CACTUSFS_META_DIR" "$D" "[$C | .volumeMounts[] | select(.name == \"meta\") | .mountPath] | join(\",\")" "$(q "$D" "$C | .env[] | select(.name == \"CACTUSFS_META_DIR\") | .value")"
 	have "$R" "CACTUSFS_META_DIR" "$D" "$C | .env[] | select(.name == \"CACTUSFS_META_DIR\") | .value"
 	want "$R" "CACTUSFS_DATA names a directory for each drive (none on a node that does not store)" "$D" "$C | .env[] | select(.name == \"CACTUSFS_DATA\") | .value" "$paths"
+	want "$R" "CACTUSFS_DRIVE_LABELS names the claim of each drive, data<N>-<StatefulSet>-0, in the order of CACTUSFS_DATA (none on a node that does not store)" "$D" "$C | .env[] | select(.name == \"CACTUSFS_DRIVE_LABELS\") | .value" "$labels"
 	if [ "$stores" = yes ]; then
 		want "$R" "every drive's claim of drives.size" "$D" '[.spec.volumeClaimTemplates[] | select(.metadata.name != "meta") | .spec.resources.requests.storage] | unique | join(",")' "$drive_size"
 		want "$R" "every drive's claim mounted at its directory of CACTUSFS_DATA" "$D" "[$C | .volumeMounts[] | select(.name | test(\"^data[0-9]+$\")) | .mountPath] | join(\",\")" "$paths"

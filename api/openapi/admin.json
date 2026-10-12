@@ -1567,6 +1567,42 @@
         }
       }
     },
+    "/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "tags": [
+          "cluster"
+        ],
+        "summary": "How every node of the deployment is configured",
+        "description": "The settings of every node, its drives and the directories they are in, the certificates it serves, and\nwhat holds for the deployment as a whole. The node that answers asks every other node as the request is\nserved, each at most once and all at the same time, and waits for none of them longer than three\nseconds: the view is live, and nothing of it is stored anywhere.\n\n**Nothing secret is part of it.** A setting of kind `secret` or `secret-file` is listed with `set` and\nnever with a `value`; a setting of kind `url` is given without userinfo, query and fragment; no mount\noption of a file system and nothing of a private key is given. A value is cut at 4096 bytes. Each node\nredacts what it says of itself, and the node that answers redacts all of it again.\n\nA node that did not answer is listed with `answered: false` and the `reason`, and nothing else. A node\nof an older release, which cannot be asked, has the reason `unsupported`.\n",
+        "x-cactusfs-action": "admin:GetSettings",
+        "responses": {
+          "200": {
+            "description": "The settings of the deployment as the answering node could gather them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not allowed `admin:GetSettings`. The refusal is written to the audit trail.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/audit": {
       "get": {
         "operationId": "listAudit",
@@ -2840,6 +2876,416 @@
           },
           "drives_total": {
             "type": "integer"
+          }
+        }
+      },
+      "Settings": {
+        "type": "object",
+        "description": "How the deployment is configured, read from its nodes as the request was served. Nothing of it is\nstored.\n",
+        "required": [
+          "answered_by",
+          "cluster",
+          "nodes",
+          "mismatches"
+        ],
+        "properties": {
+          "answered_by": {
+            "type": "string",
+            "description": "The node that answered and asked the others."
+          },
+          "cluster": {
+            "$ref": "#/components/schemas/SettingsCluster"
+          },
+          "nodes": {
+            "type": "array",
+            "description": "Every node of the deployment, by ID, with its answer or the reason there is none.",
+            "items": {
+              "$ref": "#/components/schemas/NodeSettings"
+            }
+          },
+          "mismatches": {
+            "type": "array",
+            "description": "The settings of scope `cluster` in which the nodes that answered differ, by name. Besides the\nsettings, `kms-key-id` and `version` are compared. Empty when the nodes agree, and when fewer than\ntwo answered.\n",
+            "items": {
+              "$ref": "#/components/schemas/SettingsMismatch"
+            }
+          }
+        }
+      },
+      "SettingsCluster": {
+        "type": "object",
+        "description": "What holds for the deployment as a whole, from the replicated record of the answering node and its part\nof the metadata group. A node that runs on its own is a deployment of one node.\n",
+        "required": [
+          "deployment_id",
+          "metadata_level",
+          "nodes",
+          "voters",
+          "erasure_sets"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "description": "Empty while the deployment has no drive topology."
+          },
+          "metadata_level": {
+            "type": "integer",
+            "description": "The format of metadata entry the deployment writes now: the newest every member of the metadata\ngroup can apply, as the metadata store of the answering node works it out - the number its metric\n`cactusfs_metadata_schema_level` shows. A member that has not said what it can apply holds the level\nback. It is 1 or more; when it cannot be read there is no answer, and the request fails.\n"
+          },
+          "leader": {
+            "type": "string",
+            "description": "The node that leads the metadata group. Absent when there is none."
+          },
+          "nodes": {
+            "type": "integer",
+            "description": "How many nodes are recorded. 1 when none is: the answering node, which runs on its own.\n"
+          },
+          "voters": {
+            "type": "integer",
+            "description": "How many of them have the role `meta` and vote in the metadata group. 1 when no node is recorded: a\nnode on its own is the one member of its metadata group.\n"
+          },
+          "erasure_sets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SettingsErasureSet"
+            }
+          }
+        }
+      },
+      "SettingsErasureSet": {
+        "type": "object",
+        "description": "The coding of one erasure set.",
+        "required": [
+          "index",
+          "drives",
+          "data",
+          "parity",
+          "read_quorum",
+          "write_quorum"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer"
+          },
+          "drives": {
+            "type": "integer",
+            "description": "The number of drives in the set."
+          },
+          "data": {
+            "type": "integer",
+            "description": "The number of data shards of an object."
+          },
+          "parity": {
+            "type": "integer",
+            "description": "The number of parity shards; as many drives can be lost."
+          },
+          "read_quorum": {
+            "type": "integer"
+          },
+          "write_quorum": {
+            "type": "integer"
+          }
+        }
+      },
+      "NodeSettings": {
+        "type": "object",
+        "description": "What one node says of itself. A node that did not answer has `node_id`, `answered: false` and `reason`\nand nothing else; one that answered has no `reason`, and has `roles`, `labels`, `settings`, `drives`\nand `certificates`, each of which may be empty.\n",
+        "required": [
+          "node_id",
+          "answered"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "answered": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the node did not answer: it could not be reached (`unreachable`), it did not answer in time\n(`timeout`), it is of a release that cannot be asked (`unsupported`), or it was reached and could\nnot answer (`failed`). The cause itself is in the log of the answering node, not here.\n",
+            "enum": [
+              "unreachable",
+              "timeout",
+              "unsupported",
+              "failed"
+            ]
+          },
+          "roles": {
+            "type": "array",
+            "description": "The roles the node runs.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "type": "object",
+            "description": "The placement labels that are set, by name - `region`, `zone`, `rack`, `host`.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServerVersion"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the process started."
+          },
+          "kms_key_id": {
+            "type": "string",
+            "description": "The name of the key that wraps data keys. A name, never key material."
+          },
+          "settings": {
+            "type": "array",
+            "description": "The settings of the node, by name.",
+            "items": {
+              "$ref": "#/components/schemas/Setting"
+            }
+          },
+          "drives": {
+            "type": "array",
+            "description": "The drives of the node, by ID.",
+            "items": {
+              "$ref": "#/components/schemas/DriveSettings"
+            }
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/SettingsVolume"
+          },
+          "certificates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SettingsCertificate"
+            }
+          }
+        }
+      },
+      "Setting": {
+        "type": "object",
+        "description": "One setting of one node, as it may be shown.",
+        "required": [
+          "name",
+          "kind",
+          "scope",
+          "source",
+          "set"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of the setting, which is that of its flag where it has one."
+          },
+          "env": {
+            "type": "string",
+            "description": "The environment variable that sets it."
+          },
+          "flag": {
+            "type": "string",
+            "description": "The flag that sets it, without dashes. A secret has none."
+          },
+          "group": {
+            "type": "string",
+            "description": "The heading the setting is listed under."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What the value is, and with that how much of it is shown: `plain`, `path`, `url` (shown without\nuserinfo, query and fragment), `secret` or `secret-file` (never shown). The list is not closed: a\nnode of a newer release may name a kind this document does not, and its value is then never\nshown either. Read a kind you do not know as a secret.\n"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Whose the setting is: `node` for what each node has for itself, `cluster` for what must be the\nsame on every node. A newer release may add to the list.\n"
+          },
+          "source": {
+            "type": "string",
+            "description": "How the value arrived: `default`, `environment`, `flag`, or `derived` from other settings. A newer\nrelease may add to the list.\n"
+          },
+          "set": {
+            "type": "boolean",
+            "description": "Whether the setting has a value. For the kinds `secret` and `secret-file` it is all that is told."
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "The redacted value. Never present for the kinds `secret` and `secret-file`, nor for a kind that is\nnot known; absent when there is nothing to show.\n"
+          }
+        }
+      },
+      "SettingsFilesystem": {
+        "type": "object",
+        "description": "The file system behind a directory, where the node can tell - on Linux. Mount options are never given.\n",
+        "required": [
+          "type",
+          "device",
+          "mount_point"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "device": {
+            "type": "string",
+            "description": "What is mounted, without any credential it names."
+          },
+          "mount_point": {
+            "type": "string",
+            "description": "Where it is mounted, as the node sees it."
+          }
+        }
+      },
+      "SettingsVolume": {
+        "type": "object",
+        "description": "A directory a node stores in.",
+        "required": [
+          "directory",
+          "total_bytes",
+          "free_bytes"
+        ],
+        "properties": {
+          "directory": {
+            "type": "string",
+            "description": "The directory as the node sees it - inside a container, the path in the container."
+          },
+          "filesystem": {
+            "$ref": "#/components/schemas/SettingsFilesystem"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "DriveSettings": {
+        "type": "object",
+        "description": "One drive of a node - where it is and what it belongs to.",
+        "required": [
+          "id",
+          "directory",
+          "total_bytes",
+          "free_bytes",
+          "online"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string",
+            "description": "The directory as the node sees it - inside a container, the path in the container."
+          },
+          "label": {
+            "type": "string",
+            "description": "What the deployment calls the volume, as the node was told. Absent when it was told nothing."
+          },
+          "filesystem": {
+            "$ref": "#/components/schemas/SettingsFilesystem"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "online": {
+            "type": "boolean",
+            "description": "Whether the node can use the drive."
+          },
+          "erasure_set": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The index of the erasure set the drive is in. Absent for a drive that is in none."
+          }
+        }
+      },
+      "SettingsCertificate": {
+        "type": "object",
+        "description": "What may be said of a certificate a node serves - who it names and until when. Nothing of the key.",
+        "required": [
+          "use",
+          "subject",
+          "issuer",
+          "dns_names",
+          "ip_addresses",
+          "not_before",
+          "not_after"
+        ],
+        "properties": {
+          "use": {
+            "type": "string",
+            "description": "`s3` for the certificate of the listeners clients reach, `node` for the one a node shows other\nnodes. A newer release may add to the list.\n"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "dns_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ip_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SettingsMismatch": {
+        "type": "object",
+        "description": "A setting that should be the same on every node and is not.",
+        "required": [
+          "setting",
+          "values"
+        ],
+        "properties": {
+          "setting": {
+            "type": "string",
+            "description": "The name of the setting, or `kms-key-id` or `version`."
+          },
+          "values": {
+            "type": "array",
+            "description": "What each node that answered has, by node ID.",
+            "items": {
+              "$ref": "#/components/schemas/SettingsMismatchValue"
+            }
+          }
+        }
+      },
+      "SettingsMismatchValue": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "value"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "description": "The redacted value; `set` or `not set` for a secret; empty, or `not set` for a secret, on a node\nthat does not have the setting.\n"
           }
         }
       },

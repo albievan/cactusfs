@@ -1,0 +1,95 @@
+Usage of cactusfs server:
+  -access-flush-interval duration
+    	how often the downloads this node counted are recorded with the objects, at least 5s; a node that crashes loses up to this much of the count ($CACTUSFS_ACCESS_FLUSH_INTERVAL) (default 30s)
+  -admin-addr address
+    	listen address of the admin listener ($CACTUSFS_ADMIN_ADDR) (default ":9001")
+  -advertise-raft host:port
+    	host:port at which other nodes reach this node's Raft transport; default the host of --advertise-rpc with the port of --raft-addr ($CACTUSFS_ADVERTISE_RAFT)
+  -advertise-rpc host:port
+    	host:port at which other nodes reach this node's RPC; default its entry in --peers ($CACTUSFS_ADVERTISE_RPC)
+  -allow-drive-replacement
+    	confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is refused afterwards ($CACTUSFS_ALLOW_DRIVE_REPLACEMENT)
+  -audit-export
+    	write every audit record to standard output as a JSON line with "stream":"audit" ($CACTUSFS_AUDIT_EXPORT)
+  -data directory
+    	drive directory; repeat the flag or separate directories with commas ($CACTUSFS_DATA)
+  -dev-plaintext
+    	DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only ($CACTUSFS_DEV_PLAINTEXT)
+  -drain-delay duration
+    	on shutdown, keep serving this long with /readyz answering 503 before closing the listeners ($CACTUSFS_DRAIN_DELAY)
+  -drive-labels labels
+    	what the deployment calls the volume behind each drive directory - a compose volume, a claim - as labels separated by commas, one for each --data entry in the same order, or none; shown with the node's settings and used for nothing else ($CACTUSFS_DRIVE_LABELS)
+  -gc-grace duration
+    	minimum age of an unreferenced shard before it is removed ($CACTUSFS_GC_GRACE) (default 24h0m0s)
+  -gc-interval duration
+    	pause between two passes of the garbage collector for unreferenced shards; 0 disables it ($CACTUSFS_GC_INTERVAL) (default 1h0m0s)
+  -kms service
+    	key management service: "vault" for HashiCorp Vault Transit, "local" for a sealed local key file; there is no default ($CACTUSFS_KMS)
+  -kms-key-file path
+    	path of the local KMS key file; default <metadata directory>/kms-local.json ($CACTUSFS_KMS_KEY_FILE)
+  -kms-passphrase-file path
+    	path of a file holding the local KMS passphrase, instead of $CACTUSFS_KMS_PASSPHRASE ($CACTUSFS_KMS_PASSPHRASE_FILE)
+  -lifecycle-interval duration
+    	pause between two passes of the worker that carries out the lifecycle rules of buckets; 0 disables it ($CACTUSFS_LIFECYCLE_INTERVAL) (default 1h0m0s)
+  -log-level level
+    	minimum log level: debug, info, warn or error ($CACTUSFS_LOG_LEVEL) (default "info")
+  -meta-dir directory
+    	metadata directory; default <first data directory>/meta ($CACTUSFS_META_DIR)
+  -node-id name
+    	name of this node: lowercase letters, digits and hyphens; required in a cluster, where it must be the name in the node certificate ($CACTUSFS_NODE_ID)
+  -node-tls-ca path
+    	path of the CA certificate that issues the cluster's node certificates, and nothing else ($CACTUSFS_NODE_TLS_CA)
+  -node-tls-cert path
+    	path of the node certificate for mutual TLS between nodes ($CACTUSFS_NODE_TLS_CERT)
+  -node-tls-key path
+    	path of the node certificate's private key ($CACTUSFS_NODE_TLS_KEY)
+  -otlp-endpoint URL
+    	URL of an OTLP/HTTP trace collector; traces are not exported when empty ($CACTUSFS_OTLP_ENDPOINT)
+  -peers id=host:port
+    	every node of the cluster, this one included, as id=host:port of its node RPC, separated by commas; makes the node a member of a cluster ($CACTUSFS_PEERS)
+  -raft-addr address
+    	listen address of the Raft transport ($CACTUSFS_RAFT_ADDR) (default ":9003")
+  -region region
+    	region name reported to S3 clients; default us-east-1 ($CACTUSFS_REGION)
+  -roles roles
+    	roles of this node: gateway, meta, storage, console; default all ($CACTUSFS_ROLES)
+  -rpc-addr address
+    	listen address of node RPC ($CACTUSFS_RPC_ADDR) (default ":9002")
+  -s3-addr address
+    	listen address of the S3 API ($CACTUSFS_S3_ADDR) (default ":9000")
+  -s3-domain domain
+    	domain for virtual-hosted-style requests, <bucket>.<domain> ($CACTUSFS_S3_DOMAIN)
+  -scrub-interval duration
+    	pause between two passes of the scrubber, which verifies and heals every object; 0 disables it ($CACTUSFS_SCRUB_INTERVAL) (default 24h0m0s)
+  -scrub-rate-mib int
+    	limit on how fast the scrubber reads, in MiB per second; 0 is no limit ($CACTUSFS_SCRUB_RATE_MIB) (default 64)
+  -shutdown-timeout duration
+    	time allowed for in-flight requests to finish once the listeners have closed ($CACTUSFS_SHUTDOWN_TIMEOUT) (default 30s)
+  -tls-cert path
+    	path of the PEM certificate chain ($CACTUSFS_TLS_CERT)
+  -tls-key path
+    	path of the PEM private key ($CACTUSFS_TLS_KEY)
+  -tls-reload-interval duration
+    	how often the certificate and key files, the node's too, are read again, so that a certificate is replaced without a restart; at least 5s, 0 never reads them again; the node CA is read at start only ($CACTUSFS_TLS_RELOAD_INTERVAL) (default 1m0s)
+  -topology-host host
+    	host this node runs on, for placement ($CACTUSFS_TOPOLOGY_HOST)
+  -topology-rack rack
+    	rack this node is in, for placement ($CACTUSFS_TOPOLOGY_RACK)
+  -topology-region region
+    	region this node is in, for placement ($CACTUSFS_TOPOLOGY_REGION)
+  -topology-zone zone
+    	zone this node is in, for placement ($CACTUSFS_TOPOLOGY_ZONE)
+  -vault-addr URL
+    	URL of Vault, https://host:port ($CACTUSFS_VAULT_ADDR)
+  -vault-ca-cert path
+    	path of the CA certificate that issued Vault's certificate; default the system's CAs ($CACTUSFS_VAULT_CA_CERT)
+  -vault-key name
+    	name of the Transit key, of an AEAD type such as aes256-gcm96 ($CACTUSFS_VAULT_KEY)
+  -vault-namespace namespace
+    	Vault Enterprise namespace ($CACTUSFS_VAULT_NAMESPACE)
+  -vault-server-name name
+    	name expected in Vault's certificate, when Vault is reached under another ($CACTUSFS_VAULT_SERVER_NAME)
+  -vault-token-file path
+    	path of a file holding the Vault token; read at every use, so it can be renewed in place ($CACTUSFS_VAULT_TOKEN_FILE)
+  -vault-transit-mount path
+    	path of Vault's Transit engine; default transit ($CACTUSFS_VAULT_TRANSIT_MOUNT)

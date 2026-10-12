@@ -9,3 +9,12 @@ web/dist
 web/coverage
 **/*.test
 **/*.out
+# Environment files never enter the build context: `COPY . .` would put a
+# local deploy/compose/.env or cactusfs.env, and whatever secret it holds,
+# into a layer of the builder. That is every file named .env, .env.<anything>
+# or <anything>.env, in any directory. The examples are part of the source.
+**/.env
+**/.env.*
+*.env
+**/*.env
+!**/.env*.example

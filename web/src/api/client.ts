@@ -53,6 +53,22 @@ export type APIKeyCreated = Schemas['APIKeyCreated'];
 export type ClusterStatus = Schemas['ClusterStatus'];
 /** What the background work of a node has done. */
 export type MaintenanceStatus = Schemas['MaintenanceStatus'];
+/** How every node of the deployment is configured, as the answering node could gather it. */
+export type Settings = Schemas['Settings'];
+/** What one node says of itself, or why it said nothing. */
+export type NodeSettings = Schemas['NodeSettings'];
+/** One setting of one node, as it may be shown. */
+export type Setting = Schemas['Setting'];
+/** One drive of a node: where it is and what it belongs to. */
+export type DriveSettings = Schemas['DriveSettings'];
+/** A directory a node stores in. */
+export type SettingsVolume = Schemas['SettingsVolume'];
+/** The file system behind a directory, where the node can tell. */
+export type SettingsFilesystem = Schemas['SettingsFilesystem'];
+/** What may be said of a certificate a node serves. */
+export type SettingsCertificate = Schemas['SettingsCertificate'];
+/** A setting that should be the same on every node and is not. */
+export type SettingsMismatch = Schemas['SettingsMismatch'];
 /** One record of the audit trail. */
 export type AuditRecord = Schemas['AuditRecord'];
 /** One page of the audit trail. */

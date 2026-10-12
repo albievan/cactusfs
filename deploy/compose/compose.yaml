@@ -4,6 +4,14 @@
 #   make up            # or: docker compose -f deploy/compose/compose.yaml up -d --build
 #   make down          # stop; the volumes, and so the data, are kept
 #
+# What else the cluster can be told - the log level, the intervals of the
+# background work, a trace collector - is listed in .env.example beside this
+# file. Copy it to .env (git ignores it; `make up` hands it to compose when it
+# exists, and `docker compose` finds it there by itself) or export the
+# variables; a variable of the shell wins. Nothing here is read by the nodes
+# from a file: compose puts the values into their environment. Secrets do not
+# belong in .env: export them.
+#
 # The same file works with `docker compose` and with rootless `podman compose`:
 # no privileged port, no host network, nothing privileged, named volumes only.
 #
@@ -66,6 +74,20 @@ x-environment: &environment
   CACTUSFS_TLS_CERT: /var/lib/cactusfs/config/s3.pem
   CACTUSFS_TLS_KEY: /var/lib/cactusfs/config/s3.key
   CACTUSFS_DRAIN_DELAY: 2s
+  # What may be tuned, from the shell or from .env (see .env.example). One
+  # that is not set reaches the node empty, which a node takes as not set:
+  # its default holds.
+  CACTUSFS_LOG_LEVEL: ${CACTUSFS_LOG_LEVEL:-}
+  CACTUSFS_AUDIT_EXPORT: ${CACTUSFS_AUDIT_EXPORT:-}
+  CACTUSFS_OTLP_ENDPOINT: ${CACTUSFS_OTLP_ENDPOINT:-}
+  CACTUSFS_REGION: ${CACTUSFS_REGION:-}
+  CACTUSFS_TLS_RELOAD_INTERVAL: ${CACTUSFS_TLS_RELOAD_INTERVAL:-}
+  CACTUSFS_ACCESS_FLUSH_INTERVAL: ${CACTUSFS_ACCESS_FLUSH_INTERVAL:-}
+  CACTUSFS_SCRUB_INTERVAL: ${CACTUSFS_SCRUB_INTERVAL:-}
+  CACTUSFS_SCRUB_RATE_MIB: ${CACTUSFS_SCRUB_RATE_MIB:-}
+  CACTUSFS_LIFECYCLE_INTERVAL: ${CACTUSFS_LIFECYCLE_INTERVAL:-}
+  CACTUSFS_GC_INTERVAL: ${CACTUSFS_GC_INTERVAL:-}
+  CACTUSFS_GC_GRACE: ${CACTUSFS_GC_GRACE:-}
 
 services:
   # Runs once: writes the certificates and the shared key file into the config
@@ -91,6 +113,9 @@ services:
     environment:
       <<: *environment
       CACTUSFS_NODE_ID: node1
+      # The volumes behind the two drives, as the engine names them (the
+      # project and the volume): what the node shows beside each directory.
+      CACTUSFS_DRIVE_LABELS: cactusfs_node1-data1,cactusfs_node1-data2
       CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node1.pem
       CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node1.key
       CACTUSFS_TOPOLOGY_ZONE: zone-a
@@ -112,6 +137,9 @@ services:
     environment:
       <<: *environment
       CACTUSFS_NODE_ID: node2
+      # The volumes behind the two drives, as the engine names them (the
+      # project and the volume): what the node shows beside each directory.
+      CACTUSFS_DRIVE_LABELS: cactusfs_node2-data1,cactusfs_node2-data2
       CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node2.pem
       CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node2.key
       CACTUSFS_TOPOLOGY_ZONE: zone-b
@@ -133,6 +161,9 @@ services:
     environment:
       <<: *environment
       CACTUSFS_NODE_ID: node3
+      # The volumes behind the two drives, as the engine names them (the
+      # project and the volume): what the node shows beside each directory.
+      CACTUSFS_DRIVE_LABELS: cactusfs_node3-data1,cactusfs_node3-data2
       CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node3.pem
       CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node3.key
       CACTUSFS_TOPOLOGY_ZONE: zone-a
@@ -157,6 +188,9 @@ services:
     environment:
       <<: *environment
       CACTUSFS_NODE_ID: node4
+      # The volumes behind the two drives, as the engine names them (the
+      # project and the volume): what the node shows beside each directory.
+      CACTUSFS_DRIVE_LABELS: cactusfs_node4-data1,cactusfs_node4-data2
       CACTUSFS_ROLES: gateway,storage,console
       CACTUSFS_NODE_TLS_CERT: /var/lib/cactusfs/config/nodes/node4.pem
       CACTUSFS_NODE_TLS_KEY: /var/lib/cactusfs/config/nodes/node4.key

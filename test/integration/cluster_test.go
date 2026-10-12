@@ -119,8 +119,10 @@ func TestClusterOfContainers(t *testing.T) {
 	// Every node lists the same.
 	for _, id := range nodes {
 		listed, err := c.S3(id).ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String("photos")})
-		if err != nil || len(listed.Contents) != len(objects) {
-			t.Errorf("ListObjectsV2 through %s: %d objects, %v; want %d", id, len(listed.Contents), err, len(objects))
+		if err != nil {
+			t.Errorf("ListObjectsV2 through %s: %v", id, err)
+		} else if len(listed.Contents) != len(objects) {
+			t.Errorf("ListObjectsV2 through %s: %d objects; want %d", id, len(listed.Contents), len(objects))
 		}
 	}
 	// A range, through a node that did not write the object.

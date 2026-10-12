@@ -514,3 +514,29 @@ func (c *localConfig) GetBucketConfig(ctx context.Context, name, kind string) ([
 	done(err)
 	return document, err
 }
+
+// InstrumentNodeSettings returns next wrapped so that every question to
+// another node about its settings is traced and counted. The node that is
+// asked is neither a label nor an attribute, and nothing of its answer is:
+// a setting, a directory or the name of a certificate has no place in a
+// metric or a span.
+func (t *Telemetry) InstrumentNodeSettings(next ports.NodeSettingsReader) ports.NodeSettingsReader {
+	return &nodeSettings{t: t, next: next}
+}
+
+type nodeSettings struct {
+	t    *Telemetry
+	next ports.NodeSettingsReader
+}
+
+const portNodeSettings = "node_settings"
+
+func (*nodeSettings) instrumented() {}
+
+// NodeSettings implements ports.NodeSettingsReader.
+func (s *nodeSettings) NodeSettings(ctx context.Context, nodeID string) (cluster.NodeSettings, error) {
+	ctx, done := s.t.call(ctx, portNodeSettings, "NodeSettings")
+	settings, err := s.next.NodeSettings(ctx, nodeID)
+	done(err)
+	return settings, err
+}

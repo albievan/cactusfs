@@ -83,7 +83,11 @@ type node struct {
 	iam        *app.IAMService
 	sessions   *app.SessionService
 	// cluster, idempotency and maintenance serve the management API.
-	cluster     *app.ClusterService
+	cluster *app.ClusterService
+	// local is how this node was configured, as it says it when asked;
+	// settings gathers that of every node.
+	local       *localSettings
+	settings    *app.SettingsService
 	idempotency *app.IdempotencyService
 	maintenance *app.Maintenance
 	clock       ports.Clock
@@ -142,6 +146,10 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 	kms := n.telemetry.InstrumentKMS(opened)
+	// What the node says of its settings, to its own management API and to
+	// the nodes that ask. It is there before node RPC is, and redacted from
+	// the start: the name of the KMS key is a name, not key material.
+	n.local = newLocalSettings(cfg, n.drives, opened.KeyID(), n.clock.Now())
 
 	// Events are derived from applied metadata entries and delivered inside
 	// the process.
@@ -153,6 +161,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 	n.id = n.meta.NodeID()
+	n.local.setNodeID(n.id)
 	// Every outbound port is reached through a decorator that traces and
 	// counts the call: a use case is never handed n.meta itself. A test
 	// walks the node and fails on a port that is (see wiring_test.go).
@@ -264,6 +273,21 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
 		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },
 	})
+	// The settings of every node: this node's own, and the others' asked
+	// over node RPC each time. A node on its own has nobody to ask. The
+	// metadata level is the store's own reading, as its gauge has it: a
+	// function over what Raft and the state hold, not a port.
+	var others ports.NodeSettingsReader
+	if n.rpc != nil {
+		others = n.telemetry.InstrumentNodeSettings(n.rpc)
+	}
+	n.settings, err = app.NewSettingsService(app.SettingsServiceConfig{
+		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Level: metadataLevel(n.meta),
+		Local: n.local.Local, Reader: others, Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
 	if cfg.AuditExport && n.auditOut != nil {
 		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(trail, n.auditOut, logger).Handle))
 	}

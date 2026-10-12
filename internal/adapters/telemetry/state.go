@@ -183,9 +183,11 @@ type state struct {
 type tlsObserved struct {
 	source atomic.Pointer[TLSSource]
 	probe  probe[TLSState]
-	// refused holds, by reason, what the sources of this use have counted.
-	// It is guarded by the mutex of the state.
+	// refused holds, by reason, what the sources of this use have counted,
+	// and read is the last question whose answer was counted. Both are
+	// guarded by the mutex of the state.
 	refused map[string]*tally
+	read    uint64
 }
 
 // tally makes one count that only grows of the readings of a count that is
@@ -369,20 +371,33 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 		gauge(s.tlsPending, flag(answer.Pending), use)
 		// Every reason is a series from the first answer on, so that the
 		// first refusal is an increase from nothing.
-		for reason, total := range s.tlsRefusals(use, source, answer.Refused) {
+		for reason, total := range s.tlsRefusals(use, source, tlsAsked[use].seq, answer.Refused) {
 			ch <- prometheus.MustNewConstMetric(s.tlsRefused, prometheus.CounterValue, float64(total), use, reason)
 		}
 	}
 }
 
-// tlsRefusals takes the reading of a source of the given use and returns
-// what to expose: by reason, everything the sources of that use have counted.
-func (s *state) tlsRefusals(use string, source *TLSSource, reading map[string]uint64) map[string]uint64 {
+// tlsRefusals takes the reading of a source of the given use, which is the
+// answer to the question asked, and returns what to expose: by reason,
+// everything the sources of that use have counted.
+//
+// An answer is counted once, and never after a later one: two scrapes at the
+// same moment share an answer, or hold two and come here in either order,
+// and a reading that is older than the last would look like a source that
+// began again at nothing - and be counted a second time.
+func (s *state) tlsRefusals(use string, source *TLSSource, asked uint64, reading map[string]uint64) map[string]uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	observed := s.tls[use]
+	fresh := asked > observed.read
+	if fresh {
+		observed.read = asked
+	}
 	totals := map[string]uint64{}
-	for reason, counted := range s.tls[use].refused {
-		counted.read(source, reading[reason])
+	for reason, counted := range observed.refused {
+		if fresh {
+			counted.read(source, reading[reason])
+		}
 		totals[reason] = counted.total
 	}
 	return totals
@@ -420,12 +435,17 @@ type probe[T any] struct {
 	mu sync.Mutex
 	// out is the question that is out; nil when none is.
 	out *question[T]
+	// asked counts the questions put.
+	asked uint64
 }
 
 // question is one asking of a source.
 type question[T any] struct {
 	// of is the source that was asked, as it was attached.
 	of any
+	// seq numbers the questions of a probe from 1, in the order they were
+	// put: an answer with a higher number is the later one.
+	seq uint64
 	// answered is closed when the source has answered; answer is written
 	// before that and never after.
 	answered chan struct{}
@@ -440,7 +460,8 @@ func (p *probe[T]) ask(source any, fn func() T) *question[T] {
 	if p.out != nil {
 		return p.out
 	}
-	q := &question[T]{of: source, answered: make(chan struct{})}
+	p.asked++
+	q := &question[T]{of: source, seq: p.asked, answered: make(chan struct{})}
 	p.out = q
 	go func() {
 		q.answer = fn()

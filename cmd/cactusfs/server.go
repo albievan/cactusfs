@@ -109,7 +109,11 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 			awaitReloader(context.WithoutCancel(ctx), logger, "server", reloaded, reloadStopTimeout)
 		}()
 	}
-	tel, err := telemetry.New(ctx, telemetry.Config{Version: build.Tag(), OTLPEndpoint: cfg.OTLPEndpoint})
+	// An endpoint that is refused is named in the error without what a
+	// credential travels in, and what the exporter cannot send later is said
+	// in the node's log, without the words of the error (telemetry
+	// .ExportErrors).
+	tel, err := telemetry.New(ctx, telemetry.Config{Version: build.Tag(), OTLPEndpoint: cfg.OTLPEndpoint, Logger: logger})
 	if err != nil {
 		return fmt.Errorf("server.Open: %w", err)
 	}
@@ -183,6 +187,11 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		}
 		return errors.Join(fmt.Errorf("server.Open: %w", err), servedErr)
 	}
+	if certificate != nil {
+		// The certificate clients are shown is part of what the node says of
+		// its settings.
+		n.local.serve(cluster.CertificateS3, certificate)
+	}
 	n.startBackground(ctx, cfg)
 
 	admin := http.NewServeMux()
@@ -194,6 +203,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	if cfg.Roles.Has(cluster.RoleGateway) {
 		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
+			Settings:    n.settings,
 			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
 			Build: build,

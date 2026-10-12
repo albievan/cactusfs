@@ -74,6 +74,15 @@ func TestRun(t *testing.T) {
 			wantCode: exitError, wantStderr: "must use https",
 		},
 		{
+			// And is told so without the credential being repeated: see
+			// TestARefusedCollectorIsNamedWithoutItsCredential.
+			name: "server with a credential in the URL of the trace collector refuses to start",
+			args: func(t *testing.T) []string {
+				return append([]string{"server"}, storeArgs(t, "--dev-plaintext", "--otlp-endpoint", "https://tracer:pw@collector.example:4318")...)
+			},
+			wantCode: exitError, wantStderr: `OTLP endpoint "https://collector.example:4318" (shown without them) must not carry userinfo`,
+		},
+		{
 			name: "server with unusable address fails",
 			args: func(t *testing.T) []string {
 				return append([]string{"server"}, storeArgs(t, "--dev-plaintext", "--admin-addr", "127.0.0.1:99999")...)

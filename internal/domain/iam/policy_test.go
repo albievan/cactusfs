@@ -246,11 +246,11 @@ func TestBuiltInRoles(t *testing.T) {
 	admin := iam.Resource{Admin: "user/x"}
 	// role -> what it must and must not allow
 	matrix := map[string]map[iam.Action]bool{
-		iam.RoleClusterAdmin: {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionDeleteBucket: true, iam.ActionPutUser: true, iam.ActionGetAuditLog: true},
-		iam.RoleBucketAdmin:  {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionCreateBucket: true, iam.ActionDeleteBucket: true, iam.ActionPutUser: false, iam.ActionGetAuditLog: false},
-		iam.RoleReadWrite:    {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionDeleteObject: true, iam.ActionListBucket: true, iam.ActionCreateBucket: false, iam.ActionDeleteBucket: false, iam.ActionPutUser: false},
-		iam.RoleReadOnly:     {iam.ActionGetObject: true, iam.ActionListBucket: true, iam.ActionPutObject: false, iam.ActionDeleteObject: false, iam.ActionGetUser: false},
-		iam.RoleAuditor:      {iam.ActionGetAuditLog: true, iam.ActionListUsers: true, iam.ActionGetMetrics: true, iam.ActionGetObject: false, iam.ActionListBucket: false, iam.ActionPutUser: false, iam.ActionCreateKey: false, iam.ActionDeleteUser: false},
+		iam.RoleClusterAdmin: {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionDeleteBucket: true, iam.ActionPutUser: true, iam.ActionGetAuditLog: true, iam.ActionGetSettings: true},
+		iam.RoleBucketAdmin:  {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionCreateBucket: true, iam.ActionDeleteBucket: true, iam.ActionPutUser: false, iam.ActionGetAuditLog: false, iam.ActionGetSettings: false},
+		iam.RoleReadWrite:    {iam.ActionGetObject: true, iam.ActionPutObject: true, iam.ActionDeleteObject: true, iam.ActionListBucket: true, iam.ActionCreateBucket: false, iam.ActionDeleteBucket: false, iam.ActionPutUser: false, iam.ActionGetSettings: false},
+		iam.RoleReadOnly:     {iam.ActionGetObject: true, iam.ActionListBucket: true, iam.ActionPutObject: false, iam.ActionDeleteObject: false, iam.ActionGetUser: false, iam.ActionGetSettings: false},
+		iam.RoleAuditor:      {iam.ActionGetAuditLog: true, iam.ActionListUsers: true, iam.ActionGetMetrics: true, iam.ActionGetSettings: true, iam.ActionGetObject: false, iam.ActionListBucket: false, iam.ActionPutUser: false, iam.ActionCreateKey: false, iam.ActionDeleteUser: false},
 	}
 	for role, actions := range matrix {
 		if !iam.IsBuiltIn(role) || !roles[role].BuiltIn || len(roles[role].Policies) != 1 {

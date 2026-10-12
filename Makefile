@@ -40,7 +40,7 @@ COMMIT := $(shell sh scripts/buildid.sh commit)
 endif
 
 # Targets that run inside the builder image.
-BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
+BUILDER_TARGETS := gen settings-docs fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
 	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy check
 
@@ -65,7 +65,8 @@ help:
 	@echo "  helm-lint      lint and render the Helm chart"
 	@echo "  observability-check  alerting rules and their tests, dashboards, the chart's monitoring templates"
 	@echo "  verify-clone   prove a clean export builds with Go alone and with a container engine alone"
-	@echo "  gen            regenerate code from API contracts"
+	@echo "  gen            regenerate code from API contracts, and the settings documents"
+	@echo "  settings-docs  write deploy/cactusfs.env.example and the settings tables of README and ARCHITECTURE"
 	@echo "  tidy           go mod tidy                web-lock    rewrite web/pnpm-lock.yaml"
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
 	@echo "  up / down      4-node compose cluster     test-chaos  fault injection"
@@ -155,7 +156,12 @@ run: build
 # engine's own compose (docker compose, or podman compose). The KMS passphrase
 # comes from the environment and must be the same at every start:
 #   export CACTUSFS_KMS_PASSPHRASE='...'; make up
-COMPOSE := $(ENGINE) compose -f deploy/compose/compose.yaml
+# What else the cluster can be told is listed in deploy/compose/.env.example.
+# A copy of it named deploy/compose/.env (git ignores it) is handed to compose
+# when it exists, and only then: the cluster starts without one. A variable of
+# the shell wins over the file.
+COMPOSE_ENV_FILE := deploy/compose/.env
+COMPOSE := $(ENGINE) compose $(if $(wildcard $(COMPOSE_ENV_FILE)),--env-file $(COMPOSE_ENV_FILE)) -f deploy/compose/compose.yaml
 
 up:
 	CACTUSFS_BUILD=$(BUILD) CACTUSFS_COMMIT=$(COMMIT) $(COMPOSE) up -d --build
@@ -201,6 +207,12 @@ check: fmt-check lint vet cover test-int s3-compat vuln contracts licences \
 # The web client is generated with a package of web/, so those are installed.
 gen: web-install
 	@scripts/gen.sh
+	@scripts/settings-docs.sh
+
+# The documents that list the settings, printed by the binary itself. Go is
+# all it needs: scripts/settings-docs.sh runs outside the builder as well.
+settings-docs:
+	@scripts/settings-docs.sh
 
 tidy:
 	go mod tidy

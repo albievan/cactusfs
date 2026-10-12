@@ -121,6 +121,7 @@ describe('session', () => {
       'Roles',
       'Policies',
       'Cluster',
+      'Settings',
       'Audit log',
     ]);
     for (const link of links) {
@@ -346,6 +347,34 @@ describe('navigation', () => {
     expect(window.localStorage.getItem('cactusfs.nav.folded')).toBe('0');
     await waitFor(() => {
       expect(document.activeElement).toBe(screen.getByLabelText('Search buckets and objects'));
+    });
+  });
+
+  it('has the settings among the sections and shows their screen', async () => {
+    const api = signedIn({
+      'GET /buckets': () => json(200, []),
+      'GET /settings': () =>
+        json(200, {
+          answered_by: 'node-1',
+          cluster: { deployment_id: 'dep-1', metadata_level: 4, nodes: 0, voters: 0, erasure_sets: [] },
+          nodes: [],
+          mismatches: [],
+        }),
+    });
+    render(<App />);
+
+    const sections = within(await screen.findByRole('navigation', { name: 'Sections' }));
+    const link = sections.getByRole('link', { name: 'Settings' });
+    expect(link.getAttribute('href')).toBe('#/settings');
+    expect(link.querySelector('i.bi-gear')?.getAttribute('aria-hidden')).toBe('true');
+
+    window.location.hash = '#/settings';
+
+    expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeDefined();
+    expect(await screen.findByText('dep-1')).toBeDefined();
+    expect(api.callsTo('GET', '/settings')).toHaveLength(1);
+    await waitFor(() => {
+      expect(sections.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBe('page');
     });
   });
 

@@ -77,6 +77,30 @@ func (e IdentityVia) Valid() bool {
 	}
 }
 
+// Defines values for NodeSettingsReason.
+const (
+	Failed      NodeSettingsReason = "failed"
+	Timeout     NodeSettingsReason = "timeout"
+	Unreachable NodeSettingsReason = "unreachable"
+	Unsupported NodeSettingsReason = "unsupported"
+)
+
+// Valid indicates whether the value is a known member of the NodeSettingsReason enum.
+func (e NodeSettingsReason) Valid() bool {
+	switch e {
+	case Failed:
+		return true
+	case Timeout:
+		return true
+	case Unreachable:
+		return true
+	case Unsupported:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SearchResultKind.
 const (
 	SearchResultKindBucket SearchResultKind = "bucket"
@@ -319,6 +343,27 @@ type Drive struct {
 // DriveState defines model for Drive.State.
 type DriveState string
 
+// DriveSettings One drive of a node - where it is and what it belongs to.
+type DriveSettings struct {
+	// Directory The directory as the node sees it - inside a container, the path in the container.
+	Directory string `json:"directory"`
+
+	// ErasureSet The index of the erasure set the drive is in. Absent for a drive that is in none.
+	ErasureSet *int `json:"erasure_set,omitempty"`
+
+	// Filesystem The file system behind a directory, where the node can tell - on Linux. Mount options are never given.
+	Filesystem *SettingsFilesystem `json:"filesystem,omitempty"`
+	FreeBytes  int64               `json:"free_bytes"`
+	Id         string              `json:"id"`
+
+	// Label What the deployment calls the volume, as the node was told. Absent when it was told nothing.
+	Label *string `json:"label,omitempty"`
+
+	// Online Whether the node can use the drive.
+	Online     bool  `json:"online"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
 // ErasureSet defines model for ErasureSet.
 type ErasureSet struct {
 	Drives []Drive `json:"drives"`
@@ -402,6 +447,50 @@ type NodeLabels struct {
 	Region *string `json:"region,omitempty"`
 	Zone   *string `json:"zone,omitempty"`
 }
+
+// NodeSettings What one node says of itself. A node that did not answer has `node_id`, `answered: false` and `reason`
+// and nothing else; one that answered has no `reason`, and has `roles`, `labels`, `settings`, `drives`
+// and `certificates`, each of which may be empty.
+type NodeSettings struct {
+	Answered     bool                   `json:"answered"`
+	Certificates *[]SettingsCertificate `json:"certificates,omitempty"`
+
+	// Drives The drives of the node, by ID.
+	Drives *[]DriveSettings `json:"drives,omitempty"`
+
+	// KmsKeyId The name of the key that wraps data keys. A name, never key material.
+	KmsKeyId *string `json:"kms_key_id,omitempty"`
+
+	// Labels The placement labels that are set, by name - `region`, `zone`, `rack`, `host`.
+	Labels *map[string]string `json:"labels,omitempty"`
+
+	// Metadata A directory a node stores in.
+	Metadata *SettingsVolume `json:"metadata,omitempty"`
+	NodeId   string          `json:"node_id"`
+
+	// Reason Why the node did not answer: it could not be reached (`unreachable`), it did not answer in time
+	// (`timeout`), it is of a release that cannot be asked (`unsupported`), or it was reached and could
+	// not answer (`failed`). The cause itself is in the log of the answering node, not here.
+	Reason *NodeSettingsReason `json:"reason,omitempty"`
+
+	// Roles The roles the node runs.
+	Roles *[]string `json:"roles,omitempty"`
+
+	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+	// else: no answer to a request without a credential names it, and no response header does.
+	Server *ServerVersion `json:"server,omitempty"`
+
+	// Settings The settings of the node, by name.
+	Settings *[]Setting `json:"settings,omitempty"`
+
+	// StartedAt When the process started.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
+// NodeSettingsReason Why the node did not answer: it could not be reached (`unreachable`), it did not answer in time
+// (`timeout`), it is of a release that cannot be asked (`unsupported`), or it was reached and could
+// not answer (`failed`). The cause itself is in the log of the answering node, not here.
+type NodeSettingsReason string
 
 // ObjectAccess Who uploaded a version of an object and who read it. Best-effort counts, not an audit trail.
 type ObjectAccess struct {
@@ -648,6 +737,153 @@ type Session struct {
 	// else: no answer to a request without a credential names it, and no response header does.
 	Server ServerVersion `json:"server"`
 	User   string        `json:"user"`
+}
+
+// Setting One setting of one node, as it may be shown.
+type Setting struct {
+	// Env The environment variable that sets it.
+	Env *string `json:"env,omitempty"`
+
+	// Flag The flag that sets it, without dashes. A secret has none.
+	Flag *string `json:"flag,omitempty"`
+
+	// Group The heading the setting is listed under.
+	Group *string `json:"group,omitempty"`
+
+	// Kind What the value is, and with that how much of it is shown: `plain`, `path`, `url` (shown without
+	// userinfo, query and fragment), `secret` or `secret-file` (never shown). The list is not closed: a
+	// node of a newer release may name a kind this document does not, and its value is then never
+	// shown either. Read a kind you do not know as a secret.
+	Kind string `json:"kind"`
+
+	// Name The name of the setting, which is that of its flag where it has one.
+	Name string `json:"name"`
+
+	// Scope Whose the setting is: `node` for what each node has for itself, `cluster` for what must be the
+	// same on every node. A newer release may add to the list.
+	Scope string `json:"scope"`
+
+	// Set Whether the setting has a value. For the kinds `secret` and `secret-file` it is all that is told.
+	Set bool `json:"set"`
+
+	// Source How the value arrived: `default`, `environment`, `flag`, or `derived` from other settings. A newer
+	// release may add to the list.
+	Source string `json:"source"`
+
+	// Value The redacted value. Never present for the kinds `secret` and `secret-file`, nor for a kind that is
+	// not known; absent when there is nothing to show.
+	Value *string `json:"value,omitempty"`
+}
+
+// Settings How the deployment is configured, read from its nodes as the request was served. Nothing of it is
+// stored.
+type Settings struct {
+	// AnsweredBy The node that answered and asked the others.
+	AnsweredBy string `json:"answered_by"`
+
+	// Cluster What holds for the deployment as a whole, from the replicated record of the answering node and its part
+	// of the metadata group. A node that runs on its own is a deployment of one node.
+	Cluster SettingsCluster `json:"cluster"`
+
+	// Mismatches The settings of scope `cluster` in which the nodes that answered differ, by name. Besides the
+	// settings, `kms-key-id` and `version` are compared. Empty when the nodes agree, and when fewer than
+	// two answered.
+	Mismatches []SettingsMismatch `json:"mismatches"`
+
+	// Nodes Every node of the deployment, by ID, with its answer or the reason there is none.
+	Nodes []NodeSettings `json:"nodes"`
+}
+
+// SettingsCertificate What may be said of a certificate a node serves - who it names and until when. Nothing of the key.
+type SettingsCertificate struct {
+	DnsNames    []string  `json:"dns_names"`
+	IpAddresses []string  `json:"ip_addresses"`
+	Issuer      string    `json:"issuer"`
+	NotAfter    time.Time `json:"not_after"`
+	NotBefore   time.Time `json:"not_before"`
+	Subject     string    `json:"subject"`
+
+	// Use `s3` for the certificate of the listeners clients reach, `node` for the one a node shows other
+	// nodes. A newer release may add to the list.
+	Use string `json:"use"`
+}
+
+// SettingsCluster What holds for the deployment as a whole, from the replicated record of the answering node and its part
+// of the metadata group. A node that runs on its own is a deployment of one node.
+type SettingsCluster struct {
+	// DeploymentId Empty while the deployment has no drive topology.
+	DeploymentId string               `json:"deployment_id"`
+	ErasureSets  []SettingsErasureSet `json:"erasure_sets"`
+
+	// Leader The node that leads the metadata group. Absent when there is none.
+	Leader *string `json:"leader,omitempty"`
+
+	// MetadataLevel The format of metadata entry the deployment writes now: the newest every member of the metadata
+	// group can apply, as the metadata store of the answering node works it out - the number its metric
+	// `cactusfs_metadata_schema_level` shows. A member that has not said what it can apply holds the level
+	// back. It is 1 or more; when it cannot be read there is no answer, and the request fails.
+	MetadataLevel int `json:"metadata_level"`
+
+	// Nodes How many nodes are recorded. 1 when none is: the answering node, which runs on its own.
+	Nodes int `json:"nodes"`
+
+	// Voters How many of them have the role `meta` and vote in the metadata group. 1 when no node is recorded: a
+	// node on its own is the one member of its metadata group.
+	Voters int `json:"voters"`
+}
+
+// SettingsErasureSet The coding of one erasure set.
+type SettingsErasureSet struct {
+	// Data The number of data shards of an object.
+	Data int `json:"data"`
+
+	// Drives The number of drives in the set.
+	Drives int `json:"drives"`
+	Index  int `json:"index"`
+
+	// Parity The number of parity shards; as many drives can be lost.
+	Parity      int `json:"parity"`
+	ReadQuorum  int `json:"read_quorum"`
+	WriteQuorum int `json:"write_quorum"`
+}
+
+// SettingsFilesystem The file system behind a directory, where the node can tell - on Linux. Mount options are never given.
+type SettingsFilesystem struct {
+	// Device What is mounted, without any credential it names.
+	Device string `json:"device"`
+
+	// MountPoint Where it is mounted, as the node sees it.
+	MountPoint string `json:"mount_point"`
+	Type       string `json:"type"`
+}
+
+// SettingsMismatch A setting that should be the same on every node and is not.
+type SettingsMismatch struct {
+	// Setting The name of the setting, or `kms-key-id` or `version`.
+	Setting string `json:"setting"`
+
+	// Values What each node that answered has, by node ID.
+	Values []SettingsMismatchValue `json:"values"`
+}
+
+// SettingsMismatchValue defines model for SettingsMismatchValue.
+type SettingsMismatchValue struct {
+	NodeId string `json:"node_id"`
+
+	// Value The redacted value; `set` or `not set` for a secret; empty, or `not set` for a secret, on a node
+	// that does not have the setting.
+	Value string `json:"value"`
+}
+
+// SettingsVolume A directory a node stores in.
+type SettingsVolume struct {
+	// Directory The directory as the node sees it - inside a container, the path in the container.
+	Directory string `json:"directory"`
+
+	// Filesystem The file system behind a directory, where the node can tell - on Linux. Mount options are never given.
+	Filesystem *SettingsFilesystem `json:"filesystem,omitempty"`
+	FreeBytes  int64               `json:"free_bytes"`
+	TotalBytes int64               `json:"total_bytes"`
 }
 
 // SignInRequest defines model for SignInRequest.
@@ -1103,6 +1339,9 @@ type ServerInterface interface {
 	// SignIn Sign in to the console
 	// (POST /session)
 	SignIn(w http.ResponseWriter, r *http.Request, params SignInParams)
+	// GetSettings How every node of the deployment is configured
+	// (GET /settings)
+	GetSettings(w http.ResponseWriter, r *http.Request)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(w http.ResponseWriter, r *http.Request)
@@ -3039,6 +3278,27 @@ func (siw *ServerInterfaceWrapper) SignIn(w http.ResponseWriter, r *http.Request
 	handler.ServeHTTP(w, r)
 }
 
+// GetSettings operation middleware
+func (siw *ServerInterfaceWrapper) GetSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSettings(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListUsers operation middleware
 func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -3581,6 +3841,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/policies/{name}", wrapper.UpdatePolicy)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster", wrapper.GetCluster)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster/maintenance", wrapper.GetMaintenance)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/audit", wrapper.ListAudit)
 
 	return m
@@ -4883,6 +5144,54 @@ func (response SignIndefaultApplicationProblemPlusJSONResponse) VisitSignInRespo
 	return err
 }
 
+type GetSettingsRequestObject struct{}
+
+type GetSettingsResponseObject interface {
+	VisitGetSettingsResponse(w http.ResponseWriter) error
+}
+
+type GetSettings200JSONResponse Settings
+
+func (response GetSettings200JSONResponse) VisitGetSettingsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSettings403ApplicationProblemPlusJSONResponse Problem
+
+func (response GetSettings403ApplicationProblemPlusJSONResponse) VisitGetSettingsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSettingsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetSettingsdefaultApplicationProblemPlusJSONResponse) VisitGetSettingsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListUsersRequestObject struct{}
 
 type ListUsersResponseObject interface {
@@ -5244,6 +5553,9 @@ type StrictServerInterface interface {
 	// SignIn Sign in to the console
 	// (POST /session)
 	SignIn(ctx context.Context, request SignInRequestObject) (SignInResponseObject, error)
+	// GetSettings How every node of the deployment is configured
+	// (GET /settings)
+	GetSettings(ctx context.Context, request GetSettingsRequestObject) (GetSettingsResponseObject, error)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(ctx context.Context, request ListUsersRequestObject) (ListUsersResponseObject, error)
@@ -6245,6 +6557,30 @@ func (sh *strictHandler) SignIn(w http.ResponseWriter, r *http.Request, params S
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SignInResponseObject); ok {
 		if err := validResponse.VisitSignInResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetSettings operation middleware
+func (sh *strictHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	var request GetSettingsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetSettings(ctx, request.(GetSettingsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetSettings")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetSettingsResponseObject); ok {
+		if err := validResponse.VisitGetSettingsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

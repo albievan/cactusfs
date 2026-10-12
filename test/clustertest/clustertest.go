@@ -66,6 +66,10 @@ var Nodes = []string{"node1", "node2", "node3", "node4"}
 type Options struct {
 	// Env is added to the environment of every node.
 	Env map[string]string
+	// NodeEnv is added, by node, to the environment of that node alone, over
+	// what Env says: a setting one node has and the others have not, or have
+	// otherwise.
+	NodeEnv map[string]map[string]string
 	// Images names, by node, the image of a node that is to run another
 	// release than the one under test: a cluster in the middle of a rolling
 	// upgrade. A node that is not named runs the image under test.
@@ -98,6 +102,8 @@ type Cluster struct {
 	cluster *testcontainers.DockerNetwork
 	prefix  string
 	env     map[string]string
+	// nodeEnv holds, by node, what that node alone has in its environment.
+	nodeEnv map[string]map[string]string
 	// images holds, by node, the image of a node that does not run the
 	// image under test.
 	images map[string]string
@@ -107,7 +113,11 @@ type Cluster struct {
 	// AccessKey and SecretKey are the root credential of the cluster.
 	AccessKey string
 	SecretKey string
-	roots     *x509.CertPool
+	// KMSPassphrase opens the key file the nodes share. Like the root
+	// credential it is made up for the run; a test has it to say that no
+	// answer and no log of a node holds it, and prints it nowhere.
+	KMSPassphrase string
+	roots         *x509.CertPool
 
 	mu         sync.Mutex
 	containers map[string]*testcontainers.DockerContainer
@@ -187,6 +197,7 @@ func Start(t *testing.T, opts Options) *Cluster {
 	c := &Cluster{
 		t: t, image: img, docker: docker, prefix: "cactusfs-test-" + randomHex(t, 4),
 		containers: map[string]*testcontainers.DockerContainer{}, images: map[string]string{},
+		nodeEnv:    map[string]map[string]string{},
 		publishRPC: opts.PublishNodeRPC,
 		// Credentials and passphrase are made up for this run; none is
 		// written anywhere.
@@ -194,9 +205,17 @@ func Start(t *testing.T, opts Options) *Cluster {
 		SecretKey: randomHex(t, 24),
 	}
 	passphrase := randomHex(t, 24)
+	c.KMSPassphrase = passphrase
 	for id, name := range opts.Images {
 		if name != "" {
 			c.images[id] = name
+		}
+	}
+	// Copied: the node is started again from it when it is upgraded.
+	for id, env := range opts.NodeEnv {
+		c.nodeEnv[id] = map[string]string{}
+		for k, v := range env {
+			c.nodeEnv[id][k] = v
 		}
 	}
 
@@ -235,8 +254,8 @@ func Start(t *testing.T, opts Options) *Cluster {
 	}
 	c.env = map[string]string{
 		"CACTUSFS_PEERS":           strings.Join(peers, ","),
-		"CACTUSFS_DATA":            dataRoot + "/data1," + dataRoot + "/data2",
-		"CACTUSFS_META_DIR":        dataRoot + "/meta",
+		"CACTUSFS_DATA":            strings.Join(DriveDirs(), ","),
+		"CACTUSFS_META_DIR":        MetaDir(),
 		"CACTUSFS_KMS":             "local",
 		"CACTUSFS_KMS_KEY_FILE":    configDir + "/kms.json",
 		"CACTUSFS_KMS_PASSPHRASE":  passphrase,
@@ -294,6 +313,18 @@ func Start(t *testing.T, opts Options) *Cluster {
 	return c
 }
 
+// DriveDirs returns the directories of the two drives of a node as the node
+// sees them, in the order it is given them: inside its container, where a
+// volume of its own is mounted at each.
+func DriveDirs() []string {
+	return []string{dataRoot + "/data1", dataRoot + "/data2"}
+}
+
+// MetaDir returns the metadata directory of a node as the node sees it.
+func MetaDir() string {
+	return dataRoot + "/meta"
+}
+
 func (c *Cluster) volume(name string) string {
 	return c.prefix + "-" + name
 }
@@ -311,6 +342,10 @@ func (c *Cluster) run(ctx context.Context, id string) error {
 	}
 	if id == "node4" {
 		env["CACTUSFS_ROLES"] = "gateway,storage,console"
+	}
+	// Written before any node started and only read since.
+	for k, v := range c.nodeEnv[id] {
+		env[k] = v
 	}
 	// Published on the engine's host, which is not always this machine: a
 	// port bound to its loopback address could not be reached from here.

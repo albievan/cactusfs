@@ -293,8 +293,11 @@ func TestUpgradeFromSchema3(t *testing.T) {
 
 		// The versions and the markers, as the bucket lists them.
 		listed, err := node.root.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(b.Name)})
-		if err != nil || len(listed.Versions) != len(b.Objects) || len(listed.DeleteMarkers) != len(b.Markers) {
-			t.Fatalf("versions of %s: %d and %d markers, %v; want %d and %d", b.Name, len(listed.Versions), len(listed.DeleteMarkers), err, len(b.Objects), len(b.Markers))
+		if err != nil {
+			t.Fatalf("versions of %s: %v", b.Name, err)
+		}
+		if len(listed.Versions) != len(b.Objects) || len(listed.DeleteMarkers) != len(b.Markers) {
+			t.Fatalf("versions of %s: %d and %d markers; want %d and %d", b.Name, len(listed.Versions), len(listed.DeleteMarkers), len(b.Objects), len(b.Markers))
 		}
 		want := map[string]bool{}
 		for _, o := range b.Objects {
@@ -355,8 +358,13 @@ func TestUpgradeFromSchema3(t *testing.T) {
 		// parts, and are finished by this binary - by root, who is then
 		// the uploader of what they become.
 		inProgress, err := node.root.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(b.Name)})
-		if err != nil || len(inProgress.Uploads) != len(b.Uploads) {
-			t.Fatalf("uploads in progress in %s = %+v, %v; want %d", b.Name, inProgress.Uploads, err, len(b.Uploads))
+		// Asked first of the error alone: with one there is no answer to
+		// count, and saying so must not be what fails.
+		if err != nil {
+			t.Fatalf("uploads in progress in %s: %v", b.Name, err)
+		}
+		if len(inProgress.Uploads) != len(b.Uploads) {
+			t.Fatalf("uploads in progress in %s = %+v; want %d", b.Name, inProgress.Uploads, len(b.Uploads))
 		}
 		for _, u := range b.Uploads {
 			uploads++

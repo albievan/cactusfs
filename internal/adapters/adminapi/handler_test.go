@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +25,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
@@ -92,6 +95,13 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, nil)
+}
+
+// newFixtureWith is newFixture with a handler whose configuration the test
+// completes.
+func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &fixture{t: t, store: porttest.NewMemIAM(), clock: porttest.NewClock(testNow), logs: &lockedBuffer{}}
 	logger := slog.New(slog.NewJSONHandler(f.logs, nil))
@@ -158,9 +168,16 @@ func newFixture(t *testing.T) *fixture {
 		Maintenance: f.maintenance,
 		Probe:       func(_ context.Context, slot cluster.Slot) bool { return slot.DriveID == drive.DriveID() },
 	})
-	handler := adminapi.NewHandler(adminapi.Config{
+	settings, err := app.NewSettingsService(app.SettingsServiceConfig{
+		View: view{topology: topology}, Authz: authz, NodeID: "node-a", Leader: func() string { return "node-a" },
+		Level: metadataLevel, Local: localSettings, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := adminapi.Config{
 		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
-		Sessions: sessions, Cluster: clusterService, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
+		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
 		Observe: func(_ context.Context, o adminapi.Observation) {
@@ -168,8 +185,11 @@ func newFixture(t *testing.T) *fixture {
 			defer f.seenMu.Unlock()
 			f.seen = append(f.seen, o)
 		},
-	})
-	f.Server = httptest.NewTLSServer(handler)
+	}
+	if tune != nil {
+		tune(&config)
+	}
+	f.Server = httptest.NewTLSServer(adminapi.NewHandler(config))
 	t.Cleanup(f.Close)
 	return f
 }
@@ -972,6 +992,188 @@ func TestBodiesAreBounded(t *testing.T) {
 }
 
 // TestClusterAndAudit: the status screens and the audit log.
+// settingsMark is in everything localSettings says that must not be shown.
+const settingsMark = "MARK-71c0-MUST-NOT-BE-SHOWN"
+
+// metadataLevel is the level the metadata store of these tests writes at,
+// which is not what the record of node-a says that node could apply: the
+// level of the answer is the store's.
+func metadataLevel(context.Context) (int, error) { return 3, nil }
+
+// localSettings is what node-a says of itself in these tests: more than it
+// may, in settings nothing has redacted.
+func localSettings(context.Context) (cluster.NodeSettings, error) {
+	return cluster.NodeSettings{
+		NodeID: "node-a", Roles: []string{"gateway", "storage"}, Labels: map[string]string{"zone": "z1"},
+		Build: cluster.Build{Version: "1.4.0", Build: "211"}, StartedAt: testNow, KMSKeyID: "test:1",
+		Settings: []cluster.Setting{
+			cluster.NewSetting("s3-addr", "CACTUSFS_S3_ADDR", "s3-addr", "Listeners", cluster.SettingPlain, cluster.ScopeNode, cluster.SourceFlag, ":9000"),
+			cluster.NewSetting("data", "CACTUSFS_DATA", "data", "", cluster.SettingPath, cluster.ScopeNode, cluster.SourceDefault, ""),
+			{Name: "kms-passphrase", Env: "CACTUSFS_KMS_PASSPHRASE", Kind: cluster.SettingSecret, Scope: cluster.ScopeCluster, Source: cluster.SourceEnvironment, Value: settingsMark},
+			{Name: "otlp-endpoint", Kind: cluster.SettingURL, Scope: cluster.ScopeCluster, Source: cluster.SourceFlag, Value: "https://u:" + settingsMark + "@otel:4318/v1?k=" + settingsMark},
+		},
+		Drives: []cluster.DriveSettings{
+			{
+				ID: "drive-a", Online: true,
+				Volume: cluster.Volume{
+					Directory: "/data/1", Label: "node-a-data1", TotalBytes: 1000, FreeBytes: math.MaxUint64,
+					Filesystem: cluster.Filesystem{Type: "ext4", Device: "/dev/sdb1", MountPoint: "/data"},
+				},
+			},
+			{ID: "drive-unknown", Volume: cluster.Volume{Directory: "/data/9"}},
+		},
+		Metadata: cluster.Volume{Directory: "/data/1/meta", TotalBytes: 1000, FreeBytes: 10},
+		Certificates: []cluster.Certificate{{
+			Use: cluster.CertificateNode, Subject: "CN=node-a", Issuer: "CN=node CA", DNSNames: []string{"node-a"},
+			NotBefore: testNow, NotAfter: testNow.Add(time.Hour),
+		}},
+	}, nil
+}
+
+// TestSettings: GET /settings is the use case's view in the words of the
+// contract - arrays that are never null, what is not known left out, no
+// value of a secret - for who may read it, and a refusal that is audited for
+// who may not.
+func TestSettings(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	reader := f.userKey("reader", iam.RoleReadOnly)
+	auditor := f.userKey("auditor", iam.RoleAuditor)
+
+	for _, bearer := range []string{"", auditor} {
+		r := f.must(http.StatusOK, call{method: "GET", path: "/settings", bearer: bearer})
+		if strings.Contains(string(r.body), settingsMark) {
+			t.Fatalf("the answer holds what must not be shown: %s", r.body)
+		}
+		var got map[string]any
+		r.decode(t, &got)
+		// The deployment's ID is whatever the fixture's store says.
+		ofCluster, isObject := got["cluster"].(map[string]any)
+		if !isObject {
+			t.Fatalf("GET /settings: cluster = %v", got["cluster"])
+		}
+		want := map[string]any{
+			"answered_by": "node-a",
+			"cluster": map[string]any{
+				"deployment_id": ofCluster["deployment_id"], "metadata_level": 3.0, "leader": "node-a", "nodes": 1.0, "voters": 1.0,
+				"erasure_sets": []any{map[string]any{"index": 0.0, "drives": 2.0, "data": 1.0, "parity": 0.0, "read_quorum": 1.0, "write_quorum": 1.0}},
+			},
+			"mismatches": []any{},
+			"nodes": []any{map[string]any{
+				"node_id": "node-a", "answered": true, "roles": []any{"gateway", "storage"}, "labels": map[string]any{"zone": "z1"},
+				"server": map[string]any{"version": "1.4.0", "build": "211"}, "started_at": testNow.Format(time.RFC3339), "kms_key_id": "test:1",
+				"settings": []any{
+					map[string]any{"name": "data", "env": "CACTUSFS_DATA", "flag": "data", "kind": "path", "scope": "node", "source": "default", "set": false},
+					map[string]any{"name": "kms-passphrase", "env": "CACTUSFS_KMS_PASSPHRASE", "kind": "secret", "scope": "cluster", "source": "environment", "set": true},
+					map[string]any{"name": "otlp-endpoint", "kind": "url", "scope": "cluster", "source": "flag", "set": true, "value": "https://otel:4318/v1"},
+					map[string]any{"name": "s3-addr", "env": "CACTUSFS_S3_ADDR", "flag": "s3-addr", "group": "Listeners", "kind": "plain", "scope": "node", "source": "flag", "set": true, "value": ":9000"},
+				},
+				"drives": []any{
+					map[string]any{
+						"id": "drive-a", "directory": "/data/1", "label": "node-a-data1", "total_bytes": 1000.0, "free_bytes": float64(math.MaxInt64),
+						"filesystem": map[string]any{"type": "ext4", "device": "/dev/sdb1", "mount_point": "/data"}, "online": true, "erasure_set": 0.0,
+					},
+					map[string]any{"id": "drive-unknown", "directory": "/data/9", "total_bytes": 0.0, "free_bytes": 0.0, "online": false},
+				},
+				"metadata": map[string]any{"directory": "/data/1/meta", "total_bytes": 1000.0, "free_bytes": 10.0},
+				"certificates": []any{map[string]any{
+					"use": "node", "subject": "CN=node-a", "issuer": "CN=node CA", "dns_names": []any{"node-a"}, "ip_addresses": []any{},
+					"not_before": testNow.Format(time.RFC3339), "not_after": testNow.Add(time.Hour).Format(time.RFC3339),
+				}},
+			}},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("settings =\n%s\nwant\n%v", r.body, want)
+		}
+	}
+
+	// Reading is not audited; a refusal is, once.
+	before := len(f.trail())
+	r := f.do(call{method: "GET", path: "/settings", bearer: reader})
+	if r.status != http.StatusForbidden {
+		t.Fatalf("GET /settings as a read-only user = %d, want 403: %s", r.status, r.body)
+	}
+	if p := r.problem(t); p["code"] != "AccessDenied" || p["detail"] != nil {
+		t.Errorf("refusal = %s", r.body)
+	}
+	records := f.trail()[before:]
+	if len(records) != 1 || records[0].Action != string(iam.ActionGetSettings) || records[0].Outcome != audit.Denied {
+		t.Errorf("audit records of one refusal: %+v", records)
+	}
+
+	// Nobody is told anything without a credential.
+	if r := f.do(call{method: "GET", path: "/settings"}); r.status != http.StatusUnauthorized {
+		t.Errorf("GET /settings without a credential = %d, want 401", r.status)
+	}
+}
+
+// TestSettingsOfNodesThatDidNotAnswer: a node that gave no answer is in the
+// answer with its reason, in the word of the contract, and nothing else.
+func TestSettingsOfNodesThatDidNotAnswer(t *testing.T) {
+	t.Parallel()
+	f := newFixtureWith(t, func(config *adminapi.Config) {
+		settings, err := app.NewSettingsService(app.SettingsServiceConfig{
+			View: manyNodes{"node-a", "node-b", "node-c", "node-d", "node-e"}, Authz: &porttest.Authorizer{}, NodeID: "node-a",
+			Leader: func() string { return "" }, Level: metadataLevel, Local: localSettings, Logger: slog.New(slog.DiscardHandler),
+			NodeTimeout: 100 * time.Millisecond,
+			Reader: porttest.NewNodeSettingsReader(map[string]porttest.NodeBehaviour{
+				"node-b": {Err: domain.ErrNotSupported}, "node-c": {Silent: true}, "node-d": {Err: errors.New("cannot say " + settingsMark)},
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		config.Settings = settings
+	})
+	r := f.must(http.StatusOK, call{method: "GET", path: "/settings"})
+	if strings.Contains(string(r.body), settingsMark) {
+		t.Fatalf("the answer tells why a node failed: %s", r.body)
+	}
+	var got struct {
+		Cluster map[string]any   `json:"cluster"`
+		Nodes   []map[string]any `json:"nodes"`
+	}
+	r.decode(t, &got)
+	if _, has := got.Cluster["leader"]; has {
+		t.Errorf("a cluster without a leader names one: %v", got.Cluster)
+	}
+	want := []map[string]any{
+		{"node_id": "node-b", "answered": false, "reason": "unsupported"},
+		{"node_id": "node-c", "answered": false, "reason": "timeout"},
+		{"node_id": "node-d", "answered": false, "reason": "failed"},
+		{"node_id": "node-e", "answered": false, "reason": "unreachable"},
+	}
+	if len(got.Nodes) != 5 || got.Nodes[0]["answered"] != true || !reflect.DeepEqual(got.Nodes[1:], want) {
+		t.Errorf("nodes = %v, want node-a and %v", got.Nodes, want)
+	}
+}
+
+// manyNodes is a record of nodes without a topology.
+type manyNodes []string
+
+func (manyNodes) Topology(context.Context) (cluster.Topology, error) {
+	return cluster.Topology{}, domain.ErrNoTopology
+}
+
+func (m manyNodes) Nodes(context.Context) ([]cluster.Node, error) {
+	nodes := make([]cluster.Node, len(m))
+	for i, id := range m {
+		nodes[i] = cluster.Node{ID: id}
+	}
+	return nodes, nil
+}
+
+// TestSettingsOnANodeWithoutTheUseCase: a node that was not given the use
+// case says so, as a problem, to a caller it has authenticated.
+func TestSettingsOnANodeWithoutTheUseCase(t *testing.T) {
+	t.Parallel()
+	f := newFixtureWith(t, func(config *adminapi.Config) { config.Settings = nil })
+	r := f.must(http.StatusNotImplemented, call{method: "GET", path: "/settings"})
+	if p := r.problem(t); p["code"] != "NotImplemented" || p["detail"] != nil {
+		t.Errorf("problem = %s", r.body)
+	}
+}
+
 func TestClusterAndAudit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

@@ -113,3 +113,10 @@ func TestMemIAMContract(t *testing.T) {
 	porttest.IAMContract(t, func(*testing.T) porttest.IAM { return porttest.NewMemIAM() })
 	porttest.IdempotencyContract(t, func(*testing.T) ports.IdempotencyStore { return porttest.NewMemIAM() })
 }
+
+func TestNodeSettingsReaderContract(t *testing.T) {
+	t.Parallel()
+	porttest.NodeSettingsContract(t, func(_ *testing.T, script porttest.NodeSettingsScript) ports.NodeSettingsReader {
+		return porttest.ScriptedNodeSettingsReader(script)
+	})
+}

@@ -8,6 +8,7 @@ import { PoliciesScreen } from './PoliciesScreen';
 import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
 import { SearchScreen } from './SearchScreen';
+import { SettingsScreen } from './SettingsScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
 
@@ -40,6 +41,8 @@ export function Screens() {
       return <PoliciesScreen />;
     case 'cluster':
       return <ClusterScreen />;
+    case 'settings':
+      return <SettingsScreen />;
     case 'audit':
       return <AuditScreen after={parseAfter(route.query.get('after'))} />;
     default:

@@ -28,6 +28,7 @@ Usage:
 
 Commands:
   server     run a CactusFS node
+  config     print the settings of a node, as an environment file or a table
   dev-init   write the certificates and key file of a development cluster
   version    print version information
   help       show this help
@@ -60,6 +61,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return exitOK
 	case "server":
 		return runServerCommand(ctx, args[1:], stdout, stderr, getenv)
+	case "config":
+		return runConfig(args[1:], stdout, stderr)
 	case "dev-init":
 		return runDevInit(args[1:], stdout, stderr, getenv)
 	default:
@@ -69,7 +72,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 }
 
 func runServerCommand(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	cfg, err := parseServerConfig(args, getenv, stderr)
+	cfg, sources, err := parseServerSettings(args, getenv, stderr)
+	// Where each value came from is part of what the node says of its
+	// settings.
+	cfg.sources = sources
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		return exitOK

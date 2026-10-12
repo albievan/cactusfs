@@ -99,6 +99,7 @@ Conventions that follow from it:
 ```
 cactusfs version
 cactusfs server [flags]
+cactusfs config [--format env|markdown]
 cactusfs dev-init --dir <directory> --nodes <id>[,<id>...]
 ```
 
@@ -107,48 +108,141 @@ CA with a certificate per node, a second CA with a certificate for the S3 listen
 one sealed KMS key file. It never overwrites; a complete directory is left alone.
 
 Configuration is 12-factor: every setting is a `CACTUSFS_*` environment variable with a
-matching flag, and the flag wins.
+matching flag, and the flag wins. The settings are declared once, in `serverSettings()`
+of `cmd/cactusfs`: each with its name, variable, default, meaning, group, kind (`plain`,
+`path`, `url`, `secret`, `secret-file`) and scope (`node`, or `cluster` for what every
+node must have the same). `cactusfs server` reads its command line by that list -
+default, then variable, then flag, and where each value came from is kept - and
+`cactusfs config --format env|markdown` prints it: `deploy/cactusfs.env.example` and the
+table below are that output (`make settings-docs`, part of `make gen`), held equal by a
+test. The binary reads no file of variables: what starts it hands it its environment.
+
+<!-- settings:begin -->
+
+**Listeners: where clients reach the node**
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--data` | `CACTUSFS_DATA` | — (required) | drive directory; repeat or comma-separate |
-| `--meta-dir` | `CACTUSFS_META_DIR` | `<first drive>/meta` | metadata directory |
-| `--kms` | `CACTUSFS_KMS` | — (required) | `vault`: HashiCorp Vault Transit; `local`: sealed local key file. No default and no unencrypted mode |
-| `--vault-addr`, `--vault-key`, `--vault-token-file` | `CACTUSFS_VAULT_ADDR`, `…_KEY`, `…_TOKEN_FILE` | — | Vault's URL (https), the Transit key (an AEAD type), the file holding the token |
-| `--vault-transit-mount`, `--vault-ca-cert`, `--vault-server-name`, `--vault-namespace` | `CACTUSFS_VAULT_…` | `transit`, system CAs, —, — | where Transit is mounted and how Vault's certificate is checked |
-| `--audit-export` | `CACTUSFS_AUDIT_EXPORT` | `false` | write every audit record to standard output as a JSON line |
-| `--kms-key-file` | `CACTUSFS_KMS_KEY_FILE` | `<meta dir>/kms-local.json` | local KMS key file |
-| `--kms-passphrase-file` | `CACTUSFS_KMS_PASSPHRASE_FILE` | — | file holding the KMS passphrase |
-| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` | S3 API listener |
-| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — | enables virtual-hosted style, `<bucket>.<domain>` |
-| `--region` | `CACTUSFS_REGION` | `us-east-1` | region reported to clients |
-| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | admin listener: probes and `/metrics` |
-| `--tls-cert` | `CACTUSFS_TLS_CERT` | — | PEM certificate chain |
-| `--tls-key` | `CACTUSFS_TLS_KEY` | — | PEM private key |
-| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`); `0` never reads them again. The node CA is read at start only |
-| `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
-| `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
-| `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between passes of the worker that carries out lifecycle rules; `0` disables it |
-| `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads a node counted are recorded with the objects (at least `5s`); a node that crashes loses up to this much of the count |
-| `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | scrub read limit in MiB/s; `0` is no limit |
-| `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
-| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`) |
-| `--allow-drive-replacement` | `CACTUSFS_ALLOW_DRIVE_REPLACEMENT` | `false` | confirm, for this start, that one empty drive replaces one missing drive; permanent |
-| `--node-id` | `CACTUSFS_NODE_ID` | generated when alone | name of the node; in a cluster required, and the name in its certificate |
-| `--roles` | `CACTUSFS_ROLES` | all | `gateway`, `meta`, `storage`, `console` (cluster only) |
-| `--peers` | `CACTUSFS_PEERS` | — | every node of the cluster, this one included, as `id=host:port` of its node RPC; makes the node a cluster member |
-| `--rpc-addr`, `--raft-addr` | `CACTUSFS_RPC_ADDR`, `CACTUSFS_RAFT_ADDR` | `:9002`, `:9003` | listeners for node RPC and Raft |
-| `--advertise-rpc`, `--advertise-raft` | `CACTUSFS_ADVERTISE_RPC`, `…_RAFT` | from `--peers` | addresses at which other nodes reach them |
-| `--node-tls-cert`, `--node-tls-key`, `--node-tls-ca` | `CACTUSFS_NODE_TLS_CERT`, `…_KEY`, `…_CA` | — | node certificate, key and node CA; required in a cluster |
-| `--topology-region`, `-zone`, `-rack`, `-host` | `CACTUSFS_TOPOLOGY_REGION`, … | — | where the node is, for placement |
-| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | OTLP/HTTP trace collector; nothing is exported when empty |
-| `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, time to keep serving with `/readyz` at 503 before the listeners close |
-| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` | time for in-flight requests to finish once the listeners have closed |
+| `--s3-addr` | `CACTUSFS_S3_ADDR` | `:9000` | listen address of the S3 API |
+| `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | listen address of the admin listener: probes, `/metrics`, the management API, Swagger UI and the console |
+| `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — | domain for virtual-hosted-style requests, \<bucket>.\<domain>. The same on every node |
+| `--region` | `CACTUSFS_REGION` | `us-east-1` | region name reported to S3 clients; default us-east-1. The same on every node |
+| `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` | on shutdown, keep serving this long with /readyz answering 503 before closing the listeners |
+| `--shutdown-timeout` | `CACTUSFS_SHUTDOWN_TIMEOUT` | `30s` | time allowed for in-flight requests to finish once the listeners have closed |
+
+**Storage: drives and the metadata directory**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--data` | `CACTUSFS_DATA` | required on a node that stores | drive directory; repeat the flag or separate directories with commas |
+| `--drive-labels` | `CACTUSFS_DRIVE_LABELS` | — | what the deployment calls the volume behind each drive directory - a compose volume, a claim - as labels separated by commas, one for each --data entry in the same order, or none; shown with the node's settings and used for nothing else |
+| `--meta-dir` | `CACTUSFS_META_DIR` | `<first data directory>/meta` | metadata directory; default \<first data directory>/meta |
+| `--allow-drive-replacement` | `CACTUSFS_ALLOW_DRIVE_REPLACEMENT` | `false` | confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is refused afterwards |
+
+**Cluster: the node among its peers**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--node-id` | `CACTUSFS_NODE_ID` | generated on a node on its own | name of this node: lowercase letters, digits and hyphens; required in a cluster, where it must be the name in the node certificate |
+| `--roles` | `CACTUSFS_ROLES` | all | roles of this node: gateway, meta, storage, console; default all. For members of a cluster only: a node on its own has every role |
+| `--peers` | `CACTUSFS_PEERS` | — | every node of the cluster, this one included, as id=host:port of its node RPC, separated by commas; makes the node a member of a cluster. The same on every node |
+| `--rpc-addr` | `CACTUSFS_RPC_ADDR` | `:9002` | listen address of node RPC |
+| `--raft-addr` | `CACTUSFS_RAFT_ADDR` | `:9003` | listen address of the Raft transport |
+| `--advertise-rpc` | `CACTUSFS_ADVERTISE_RPC` | the node's entry in `--peers` | host:port at which other nodes reach this node's RPC; default its entry in --peers |
+| `--advertise-raft` | `CACTUSFS_ADVERTISE_RAFT` | the host of `--advertise-rpc`, the port of `--raft-addr` | host:port at which other nodes reach this node's Raft transport; default the host of --advertise-rpc with the port of --raft-addr |
+| `--topology-region` | `CACTUSFS_TOPOLOGY_REGION` | — | region this node is in, for placement |
+| `--topology-zone` | `CACTUSFS_TOPOLOGY_ZONE` | — | zone this node is in, for placement |
+| `--topology-rack` | `CACTUSFS_TOPOLOGY_RACK` | — | rack this node is in, for placement |
+| `--topology-host` | `CACTUSFS_TOPOLOGY_HOST` | — | host this node runs on, for placement |
+
+**TLS: certificates of the listeners and of the node**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--tls-cert` | `CACTUSFS_TLS_CERT` | required, unless `--dev-plaintext` | path of the PEM certificate chain of the S3 and admin listeners |
+| `--tls-key` | `CACTUSFS_TLS_KEY` | required, unless `--dev-plaintext` | path of the PEM private key of that certificate. The file holds a secret: its path is not shown with the node's settings |
+| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`; `0` never reads them again). A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular files (not pipes) |
+| `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only |
+| `--node-tls-cert` | `CACTUSFS_NODE_TLS_CERT` | required in a cluster | path of the node certificate for mutual TLS between nodes |
+| `--node-tls-key` | `CACTUSFS_NODE_TLS_KEY` | required in a cluster | path of the node certificate's private key. The file holds a secret: its path is not shown with the node's settings |
+| `--node-tls-ca` | `CACTUSFS_NODE_TLS_CA` | required in a cluster | path of the CA certificate that issues the cluster's node certificates, and nothing else |
+
+**KMS: the key that wraps data keys**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--kms` | `CACTUSFS_KMS` | required | key management service: `vault` for HashiCorp Vault Transit, `local` for a sealed local key file. There is no default and no unencrypted mode. The same on every node |
+| `--kms-key-file` | `CACTUSFS_KMS_KEY_FILE` | `<metadata directory>/kms-local.json`; required in a cluster | path of the local KMS key file; default \<metadata directory>/kms-local.json. The file holds a secret: its path is not shown with the node's settings |
+| — (no flag: a secret) | `CACTUSFS_KMS_PASSPHRASE` | required with the local KMS, or `--kms-passphrase-file` | passphrase that opens the local KMS key file. A secret: from the environment only, never shown |
+| `--kms-passphrase-file` | `CACTUSFS_KMS_PASSPHRASE_FILE` | — | path of a file holding the local KMS passphrase, instead of $CACTUSFS_KMS_PASSPHRASE. The file holds a secret: its path is not shown with the node's settings |
+| `--vault-addr` | `CACTUSFS_VAULT_ADDR` | required with `--kms vault` | URL of Vault, https://host:port. The same on every node |
+| `--vault-transit-mount` | `CACTUSFS_VAULT_TRANSIT_MOUNT` | `transit` | path of Vault's Transit engine; default transit. The same on every node |
+| `--vault-key` | `CACTUSFS_VAULT_KEY` | required with `--kms vault` | name of the Transit key, of an AEAD type such as aes256-gcm96. The same on every node |
+| `--vault-token-file` | `CACTUSFS_VAULT_TOKEN_FILE` | required with `--kms vault` | path of a file holding the Vault token; read at every use, so it can be renewed in place. The file holds a secret: its path is not shown with the node's settings |
+| `--vault-ca-cert` | `CACTUSFS_VAULT_CA_CERT` | the system's CAs | path of the CA certificate that issued Vault's certificate; default the system's CAs |
+| `--vault-server-name` | `CACTUSFS_VAULT_SERVER_NAME` | — | name expected in Vault's certificate, when Vault is reached under another |
+| `--vault-namespace` | `CACTUSFS_VAULT_NAMESPACE` | — | Vault Enterprise namespace. The same on every node |
+
+**Bootstrap: the root credentials of a new deployment**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| — (no flag: a secret) | `CACTUSFS_ROOT_ACCESS_KEY` | generated, and shown once, by a new deployment | access key ID of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_SECRET_KEY. A secret: from the environment only, never shown |
+| — (no flag: a secret) | `CACTUSFS_ROOT_SECRET_KEY` | generated, and shown once, by a new deployment | secret key of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_ACCESS_KEY. A secret: from the environment only, never shown |
+
+**Maintenance: background work**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between two passes of the scrubber, which verifies and heals every object; 0 disables it. The same on every node |
+| `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | limit on how fast the scrubber reads, in MiB per second; 0 is no limit. The same on every node |
+| `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between two passes of the worker that carries out the lifecycle rules of buckets; 0 disables it. The same on every node |
+| `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between two passes of the garbage collector for unreferenced shards; 0 disables it |
+| `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`). The same on every node |
+| `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads this node counted are recorded with the objects, at least 5s; a node that crashes loses up to this much of the count |
+
+**Observability: log, audit export and traces**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--log-level` | `CACTUSFS_LOG_LEVEL` | `info` | minimum log level: debug, info, warn or error |
+| `--audit-export` | `CACTUSFS_AUDIT_EXPORT` | `false` | write every audit record to standard output as a JSON line with "stream":"audit" |
+| `--otlp-endpoint` | `CACTUSFS_OTLP_ENDPOINT` | — | URL of an OTLP/HTTP trace collector, `https` unless the host is a loopback IP address; traces are not exported when empty. A URL with userinfo, a query or a fragment is refused: a credential does not belong in it, and a credential for the collector is not a setting of CactusFS |
+
+<!-- settings:end -->
 
 Secrets have no flag, because a command line is visible to every user of the machine:
 `CACTUSFS_KMS_PASSPHRASE` (or the passphrase file), and optionally
 `CACTUSFS_ROOT_ACCESS_KEY` with `CACTUSFS_ROOT_SECRET_KEY`.
+
+**The settings of a running deployment** are read live, never stored: nothing of them is
+replicated and no schema knows them. `GET /api/v1/settings` (`admin:GetSettings`; the
+console's Settings screen) is answered by `app.SettingsService` on the node that was
+asked: its own settings come from `ports.LocalSettings`, those of every other recorded
+node are asked of that node over node RPC (`NodeService.Settings`, through
+`ports.NodeSettingsReader`), all at once and none waited for longer than 4 s (a second more than a connection is waited for, so that a node that cannot be reached is not called slow). A node
+that is down, too slow or of a release without the call is in the answer as
+`unreachable`, `timeout` or `unsupported`, and costs nobody else's time. Settings of
+scope `cluster` in which the nodes that answered differ are listed as mismatches, with
+the name of the KMS key and the version beside them.
+
+What a node says of itself is put together in the composition root
+(`cmd/cactusfs/localsettings.go`): every setting of the list above with its value and
+where it came from (`default`, `environment`, `flag`, or `derived` for what the node
+worked out, such as the metadata directory inside the first drive); its roles, labels,
+build and start time; the name of its KMS key; each drive it opened with its directory,
+the label it was given (`--drive-labels`: the compose volume, the claim - a process
+cannot know that name, so it is shown as it was told), the file system behind it (Linux)
+and its room; the metadata volume; and the certificates in use at that moment, by their
+names and dates. **Redaction happens there, in the node that owns the values**
+(`cluster.NewSetting`, by the declared kind): a secret and the path of a file that holds
+one never leave the process - not to a peer, not to the gateway, not to the log - and
+each wire redacts once more what it carries. The volumes are asked with one deadline of
+two seconds, one question out to each at a time: whoever asks while a question is out
+waits for that answer against a deadline of their own, so two callers at the same
+moment are told the same, and a mount that hangs costs each caller its two seconds and
+the node one goroutine - it is shown as not reached, without its room, to those whose
+time ran out, and is not asked a second time.
 
 Behaviour:
 
@@ -224,6 +318,23 @@ Behaviour:
   that does not trace neither reads nor passes on either of the two. No span has an
   attribute, and no metric a label, that holds a bucket, a key, a user, an access key,
   a node's name, the directory of a drive or the text of an error.
+  The endpoint holds no credential: a URL with userinfo, a query or a fragment is
+  refused at start (the exporter would send neither - it takes the host and the path of
+  the URL and nothing else), and every refusal names the endpoint as
+  `cluster.RedactURL` leaves it. CactusFS has no setting that gives the collector a
+  credential. What the exporter cannot send it reports to OpenTelemetry's error
+  handler, of which a process has one: `telemetry.New` sets it when it creates an
+  exporter (`telemetry.ExportErrors`), because the library otherwise prints each error
+  to standard error with the URL it was sent to. The node logs `traces could not be
+  exported` at WARN with the class of the error (`timeout`, `canceled`, `certificate`,
+  `dns`, `connection`, `request`, `other`), the name of its Go type and how many were
+  left out - never its text - and at most once a minute.
+  Not a setting, and so neither listed nor shown with the settings: the OpenTelemetry
+  exporter reads its own `OTEL_EXPORTER_OTLP_*` variables from the node's environment
+  (headers, a client certificate, a timeout among them); the endpoint and whether TLS
+  is used are always those of `--otlp-endpoint`. Nothing in CactusFS sets, tests or
+  redacts them, and the library reports one it cannot read through its own log, on
+  standard error, with the value.
 - **Ports.** Every outbound port a use case is given is a decorator of
   `internal/adapters/telemetry` (`InstrumentX`): one span and one count per call, the
   `method` label the name of the Go method, the `result` `error` whenever the port
@@ -304,7 +415,7 @@ Prometheus client and are not listed.
 
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
-`identity_provider`, `passwords`, `cluster_view`.
+`identity_provider`, `passwords`, `cluster_view`, `node_settings`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
