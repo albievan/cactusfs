@@ -2,8 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +22,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/albievan/cactusfs/internal/adapters/health"
+	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
@@ -99,7 +109,7 @@ func TestANodeSaysHowItIs(t *testing.T) {
 	}
 	driveSeries := 0
 	for name := range got {
-		if strings.HasPrefix(name, "cactusfs_node_certificate_not_after_seconds") {
+		if strings.HasPrefix(name, "cactusfs_node_certificate_not_after_seconds") || strings.HasPrefix(name, "cactusfs_tls_") {
 			t.Errorf("%s is exposed by a node that has no node certificate", name)
 		}
 		if strings.Contains(name, dir) {
@@ -358,5 +368,248 @@ func TestReadinessGauge(t *testing.T) {
 	gate.Close()
 	if got, ok := samples(t, tel)["cactusfs_ready{}"]; !ok || got != 0 {
 		t.Errorf("cactusfs_ready = %v (exposed: %v) while the node drains, want 0", got, ok)
+	}
+}
+
+// endingCA is a CA of a test that issues certificates that end when the
+// test says: the development CA of nodetls ends all of its own with itself.
+type endingCA struct {
+	certificate *x509.Certificate
+	key         *ecdsa.PrivateKey
+	pem         []byte
+	serial      int64
+}
+
+func newEndingCA(t *testing.T) *endingCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &endingCA{certificate: certificate, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), serial: 1}
+}
+
+// issue writes a certificate that names name, may be used as usages say and
+// ends at notAfter, and its key, to the two files.
+func (ca *endingCA) issue(t *testing.T, certFile, keyFile, name string, notAfter time.Time, usages ...x509.ExtKeyUsage) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca.serial++
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(ca.serial), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: notAfter,
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: usages,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.certificate, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The key first, as a replacement is written: the pair is whole when
+	// the certificate is.
+	writeTestFile(t, keyFile, string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})))
+	writeTestFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})))
+}
+
+// TestCertificateGaugesFollowARotation: the gauges of the node's certificate
+// and of the one clients are shown say when the certificate in use ends -
+// after a replacement, the new one. A pair that is refused changes no end,
+// is pending for as long as it is on disk and is counted once, by its
+// reason; a good pair after it is pending no more, and the count stays.
+func TestCertificateGaugesFollowARotation(t *testing.T) {
+	t.Parallel()
+	ca, dir := newEndingCA(t), t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	writeTestFile(t, caFile, string(ca.pem))
+	nodeCert, nodeKey := filepath.Join(dir, "node.pem"), filepath.Join(dir, "node.key")
+	servedCert, servedKey := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	node, server := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	// Whole seconds: the gauges are in seconds.
+	now := time.Now().Truncate(time.Second)
+	ends := map[string]time.Time{"node": now.Add(2 * time.Hour), "s3": now.Add(3 * time.Hour)}
+	ca.issue(t, nodeCert, nodeKey, "n1", ends["node"], node...)
+	ca.issue(t, servedCert, servedKey, "s3.test", ends["s3"], server...)
+
+	identity, err := nodetls.Load(nodeCert, nodeKey, caFile)
+	if err != nil {
+		t.Fatalf("nodetls.Load: %v", err)
+	}
+	// Never read by a loop: the test says when the files are looked at.
+	ofNode, err := identity.Reloader(nodetls.ReloadConfig{CertFile: nodeCert, KeyFile: nodeKey, Clock: systemClock{}})
+	if err != nil {
+		t.Fatalf("Reloader: %v", err)
+	}
+	_, ofServer, err := loadTLSConfig(t.Context(), serverConfig{TLSCert: servedCert, TLSKey: servedKey}, nil)
+	if err != nil {
+		t.Fatalf("loadTLSConfig: %v", err)
+	}
+	// Attached as openCluster and runServer attach them.
+	tel := newTelemetry(t)
+	tel.ObserveNodeCertificate(certificateGauge{reloader: ofNode})
+	tel.ObserveTLS(telemetry.TLSUseNode, tlsGauges{reloader: ofNode})
+	tel.ObserveTLS(telemetry.TLSUseS3, tlsGauges{reloader: ofServer})
+
+	pending := map[string]float64{"node": 0, "s3": 0}
+	refused := map[string]float64{}
+	check := func(when string) {
+		t.Helper()
+		got := samples(t, tel)
+		want := map[string]float64{"cactusfs_node_certificate_not_after_seconds{}": float64(ends["node"].Unix())}
+		for _, use := range []string{"node", "s3"} {
+			want["cactusfs_tls_certificate_not_after_seconds{use="+use+"}"] = float64(ends[use].Unix())
+			want["cactusfs_tls_reload_pending{use="+use+"}"] = pending[use]
+			for _, reason := range nodetls.ReloadRefusals() {
+				name := "cactusfs_tls_reload_refused_total{reason=" + string(reason) + ",use=" + use + "}"
+				want[name] = refused[name]
+			}
+		}
+		for name, value := range want {
+			if sample, ok := got[name]; !ok || sample != value {
+				t.Errorf("%s: %s = %v (exposed: %v), want %v", when, name, sample, ok, value)
+			}
+		}
+	}
+	check("at the start")
+
+	steps := []struct {
+		name string
+		// use is the certificate whose files change, and write changes them.
+		use   string
+		write func()
+		// replaced says that the pair is put to use; ends is then its end.
+		replaced bool
+		ends     time.Time
+		// reason is why it is refused when it is not.
+		reason nodetls.ReloadRefusal
+	}{
+		{
+			name: "the node's certificate is renewed", use: "node", replaced: true, ends: now.Add(5 * time.Hour),
+			write: func() { ca.issue(t, nodeCert, nodeKey, "n1", now.Add(5*time.Hour), node...) },
+		},
+		{
+			name: "the certificate for clients is renewed", use: "s3", replaced: true, ends: now.Add(7 * time.Hour),
+			write: func() { ca.issue(t, servedCert, servedKey, "s3.test", now.Add(7*time.Hour), server...) },
+		},
+		{
+			name: "a certificate that names another node", use: "node", reason: nodetls.RefusedIdentity,
+			write: func() { ca.issue(t, nodeCert, nodeKey, "n2", now.Add(9*time.Hour), node...) },
+		},
+		{name: "the same files, looked at again", use: "node", reason: nodetls.RefusedIdentity, write: func() {}},
+		{
+			name: "a certificate no server may show", use: "s3", reason: nodetls.RefusedUsage,
+			write: func() {
+				ca.issue(t, servedCert, servedKey, "s3.test", now.Add(9*time.Hour), x509.ExtKeyUsageClientAuth)
+			},
+		},
+		{
+			name: "the node's certificate is put right", use: "node", replaced: true, ends: now.Add(6 * time.Hour),
+			write: func() { ca.issue(t, nodeCert, nodeKey, "n1", now.Add(6*time.Hour), node...) },
+		},
+		{
+			name: "a renewal that ends sooner is the one in use all the same", use: "s3", replaced: true, ends: now.Add(4 * time.Hour),
+			write: func() { ca.issue(t, servedCert, servedKey, "s3.test", now.Add(4*time.Hour), server...) },
+		},
+	}
+	counted := map[string]bool{}
+	for _, step := range steps {
+		step.write()
+		reloader := ofNode
+		if step.use == "s3" {
+			reloader = ofServer
+		}
+		if got := reloader.Poll(t.Context()); got != step.replaced {
+			t.Fatalf("%s: Poll = %t, want %t", step.name, got, step.replaced)
+		}
+		if step.replaced {
+			ends[step.use], pending[step.use] = step.ends, 0
+		} else {
+			pending[step.use] = 1
+			// Counted once for one content of the files.
+			name := "cactusfs_tls_reload_refused_total{reason=" + string(step.reason) + ",use=" + step.use + "}"
+			if !counted[name] {
+				counted[name] = true
+				refused[name]++
+			}
+		}
+		check(step.name)
+	}
+	if len(counted) != 2 {
+		t.Fatalf("%d kinds of refusal were tried, want 2", len(counted))
+	}
+
+	// Detached, as a node that stops detaches them.
+	tel.ObserveNodeCertificate(nil)
+	tel.ObserveTLS(telemetry.TLSUseNode, nil)
+	for name := range samples(t, tel) {
+		if strings.HasPrefix(name, "cactusfs_node_certificate_") || strings.Contains(name, "use=node") {
+			t.Errorf("%s is exposed when the node has stopped", name)
+		}
+	}
+}
+
+// TestReasonsOfTheMetricsAreThoseOfNodeTLS: the reason labels of the metrics
+// take the values the telemetry adapter defines, and nodetls names the
+// reasons; the two adapters do not know each other, so this holds them to
+// each other. Every reason a certificate on disk is refused for is a label
+// value, and no label value is without its reason; every reason a handshake
+// is refused for is counted under one of the four the metric has.
+func TestReasonsOfTheMetricsAreThoseOfNodeTLS(t *testing.T) {
+	t.Parallel()
+	var reload []string
+	for _, reason := range nodetls.ReloadRefusals() {
+		reload = append(reload, string(reason))
+	}
+	labelled := telemetry.TLSReloadReasons()
+	slices.Sort(reload)
+	slices.Sort(labelled)
+	if !slices.Equal(reload, labelled) {
+		t.Errorf("nodetls refuses a certificate on disk for %v; the metric has the reasons %v", reload, labelled)
+	}
+
+	tests := []struct {
+		refusal nodetls.PeerRefusal
+		want    string
+	}{
+		{refusal: nodetls.PeerRefusedNoCertificate, want: telemetry.HandshakeCertificate},
+		{refusal: nodetls.PeerRefusedUntrusted, want: telemetry.HandshakeCertificate},
+		{refusal: nodetls.PeerRefusedIdentity, want: telemetry.HandshakeCertificate},
+		{refusal: nodetls.PeerRefusedNotAdmitted, want: telemetry.HandshakeNotAdmitted},
+		{refusal: nodetls.PeerRefusedTimeout, want: telemetry.HandshakeTimeout},
+		{refusal: nodetls.PeerRefusedHandshake, want: telemetry.HandshakeOther},
+		{refusal: "a reason nodetls does not have yet", want: telemetry.HandshakeOther},
+	}
+	sorted := map[nodetls.PeerRefusal]bool{}
+	for _, tc := range tests {
+		t.Run(string(tc.refusal), func(t *testing.T) {
+			t.Parallel()
+			if got := handshakeReason(tc.refusal); got != tc.want {
+				t.Errorf("handshakeReason(%q) = %q, want %q", tc.refusal, got, tc.want)
+			}
+		})
+		sorted[tc.refusal] = true
+	}
+	for _, refusal := range nodetls.PeerRefusals() {
+		if !sorted[refusal] {
+			t.Errorf("this test does not say what %q is counted as", refusal)
+		}
 	}
 }

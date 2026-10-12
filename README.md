@@ -158,6 +158,7 @@ the exception: they are read from the environment or a file, never from the comm
 | `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` |
 | `--s3-domain` | `CACTUSFS_S3_DOMAIN` | — (enables `<bucket>.<domain>`) |
 | `--tls-cert`, `--tls-key` | `CACTUSFS_TLS_CERT`, `CACTUSFS_TLS_KEY` | — |
+| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` (at least `5s`; `0` is off): how often the certificate and key files, the node's too, are read again. A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular files (not pipes) |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` |
 | `--drain-delay` | `CACTUSFS_DRAIN_DELAY` | `0s` |
 | `--peers`, `--node-id`, `--roles` | `CACTUSFS_PEERS`, `CACTUSFS_NODE_ID`, `CACTUSFS_ROLES` | — (cluster, see below) |

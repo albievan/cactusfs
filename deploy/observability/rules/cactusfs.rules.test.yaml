@@ -1019,6 +1019,38 @@ tests:
               summary: "A node certificate ends within three days"
               description: "The certificate b:9001 shows the other nodes ends in less than three days. When it has ended the node drops out of the cluster."
 
+  # --- CactusFSCertificateReloadRefused: pending == 1 for 30m ----------------
+  # a, node: nothing pending at 0m-4m ('0x4' is five samples), refused from
+  #    5m on. True from 5m, fires at 5m + 30m = 35m.
+  # a, s3: its other certificate is in use all along. Never true: the alert
+  #    is one a certificate, not one a node.
+  # b, s3: the pair is half written at 10m-19m ('0x9' ends at 9m, '1x9' is
+  #    ten samples) and whole from 20m. True for ten minutes, not thirty.
+  - name: a certificate on disk that was refused
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_tls_reload_pending{job="cactusfs", instance="a:9001", use="node"}'
+        values: '0x4 1x60'
+      - series: 'cactusfs_tls_reload_pending{job="cactusfs", instance="a:9001", use="s3"}'
+        values: '0x65'
+      - series: 'cactusfs_tls_reload_pending{job="cactusfs", instance="b:9001", use="s3"}'
+        values: '0x9 1x9 0x45'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CactusFSCertificateReloadRefused
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CactusFSCertificateReloadRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+              use: node
+            exp_annotations:
+              summary: "A certificate on disk was refused"
+              description: "a:9001 has had certificate files it refuses for thirty minutes (use: node; node is the certificate the other nodes are shown, s3 the one clients are). The certificate on disk was refused; the old one is still served, and ends when it would have. The node will not start with the new one if it is the node certificate, or if the files cannot be read as a pair. The log of the node says why."
+
   # --- CactusFSNodeHandshakesRefused: increase in 15m > 0 for 30m ------------
   # a: one handshake a minute is refused for its certificate, for ever. True
   #    from 1m, fires at 31m.

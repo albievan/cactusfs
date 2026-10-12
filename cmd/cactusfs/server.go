@@ -18,6 +18,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/adminapi/swaggerui"
 	"github.com/albievan/cactusfs/internal/adapters/console"
 	"github.com/albievan/cactusfs/internal/adapters/health"
+	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
@@ -90,9 +91,23 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	// has signed in - the management API say.
 	build := buildinfo.Get()
 
-	tlsConfig, err := loadTLSConfig(cfg)
+	tlsConfig, certificate, err := loadTLSConfig(ctx, cfg, logger)
 	if err != nil {
 		return err
+	}
+	if certificate != nil {
+		// The certificate is replaced without a restart when its files
+		// change (ADR-0020), until the node is told to stop.
+		reloadCtx, stopReload := context.WithCancel(ctx)
+		reloaded := make(chan struct{})
+		go func() {
+			defer close(reloaded)
+			certificate.Run(reloadCtx)
+		}()
+		defer func() {
+			stopReload()
+			awaitReloader(context.WithoutCancel(ctx), logger, "server", reloaded, reloadStopTimeout)
+		}()
 	}
 	tel, err := telemetry.New(ctx, telemetry.Config{Version: build.Tag(), OTLPEndpoint: cfg.OTLPEndpoint})
 	if err != nil {
@@ -118,6 +133,10 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	probes := health.NewHandler(readiness, logger, readinessTimeout)
 	// The gauge says what /readyz says, from the first scrape on.
 	tel.ObserveReadiness(readyGauge{health: readiness})
+	if certificate != nil {
+		// And which certificate clients are shown, whichever it is by then.
+		tel.ObserveTLS(telemetry.TLSUseS3, tlsGauges{reloader: certificate})
+	}
 	adminHandler, s3Handler := &handlerSwitch{}, &handlerSwitch{}
 	adminHandler.set(startingAdmin(probes))
 	s3Handler.set(s3api.Starting())
@@ -279,21 +298,47 @@ func listen(ctx context.Context, endpoints []endpoint, addrs []string) ([]endpoi
 	return endpoints, nil
 }
 
-// loadTLSConfig returns the TLS configuration of the listeners, or nil when
-// the node runs in development plaintext mode.
-func loadTLSConfig(cfg serverConfig) (*tls.Config, error) {
-	if cfg.DevPlaintext {
-		return nil, nil
+// reloadStopTimeout is how long a node that stops waits for a loop that
+// reads certificate files again to end.
+const reloadStopTimeout = 2 * time.Second
+
+// awaitReloader waits until the loop that reads the certificate files of the
+// given kind again has stopped, and no longer than limit. The loop ends with
+// its context whatever it is doing; should it not, the node stops all the
+// same and says so. Its goroutine - one that is held in a read of a file on
+// a mount that hangs, say - is left behind: the process is about to end, and
+// nothing it could still do changes what was stored.
+func awaitReloader(ctx context.Context, logger *slog.Logger, kind string, stopped <-chan struct{}, limit time.Duration) {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-stopped:
+	case <-timer.C:
+		logger.WarnContext(ctx, "the loop that reads the certificate files again did not stop; shutdown goes on without it",
+			slog.String("certificate", kind), slog.Duration("waited", limit))
 	}
-	certificate, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+}
+
+// loadTLSConfig returns the TLS configuration of the listeners and what keeps
+// their certificate current, or nil for both when the node runs in
+// development plaintext mode. Every handshake is shown the certificate in use
+// when it begins; the caller runs the reloader that replaces it.
+func loadTLSConfig(ctx context.Context, cfg serverConfig, logger *slog.Logger) (*tls.Config, *nodetls.Reloader, error) {
+	if cfg.DevPlaintext {
+		return nil, nil, nil
+	}
+	certificate, err := nodetls.LoadServer(ctx, nodetls.ReloadConfig{
+		CertFile: cfg.TLSCert, KeyFile: cfg.TLSKey, Interval: cfg.TLSReloadInterval,
+		Clock: systemClock{}, Logger: logger, Tick: cfg.tlsReloadTick,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("server.LoadTLS: %w", err)
+		return nil, nil, fmt.Errorf("server.LoadTLS: %w", err)
 	}
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		CipherSuites: tls12CipherSuites(),
-		Certificates: []tls.Certificate{certificate},
-	}, nil
+		MinVersion:     tls.VersionTLS12,
+		CipherSuites:   tls12CipherSuites(),
+		GetCertificate: certificate.GetCertificate,
+	}, certificate, nil
 }
 
 // tls12CipherSuites returns the suites offered to TLS 1.2 clients: forward

@@ -382,7 +382,7 @@ func TestServeTLS(t *testing.T) {
 	t.Parallel()
 
 	certFile, keyFile, pool := writeTestCertificate(t)
-	tlsConfig, err := loadTLSConfig(serverConfig{TLSCert: certFile, TLSKey: keyFile})
+	tlsConfig, _, err := loadTLSConfig(t.Context(), serverConfig{TLSCert: certFile, TLSKey: keyFile}, nil)
 	if err != nil {
 		t.Fatalf("loadTLSConfig: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestTLSConfigIsStrict(t *testing.T) {
 	t.Parallel()
 
 	certFile, keyFile, _ := writeTestCertificate(t)
-	cfg, err := loadTLSConfig(serverConfig{TLSCert: certFile, TLSKey: keyFile})
+	cfg, _, err := loadTLSConfig(t.Context(), serverConfig{TLSCert: certFile, TLSKey: keyFile}, nil)
 	if err != nil {
 		t.Fatalf("loadTLSConfig: %v", err)
 	}
@@ -460,12 +460,12 @@ func TestTLSConfigIsStrict(t *testing.T) {
 func TestLoadTLSConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := loadTLSConfig(serverConfig{DevPlaintext: true})
+	cfg, _, err := loadTLSConfig(t.Context(), serverConfig{DevPlaintext: true}, nil)
 	if err != nil || cfg != nil {
 		t.Errorf("plaintext: got (%v, %v), want (nil, nil)", cfg, err)
 	}
 
-	if _, err := loadTLSConfig(serverConfig{TLSCert: "missing.pem", TLSKey: "missing.key"}); err == nil {
+	if _, _, err := loadTLSConfig(t.Context(), serverConfig{TLSCert: "missing.pem", TLSKey: "missing.key"}, nil); err == nil {
 		t.Error("missing certificate files: got nil error")
 	}
 }

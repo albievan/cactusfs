@@ -85,8 +85,25 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		return nil, fmt.Errorf("%w: the node certificate names %q, this node is %q",
 			domain.ErrInvalidArgument, identity.NodeID(), cfg.NodeID)
 	}
-	n.identity = identity
-	n.telemetry.ObserveNodeCertificate(certificateGauge{identity: identity})
+	// The certificate is replaced without a restart when its files change
+	// (ADR-0020); the node it names and the CA are not.
+	reloader, err := identity.Reloader(nodetls.ReloadConfig{
+		CertFile: cfg.NodeTLSCert, KeyFile: cfg.NodeTLSKey, Interval: cfg.TLSReloadInterval,
+		Clock: n.clock, Logger: logger, Tick: cfg.tlsReloadTick,
+	})
+	if err != nil {
+		return nil, err
+	}
+	n.identity, n.reloader = identity, reloader
+	// The gauges read the certificate in use, whichever that is by then,
+	// and what became of the files it is read from again.
+	n.telemetry.ObserveNodeCertificate(certificateGauge{reloader: reloader})
+	n.telemetry.ObserveTLS(telemetry.TLSUseNode, tlsGauges{reloader: reloader})
+	// A handshake is counted once, where it is done: one on the Raft port,
+	// or on a connection Raft dials, by the identity, which is read when the
+	// node is scraped; one on the node RPC port by gRPC's credentials, which
+	// report it below.
+	n.telemetry.ObserveHandshakes(handshakeCounts{identity: identity})
 	// Every call between nodes is a span and is counted, on both sides;
 	// the caller's trace travels with the call.
 	observed := n.telemetry.NodeRPC(noderpc.Methods())
@@ -94,19 +111,12 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		WithInterceptors(observed.UnaryClient(), observed.StreamClient())
 
 	// Raft trusts what its messages say about who sent them, so the
-	// listener admits only the nodes that may send any: the voters.
-	//
-	// TODO(PLAN 7.5): a handshake the Raft listener itself fails - no
-	// certificate, not one of the node CA, too slow - is not counted:
-	// nodetls.Listen closes such a connection without telling anybody. When
-	// it reports them, count them here with telemetry.HandshakeCertificate
-	// and telemetry.HandshakeTimeout. Node RPC counts its own, below.
+	// listener admits only the nodes that may send any: the voters. A
+	// node it turns away is counted by the identity, with every other
+	// handshake the listener refuses - not here, or it would be counted
+	// twice.
 	raftListener, err := identity.Listen(ctx, cfg.RaftAddr, func(nodeID string) bool {
-		admitted := n.mayReplicate(cfg, nodeID)
-		if !admitted {
-			n.telemetry.ObserveHandshakeRefused(telemetry.HandshakeNotAdmitted)
-		}
-		return admitted
+		return n.mayReplicate(cfg, nodeID)
 	})
 	if err != nil {
 		return nil, err
@@ -133,8 +143,22 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		UnaryInterceptor: observed.UnaryServer(), StreamInterceptor: observed.StreamServer(),
 		OnHandshakeRefused: n.telemetry.ObserveHandshakeRefused,
 	})
+	// The files are looked at for as long as node RPC is served: what stops
+	// the one stops the other.
+	reloadCtx, stopReload := context.WithCancel(context.WithoutCancel(ctx))
+	reloaded := make(chan struct{})
+	go func() {
+		defer close(reloaded)
+		reloader.Run(reloadCtx)
+	}()
 	n.rpcDone = make(chan error, 1)
-	go func() { n.rpcDone <- n.rpcServer.Serve(rpcListener) }()
+	go func() {
+		err := n.rpcServer.Serve(rpcListener)
+		stopReload()
+		// Bounded: Close waits for rpcDone, and must not wait for a file.
+		awaitReloader(context.WithoutCancel(ctx), logger, "node", reloaded, reloadStopTimeout)
+		n.rpcDone <- err
+	}()
 	logger.InfoContext(ctx, "listening", slog.String("listener", "node-rpc"), slog.String("addr", rpcListener.Addr().String()),
 		slog.Bool("tls", true))
 	logger.InfoContext(ctx, "listening", slog.String("listener", "raft"), slog.String("addr", raftListener.Addr().String()),

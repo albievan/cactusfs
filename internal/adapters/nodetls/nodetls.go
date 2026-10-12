@@ -12,8 +12,10 @@ package nodetls
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -28,19 +31,108 @@ import (
 )
 
 // Identity is a node's certificate and the CA that it and its peers trust.
+// The certificate can be replaced while the node runs (see Reloader); the
+// node it names and the CA cannot.
 type Identity struct {
-	nodeID      string
-	certificate tls.Certificate
-	roots       *x509.CertPool
+	nodeID string
+	roots  *x509.CertPool
+	// current is the certificate every new handshake presents. A handshake
+	// that has begun, and a connection that is open, keep the one they have.
+	current atomic.Pointer[tls.Certificate]
+	// digest tells the files the certificate was made from from any other.
+	digest [sha256.Size]byte
+	// refused counts the peers whose handshake was refused, by reason.
+	refused map[PeerRefusal]*atomic.Uint64
+}
+
+// PeerRefusal is why a handshake with another node was refused. The set is
+// fixed, so that it can label a metric.
+type PeerRefusal string
+
+const (
+	// PeerRefusedHandshake - the handshake failed before any certificate
+	// was judged, for a reason that is none of the others: a connection
+	// that was closed half-way, a caller that speaks no TLS 1.3.
+	PeerRefusedHandshake PeerRefusal = "handshake"
+	// PeerRefusedTimeout - the caller connected and did not finish the
+	// handshake in time.
+	PeerRefusedTimeout PeerRefusal = "timeout"
+	// PeerRefusedNoCertificate - the caller showed no certificate.
+	PeerRefusedNoCertificate PeerRefusal = "no_certificate"
+	// PeerRefusedUntrusted - the certificate is not a valid one of the node
+	// CA.
+	PeerRefusedUntrusted PeerRefusal = "untrusted"
+	// PeerRefusedIdentity - the certificate names no node, or not the node
+	// that was dialled.
+	PeerRefusedIdentity PeerRefusal = "identity"
+	// PeerRefusedNotAdmitted - the certificate is good, and the listener
+	// does not admit the node it names.
+	PeerRefusedNotAdmitted PeerRefusal = "not_admitted"
+)
+
+// PeerRefusals returns every PeerRefusal there is.
+func PeerRefusals() []PeerRefusal {
+	return []PeerRefusal{
+		PeerRefusedHandshake, PeerRefusedTimeout, PeerRefusedNoCertificate, PeerRefusedUntrusted, PeerRefusedIdentity,
+		PeerRefusedNotAdmitted,
+	}
+}
+
+// PeersRefused returns how many handshakes with other nodes were refused for
+// the given reason, on connections whose handshake this package does: those
+// of Listen and of Dial, which carry Raft. gRPC does its own for node RPC,
+// with the same configuration; they are not counted here.
+func (i *Identity) PeersRefused(reason PeerRefusal) uint64 {
+	if counter, ok := i.refused[reason]; ok {
+		return counter.Load()
+	}
+	return 0
+}
+
+func (i *Identity) refuse(reason PeerRefusal) {
+	i.refused[reason].Add(1)
+}
+
+// noCertificate is how crypto/tls says that a caller showed no certificate.
+// It has no type for it; should the text change, such a caller is counted as
+// PeerRefusedHandshake, and still counted.
+const noCertificate = "client didn't provide a certificate"
+
+// peerRefusalOf sorts the error of a failed handshake.
+func peerRefusalOf(err error) PeerRefusal {
+	var verification *tls.CertificateVerificationError
+	if !errors.As(err, &verification) {
+		var timeout net.Error
+		switch {
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded),
+			errors.As(err, &timeout) && timeout.Timeout():
+			return PeerRefusedTimeout
+		case strings.Contains(err.Error(), noCertificate):
+			return PeerRefusedNoCertificate
+		}
+		return PeerRefusedHandshake
+	}
+	var name x509.HostnameError
+	if errors.As(err, &name) {
+		return PeerRefusedIdentity
+	}
+	return PeerRefusedUntrusted
+}
+
+// NotAfter returns when the certificate in use expires.
+func (i *Identity) NotAfter() time.Time {
+	return i.current.Load().Leaf.NotAfter
 }
 
 // Load reads a node's certificate, key and CA from PEM files. It checks, now
 // rather than at the first connection, that the certificate is one the CA
-// issued and that it names a node.
+// issued and that it names a node. The certificate and the key are read as a
+// Reloader reads them again later: regular files, within their directory.
 func Load(certFile, keyFile, caFile string) (*Identity, error) {
 	var pems [3][]byte
+	readers := []func(string) ([]byte, error){readConfined, readConfined, readFile}
 	for i, path := range []string{certFile, keyFile, caFile} {
-		data, err := readFile(path)
+		data, err := readers[i](path)
 		if err != nil {
 			return nil, fmt.Errorf("nodetls.Load: %w", err)
 		}
@@ -54,9 +146,8 @@ func Load(certFile, keyFile, caFile string) (*Identity, error) {
 	return identity, nil
 }
 
-// maxPEMFile bounds a certificate, key or CA file.
-const maxPEMFile = 1 << 20
-
+// readFile reads the node CA, once, at start: within its directory, and
+// whatever kind of file it is.
 func readFile(path string) ([]byte, error) {
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
@@ -88,19 +179,57 @@ func New(certPEM, keyPEM, caPEM []byte) (*Identity, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("%w: the node CA file holds no certificate", domain.ErrInvalidArgument)
 	}
-	leaf := certificate.Leaf
+	leaf, err := leafOf(&certificate)
+	if err != nil {
+		return nil, fmt.Errorf("%w: node certificate: %w", domain.ErrInvalidArgument, err)
+	}
 	nodeID, err := nodeIDOf(leaf)
 	if err != nil {
 		return nil, err
 	}
+	// The zero time is the time it is.
+	if err := verifyNode(leaf, roots, nodeID, time.Time{}); err != nil {
+		return nil, fmt.Errorf("%w: %w", domain.ErrInvalidArgument, err)
+	}
+	identity := &Identity{
+		nodeID: nodeID, roots: roots, digest: pairDigest(certPEM, keyPEM), refused: map[PeerRefusal]*atomic.Uint64{},
+	}
+	for _, reason := range PeerRefusals() {
+		identity.refused[reason] = &atomic.Uint64{}
+	}
+	identity.current.Store(&certificate)
+	return identity, nil
+}
+
+// leafOf returns the parsed certificate of a pair, and keeps it with the
+// pair.
+func leafOf(certificate *tls.Certificate) (*x509.Certificate, error) {
+	if certificate.Leaf != nil {
+		return certificate.Leaf, nil
+	}
+	if len(certificate.Certificate) == 0 {
+		return nil, errors.New("no certificate")
+	}
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		return nil, err
+	}
+	certificate.Leaf = leaf
+	return leaf, nil
+}
+
+// verifyNode checks, as a peer will at every handshake, that a certificate
+// is one the node CA issued to the node with the given ID, good for both
+// ends of a connection, and valid at the given time.
+func verifyNode(leaf *x509.Certificate, roots *x509.CertPool, nodeID string, now time.Time) error {
 	usages := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 	for _, usage := range usages {
-		if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: nodeID, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
-			return nil, fmt.Errorf("%w: the node certificate is not valid under the node CA, as server and as client: %w",
-				domain.ErrInvalidArgument, err)
+		options := x509.VerifyOptions{Roots: roots, DNSName: nodeID, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{usage}}
+		if _, err := leaf.Verify(options); err != nil {
+			return fmt.Errorf("the node certificate is not valid under the node CA, as server and as client: %w", err)
 		}
 	}
-	return &Identity{nodeID: nodeID, certificate: certificate, roots: roots}, nil
+	return nil
 }
 
 // nodeIDOf returns the node a certificate names.
@@ -124,25 +253,28 @@ func (i *Identity) NodeID() string {
 
 // Server returns the configuration for accepting connections from other
 // nodes: TLS 1.3, and a certificate of the node CA is demanded of every
-// caller.
+// caller. Every handshake presents the certificate in use when it begins.
 func (i *Identity) Server() *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{i.certificate},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    i.roots,
+		MinVersion: tls.VersionTLS13,
+		// Never nil: there is a certificate from the moment the identity
+		// exists, and it is only ever exchanged for another.
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return i.current.Load(), nil },
+		ClientAuth:     tls.RequireAndVerifyClientCert,
+		ClientCAs:      i.roots,
 	}
 }
 
 // Client returns the configuration for connecting to the node with the given
 // ID: TLS 1.3, and the certificate shown must be one of the node CA that
-// names that node.
+// names that node. Every handshake presents the certificate in use when it
+// begins - a connection that is opened again after a replacement, too.
 func (i *Identity) Client(nodeID string) *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{i.certificate},
-		RootCAs:      i.roots,
-		ServerName:   nodeID,
+		MinVersion:           tls.VersionTLS13,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return i.current.Load(), nil },
+		RootCAs:              i.roots,
+		ServerName:           nodeID,
 	}
 }
 
@@ -171,7 +303,7 @@ func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID
 	}
 	l := &listener{
 		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
-		open: map[*tracked]struct{}{},
+		refuse: i.refuse, open: map[*tracked]struct{}{},
 	}
 	// The listener outlives the call that opened it.
 	go l.run(context.WithoutCancel(ctx))
@@ -181,8 +313,10 @@ func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID
 // listener hands out connections that are authenticated and admitted.
 type listener struct {
 	net.Listener
-	config   *tls.Config
-	allow    func(nodeID string) bool
+	config *tls.Config
+	allow  func(nodeID string) bool
+	// refuse is told why a caller was turned away.
+	refuse   func(PeerRefusal)
 	accepted chan net.Conn
 	closed   chan struct{}
 	once     sync.Once
@@ -232,11 +366,18 @@ func (l *listener) admit(ctx context.Context, raw net.Conn) {
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	if err := conn.HandshakeContext(ctx); err != nil {
+		l.refuse(peerRefusalOf(err))
 		_ = conn.Close()
 		return
 	}
 	nodeID, err := PeerNodeID(conn.ConnectionState())
-	if err != nil || !l.allow(nodeID) {
+	if err != nil {
+		l.refuse(PeerRefusedIdentity)
+		_ = conn.Close()
+		return
+	}
+	if !l.allow(nodeID) {
+		l.refuse(PeerRefusedNotAdmitted)
 		_ = conn.Close()
 		return
 	}
@@ -307,6 +448,11 @@ func (i *Identity) Dial(ctx context.Context, address string) (net.Conn, error) {
 	dialer := &tls.Dialer{Config: i.Client(nodeID)}
 	conn, err := dialer.DialContext(ctx, "tcp", hostPort)
 	if err != nil {
+		// A node that cannot be reached refused nothing.
+		var verification *tls.CertificateVerificationError
+		if errors.As(err, &verification) {
+			i.refuse(peerRefusalOf(err))
+		}
 		return nil, fmt.Errorf("nodetls.Dial: %s: %w", address, err)
 	}
 	return conn, nil

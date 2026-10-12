@@ -101,6 +101,7 @@ func observedTelemetry(t *testing.T) *telemetry.Telemetry {
 	}})
 	tel.ObserveDrives(fixedDrives{{ID: "drive-a", Online: true, FreeBytes: 1, TotalBytes: 2}})
 	tel.ObserveNodeCertificate(fixedCertificate{notAfter: time.Unix(1, 0), present: true})
+	tel.ObserveTLS(telemetry.TLSUseNode, fixedTLS{NotAfter: time.Unix(1, 0)})
 	tel.ObserveReadiness(readyWhen(true))
 	return tel
 }

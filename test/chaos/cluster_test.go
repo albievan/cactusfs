@@ -381,9 +381,14 @@ func TestClusterHealsCorruptionAndLoss(t *testing.T) {
 	})
 	before := rebuilt(c)
 
-	// Flip a byte in the middle of every shard file on node2.
+	// Change a byte in the middle of every shard file on node2 - to its
+	// complement, whatever it was: a byte written over with a fixed value is
+	// not changed where it already had that value, which is one shard in
+	// 256, and then a shard short of what this test waits for.
 	c.Shell("node2", `for f in $(find /data1/shards /data2/shards -type f); do
-		size=$(stat -c %s "$f"); printf '\377' | dd of="$f" bs=1 seek=$((size / 2)) conv=notrunc 2>/dev/null; done`)
+		size=$(stat -c %s "$f"); at=$((size / 2))
+		was=$(dd if="$f" bs=1 skip=$at count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+		printf "\\$(printf '%03o' $((was ^ 255)))" | dd of="$f" bs=1 seek=$at conv=notrunc 2>/dev/null; done`)
 	// Delete every shard file on node3.
 	// (The scrubber may have begun to put them back by the time anyone
 	// could count them.)

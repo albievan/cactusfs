@@ -38,6 +38,30 @@ can issue the certificates, and nothing requires it.
 | `secrets.nodeCA` | The CA of node certificates: key `ca.crt`. Not for a node on its own |
 | `<node ID>-node-tls` | One for every node (`kubernetes.io/tls`); the suffix is `secrets.nodeTLSSuffix`. The certificate carries one DNS name, the node ID. A pod mounts its own and no other node's |
 
+**Rotating certificates.** Update the Secret - `secrets.tls`, or a node's
+`<node ID>-node-tls` - and do nothing else: no pod restarts (ADR-0020). The kubelet
+brings the new files into the pod, which can take a minute or more; the node reads its
+certificate files again every minute (`CACTUSFS_TLS_RELOAD_INTERVAL`) and uses a new
+pair for new connections. Connections that are open stay open, and the metadata group
+keeps its leader. A node certificate must name the same node and come from the CA in
+`secrets.nodeCA`; a pair that is not valid is refused, the node logs why at `ERROR`
+(`the certificate on disk is refused; the one in use stays`) and goes on with the old
+one - so renew with more margin than those two delays, and watch the log or the alert
+`CactusFSCertificateReloadRefused` (`cactusfs_tls_reload_pending` has been 1 for thirty
+minutes). The Secret is
+also what a pod reads when it next starts: a refused node certificate left in it stops
+that start.
+
+Rotation is not revocation: a replaced certificate and its key remain accepted by peers
+until that certificate expires; for a compromised key, rotate the CA (below) or remove
+the node.
+
+The CA in `secrets.nodeCA` is **not** read again: trust changes with a restart. To
+replace the CA, (1) put both CA certificates, old and new, in `ca.crt` and restart the
+pods one StatefulSet at a time; (2) replace every node certificate by one of the new
+CA, as above, without restarts; (3) put the new CA alone in `ca.crt` and restart once
+more.
+
 Keys are kept in a KMS; there is no unencrypted fallback.
 
 | Value | |

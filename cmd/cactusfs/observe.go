@@ -48,24 +48,66 @@ func (g driveGauges) DriveStates() []telemetry.DriveState {
 	return states
 }
 
-// certificateGauge is the node's identity as the gauge of its certificate's
-// end reads it.
-//
-// TODO(PLAN 7.5): nodetls has no accessor for the certificate it presents,
-// so this reads it from the configuration the identity gives a listener.
-// When certificates are replaced without a restart and nodetls can say
-// which one it presents now, read it from there.
+// certificateGauge is what replaces the node's certificate as the gauge of
+// that certificate's end reads it: the one in use at the scrape, which is
+// another after a replacement (ADR-0020).
 type certificateGauge struct {
-	identity *nodetls.Identity
+	reloader *nodetls.Reloader
 }
 
 // NodeCertificateNotAfter implements telemetry.CertificateSource.
 func (g certificateGauge) NodeCertificateNotAfter() (time.Time, bool) {
-	certificates := g.identity.Server().Certificates
-	if len(certificates) == 0 || certificates[0].Leaf == nil {
-		return time.Time{}, false
+	return g.reloader.NotAfter(), true
+}
+
+// tlsGauges is what replaces one of the node's certificates - the one the
+// other nodes are shown, or the one clients are - as the gauges of that
+// certificate read it. Nothing it asks waits for a file.
+type tlsGauges struct {
+	reloader *nodetls.Reloader
+}
+
+// TLSState implements telemetry.TLSSource.
+func (g tlsGauges) TLSState() telemetry.TLSState {
+	state := telemetry.TLSState{
+		NotAfter: g.reloader.NotAfter(), Pending: g.reloader.Pending() != "", Refused: map[string]uint64{},
 	}
-	return certificates[0].Leaf.NotAfter, true
+	for _, reason := range nodetls.ReloadRefusals() {
+		state.Refused[string(reason)] = g.reloader.Refused(reason)
+	}
+	return state
+}
+
+// handshakeCounts is the node's identity as the count of refused handshakes
+// reads it: what it refused on the Raft port and on the connections Raft
+// dials. Node RPC's handshakes are gRPC's, and are not in it.
+type handshakeCounts struct {
+	identity *nodetls.Identity
+}
+
+// HandshakesRefused implements telemetry.HandshakeSource.
+func (c handshakeCounts) HandshakesRefused() map[string]uint64 {
+	counts := map[string]uint64{}
+	for _, reason := range nodetls.PeerRefusals() {
+		counts[handshakeReason(reason)] += c.identity.PeersRefused(reason)
+	}
+	return counts
+}
+
+// handshakeReason names a refusal of nodetls as the metric does, which has
+// the reasons node RPC tells: whichever port a peer was refused on, and
+// whoever did the handshake, the same thing has the same name.
+func handshakeReason(reason nodetls.PeerRefusal) string {
+	switch reason {
+	case nodetls.PeerRefusedNoCertificate, nodetls.PeerRefusedUntrusted, nodetls.PeerRefusedIdentity:
+		return telemetry.HandshakeCertificate
+	case nodetls.PeerRefusedNotAdmitted:
+		return telemetry.HandshakeNotAdmitted
+	case nodetls.PeerRefusedTimeout:
+		return telemetry.HandshakeTimeout
+	default:
+		return telemetry.HandshakeOther
+	}
 }
 
 // readyGauge is the health service as the readiness gauge reads it.

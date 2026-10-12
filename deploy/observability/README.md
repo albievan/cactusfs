@@ -57,7 +57,7 @@ Prometheus data source (`DS_PROMETHEUS`) and one for the nodes shown.
 | `cactusfs.storage` | the KMS, shard operations, objects that cannot be rebuilt, shards rebuilt, lifecycle rules, reads not counted |
 | `cactusfs.metadata` | no leader of the metadata group, elections that do not stop, a node behind, an upgrade of the schema that is not finished |
 | `cactusfs.drives` | a drive that is offline, a drive that is nearly full |
-| `cactusfs.nodes` | a node certificate that ends within 14 and within 3 days, refused handshakes, failing calls between nodes, a node that is not ready |
+| `cactusfs.nodes` | a node certificate that ends within 14 and within 3 days, a certificate on disk that was refused, refused handshakes, failing calls between nodes, a node that is not ready |
 | `cactusfs.audit` | an audit trail that cannot be written |
 
 A drive is named in an alert by its generated ID, never by its directory.
@@ -68,9 +68,26 @@ There is no alert on a scrubber that has stopped (the count of passes cannot tel
 pass from a stuck one; it needs a gauge of the last finished pass) and none on requests
 refused while a node starts (there is no count of them). The end of the rules file says
 so. An alert is not written before its metric exists - a rule on a metric that does not
-exist never fires. Handshakes that the Raft listener itself fails - as opposed to nodes
-it does not admit, and to everything on the node RPC port - are not counted yet
-(PLAN 7.5).
+exist never fires.
+
+The end of the certificate clients are shown (`cactusfs_tls_certificate_not_after_seconds{use="s3"}`)
+is exposed and in no alert: the two alerts on a certificate that ends read the node's.
+Write one with the margin your own renewal has.
+
+## Certificates and handshakes
+
+Certificates are replaced without a restart (ADR-0020), and three metrics say how that
+went, for the node's certificate (`use="node"`) and for the one clients are shown
+(`use="s3"`): when the certificate in use ends, whether the files hold something that
+was refused (`cactusfs_tls_reload_pending`, what `CactusFSCertificateReloadRefused`
+reads), and how often what for (`cactusfs_tls_reload_refused_total`). After a
+replacement `cactusfs_node_certificate_not_after_seconds` is the new certificate's end.
+
+`cactusfs_node_handshakes_refused_total` counts every handshake with another node that
+this node refused, once: on the node RPC port, on the Raft port - a node that is not
+admitted there, and a caller without a certificate, with one of another CA, or one that
+was too slow - and on the connections Raft dials, when the node that answers shows a
+certificate that is not the one of the node that was meant.
 
 ## Checking
 

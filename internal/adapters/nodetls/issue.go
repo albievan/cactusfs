@@ -72,6 +72,12 @@ func NewNamedAuthority(entropy io.Reader, now time.Time, validity time.Duration,
 	}, nil
 }
 
+// NotAfter returns when the CA expires, and with it every certificate it
+// issued.
+func (a *Authority) NotAfter() time.Time {
+	return a.certificate.NotAfter
+}
+
 func newSerial(entropy io.Reader) (*big.Int, error) {
 	raw := make([]byte, serialBits/8+1)
 	if _, err := io.ReadFull(entropy, raw); err != nil {

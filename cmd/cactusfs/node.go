@@ -54,7 +54,10 @@ type node struct {
 	id    string
 	roles cluster.Roles
 	// The fields below are set on a member of a cluster only.
-	identity  *nodetls.Identity
+	identity *nodetls.Identity
+	// reloader replaces the certificate of the identity when its files
+	// change.
+	reloader  *nodetls.Reloader
 	rpc       *noderpc.Client
 	rpcServer *noderpc.Server
 	rpcDone   chan error
@@ -640,6 +643,8 @@ func (n *node) Close() error {
 	n.telemetry.ObserveRaft(nil)
 	n.telemetry.ObserveDrives(nil)
 	n.telemetry.ObserveNodeCertificate(nil)
+	n.telemetry.ObserveTLS(telemetry.TLSUseNode, nil)
+	n.telemetry.ObserveHandshakes(nil)
 	var errs []error
 	if n.meta != nil {
 		// Let the others carry on without waiting for an election timeout.

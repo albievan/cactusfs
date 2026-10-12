@@ -162,7 +162,7 @@ func TestParseServerConfig(t *testing.T) {
 			MetaDir: filepath.Join(dataDir, "meta"), KMS: "local", KMSKeyFile: filepath.Join(dataDir, "meta", "kms-local.json"),
 			DevPlaintext: true, LogLevel: slog.LevelInfo, ShutdownTimeout: 30 * time.Second,
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
-			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second,
+			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second, TLSReloadInterval: time.Minute,
 			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
@@ -269,6 +269,22 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "reads recorded too often", args: dev("--access-flush-interval", "4s"), env: passphrase, wantErr: "access flush interval"},
 		{name: "reads never recorded", args: dev("--access-flush-interval", "0"), env: passphrase, wantErr: "access flush interval"},
 		{name: "bad access flush interval variable", env: withPassphrase(map[string]string{envAccessFlush: "often"}), wantErr: envAccessFlush},
+		{
+			name: "certificates read again more often, by flag over variable", args: dev("--tls-reload-interval", "5s"),
+			env:  withPassphrase(map[string]string{envTLSReload: "10m"}),
+			want: base(func(c *serverConfig) { c.TLSReloadInterval = 5 * time.Second }),
+		},
+		{
+			name: "certificates read again less often, by variable", args: dev(), env: withPassphrase(map[string]string{envTLSReload: "10m"}),
+			want: base(func(c *serverConfig) { c.TLSReloadInterval = 10 * time.Minute }),
+		},
+		{
+			name: "certificates never read again", args: dev("--tls-reload-interval", "0"), env: passphrase,
+			want: base(func(c *serverConfig) { c.TLSReloadInterval = 0 }),
+		},
+		{name: "certificates read again too often", args: dev("--tls-reload-interval", "4s"), env: passphrase, wantErr: "TLS reload interval"},
+		{name: "negative TLS reload interval", args: dev("--tls-reload-interval", "-1m"), env: passphrase, wantErr: "TLS reload interval"},
+		{name: "bad TLS reload interval variable", env: withPassphrase(map[string]string{envTLSReload: "often"}), wantErr: envTLSReload},
 		{name: "negative scrub rate", args: dev("--scrub-rate-mib", "-1"), env: passphrase, wantErr: "must not be negative"},
 		{name: "grace period too short to be safe", args: dev("--gc-grace", "59m"), env: passphrase, wantErr: "grace period"},
 		{

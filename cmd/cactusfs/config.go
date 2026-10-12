@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/app"
@@ -41,6 +42,7 @@ const (
 	envAuditExport     = "CACTUSFS_AUDIT_EXPORT"
 	envTLSCert         = "CACTUSFS_TLS_CERT"
 	envTLSKey          = "CACTUSFS_TLS_KEY"
+	envTLSReload       = "CACTUSFS_TLS_RELOAD_INTERVAL"
 	envDevPlaintext    = "CACTUSFS_DEV_PLAINTEXT"
 	envLogLevel        = "CACTUSFS_LOG_LEVEL"
 	envOTLPEndpoint    = "CACTUSFS_OTLP_ENDPOINT"
@@ -139,6 +141,13 @@ type serverConfig struct {
 	// private key of the listeners.
 	TLSCert string
 	TLSKey  string
+	// TLSReloadInterval is how often the certificate files - these and the
+	// node's - are read again, so that a certificate is replaced without a
+	// restart (ADR-0020); zero never reads them again.
+	TLSReloadInterval time.Duration
+	// tlsReloadTick, when not nil, replaces the timer between two readings;
+	// tests set it.
+	tlsReloadTick func(time.Duration) <-chan time.Time
 	// DevPlaintext serves HTTP without TLS, on loopback only.
 	DevPlaintext bool
 	// LogLevel is the minimum level written to the log.
@@ -256,6 +265,10 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		return cfg, err
 	}
 
+	tlsReload, err := envDuration(getenv, envTLSReload, nodetls.DefaultReloadInterval)
+	if err != nil {
+		return cfg, err
+	}
 	scrubInterval, err := envDuration(getenv, envScrubInterval, defaultScrubInterval)
 	if err != nil {
 		return cfg, err
@@ -331,6 +344,10 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"`path` of the PEM certificate chain ($"+envTLSCert+")")
 	fs.StringVar(&cfg.TLSKey, "tls-key", getenv(envTLSKey),
 		"`path` of the PEM private key ($"+envTLSKey+")")
+	fs.DurationVar(&cfg.TLSReloadInterval, "tls-reload-interval", tlsReload,
+		"how often the certificate and key files, the node's too, are read again, so that a certificate is replaced "+
+			"without a restart; at least "+nodetls.MinReloadInterval.String()+", 0 never reads them again; "+
+			"the node CA is read at start only ($"+envTLSReload+")")
 	fs.BoolVar(&cfg.DevPlaintext, "dev-plaintext", devPlaintext,
 		"DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only ($"+envDevPlaintext+")")
 	fs.DurationVar(&cfg.DrainDelay, "drain-delay", drainDelay,
@@ -431,6 +448,10 @@ func (c *serverConfig) validate() error {
 	}
 	if c.ScrubInterval < 0 || c.GCInterval < 0 || c.ScrubRateMiB < 0 || c.LifecycleInterval < 0 {
 		return errors.New("scrub interval, scrub rate, lifecycle interval and garbage collection interval must not be negative")
+	}
+	if c.TLSReloadInterval < 0 || (c.TLSReloadInterval > 0 && c.TLSReloadInterval < nodetls.MinReloadInterval) {
+		return fmt.Errorf("TLS reload interval %s: must be at least %s, or 0 to never reload",
+			c.TLSReloadInterval, nodetls.MinReloadInterval)
 	}
 	if c.AccessFlushInterval < app.MinAccessFlushInterval {
 		return fmt.Errorf("access flush interval %s: must be at least %s", c.AccessFlushInterval, app.MinAccessFlushInterval)

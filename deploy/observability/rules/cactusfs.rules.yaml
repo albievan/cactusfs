@@ -331,6 +331,18 @@ groups:
           summary: "A node certificate ends within three days"
           description: "The certificate {{ $labels.instance }} shows the other nodes ends in less than three days. When it has ended the node drops out of the cluster."
 
+      # What is in the certificate files is not what the node shows: it found
+      # them changed and refused what they hold. Half an hour is longer than
+      # any replacement takes to be whole, and long before the old one ends.
+      - alert: CactusFSCertificateReloadRefused
+        expr: cactusfs_tls_reload_pending == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A certificate on disk was refused"
+          description: "{{ $labels.instance }} has had certificate files it refuses for thirty minutes (use: {{ $labels.use }}; node is the certificate the other nodes are shown, s3 the one clients are). The certificate on disk was refused; the old one is still served, and ends when it would have. The node will not start with the new one if it is the node certificate, or if the files cannot be read as a pair. The log of the node says why."
+
       # Certificates that are not accepted and nodes that are not admitted;
       # not connections that were merely cut short. A few at the start of a
       # cluster pass: the alert wants them to go on.

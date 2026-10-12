@@ -125,6 +125,7 @@ matching flag, and the flag wins.
 | `--admin-addr` | `CACTUSFS_ADMIN_ADDR` | `:9001` | admin listener: probes and `/metrics` |
 | `--tls-cert` | `CACTUSFS_TLS_CERT` | — | PEM certificate chain |
 | `--tls-key` | `CACTUSFS_TLS_KEY` | — | PEM private key |
+| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`); `0` never reads them again. The node CA is read at start only |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
 | `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
 | `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between passes of the worker that carries out lifecycle rules; `0` disables it |
@@ -155,6 +156,18 @@ Behaviour:
   `--dev-plaintext` it serves HTTP, but only on `127.0.0.1` or `::1`; a wildcard, a
   routable address or a host name is rejected. TLS minimum is 1.2, restricted to ECDHE
   suites with AES-GCM or ChaCha20-Poly1305; 1.3 is negotiated when the client offers it.
+  Certificates are replaced without a restart (ADR-0020): every `--tls-reload-interval`
+  the certificate and key files - of the listeners and of the node - are read again, and
+  a pair whose content changed is put to use for new handshakes if it parses, matches,
+  is valid at the time and, for the node, names this node and verifies under the node
+  CA; anything else is refused and logged and the pair in use stays. Open connections
+  are not touched, so Raft keeps its leader. The node CA is read at start only: trust
+  roots change with a restart. The files are regular files of at most 1 MiB; the node's
+  pair is read within its directory, the listeners' pair through links wherever they
+  lead. A read that hangs holds up neither handshakes nor shutdown. The listeners'
+  pair is held to the same checks at start, where a failure is logged at `ERROR` and
+  the node starts all the same. A refusal that stands is logged again every hour, and
+  is `cactusfs_tls_reload_pending` = 1 for as long as it stands.
 - **Probes.** `GET /healthz` answers 200 while the process can serve HTTP. `GET /readyz`
   answers 200 when every `ports.ReadinessCheck` passes and 503 otherwise. The probes are
   unauthenticated, so a response is only `{"status":"ok"}` or `{"status":"unavailable"}`;
@@ -192,7 +205,8 @@ Behaviour:
   neither unless told to. The rules expect the scrape job to be named `cactusfs`.
   The alerts cover the APIs, the KMS and the shard stores, healing, the metadata group
   (no leader, elections, a node behind, an unfinished upgrade of the schema), drives
-  (offline, nearly full), node certificates, refused handshakes, calls between nodes,
+  (offline, nearly full), node certificates, a certificate on disk that was refused,
+  refused handshakes, calls between nodes,
   readiness and the audit trail.
   `make observability-check` runs `promtool`, checks the dashboards and the chart's two
   templates, and runs a test of `internal/adapters/telemetry` that fails when a rule, a
@@ -219,7 +233,7 @@ Behaviour:
   is held without its decorator; the exceptions (the clock, the authorizer, the erasure
   codec, the composition of drives, shard readers, readiness checks) are listed in
   that test with their reasons.
-- **State.** The gauges of the metadata group, the drives, the node certificate and
+- **State.** The gauges of the metadata group, the drives, the certificates and
   readiness are read when the metrics are scraped, from accessors that ask no other
   node: what Raft keeps in memory, short reads of the node's own state, one `fstatfs` a
   drive through the handle the drive was opened with. Every source is asked through a
@@ -228,7 +242,16 @@ Behaviour:
   `cactusfs_drive_online`, which is 0 for every drive the last answer named - and a
   source that hangs (the metadata state while a snapshot is restored, a drive) is asked
   once, not once a scrape. A gauge whose source does not exist (a node that is starting,
-  a node without a node certificate) is absent as well.
+  a node without a node certificate) is absent as well. Two counters are read the same
+  way from counts that are kept where the thing happens, and never go back: the
+  refusals of certificate files (`cactusfs_tls_reload_refused_total`, every reason at 0
+  from the first scrape of a certificate) and the handshakes `nodetls` does itself, on
+  the Raft port and on the connections Raft dials, which a scrape adds to
+  `cactusfs_node_handshakes_refused_total` beside those of node RPC, which gRPC does and
+  reports one by one. A handshake reaches that counter by one of the two ways only. Its
+  reasons are the same four whoever did the handshake: no certificate, another CA or
+  another node's name is `certificate`; a node the Raft port does not admit is
+  `not_admitted`.
 - **Logs** are JSON on stdout (`log/slog`). Secrets, keys, tokens and object contents are
   never logged.
 
@@ -251,8 +274,11 @@ Prometheus client and are not listed.
 | `cactusfs_port_call_duration_seconds` | histogram | `port`, `method` | duration of calls across an outbound port |
 | `cactusfs_noderpc_requests_total` | counter | `side`, `method`, `code` | calls between nodes: `side` is `client` (made) or `server` (answered), `method` one of node RPC's or `other`, `code` the gRPC status |
 | `cactusfs_noderpc_request_duration_seconds` | histogram | `side`, `method` | duration of calls between nodes; of a stream, until it ends |
-| `cactusfs_node_handshakes_refused_total` | counter | `reason` | handshakes of other nodes this node refused: `certificate`, `not_admitted`, `timeout`, `other` |
-| `cactusfs_node_certificate_not_after_seconds` | gauge | - | when the node's certificate ends, in seconds since 1970; clusters only |
+| `cactusfs_node_handshakes_refused_total` | counter | `reason` | handshakes with other nodes this node refused, on node RPC and on Raft, each counted once: `certificate`, `not_admitted`, `timeout`, `other` |
+| `cactusfs_node_certificate_not_after_seconds` | gauge | - | when the node certificate in use ends, in seconds since 1970; after a replacement, the new one's end; clusters only |
+| `cactusfs_tls_certificate_not_after_seconds` | gauge | `use` | when a certificate in use ends, in seconds since 1970: `use` is `node` (shown to the other nodes) or `s3` (shown to clients of the S3 API, the management API and the console) |
+| `cactusfs_tls_reload_pending` | gauge | `use` | 1 while the certificate files hold something that was refused and the certificate from before is still shown, else 0 |
+| `cactusfs_tls_reload_refused_total` | counter | `use`, `reason` | contents of the certificate files that were refused, each counted once: `unreadable`, `pair`, `not_yet_valid`, `expired`, `identity`, `untrusted`, `usage` |
 | `cactusfs_raft_is_leader` | gauge | - | 1 on the node that leads the metadata group |
 | `cactusfs_raft_term` | gauge | - | the Raft term; grows with every election |
 | `cactusfs_raft_applied_index` | gauge | - | last metadata entry the node's state reflects |

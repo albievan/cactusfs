@@ -94,6 +94,55 @@ type CertificateSource interface {
 	NodeCertificateNotAfter() (time.Time, bool)
 }
 
+// The certificates a node shows, as the use label names them.
+const (
+	// TLSUseNode is the certificate the node shows the other nodes, on node
+	// RPC and on Raft.
+	TLSUseNode = "node"
+	// TLSUseS3 is the certificate of the listeners clients reach: the S3
+	// API, and the management API and console with it.
+	TLSUseS3 = "s3"
+)
+
+// tlsUses and tlsReloadReasons are the only values of the use and reason
+// labels of the cactusfs_tls_* metrics.
+func tlsUses() []string { return []string{TLSUseNode, TLSUseS3} }
+
+// TLSReloadReasons returns every reason a certificate found on disk is
+// refused for, as cactusfs_tls_reload_refused_total labels them. They are
+// the reasons of the adapter that reads the files; the composition root has
+// a test that holds the two sets to each other.
+func TLSReloadReasons() []string {
+	return []string{"unreadable", "pair", "not_yet_valid", "expired", "identity", "untrusted", "usage"}
+}
+
+// TLSState is one of the node's certificates, and what became of the files
+// it is read from again, as their gauges show it.
+type TLSState struct {
+	// NotAfter is when the certificate in use ends.
+	NotAfter time.Time
+	// Pending reports that what is on disk is not what is in use: it was
+	// refused, and the certificate from before is still shown.
+	Pending bool
+	// Refused is how many distinct contents of the files were refused since
+	// the node started, by reason: one of TLSReloadReasons. Any other
+	// reason is left out.
+	Refused map[string]uint64
+}
+
+// TLSSource says how one of the node's certificates is.
+type TLSSource interface {
+	TLSState() TLSState
+}
+
+// HandshakeSource says how many handshakes with other nodes were refused
+// where gRPC does not do them - on the Raft port and on the connections Raft
+// dials - since the node started, by reason: one of the Handshake constants.
+// Any other reason is counted as HandshakeOther. The counts only grow.
+type HandshakeSource interface {
+	HandshakesRefused() map[string]uint64
+}
+
 // ReadinessSource says what /readyz would say.
 type ReadinessSource interface {
 	Ready(ctx context.Context) bool
@@ -105,7 +154,10 @@ type state struct {
 	drives      atomic.Pointer[DriveSource]
 	certificate atomic.Pointer[CertificateSource]
 	readiness   atomic.Pointer[ReadinessSource]
-	timeout     time.Duration
+	// tls holds, by use, the source of a certificate's gauges; the uses are
+	// those of tlsUses, and the map is not written after newState.
+	tls     map[string]*tlsObserved
+	timeout time.Duration
 
 	// One probe a source.
 	raftProbe        probe[raftAnswer]
@@ -123,6 +175,36 @@ type state struct {
 	schemaLevel, schemaSupported, schema   *prometheus.Desc
 	driveOnline, driveFree, driveTotal     *prometheus.Desc
 	certificateNotAfter, ready             *prometheus.Desc
+	tlsNotAfter, tlsPending, tlsRefused    *prometheus.Desc
+}
+
+// tlsObserved is the source of one certificate's gauges, the probe it is
+// asked through, and what it counted.
+type tlsObserved struct {
+	source atomic.Pointer[TLSSource]
+	probe  probe[TLSState]
+	// refused holds, by reason, what the sources of this use have counted.
+	// It is guarded by the mutex of the state.
+	refused map[string]*tally
+}
+
+// tally makes one count that only grows of the readings of a count that is
+// kept elsewhere, by a source that may be exchanged for another that starts
+// at nothing again: a counter that is exposed never goes back.
+type tally struct {
+	// total is what is exposed; last is the last reading of the source of.
+	total, last uint64
+	of          any
+}
+
+// read takes a reading of a source and returns what is new in it.
+func (c *tally) read(source any, reading uint64) uint64 {
+	if c.of != source || reading < c.last {
+		c.of, c.last = source, 0
+	}
+	grown := reading - c.last
+	c.total, c.last = c.total+grown, reading
+	return grown
 }
 
 func newState(timeout time.Duration) *state {
@@ -132,8 +214,15 @@ func newState(timeout time.Duration) *state {
 	desc := func(name, help string, labels ...string) *prometheus.Desc {
 		return prometheus.NewDesc(name, help, labels, nil)
 	}
+	observed := map[string]*tlsObserved{}
+	for _, use := range tlsUses() {
+		observed[use] = &tlsObserved{refused: map[string]*tally{}}
+		for _, reason := range TLSReloadReasons() {
+			observed[use].refused[reason] = &tally{}
+		}
+	}
 	return &state{
-		timeout:  timeout,
+		timeout: timeout, tls: observed,
 		isLeader: desc("cactusfs_raft_is_leader", "Whether this node leads the metadata group: 1 or 0."),
 		term:     desc("cactusfs_raft_term", "The Raft term this node is in. It grows with every election."),
 		applied:  desc("cactusfs_raft_applied_index", "Index of the last metadata entry this node's state reflects."),
@@ -149,6 +238,15 @@ func newState(timeout time.Duration) *state {
 		certificateNotAfter: desc("cactusfs_node_certificate_not_after_seconds",
 			"When the certificate this node shows the other nodes ends, in seconds since 1970."),
 		ready: desc("cactusfs_ready", "Whether this node is ready to serve, as /readyz says: 1 or 0."),
+		tlsNotAfter: desc("cactusfs_tls_certificate_not_after_seconds",
+			"When a certificate this node shows ends, in seconds since 1970, by use: node (to the other nodes) or s3 (to clients of the S3 API, the management API and the console).",
+			"use"),
+		tlsPending: desc("cactusfs_tls_reload_pending",
+			"Whether the certificate files on disk hold something other than the certificate in use, because it was refused: 1 or 0, by use.",
+			"use"),
+		tlsRefused: desc("cactusfs_tls_reload_refused_total",
+			"Contents of the certificate files that were refused as a replacement, by use and reason; one that stays on disk is counted once.",
+			"use", "reason"),
 	}
 }
 
@@ -157,6 +255,7 @@ func (s *state) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		s.isLeader, s.term, s.applied, s.commit, s.peers, s.schemaLevel, s.schemaSupported, s.schema,
 		s.driveOnline, s.driveFree, s.driveTotal, s.certificateNotAfter, s.ready,
+		s.tlsNotAfter, s.tlsPending, s.tlsRefused,
 	} {
 		ch <- d
 	}
@@ -219,6 +318,12 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 			return (*readiness).Ready(ctx)
 		})
 	}
+	tlsSources, tlsAsked := map[string]*TLSSource{}, map[string]*question[TLSState]{}
+	for _, use := range tlsUses() {
+		if source := s.tls[use].source.Load(); source != nil {
+			tlsSources[use], tlsAsked[use] = source, s.tls[use].probe.ask(source, (*source).TLSState)
+		}
+	}
 	// One deadline for all of them.
 	expired, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
@@ -254,6 +359,33 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 	if ready, ok := readinessAsked.wait(expired, readiness); ok {
 		gauge(s.ready, flag(ready))
 	}
+	for _, use := range tlsUses() {
+		source := tlsSources[use]
+		answer, ok := tlsAsked[use].wait(expired, source)
+		if !ok {
+			continue
+		}
+		gauge(s.tlsNotAfter, float64(answer.NotAfter.Unix()), use)
+		gauge(s.tlsPending, flag(answer.Pending), use)
+		// Every reason is a series from the first answer on, so that the
+		// first refusal is an increase from nothing.
+		for reason, total := range s.tlsRefusals(use, source, answer.Refused) {
+			ch <- prometheus.MustNewConstMetric(s.tlsRefused, prometheus.CounterValue, float64(total), use, reason)
+		}
+	}
+}
+
+// tlsRefusals takes the reading of a source of the given use and returns
+// what to expose: by reason, everything the sources of that use have counted.
+func (s *state) tlsRefusals(use string, source *TLSSource, reading map[string]uint64) map[string]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	totals := map[string]uint64{}
+	for reason, counted := range s.tls[use].refused {
+		counted.read(source, reading[reason])
+		totals[reason] = counted.total
+	}
+	return totals
 }
 
 // driveStates returns the drives to expose: those of the answer, or - when
@@ -382,14 +514,104 @@ func (t *Telemetry) ObserveReadiness(source ReadinessSource) {
 	t.state.readiness.Store(&source)
 }
 
+// ObserveTLS attaches the source of the gauges of one of the node's
+// certificates; nil detaches it. use is TLSUseNode or TLSUseS3, and anything
+// else attaches nothing: the label takes no other value.
+func (t *Telemetry) ObserveTLS(use string, source TLSSource) {
+	observed, ok := t.state.tls[use]
+	if !ok {
+		return
+	}
+	if source == nil {
+		observed.source.Store(nil)
+		return
+	}
+	observed.source.Store(&source)
+}
+
+// ObserveHandshakes attaches a source of refused handshakes that are counted
+// where they happen and read here; nil detaches it. What it has counted is
+// added to cactusfs_node_handshakes_refused_total when the node is scraped,
+// beside what ObserveHandshakeRefused is told; a handshake must reach the
+// metric by one of the two ways only.
+func (t *Telemetry) ObserveHandshakes(source HandshakeSource) {
+	if source == nil {
+		t.handshakes.source.Store(nil)
+		return
+	}
+	t.handshakes.source.Store(&source)
+}
+
+// handshakes is cactusfs_node_handshakes_refused_total as it is scraped:
+// the counter, to which what the attached source has counted since the last
+// scrape is added first. The source is asked through a probe, as the sources
+// of the gauges are: a scrape waits for it no longer than timeout, and what
+// it has counted is then added by a later scrape.
+type handshakes struct {
+	counter *prometheus.CounterVec
+	source  atomic.Pointer[HandshakeSource]
+	probe   probe[struct{}]
+	timeout time.Duration
+
+	mu sync.Mutex
+	// read holds, by reason of the source, what was read of it.
+	read map[string]*tally
+}
+
+func newHandshakes(counter *prometheus.CounterVec, timeout time.Duration) *handshakes {
+	if timeout <= 0 {
+		timeout = stateTimeout
+	}
+	return &handshakes{counter: counter, timeout: timeout, read: map[string]*tally{}}
+}
+
+// Describe implements prometheus.Collector.
+func (h *handshakes) Describe(ch chan<- *prometheus.Desc) {
+	h.counter.Describe(ch)
+}
+
+// Collect implements prometheus.Collector.
+func (h *handshakes) Collect(ch chan<- prometheus.Metric) {
+	if source := h.source.Load(); source != nil {
+		asked := h.probe.ask(source, func() struct{} {
+			h.add(source, (*source).HandshakesRefused())
+			return struct{}{}
+		})
+		expired, cancel := context.WithTimeout(context.Background(), h.timeout)
+		asked.wait(expired, source)
+		cancel()
+	}
+	h.counter.Collect(ch)
+}
+
+// add adds what is new in a reading of a source to the counter.
+func (h *handshakes) add(source *HandshakeSource, reading map[string]uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for reason, counted := range reading {
+		if h.read[reason] == nil {
+			h.read[reason] = &tally{}
+		}
+		if grown := h.read[reason].read(source, counted); grown > 0 {
+			h.counter.WithLabelValues(handshakeReason(reason)).Add(float64(grown))
+		}
+	}
+}
+
+// handshakeReason returns reason when it is one of the Handshake constants,
+// and HandshakeOther for anything else.
+func handshakeReason(reason string) string {
+	switch reason {
+	case HandshakeCertificate, HandshakeNotAdmitted, HandshakeTimeout:
+		return reason
+	default:
+		return HandshakeOther
+	}
+}
+
 // ObserveHandshakeRefused counts a handshake of another node that this node
 // refused. reason is one of the Handshake constants; anything else is
 // counted as HandshakeOther.
 func (t *Telemetry) ObserveHandshakeRefused(reason string) {
-	switch reason {
-	case HandshakeCertificate, HandshakeNotAdmitted, HandshakeTimeout:
-	default:
-		reason = HandshakeOther
-	}
-	t.handshakesRefused.WithLabelValues(reason).Inc()
+	t.handshakesRefused.WithLabelValues(handshakeReason(reason)).Inc()
 }

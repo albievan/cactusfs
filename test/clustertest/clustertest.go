@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -52,6 +53,7 @@ const (
 	dataRoot  = "/var/lib/cactusfs"
 	s3Port    = "9000/tcp"
 	adminPort = "9001/tcp"
+	rpcPort   = "9002/tcp"
 
 	startTimeout = 3 * time.Minute
 )
@@ -68,6 +70,23 @@ type Options struct {
 	// release than the one under test: a cluster in the middle of a rolling
 	// upgrade. A node that is not named runs the image under test.
 	Images map[string]string
+	// Prepare, when not nil, runs when the configuration the nodes share
+	// has been written and before any node starts. A test that brings its
+	// own certificates puts them in place here, with WriteConfig.
+	Prepare func(c *Cluster)
+	// PublishNodeRPC publishes port 9002 of every node, node RPC, to where
+	// the test runs, as the S3 and admin ports always are: on a port of the
+	// engine's host that the engine picks. It is off unless a test dials
+	// node RPC itself; the nodes reach each other without it. A caller there
+	// is served only with a certificate of the cluster's node CA.
+	PublishNodeRPC bool
+}
+
+// ConfigFile is a file in the configuration directory the nodes share. Its
+// name is relative to that directory: "node-ca.pem", "nodes/node1.key".
+type ConfigFile struct {
+	Name string
+	Data []byte
 }
 
 // Cluster is a running test cluster.
@@ -82,6 +101,8 @@ type Cluster struct {
 	// images holds, by node, the image of a node that does not run the
 	// image under test.
 	images map[string]string
+	// publishRPC says that node RPC is published to the test.
+	publishRPC bool
 
 	// AccessKey and SecretKey are the root credential of the cluster.
 	AccessKey string
@@ -166,6 +187,7 @@ func Start(t *testing.T, opts Options) *Cluster {
 	c := &Cluster{
 		t: t, image: img, docker: docker, prefix: "cactusfs-test-" + randomHex(t, 4),
 		containers: map[string]*testcontainers.DockerContainer{}, images: map[string]string{},
+		publishRPC: opts.PublishNodeRPC,
 		// Credentials and passphrase are made up for this run; none is
 		// written anywhere.
 		AccessKey: "TEST" + strings.ToUpper(randomHex(t, 8)),
@@ -201,6 +223,10 @@ func Start(t *testing.T, opts Options) *Cluster {
 	}
 	if state, err := initCtr.State(ctx); err != nil || state.ExitCode != 0 {
 		t.Fatalf("dev-init exited with %v, %v\n%s", state, err, logsOf(ctx, initCtr))
+	}
+
+	if opts.Prepare != nil {
+		opts.Prepare(c)
 	}
 
 	peers := make([]string, len(Nodes))
@@ -286,10 +312,16 @@ func (c *Cluster) run(ctx context.Context, id string) error {
 	if id == "node4" {
 		env["CACTUSFS_ROLES"] = "gateway,storage,console"
 	}
+	// Published on the engine's host, which is not always this machine: a
+	// port bound to its loopback address could not be reached from here.
+	published := []string{s3Port, adminPort}
+	if c.publishRPC {
+		published = append(published, rpcPort)
+	}
 	ctr, err := testcontainers.Run(ctx, c.ImageOf(id),
 		testcontainers.WithCmd("server"),
 		testcontainers.WithEnv(env),
-		testcontainers.WithExposedPorts(s3Port, adminPort),
+		testcontainers.WithExposedPorts(published...),
 		tcnetwork.WithNetwork(nil, c.edge),
 		tcnetwork.WithNetwork([]string{id}, c.cluster),
 		testcontainers.WithMounts(
@@ -733,6 +765,51 @@ func (c *Cluster) Shell(id, script string) string {
 		c.t.Fatalf("helper on %s exited with %v, %v\n%s", id, state, err, out)
 	}
 	return out
+}
+
+// WriteConfig replaces files in the configuration directory the nodes share,
+// in the order given, while the nodes run or before they start. Each file is
+// written beside its place and renamed into it, with the owner and mode of
+// the file it replaces: a node reads the old content or the new, never half.
+// It is how a test replaces a certificate under a running node.
+func (c *Cluster) WriteConfig(files ...ConfigFile) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var script strings.Builder
+	script.WriteString("set -e\n")
+	for _, file := range files {
+		if file.Name == "" || strings.ContainsAny(file.Name, "'\\\n") || strings.Contains(file.Name, "..") || strings.HasPrefix(file.Name, "/") {
+			c.t.Fatalf("configuration file name %q", file.Name)
+		}
+		// Base64 has no character a shell reads anything into.
+		fmt.Fprintf(&script, "f='/config/%s'; t=\"$f.new\"\n", file.Name)
+		script.WriteString("if [ -e \"$f\" ]; then cp -p \"$f\" \"$t\"; fi\n")
+		fmt.Fprintf(&script, "echo '%s' | base64 -d > \"$t\"\n", base64.StdEncoding.EncodeToString(file.Data))
+		script.WriteString("mv \"$t\" \"$f\"\n")
+	}
+	helper, err := testcontainers.Run(ctx, helperImage,
+		testcontainers.WithCmd("sh", "-c", script.String()),
+		testcontainers.WithMounts(testcontainers.VolumeMount(c.volume("config"), "/config")),
+		testcontainers.WithWaitStrategy(wait.ForExit().WithExitTimeout(time.Minute)),
+	)
+	if helper != nil {
+		defer func() { _ = helper.Terminate(context.WithoutCancel(ctx)) }()
+	}
+	if err != nil {
+		c.t.Fatalf("write configuration files: %v", err)
+	}
+	if state, err := helper.State(ctx); err != nil || state.ExitCode != 0 {
+		c.t.Fatalf("write configuration files: %v, %v\n%s", state, err, logsOf(ctx, helper))
+	}
+}
+
+// Address returns where a port of a node - 9000 for S3, 9001 for the admin
+// listener, 9002 for node RPC when Options.PublishNodeRPC is set - is reached
+// from the test, for a test that
+// does the TLS handshake itself to see which certificate it is shown.
+func (c *Cluster) Address(ctx context.Context, id string, port int) (string, error) {
+	return c.address(ctx, id, fmt.Sprintf("%d/tcp", port))
 }
 
 // Eventually waits until condition holds, and fails the test when it does not

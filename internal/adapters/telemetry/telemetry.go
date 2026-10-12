@@ -93,6 +93,8 @@ type Telemetry struct {
 	rpcRequests       *prometheus.CounterVec
 	rpcSeconds        *prometheus.HistogramVec
 	handshakesRefused *prometheus.CounterVec
+	// handshakes is that counter as the registry collects it.
+	handshakes *handshakes
 }
 
 // New returns the node's Telemetry. The caller must call Shutdown.
@@ -179,18 +181,20 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	}, []string{"side", "method"})
 	t.handshakesRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_node_handshakes_refused_total",
-		Help: "Handshakes of other nodes this node refused, by reason: certificate, not_admitted, timeout or other.",
+		Help: "Handshakes with other nodes this node refused, on node RPC and on Raft, by reason: certificate, not_admitted, timeout or other.",
 	}, []string{"reason"})
 	// The first refusal is the one that matters: every reason is a series
 	// from the start, so that an increase from nothing is seen.
 	for _, reason := range []string{HandshakeCertificate, HandshakeNotAdmitted, HandshakeTimeout, HandshakeOther} {
 		t.handshakesRefused.WithLabelValues(reason)
 	}
+	// What nodetls counts for the Raft port is added when the node is scraped.
+	t.handshakes = newHandshakes(t.handshakesRefused, cfg.StateTimeout)
 
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
-		t.rpcRequests, t.rpcSeconds, t.handshakesRefused, t.state,
+		t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
