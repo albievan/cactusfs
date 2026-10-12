@@ -2,7 +2,9 @@
 
 Alerting rules and dashboards for a CactusFS deployment. Nothing here is needed to run
 CactusFS, and nothing here fetches anything: the dashboards use panels of Grafana itself
-and name no address.
+and name no address. The metrics themselves are listed, with their types and labels, in
+[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md), and a test holds that list to the
+binary.
 
 | | |
 |---|---|
@@ -16,7 +18,9 @@ and name no address.
 
 `/metrics` is on the admin port (9001), over TLS, and requires
 `Authorization: Bearer <access key ID>:<secret>` of an API key whose owner is allowed
-`admin:GetMetrics`. **The rules and dashboards expect the job to be named `cactusfs`.**
+`admin:GetMetrics` - make a user with a policy that allows that action and nothing else,
+and a key for it, rather than giving the scraper the root key. **The rules and
+dashboards expect the job to be named `cactusfs`.**
 Scrape every node, not a load balancer in front of them - and every node whatever its
 roles: the gauges of the metadata group and of the drives come from the nodes that vote
 and store, which need not be gateways. A node that is still starting refuses its scrape.
@@ -39,7 +43,12 @@ rule_files:
 
 On Kubernetes with the Prometheus Operator the Helm chart renders a PodMonitor, which
 selects every pod of the release, and a PrometheusRule instead (`podMonitor.enabled`,
-`prometheusRule.enabled`; see the chart's README). The chart carries a copy of the rules in
+`prometheusRule.enabled`, both off by default; see
+[the chart's README](../helm/cactusfs/README.md)). The PodMonitor always checks the
+certificate of the pod it scrapes - against `podMonitor.tlsConfig.serverName`, which
+must be given, and the CA of `tlsConfig.caSecret` when one is named: the chart has no
+value that turns the check off, because the credential would then go to whoever
+answers. The chart carries a copy of the rules in
 `deploy/helm/cactusfs/files/cactusfs.rules.yaml`: change both files together - the gate
 fails when they differ.
 

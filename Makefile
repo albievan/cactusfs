@@ -271,6 +271,9 @@ test-chaos:
 # is the client of whichever engine's socket was passed through.
 SCHEMA3_COMMIT ?= 0b7d825
 test-rolling:
+	@go test -tags=integration,rollingupgrade -list '^TestRollingUpgradeFromSchema3ToSchema4$$' ./test/integration/ | \
+		grep -qx TestRollingUpgradeFromSchema3ToSchema4 || \
+		{ echo "test-rolling: FAIL - no test TestRollingUpgradeFromSchema3ToSchema4 in test/integration: nothing would run" >&2; exit 1; }
 	git archive $(SCHEMA3_COMMIT) | docker build --quiet -t cactusfs-test:schema3 - >/dev/null
 	CACTUSFS_TEST_IMAGE_SCHEMA3=cactusfs-test:schema3 go test -race -count=1 -timeout 40m \
 		-tags=integration,rollingupgrade -run 'TestRollingUpgradeFromSchema3ToSchema4' ./test/integration/
@@ -279,9 +282,11 @@ test-rolling:
 # The Helm chart on a real Kubernetes: k3s in one container, the chart
 # installed with the image this tree builds, in a namespace that enforces the
 # restricted Pod Security Standard. No part of `make check`: k3s needs a
-# privileged container, which a rootless engine does not give.
+# privileged container, which a rootless engine does not give. The image is
+# built first and four nodes start on one machine: 45 minutes, and the CI job
+# is given 60.
 test-k8s:
-	go test -count=1 -tags=k8s -timeout 30m ./test/k8s/...
+	go test -count=1 -tags=k8s -timeout 45m ./test/k8s/...
 	@echo "test-k8s: PASS"
 
 vuln:

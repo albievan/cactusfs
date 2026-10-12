@@ -42,8 +42,9 @@ ARG S3TESTS_COMMIT=5522d1c351f75bc00ae0f64f742f3f095f5939d9
 ARG S3TESTS_SHA256=f0943e3ca3a68f5c8d9ce19d12879a3edca68de3293eef687533ab5caf2aca13
 # What `make helm-lint` judges the chart's renders with: kubeconform, the
 # Kubernetes JSON schemas of ONE version (so that it validates with the network
-# off) and yq, which scripts/helm-assert.sh reads the renders with. Tools of
-# the builder image only. Each is pinned by the checksum of what is downloaded;
+# off) and yq, which scripts/helm-assert.sh reads the renders with. kubeconform
+# is Apache-2.0 and yq is MIT. Tools of the builder image only; nothing of them
+# is in the product. Each is pinned by the checksum of what is downloaded;
 # to move a pin, change the version (or commit) AND its checksums together.
 # The schemas are single files of yannh/kubernetes-json-schema at one commit,
 # from its directory v<version>-standalone-strict: one for each kind the chart
@@ -63,9 +64,8 @@ ARG K8S_SCHEMAS_COMMIT=817113f21a2643311cbc3e992bb44ffe1c416c54
 # archive, which is pinned by its checksum for each architecture; to move the
 # pin, change the version AND both checksums. The checksums are those of
 #   https://github.com/prometheus/prometheus/releases/download/v<version>/prometheus-<version>.linux-<arch>.tar.gz
-# as the release's own sha256sums.txt lists them.
-# TODO(PLAN 7.4): the two checksums below are placeholders - the builder image
-# does not build until they are replaced with the real ones.
+# as the release's own sha256sums.txt lists them; the stage that downloads
+# the archive fails the build of the builder image when one does not match.
 ARG PROMETHEUS_VERSION=3.15.0
 ARG PROMTOOL_SHA256_AMD64=2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
 ARG PROMTOOL_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
@@ -87,9 +87,8 @@ ARG PROMTOOL_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbd
 # as the releases' own cosign_checksums.txt and syft_<version>_checksums.txt
 # list them; the digest is that of the index:
 #   docker buildx imagetools inspect registry:<tag>
-# TODO(PLAN 7.3): the four checksums and the digest below are placeholders -
-# the builder image does not build, and the gate does not start a registry,
-# until they are replaced with the real ones.
+# A download that does not match its checksum fails the build of the builder
+# image, and the gate starts no registry that is not pinned by digest.
 ARG COSIGN_VERSION=2.6.1
 ARG COSIGN_SHA256_AMD64=064954c5d8c7e3b28188eee5b1727b31c411550bc5fefd41aa672d3c761d103a
 ARG COSIGN_SHA256_ARM64=56a16480bdd56ec789abaa65924402f6b92c0041f06885995853c05567b76f34

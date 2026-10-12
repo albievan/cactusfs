@@ -4,7 +4,8 @@
 {{- $tls := $pm.tlsConfig | default dict -}}
 {{- $ca := $tls.caSecret | default dict -}}
 {{- if or (not $token.name) (not $token.key) -}}{{- fail "podMonitor.bearerTokenSecret: /metrics answers no one without a credential: name the Secret, and its key, that holds <access key ID>:<secret> of an API key allowed admin:GetMetrics" -}}{{- end -}}
-{{- if and (not $tls.serverName) (not $tls.insecureSkipVerify) -}}{{- fail "podMonitor.tlsConfig.serverName: pods are scraped by their addresses, which no certificate names: say a name the certificate of secrets.tls carries" -}}{{- end -}}
+{{- if hasKey $tls "insecureSkipVerify" -}}{{- fail "podMonitor.tlsConfig.insecureSkipVerify: there is no such value: the credential of /metrics is sent only to a pod whose certificate was checked; say tlsConfig.serverName, and tlsConfig.caSecret when Prometheus does not trust the CA" -}}{{- end -}}
+{{- if not $tls.serverName -}}{{- fail "podMonitor.tlsConfig.serverName: pods are scraped by their addresses, which no certificate names: say a name the certificate of secrets.tls carries" -}}{{- end -}}
 {{- if and $ca.name (not $ca.key) -}}{{- fail "podMonitor.tlsConfig.caSecret: name the key of the Secret that holds the CA" -}}{{- end -}}
 # For the Prometheus Operator; rendered only when podMonitor.enabled.
 # Scrapes /metrics of every pod of the release on its admin port, over TLS,
@@ -42,16 +43,11 @@ spec:
           name: {{ $token.name | quote }}
           key: {{ $token.key | quote }}
       tlsConfig:
-        {{- with $tls.serverName }}
-        serverName: {{ . | quote }}
-        {{- end }}
+        serverName: {{ $tls.serverName | quote }}
         {{- if $ca.name }}
         ca:
           secret:
             name: {{ $ca.name | quote }}
             key: {{ $ca.key | quote }}
-        {{- end }}
-        {{- if $tls.insecureSkipVerify }}
-        insecureSkipVerify: true
         {{- end }}
 {{- end }}

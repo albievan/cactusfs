@@ -1,0 +1,115 @@
+# Example - adapt before use; not run by the project's gates.
+#
+# The S3 API behind ingress-nginx. Two ways, two documents; apply ONE of them.
+# Placeholders: the release is "cactusfs" in the namespace "cactusfs" (so the
+# S3 Service is "cactusfs", port 9000), clients use s3.example.com, and the
+# controller runs in the namespace "ingress-nginx".
+#
+# Whichever you take, the chart's NetworkPolicy must let the controller in, or
+# every request ends in a timeout:
+#
+#   networkPolicy:
+#     clientsFrom:
+#       - namespaceSelector:
+#           matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+#
+# Note: the Kubernetes project has announced the retirement of ingress-nginx.
+# For a new installation, look at gateway-api-tlsroute.yaml first.
+#
+# --- 1. TLS passthrough (preferred) ------------------------------------------
+# The controller reads the server name of the TLS handshake and forwards the
+# connection as it is; the CactusFS pod ends TLS with the certificate of
+# secrets.tls, which must name s3.example.com. It needs the controller started
+# with --enable-ssl-passthrough; without that flag the annotation is ignored
+# and the controller ends TLS itself with its default certificate.
+#
+# With passthrough the controller handles no HTTP: body-size, buffering and
+# timeout annotations have nothing to act on, and none is needed.
+#
+# Virtual-hosted-style requests (<bucket>.s3.example.com, s3.domain in the
+# chart) need a rule for the wildcard name too. Whether your controller
+# version matches a wildcard host for passthrough is something to test before
+# relying on it; path-style clients need only the rule below.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cactusfs-s3
+  namespace: cactusfs
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: s3.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cactusfs
+                port:
+                  number: 9000
+---
+# --- 2. TLS ended at the controller and begun again to the pods ---------------
+# Only when the controller must hold the public certificate (the Secret
+# s3-example-com-tls below). Every annotation here is needed:
+#   backend-protocol HTTPS   the pods serve TLS and nothing else;
+#   proxy-ssl-*              the pods' certificate is verified: against the CA
+#                            in the Secret cactusfs/cactusfs-s3-ca (key
+#                            ca.crt), under a name that certificate carries;
+#   proxy-body-size "0"      no limit; the default of 1m refuses every upload
+#                            larger than that with 413;
+#   proxy-request-buffering  off: an upload streams to the pod instead of
+#                            being written to the controller's disk first;
+#   proxy-buffering          off: downloads stream as well;
+#   proxy-read/send-timeout  seconds without a byte, not the length of a
+#                            transfer; the default of 60 is too short for the
+#                            completion of a large multipart upload.
+# The controller passes the Host header and the request line on as they came,
+# which the SigV4 signature depends on: add no rewrite-target, no
+# upstream-vhost and no configuration snippet that touches them.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cactusfs-s3-reencrypt
+  namespace: cactusfs
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+    nginx.ingress.kubernetes.io/proxy-ssl-secret: "cactusfs/cactusfs-s3-ca"
+    nginx.ingress.kubernetes.io/proxy-ssl-name: "s3.example.com"
+    nginx.ingress.kubernetes.io/proxy-ssl-server-name: "on"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "900"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - s3.example.com
+        - "*.s3.example.com"
+      secretName: s3-example-com-tls
+  rules:
+    - host: s3.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cactusfs
+                port:
+                  number: 9000
+    - host: "*.s3.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cactusfs
+                port:
+                  number: 9000

@@ -1,0 +1,3 @@
+# expect: podMonitor.tlsConfig.insecureSkipVerify
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+podMonitor: {enabled: true, bearerTokenSecret: {name: cactusfs-metrics-token}, tlsConfig: {serverName: cactusfs.example.test, insecureSkipVerify: true}}

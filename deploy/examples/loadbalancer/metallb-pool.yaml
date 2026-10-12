@@ -1,0 +1,40 @@
+# Example - adapt before use; not run by the project's gates.
+#
+# MetalLB in layer 2 mode: the addresses a Service of type LoadBalancer may be
+# given on a cluster with no cloud behind it. It needs MetalLB installed
+# (namespace metallb-system) and, on k3s, the built-in ServiceLB turned off
+# (--disable=servicelb): two controllers must not answer for one Service.
+#
+#   kubectl apply -f metallb-pool.yaml
+#
+# Then, in the values of the CactusFS chart:
+#
+#   service:
+#     type: LoadBalancer
+#     annotations:
+#       metallb.io/address-pool: cactusfs      # older MetalLB: metallb.universe.tf/address-pool
+#   networkPolicy:
+#     clientsFrom:
+#       - ipBlock: {cidr: 198.51.100.0/24}     # see docs/load-balancing.md: WHO the policy sees
+#
+# The range is a placeholder (RFC 5737). Use addresses of the machines' own
+# network that nothing else hands out.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: cactusfs
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.0.2.240-192.0.2.250
+  # Only Services that ask for this pool by name get an address from it.
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: cactusfs
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - cactusfs

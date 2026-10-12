@@ -5,10 +5,19 @@ This document names what is protected, from whom, and which control answers each
 It is revised in the same change as any step that adds a trust boundary, an asset or a
 control.
 
-**Status column:** `implemented` means the control exists and is tested today;
-`M<n>` is the milestone in `PLAN.md` that delivers it. A control that is not yet
-implemented protects nothing: do not deploy CactusFS for real data before the milestones
-it depends on are done.
+**Status column:** `implemented` means the control exists and is tested today, and
+where one test or gate proves it, the row names it; `implemented, with a limit` and
+`accepted risk` say what the control does not do; `written, not yet run` is a control
+of the release workflow, which cannot run before the first release; `not mitigated`,
+`not planned yet` and `M8` (milestone 8 of `PLAN.md`, not started) mean that nothing
+answers the threat today; `rule` is a rule of the project that no gate can prove. A
+control that is not implemented protects nothing.
+
+**Where the project stands** (2026-10-12, release 0.7.0, none published): milestones 0
+to 6 are done and milestone 7 is built, with its final verification and review still
+open. CactusFS is not offered as ready for production, and no review of its security by
+a party outside the project is recorded in this repository. Do not keep data in it that
+you cannot lose.
 
 ## 1. Assets
 
@@ -54,10 +63,10 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Use of a built-in or default account | No default API key: first start requires or generates root credentials, shown once on standard error and stored sealed | **implemented** |
-| Sign-in to the console of a new deployment as `admin` / `admin` | **None until the operator acts.** A new deployment has that console user with `cluster-admin` (ADR-0014, Albie's decision). It is made once and never restored; the node warns in its log; `admin` cannot be set as a password again. The operator must delete the user or change the password before the admin port is reachable by others; a changed password does not end a session already open (30 minutes) nor remove keys, users or policies made through it - deleting the user ends its sessions and removes its keys, and the audit trail (`auth:SignIn`, `admin:*` by `admin`) shows whether anybody was first. The compose cluster publishes the admin port on loopback only | **accepted risk** |
-| Forged S3 requests | SigV4 verification (checked against AWS's documented examples); host and every `x-amz-*` header must be signed; constant-time comparison; 15-minute clock-skew window | **implemented** (header authentication; presigned URLs M6) |
-| Stolen API key used indefinitely | Expiry; last use recorded (to within five minutes); revocation that every node honours with the next request; an inline policy that narrows the key | **implemented**; there is no admin API to do it through until milestone 5 |
-| Password guessing against the console | Argon2id (64 MiB, 3 passes); a refused sign-in looks and costs the same whether the user exists or not; sessions of 30 minutes stored as hashes; `__Host-` cookie that is `HttpOnly`, `Secure`, `SameSite=Strict`; CSRF token on every changing request | **implemented** in the use cases and helpers; **sign-in attempts are rate-limited per user and source**; the console that uses them is milestone 5 |
+| Sign-in to the console of a new deployment as `admin` / `admin` | **None until the operator acts.** A new deployment has that console user with `cluster-admin` (ADR-0014, the owner's decision). It is made once and never restored; the node warns in its log; `admin` cannot be set as a password again. The operator must delete the user or change the password before the admin port is reachable by others; a changed password does not end a session already open (30 minutes) nor remove keys, users or policies made through it - deleting the user ends its sessions and removes its keys, and the audit trail (`auth:SignIn`, `admin:*` by `admin`) shows whether anybody was first. The compose cluster publishes the admin port on loopback only | **accepted risk** |
+| Forged S3 requests | SigV4 verification (checked against AWS's documented examples); host and every `x-amz-*` header must be signed; constant-time comparison; 15-minute clock-skew window | **implemented**: header authentication, presigned URLs and signed streaming payloads (PLAN 6.3; `TestPresignedGetObject`, `TestPresignedPutObject` and `TestPresignedURLExpires` of `test/s3compat`) |
+| Stolen API key used indefinitely | Expiry; last use recorded (to within five minutes); revocation that every node honours with the next request; an inline policy that narrows the key | **implemented**, and managed through the management API and the console (PLAN 4.3, 5.3, 5.7) |
+| Password guessing against the console | Argon2id (64 MiB, 3 passes); a refused sign-in looks and costs the same whether the user exists or not; sessions of 30 minutes stored as hashes; `__Host-` cookie that is `HttpOnly`, `Secure`, `SameSite=Strict`; CSRF token on every changing request | **implemented**; failed sign-ins are limited per address, on each node by itself and in memory (see "Password guessing at the console" below); the management API and the console sign in through these use cases (PLAN 5.3, 5.7) |
 | Rogue node joining the cluster | Mutual TLS 1.3 for node RPC and Raft; only certificates of the cluster's node CA are accepted; a node's identity is the name in its certificate, never its address; every call passes the authorizer as that node; a node joins, leaves and records only itself; the Raft port admits voters only; no plaintext mode exists | **implemented**, with a limit: any node certificate may propose changes to buckets, objects and the topology, so a stolen one breaches the cluster's metadata, not just one node; the node CA must issue node certificates only — whatever it signs is a node. A node certificate is replaced without a restart (ADR-0020), and only by one that names the same node and verifies under the node CA loaded at start; whoever can write the node's certificate files can therefore give it nothing its peers would not accept from it anyway. The node CA itself is read at start only. The certificate files are read only if they are regular files, the node's within their own directory, and a read that does not end holds up neither handshakes nor shutdown: whoever can write them can make the node keep the certificate it has, not stop it. Rotation is not revocation - there is no revocation list: a certificate that was replaced, and its key, stay valid until it expires, and connections opened with it stay open; for a compromised key the CA is rotated or the node removed |
 | A node is impersonated at its address (DNS or routing) | The caller checks that the certificate names the node it meant, whatever answered | **implemented** |
 | A cut-off or deposed leader serves stale data | Reads on every node wait for a read index that the leader gives only after a majority of the *voters* confirm its term; a node without a majority answers nothing | **implemented**; tested with a network partition |
@@ -70,6 +79,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Traffic modified in transit | TLS 1.2+ for clients (1.3 preferred), ECDHE with AEAD suites only; a plaintext listener exists only behind `--dev-plaintext` and binds to a loopback IP | **implemented** (S3 and admin listeners) |
+| A certificate or key file on disk is replaced by one that must not be used - by mistake, or by whoever can write the files (ADR-0020) | The files are read again every `--tls-reload-interval`; a pair is put to use only if it parses, the key matches, it is valid at that time and, for the node's pair, it names this node and verifies under the node CA that was loaded at start. Anything else is refused and logged, the pair in use stays, and `cactusfs_tls_reload_pending` is 1 for as long as the refusal stands (alert `CactusFSCertificateReloadRefused`). Only regular files of at most 1 MiB are read, the node's pair within its own directory; a read that hangs holds up neither handshakes nor shutdown. Open connections are not touched | **implemented**: `internal/adapters/nodetls` (`TestReloadRefusesACandidateAndKeepsTheOneInUse`, `TestReloadRefusesAFifo`, `TestReloadKeepsTheNodePairWithinItsDirectory`), `TestServedCertificateRotatesWithoutRestart` and `TestClusterRotatesNodeCertificatesAndKeepsItsLeader` of `cmd/cactusfs`, `TestCertificateRotation` of `test/integration` on four nodes. Limits: whoever can write the listeners' pair can have the node serve any certificate that is valid, and its clients decide whether they trust it; the node CA is not reloaded; rotation is not revocation; at start-up a client-facing certificate that is expired is logged at `ERROR` and served all the same (ADR-0020, open question 20); no alert ships for the end of the client-facing certificate (open question 21) |
 | Upload corrupted or cut short in transit | Declared SHA-256, `Content-MD5` (which must be signed) and CRC32/CRC32C/CRC64NVME/SHA-256 checksums are verified before anything becomes durable; a body the transport reports as cut short is never stored | **implemented** |
 | A write reported as failed takes effect later | A commit whose outcome is unknown keeps its data; the state machine is fail-stop; a stale state database is rebuilt from the newest snapshot | **implemented** |
 | Bitrot or deliberate modification of shards on disk | Position-bound SHA-256 per block and AES-GCM per segment, both verified on every read; unverified bytes are never returned; reads rebuild from parity; a scrubber verifies everything in the background and heals | **implemented** with four or more drives; below that, detection only |
@@ -77,7 +87,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | An object made of parts is served with a part dropped, moved or swapped | Every part has a key of its own, derived from the upload's data key, its number and its data ID; the place of every part in the object - index, offset, count, total size - is sealed with an HMAC under a second derived key and verified before a byte of the part is returned (ADR-0010) | **implemented** |
 | A customer key (SSE-C) is disclosed by the server | It is accepted over TLS only, in signed headers only, never in a query string; never stored and never logged, nor any digest of it; the decoded key and everything derived from it are cleared after use. Stored is a check value that takes the KMS key to test a guess against. Entity tags of SSE-C objects are not digests of their content | **implemented**; the key is in the gateway's memory for the length of a request, and the header as it arrived cannot be cleared from the HTTP server's buffers |
 | Path traversal, reserved names or case collisions via object keys | Keys and bucket names never become filesystem paths; data lives under generated IDs, and all drive I/O is confined by `os.Root` | **implemented** |
-| Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order and exactly once; an entry this binary cannot interpret stops the node rather than being skipped | **implemented** (single voter); mTLS between voters M3 |
+| Forged or replayed metadata changes | All metadata changes are Raft entries, versioned, applied in order and exactly once; an entry this binary cannot interpret stops the node rather than being skipped | **implemented**, for one voter and for a cluster: entries travel between voters over mutual TLS 1.3, and the Raft port admits voters only (ADR-0005) |
 | Policy tampering | Policies live in Raft; every change is authorized and written to the audit trail in the same entry as the change | **implemented** |
 | A policy silently means less than it says | Parsing is strict: an unknown field, operator or condition key is an error, never ignored; evaluation is fuzzed against its laws (silence refuses, a matching Deny always wins, a key's policy only takes away) | **implemented** |
 | The audit trail is edited | Records are numbered and hash-chained by the state machine; reading verifies the chain; the latest hash is published as an event and can be exported | **implemented**; a rewrite of the whole chain is only detected by somebody who kept a hash outside |
@@ -88,7 +98,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 
 | Threat | Control | Status |
 |---|---|---|
-| An administrator denies an action or erases the evidence | Append-only, hash-chained audit events for every admin mutation, authentication failure and authorization denial; audit records are never deleted | M4. Until then authentication failures and denials are written to the log, which is not tamper-evident |
+| An administrator denies an action or erases the evidence | Append-only, hash-chained audit events for every admin mutation, authentication failure and authorization denial; audit records are never deleted | **implemented** (ADR-0006): a change to identities carries its audit record in the same Raft entry; authentication failures and denials are written in the background. Limits: under a flood a record of a refusal can be dropped (see "The audit trail is flooded or outrun"), and a rewrite of the whole chain is detected only by somebody who kept a hash outside (see "The audit trail is edited"). What is recorded: changes to identities, the creation, removal and configuration of buckets (versioning, Object Lock, policy, CORS, tags, lifecycle rules), a governance retention that was overridden, legal holds, failed sign-ins and authentications, and denials - not the ordinary reads and writes of objects |
 | A search is used to look around unrecorded | By design a search leaves no audit record, and the buckets it passes over for a caller leave none: they are filtered with `Authorizer.Allowed`, the decision of `Authorize` without its record, or one search over N buckets would write N denials and bury the trail. `Allowed` is for filtering result sets only and gates nothing; what a caller asks for by name - a search of one bucket, or a search by somebody who may list nothing at all - goes through `Authorize` and is audited, once. A search shows only what a listing, itself unaudited, would show | **implemented**; accepted: there is no record of who searched for what |
 
 ### Information disclosure
@@ -96,7 +106,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Threat | Control | Status |
 |---|---|---|
 | Theft of drives, backups or decommissioned disks | Encryption at rest is always on: AES-256-GCM, a data key per object, wrapped by a KMS key; no unencrypted fallback | **implemented** |
-| Theft of the local KMS key file | The master key is sealed with AES-256-GCM under an Argon2id-derived key; the passphrase is never stored | **implemented** (strength is the passphrase's; Vault Transit M4) |
+| Theft of the local KMS key file | The master key is sealed with AES-256-GCM under an Argon2id-derived key; the passphrase is never stored | **implemented**; its strength is the passphrase's, and the key file is on the node. `--kms vault` keeps the key off the nodes (two rows below) |
 | A node started with the wrong key | A missing key file on an existing deployment, a wrong passphrase or another deployment's key stops the node | **implemented** |
 | Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once; console passwords are Argon2id hashes; sessions are stored as hashes of their tokens | **implemented** |
 | The KMS key is on the nodes | `--kms vault`: the key stays in Vault Transit; wrapped data keys are bound to their owner by associated data, and a key type that cannot bind is refused at start; HTTPS only; the token is read from a file and never logged | **implemented**; token authentication only, renewal is the platform's job |
@@ -108,7 +118,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Existence of buckets or keys probed anonymously | Authentication precedes routing: an unsigned request is refused the same way whether or not its target exists | **implemented** |
 | The version of the software told to anybody, to choose an attack by | The release, build and commit are named only in answers to authenticated callers (`server` in the session answers and `GET /cluster`), in `/metrics`, which is authenticated and authorized, and in the log. Nothing answered without a credential names them: not the sign-in page, a probe, a refusal, the contract, nor a response header | **implemented**, tested for the probes and for the refusals, the contract and the starting answers of the admin API; the documentation page, the console's files and the S3 API are given no build to name |
 | Probe endpoints reveal internals | `/healthz` and `/readyz` return only `ok` or `unavailable`; the reason is logged, not returned | **implemented** |
-| Eavesdropping | See TLS above | **implemented** (admin listener) |
+| Eavesdropping | See TLS above | **implemented**: the S3 and admin listeners (TLS 1.2+), node RPC and Raft (mutual TLS 1.3). `--dev-plaintext` is the one exception, on a loopback address only |
 | Data leaves an air-gapped site | No runtime call to the internet, no telemetry, no CDN asset | **implemented** |
 | Who read an object is learned by somebody who should not know (ADR-0016) | The uploader, the counts and the readers are behind an action of their own, `admin:GetObjectAccess`, which reading the object does not give and only `cluster-admin` and `auditor` hold among the built-in roles; the single authorizer is asked before anything is said of the object, whether it exists included; the object's metadata and the S3 API say nothing of it; the object list says the uploader, the time of upload, the two counts and the time of the last read - never a reader - only when asked to (`access=true`) and only of the objects the caller holds `admin:GetObjectAccess` on, decided by the same authorizer with the same request as the single read, object by object, so that a deny by key holds in the list; a caller without it is given the plain list and no denial is audited, because the permission there filters a result and gates nothing - the list itself stays gated, and its refusal audited, by `s3:ListBucket`; no address of a reader is kept; no event carries a flush, no metric or span names a reader, and nothing the recorder logs names one ; the record of a bucket's latest uploads and downloads (`bucketactivity`, ADR-0019) names readers, uploaders and object keys as well and is kept in the same store: it is read out in one place, the list of buckets (next row) | **implemented**; **accepted risk**: metadata is not encrypted at rest, so the list of readers - and with it who created a bucket and its latest uploads and downloads - sits in the metadata store as object keys do |
 | Who uses a bucket is learned through the list of buckets by somebody who should not know (ADR-0019) | `GET /buckets?details=true` says of each bucket only what the single authorizer allows this caller of that bucket, asked with the request the use case for one bucket is gated by: who created it and whether any of its latest uploads and downloads are shown, with `admin:GetObjectAccess` on the bucket, which `cluster-admin` and `auditor` hold among the built-in roles and listing or reading does not give; each upload and download - who and when - only where the same authorizer also allows `admin:GetObjectAccess` on the object the row names, the request `/object/access` is gated by, decided by the row's real key before any key is blanked, and a row that is not allowed is left out whole, so that an explicit deny by key holds in the list as it holds for the single read (holding the action on objects and not on the bucket shows nothing: the stricter reading); the keys of those objects only with `s3:ListBucket` on the bucket besides, the bucket's own policy included, so that the list names no object a listing would not; the summary of the policy - how many statements, and whether one allows something to every caller (conditions and denies not weighed: it is not a statement that the bucket is open to the unauthenticated), never what it says - with `s3:GetBucketPolicy`. The use case blanks what is not allowed before the handler sees it; the console shows what the API sent and decides nothing. A part that is left out is not refused and not audited, by design: the permissions filter a result and gate nothing, and a list of a thousand buckets must not write a thousand denials - the list itself stays gated, and its refusal audited, by `s3:ListAllMyBuckets`. A bucket whose stored policy is damaged is shown without keys and without a summary (fail closed). Without `details` the answer is what it was; the S3 API says nothing of any of it; no metric or span names who used a bucket | **implemented**, tested per role, per bucket with policies that differ between buckets, and per object with a deny by key; residual, accepted: the number of rows left out is not said, but fewer than three rows where a bucket has had more use tells a caller that something is kept from them; `access_included` and `policy_included` tell a caller which of those permissions they hold on a bucket, which they could learn by asking for the single read; the time a list takes grows with the number of buckets, as a search's does |
@@ -129,13 +139,13 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | A missing mount is mistaken for a replaced drive | Replacement needs parity and the operator's confirmation for that start; without parity it is never made | **implemented**; a confirmed replacement cannot be undone |
 | Repair makes things worse | Healing rebuilds only definite damage, replaces a shard in one step, removes nothing when it cannot tell whether an object changed, and runs once per object at a time | **implemented** |
 | Unreferenced data accumulates, or is removed while still needed | Garbage collection by data-ID reference count; writes in progress and commits of unknown outcome are pinned; nothing is collected while the metadata is not ready; a grace period of at least 1 hour (default 24) covers the rest | **implemented** |
-| Multipart uploads are begun and never finished | Parts of an upload are referenced data, not garbage, until the upload is completed or aborted; uploads are listed and aborted with permissions of their own (`s3:ListBucketMultipartUploads`, `s3:AbortMultipartUpload`) and go with their bucket | **implemented**; nothing ends an abandoned upload on its own until lifecycle rules (PLAN 6.6), and there is no quota (M8) |
+| Multipart uploads are begun and never finished | Parts of an upload are referenced data, not garbage, until the upload is completed or aborted; uploads are listed and aborted with permissions of their own (`s3:ListBucketMultipartUploads`, `s3:AbortMultipartUpload`) and go with their bucket | **implemented**; an abandoned upload is ended only where the bucket has a lifecycle rule that says so (`AbortIncompleteMultipartUpload`, ADR-0013) - without one nothing ends it - and there is no quota (M8) |
 | A bucket is opened to the world by mistake or by a stolen key | Only a bucket policy lets a caller in without credentials, and only for a fixed list of read actions - never to write, delete or configure, whatever the policy says; setting a policy is its own permission and is audited with whether it opens anything to everyone; a policy that cannot be read refuses the request; no bucket policy can grant the governance bypass | **implemented**; a policy can still publish every object of a bucket to readers, which is what it is for |
 | A browser is used against a bucket (cross-origin) | Requests are authenticated by signature, never by cookie, and `Access-Control-Allow-Credentials` is never sent; cross-origin answers are readable only for origins a rule of the bucket names; a refused preflight is the same for a missing bucket as for a missing rule | **implemented** |
 | A lifecycle rule is used to destroy protected data | Rules are carried out through the same delete a client would call, as a service principal that may delete and abort and may never lift a retention; Object Lock is enforced by the state machine all the same; setting rules is its own permission, needs a signed body and is audited | **implemented**; a rule can still delete everything in a bucket that no lock keeps, which is what it is for, and a leader whose clock jumps far ahead expires early whatever no lock keeps |
-| Requests routed to a node that is going away | `/readyz` answers 503 for `--drain-delay` before the listener closes; in-flight requests then finish within `--shutdown-timeout` | **implemented**; the delay defaults to `0s` (off) and must be set per deployment (chart default: M7) |
+| Requests routed to a node that is going away | `/readyz` answers 503 for `--drain-delay` before the listener closes; in-flight requests then finish within `--shutdown-timeout` | **implemented**; the delay defaults to `0s` (off) for the binary and must be set per deployment. The chart sets it (PLAN 7.6): `CACTUSFS_DRAIN_DELAY` covers the readiness probe's `periodSeconds x failureThreshold`, and `terminationGracePeriodSeconds` exceeds the delay plus the shutdown timeout - asserted on every render by `scripts/helm-assert.sh` (`make helm-lint`) |
 | Search is used to stall writes or exhaust a node | One request examines at most 50 000 keys and 200 buckets for at most two seconds and returns at most 500 results; the index is walked 5 000 keys at a time, so the metadata read lock a pending write waits for is held for about twenty milliseconds and let go between walks, and matching is done outside it; every query, `rx:` included, is one RE2 program of bounded size - no backtracking; one search at a time for a principal and eight for a node, then 429 with `Retry-After`. Deciding which buckets a caller may see costs one linearizable read a page (the listing of the buckets) and one walk of the bucket policies in the node's own state, not a question to the leader for each bucket. The walk is paged: a read transaction covers at most 256 buckets or 1 MiB of stored records and the read lock is let go before a policy is hashed or parsed and between pages - measured 1.5 ms a page where policies are 17 KiB (45 buckets), 0.9 ms a page of 256 buckets with 1.2 KiB policies (`BenchmarkLocalBucketPolicies`, Apple M3); before, the lock was held for the whole reading, which the review measured at 40 ms for every 1 000 buckets of the first kind. The authorizer remembers parsed policies by bucket and SHA-256 of the document just read (never a stale one, never a document that does not parse), in at most 128 MiB of documents (about 200 MiB of heap) and 131 072 entries, so a page hashes and does not parse: 5 000 buckets with 16 KiB policies are decided in 40 ms and 2.5 MB instead of 2.6 s and 2.3 GB (`BenchmarkSearchDeciding`), and a request keeps one page of policies and a bit a bucket. Deciding is inside the two seconds: when it takes them all the request fails with 503 and says why | **implemented**; residual, accepted: (1) just after a restart nothing is remembered, a page costs some ten times as much, and a deployment near the size above answers the first searches with 503 - each keeps what it parsed, so they pass; (2) **a limit, not a transient:** whoever may `s3:CreateBucket` and `s3:PutBucketPolicy` can make so many buckets with large policies - about 10 000 with 16 KiB each, or 150 000 with 1 KiB, on the machine measured - that deciding takes the two seconds even when everything that fits is remembered; search across buckets then answers 503 to everybody but the root identity (bound by no bucket policy, it reads none), each such request costing up to two CPU-seconds, at most eight at once a node; a search of one named bucket, and everything that is not a search, are not affected; a quota on buckets (milestone 8) is the remedy; (3) eight principals can hold all places of a node, which refuses search to others and nothing else |
-| One tenant fills the cluster | Per-bucket quotas | M8 |
+| One tenant fills the cluster | Per-bucket quotas | M8: **not implemented**. Nothing limits what a caller who may write stores |
 
 ### Elevation of privilege
 
@@ -146,15 +156,15 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | A copy is used to read or write what the caller may not (confused deputy) | A copy is the use cases of reading and of writing in sequence, each authorized as itself against the caller's policies and the bucket's: `s3:GetObject` (or `GetObjectVersion`) on the source, `s3:PutObject` on the destination, the tag and lock permissions for what travels or is set; an SSE-C source takes its key, in signed headers, never in a query string; the destination inherits no lock and shares no data or key with the source; every `x-amz-*` header must be covered by the signature, so the holder of a presigned PUT cannot turn it into a copy | **implemented** |
 | An API key exceeds its owner | A request with a key must be allowed by the owner's policies and, when the key has one, by its inline policy too | **implemented** |
 | An administrator of users makes themselves an administrator of everything | Whoever may put users, groups, roles or policies, or make keys for an administrator, in effect holds every permission: by design, as in IAM. Of the built-in roles only `cluster-admin` can; a custom policy granting one of these grants the deployment. Every such change, and what it granted, is in the audit trail; a narrowed key cannot make keys | **accepted** |
-| Anonymous access | Only when a bucket policy explicitly grants it | M6 |
+| Anonymous access | Only when a bucket policy explicitly grants it | **implemented** (PLAN 6.7; `TestAnonymousIsRejected` and `TestBucketPolicyPublicRead` of `test/s3compat`) |
 | A node's clock decides what must not be deleted yet | The time of every metadata entry is stamped by the metadata leader and held monotonic by the state machine; gateways, proposers and followers have no say | **implemented** (ADR-0008), with a limit: a voter with a clock that runs ahead, once it leads, moves time forward. Voters need synchronised clocks |
 | Another site makes a signed-in browser change something | Session cookie is `__Host-`, `HttpOnly`, `Secure`, `SameSite=Strict`; every change needs the session's CSRF token in a header; JSON bodies must be `application/json` | **implemented** |
 | Script injected into the console or the documentation | Content-Security-Policy `default-src 'none'; script-src 'self'; style-src 'self'`: no inline script, nothing from another host; no CDN assets; downloads are always `attachment` and `application/octet-stream`, so an uploaded HTML file is never rendered on the console's origin | **implemented** |
 | Password guessing at the console | Argon2id; at most four hashes at once; ten failed sign-ins per address in five minutes, per node; every failure audited; one answer for every reason of refusal | **implemented**, with limits: no lockout, the count is per node and in memory |
 | A repeated request changes something twice, or leaks a stored answer | `Idempotency-Key` records are replicated and scoped to the caller; answers are sealed through the KMS; the same key with another request is refused | **implemented**; not atomic with the change (ADR-0007): after a node crash a repeat can run again |
-| The management API reveals what it protects | A refusal and an internal error carry no detail; public are only sign-in, the contract, the documentation and the console's files | **implemented**; the public routes are an exception to "every request is authenticated" - see open questions |
+| The management API reveals what it protects | A refusal and an internal error carry no detail; public are only sign-in, the contract, the documentation and the console's files | **implemented**; the public routes are an exception to "every request is authenticated" - see open question 1 |
 | Ransomware with stolen admin credentials | Versioning: an overwrite or a delete destroys nothing while it is enabled, and removing a version is its own permission, which `read-write` does not have. Object Lock: a version under compliance retention or legal hold is removed by no entry the state machine accepts - not from root, not with any flag (ADR-0009); governance bypass is granted by no wildcard | **implemented**, with limits: the rule is enforced in the metadata, so whoever can write to the drives of enough nodes or to the metadata of a majority of voters is not stopped by it; a voter with a clock that runs ahead ends retentions early; a stolen node certificate can delete shards over node RPC |
-| Container escape or host damage | Distroless static image, non-root UID 65532, no shell; read-only root filesystem; all capabilities dropped; `restricted` Pod Security Standard; default-deny NetworkPolicy | image **implemented**; chart M7 |
+| Container escape or host damage | Distroless static image, non-root UID 65532, no shell; read-only root filesystem; all capabilities dropped; `restricted` Pod Security Standard; default-deny NetworkPolicy | **implemented**. The image: `make image` fails one that runs as root. The chart (PLAN 7.1, 7.2, 7.10): `scripts/helm-assert.sh` (`make helm-lint`) asserts on every render `runAsNonRoot`, a read-only root filesystem, `drop: [ALL]`, `seccompProfile: RuntimeDefault`, no service-account token, no host namespace or `hostPath`, and every rule of the default-deny NetworkPolicy; `make test-k8s` installs it on k3s in a namespace that enforces the `restricted` standard and proves that a pod outside the release cannot reach ports 9001-9003 |
 
 ### Supply chain
 
@@ -164,8 +174,8 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | A package runs code at install time | pnpm lifecycle scripts are disabled for the console | **implemented** |
 | A test tool of the builder image changes under its name | The AWS CLI installer and the ceph/s3-tests archive are fetched by URL and accepted only by SHA-256; the Python packages of the tests are installed with `--require-hashes` from a lock file in the repository. They exist in the builder image only; the stage is not built for the product image | **implemented**; the tools themselves run with the privileges of the builder container during `make s3-compat`. The s3-tests archive is one GitHub generates for a commit: if its bytes change the builder build fails until the checksum is looked at again |
 | A vulnerable Go dependency | `govulncheck` gate | **implemented** |
-| A vulnerable console package | Audit gate for `web/` | not planned yet — see open question 4 |
-| A gate silently switched off | `make lint` rejects `//nolint`, skipped tests and `testing.Short`; gates whose subject does not exist yet fail as soon as it appears | **implemented** |
+| A vulnerable console package | Audit gate for `web/` | **not implemented**, not planned yet — see open question 4 |
+| A gate silently switched off | `make lint` rejects `//nolint`, skipped tests and `testing.Short` (`scripts/no-bypass.sh`); every gate fails when its subject is missing - a chart, a contract, a baseline, a dashboard, a test it names (`PLAN.md`, "Gates and what each fails without") | **implemented**. Two gosec findings are excluded by path in `.golangci.yml` (open question 5) |
 | A licence that taints the product | Allow-list gate: MIT, BSD, ISC, Apache-2.0, MPL-2.0 | **implemented** |
 | Copied AGPL code | Clean-room rule: MinIO source is never read, copied or ported; the S3 API is implemented from AWS's public documentation | rule |
 | A private or unreproducible build input | `make verify-clone` builds a clean export with Go alone and with a container engine alone | **implemented** |
@@ -173,17 +183,26 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | A stolen token of the registry (the job's `GITHUB_TOKEN`, or a personal token with `write:packages`): another image is pushed under a release's name | The token can write to the registry; it cannot sign. A signature that verifies needs a certificate of Fulcio for the identity `.../.github/workflows/release.yml@refs/tags/v<version>`, which only a run of that workflow at that tag in `albievan/cactusfs` is given, and the registry's token is not an OIDC token. What the thief pushes has no signature that verifies, and a signature or attestation copied from a released image onto it is refused (the gate proves both). The token is given to the two steps that publish (`make release`, and the creation of the GitHub Release), lives for the job, and is written to a directory that is deleted with the run | written, **not yet run**. Limit: whoever pulls by tag without verifying gets what the tag names - verify, and deploy the digest |
 | A malicious tag push: somebody with write access tags a commit `v<version>` to have it released and signed | The workflow starts on tags `v*` only and first holds the tag to the tree: it must be `v` + `internal/buildinfo/VERSION` (and the `Dockerfile` and the chart must agree), and the commit must be in the history of `main`; then `make check` and `make test-chaos` must pass, in jobs without the permission to push or sign. `scripts/release.sh --publish` asks the same again and refuses outside that workflow. There is no manual trigger | written, **not yet run**. Limit: all of this is checked by the workflow, which is in the commit that is tagged - someone who may push to `main` and push tags can change it. Who may do either is **the owner's to configure** (protection of `main` and of tags `v*`, required reviews); it is not configured from this repository |
 | A compromised dependency of the release workflow: an action, or a tool it runs, that would sign or publish something else | The only action is `actions/checkout`, pinned by commit SHA, as in CI; every other step is a `run:` with the tools of the builder image, which are pinned by digest or by checksum. The gate and the fault-injection tests run first, in jobs whose token can only read; the job that can push and sign builds in the builder container, which is given none of the job's tokens, and only `make release` passes them into it - no gate or test runs in that job | written, **not yet run**. Limit: the publishing job's steps run on one runner, and what builds the binaries there (the Go toolchain, the modules, pnpm and the console's packages, all pinned) runs before the step that signs; a dependency that corrupted the build would be signed. The SBOM names what was built in |
-| Re-tagging: a release's tag is moved to another image, in the registry or by a second run of the workflow | A tag is not signed and a digest cannot be moved: the signature is of the digest, the documentation and the release notes give digests, and the chart takes `image.digest`. The workflow never writes `latest`, and writes `<version>` last, onto a list that is signed and verified. The gate proves that a signed tag moved to an unsigned image is refused | **gated** for the refusal; the rest written, **not yet run**. Limits: a tag moved to another *released* image verifies - only a digest pins which release runs; a second run of the workflow at the same tag moves `<version>` to its own list (open: whether to refuse that) |
+| Re-tagging: a release's tag is moved to another image, in the registry or by a second run of the workflow | A tag is not signed and a digest cannot be moved: the signature is of the digest, the documentation and the release notes give digests, and the chart takes `image.digest`. The workflow never writes `latest`, and writes `<version>` last, onto a list that is signed and verified. The gate proves that a signed tag moved to an unsigned image is refused | **gated** for the refusal; the rest written, **not yet run**. Limits: a tag moved to another *released* image verifies - only a digest pins which release runs. A second run of the workflow at the same tag does not move `<version>`: before it writes the tag, `release.sh --publish` asks the registry, goes on only if the tag is absent (404) or names the very list it built, and refuses otherwise (exit 20; exit 21 when the registry gives no answer) - written, **not yet run**; the gate proves that the helper tells "absent" from a failure (`make sign-verify`). The chart's `<version>` is not guarded so (ADR-0021) |
 | What is in an image is not known, or is misstated | An SPDX SBOM for the image of each architecture, from the module list the Go linker embeds, and one for the console's packages, from the lock file; `make sbom` fails if one lacks the Go module, a module known to be linked, or the console's known packages. The SBOM of a platform image is attached to its digest as a signed attestation, and the gate proves that one image's attestation is refused for another | **implemented and gated**; the SBOM lists what syft finds: a dependency that leaves no trace in the binary or the lock file is not in it. The licence of CactusFS itself is declared in the image's SBOM as `LicenseRef-CactusFS-Blessing` with the text of `LICENSE.md` (written after the gate last ran: `make sbom` has to pass again with it) |
 | The signing or SBOM tool of the builder changes under its name, or calls out | cosign and syft are fetched by URL and accepted only by SHA-256, the registry image is pinned by digest; all Apache-2.0, in the builder image only. In the gate both tools are given a proxy that leads nowhere for every host but the run's registry, so a call to the internet fails the gate. The registry speaks plain HTTP on the host's loopback and on a network of the run only, and is removed with the keys on every way out | **implemented**; the tools run with the privileges of the builder container, which holds the engine socket, as `make image` does |
 | Hand-rolled cryptography | Only the standard library `crypto/*` and `golang.org/x/crypto` | rule |
 
-## 5. Open questions for Albie
+## 5. Open questions for the owner
+
+Answered since this list was begun, and so no longer here: the module path
+(`github.com/albievan/cactusfs` stays), the project's licence (the public-domain
+dedication of `LICENSE.md`), the registry (`ghcr.io/albievan/cactusfs`) and how a
+release is signed (keyless, ADR-0021) - `CLAUDE.md` §11 and `PLAN.md` record them.
+
+Still open:
 
 1. **Unauthenticated probes.** `CLAUDE.md` §3 says every inbound request is
    authenticated. `/healthz` and `/readyz` are not, because kubelet and compose health
    checks cannot hold credentials; they disclose nothing instead. The stricter
-   alternative is to require a credential and use exec probes. Decide before milestone 7.
+   alternative is to require a credential and use exec probes. The chart probes over
+   HTTPS without a credential, as compose does. Sign-in, the contract, Swagger UI and
+   the console's files are public in the same way (ADR-0007).
 2. **Probes over TLS.** The probes share the TLS admin listener. Kubernetes HTTPS probes
    do not verify the certificate, which is acceptable for a health check. An alternative
    is a separate loopback-only plaintext probe port.
@@ -193,32 +212,102 @@ physical side channels; denial of service by volumetric flooding (left to the ne
    `pnpm audit` gate? It needs registry access at check time and can fail on advisories
    in build-only tools.
 5. **Lint exclusions.** Two gosec findings are silenced by path in `.golangci.yml`, and
-   nowhere else: G204 under `test/` (see below) and G401/G501 for
+   nowhere else: G204 ("subprocess launched with a variable") under `test/`, whose
+   black-box tests exist to execute the binary they have just built, and G401/G501 for
    `internal/adapters/s3api/md5.go`, the one file that computes the MD5 the S3 protocol
    prescribes for ETag and `Content-MD5`.
 6. **Metadata at rest.** Object data is encrypted, but bucket names, object keys, sizes,
    content types and user metadata are stored in the clear in `state.db` and the Raft
-   log. `CLAUDE.md` §3 says "every object is encrypted"; whether names and metadata must
-   be too is a product decision (it costs listing performance or needs encrypted bbolt
-   pages).
+   log - and with them who uploaded and who read an object, who created a bucket and
+   its latest use. `CLAUDE.md` §3 says "every object is encrypted"; whether names and
+   metadata must be too is a product decision (it costs listing performance or needs
+   encrypted bbolt pages).
 7. **Root credentials on standard error.** Generated credentials are printed once to
    stderr, which container log drivers capture. Production deployments should supply
    them; should generation be refused when stderr is not a terminal?
-8. **Bearer format for `/metrics`.** `Bearer <access key ID>:<secret>` is provisional
-   until the admin API contract (PLAN 5.1), and until scoped keys exist it is the root
-   key that a scraper must hold.
+8. **The default console user** (ADR-0014). `admin` / `admin` with `cluster-admin` on
+   every new deployment was the owner's decision, against the recommendation recorded
+   in the ADR, and is an accepted risk. With the repository public the password is
+   known to everybody. Open: whether the first sign-in should force a new password, or
+   whether the user should be made only on request.
 9. **Slow uploads.** The S3 listener has no body deadline; a client can hold a
    connection open by sending slowly.
 10. **SHA-1 checksums** (`x-amz-checksum-sha1`) are refused rather than verified,
     because the linter rejects SHA-1.
-11. **gosec G204 in `test/`.** `.golangci.yml` excludes the "subprocess launched with a
-   variable" finding for the black-box tests under `test/`, which exist to execute the
-   binary they have just built. It is the only lint exclusion in the repository.
+11. **What `auditor` may see.** The role holds `admin:GetObjectAccess` and
+    `admin:GetSettings` and may not list buckets or objects. So an auditor asks about
+    an object by its key and is refused the grid of buckets and the columns of the
+    object browser; and the Settings screen shows an auditor the directories,
+    addresses, drive labels and builds of every node. Decide both: whether the role may
+    list, and whether it should read the settings in that detail.
 12. **Local KMS wrap bound.** The local KMS wraps every data key under one master key
     with a random 96-bit nonce, which is safe for about 2^32 wraps. There is no key
-    rotation yet; Vault Transit (milestone 4) does not have this bound.
+    rotation yet; Vault Transit does not have this bound.
 13. **Conditional writes** (`If-None-Match: *` and `If-Match` on a PUT, "create only
     if absent") answer `501` rather than being ignored: the condition would have to be
     part of the Raft entry, and that is not built. Conditional *reads* are implemented
     on GET and HEAD of an object and on the source of a copy; they are judged after
     authorization and, for an object under a customer key, after the key was shown.
+14. **No way to scrape without checking the certificate.** The chart had a value
+    `podMonitor.tlsConfig.insecureSkipVerify`; it was removed by the stricter reading
+    (the credential of `/metrics` goes to nobody unverified), and the chart refuses the
+    value. Open to reverse if a test bench needs it.
+15. **The paths of files that hold a secret** (a private key, the KMS key file, the
+    passphrase and token files) are hidden in the settings view - "set" or "not set" -
+    by the stricter reading. They are shown to nobody, `cluster-admin` included. Confirm,
+    or show them to whoever may read settings.
+16. **Wildcards and the settings.** A user policy that allows `admin:Get*` or `admin:*`
+    on a resource that covers the settings grants `admin:GetSettings` as well, since
+    wildcards match by name. Narrow such policies, or accept it.
+17. **`OTEL_EXPORTER_OTLP_*`.** The OpenTelemetry exporter reads its own variables from
+    the node's environment (headers, a client certificate). They are no setting of
+    CactusFS, are not shown with the settings, are not tested, and a value the library
+    cannot read is printed by it on standard error. Forbid, adopt as settings, or leave.
+18. **No `latest` tag.** The release workflow writes `<version>` and
+    `<version>-<build>` and never `latest`. Confirm.
+19. **Who may release.** The workflow checks the tag against the tree and that the
+    commit is on `main`, but the workflow is in the commit that is tagged. Protection of
+    `main` and of tags `v*`, and required reviews, are configured in the repository's
+    settings on GitHub, not from this tree, and are not configured yet as far as this
+    repository can tell. After the first push the two packages on ghcr (the image and
+    the chart) must also be made public by hand. The chart's tag `<version>` is not
+    guarded against a second, different push as the image's is (ADR-0021).
+20. **A client-facing certificate that is expired at start** is logged at `ERROR` and
+    served; a bad node certificate stops the node. Whether start-up should refuse the
+    first as well is asked in ADR-0020.
+21. **No alert on the end of the client-facing certificate.** The metric exists
+    (`cactusfs_tls_certificate_not_after_seconds{use="s3"}`); the two alerts that ship
+    read the node certificate's. Ship one, and with what margin?
+22. **The build of every node in `GET /cluster`.** That answer names the build of the
+    node that answered; knowing every node's from one answer needs a field in the
+    replicated node record, a schema change of its own. `GET /settings` asks each node
+    and does say them.
+23. **`GET /cluster` lists no node on a deployment of one node.** A node on its own
+    registers no node record, so `nodes` is empty there, while `GET /settings` says one
+    node and one voter. Left as a follow-up.
+24. **Clocks.** A voter whose clock runs ahead, once it leads, ends retentions early
+    and expires by lifecycle rule whatever no lock keeps. Stricter rules - the earliest
+    clock of a majority for a removal that only time allows (ADR-0009); refusing to act
+    when the clock is far ahead of the last entry's time (ADR-0013) - are not built.
+25. **Lower-casing of tags** (ADR-0018, not implemented beyond the store). The owner
+    asked for all tags in lower case; S3 keeps their case and two entries of the
+    compatibility baseline assert it. As designed it is a setting of each bucket's tag
+    rules. Deployment-wide lower-casing costs those two entries: his to choose.
+26. **Sub-bucket semantics** (ADR-0017, not implemented beyond the store). Read
+    strictly: a sub-bucket's policy never opens anything to anonymous callers and
+    cannot grant the governance bypass; "each bucket must be controlled by policies" is
+    read as "a policy can be attached", not "must be". Confirm before the use cases are
+    built.
+27. **Licences of test tools.** Does the licence list of `CLAUDE.md` §3 govern tools
+    that exist only in the builder image and are never distributed (the AWS CLI's
+    bundled Python and readline among them)? The lenient reading is used.
+28. **Where to report a vulnerability.** The repository has no `SECURITY.md` and names
+    no contact; the README points to GitHub's private vulnerability reporting, which
+    the owner must enable for the repository.
+29. **Behind a load balancer the nodes see the balancer's address.** There is no PROXY
+    protocol on the listeners and no trusted-proxy setting; `X-Forwarded-For` is not
+    read. So the audit trail and the `aws:SourceIp` condition name the balancer, and
+    the limiter of failed sign-ins, which counts by source address in each node, gives
+    every console user behind one balancer a single allowance
+    ([`docs/load-balancing.md`](load-balancing.md), "Limits and gaps today"). Should
+    the listeners take the PROXY protocol from named peers?

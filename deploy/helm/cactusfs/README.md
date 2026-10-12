@@ -1,8 +1,12 @@
 # The CactusFS Helm chart
 
-Runs a CactusFS cluster, or one node on its own, on Kubernetes and k3s. The chart
-depends on no ingress controller, storage driver or cloud. The reasons for its shape
-are in `docs/adr/0015-helm-chart.md`.
+Runs a CactusFS cluster, or one node on its own, on Kubernetes (1.27 or later) and k3s.
+The chart depends on no ingress controller, storage driver or cloud. The reasons for its
+shape are in [`docs/adr/0015-helm-chart.md`](../../../docs/adr/0015-helm-chart.md).
+
+**No release has been published yet**: there is no image at `ghcr.io/albievan/cactusfs`
+and no chart at `oci://ghcr.io/albievan/charts` to pull. Until the first release, install
+the chart from this directory with an image you built ([Installing](#installing)).
 
 ## What it installs
 
@@ -23,8 +27,20 @@ Pod Security Standard.
 
 The release name is used exactly as given: `helm install store ...` makes the nodes
 `store-meta-0`, `store-meta-1`, `store-meta-2` and `store-data-0` with the default
-pools. Across all pools 3 or 5 nodes vote (their `roles` are empty) and at least 4
-store - or there is exactly one node, with every role.
+pools. Across all pools 3 or 5 nodes vote (their `roles` are empty, which is every
+role, or name `meta`) and at least 4 store - or there is exactly one node, with every
+role.
+
+## The image
+
+| Value | |
+|---|---|
+| `image.repository` | `ghcr.io/albievan/cactusfs`, where releases will be published (none is yet). An image you built (`make image`) and pushed to a registry of your own, or loaded into the cluster, is named here |
+| `image.tag` | The build to run, `<version>-<build>`. Empty: the chart's `appVersion`, the release |
+| `image.digest` | `sha256:...`, to run exactly that image; it wins over the tag. Verify a release's digest and deploy that digest (the README of the repository, "Verifying an image") |
+
+Pods are labelled `app.kubernetes.io/version` with the tag, or with the `appVersion`
+when there is none.
 
 ## Values that must be set
 
@@ -34,9 +50,51 @@ can issue the certificates, and nothing requires it.
 | Value | Secret |
 |---|---|
 | `secrets.root` | Root credentials: keys `access-key` and `secret-key` |
-| `secrets.tls` | The certificate of the S3 and admin listeners (`kubernetes.io/tls`) |
+| `secrets.tls` | The certificate of the S3 and admin listeners (`kubernetes.io/tls`: keys `tls.crt` and `tls.key`) |
 | `secrets.nodeCA` | The CA of node certificates: key `ca.crt`. Not for a node on its own |
-| `<node ID>-node-tls` | One for every node (`kubernetes.io/tls`); the suffix is `secrets.nodeTLSSuffix`. The certificate carries one DNS name, the node ID. A pod mounts its own and no other node's |
+| `<node ID>-node-tls` | One for every node (`kubernetes.io/tls`); the suffix is `secrets.nodeTLSSuffix`. The certificate carries one DNS name, the node ID, and no IP address. A pod mounts its own and no other node's. Not for a node on its own |
+
+The root credentials are an access key ID of at least 3 characters and a secret key of
+at least 16. They are what the deployment begins with: once it exists, a pair that
+differs from the stored one stops the node.
+
+## Installing
+
+With the default pools and a release named `store`, the nodes are `store-meta-0`,
+`store-meta-1`, `store-meta-2` and `store-data-0`. The names of the Secrets are yours
+to choose; the files are your own PKI's.
+
+```sh
+kubectl create namespace cactusfs
+kubectl label namespace cactusfs pod-security.kubernetes.io/enforce=restricted   # optional: the pods pass it
+
+kubectl -n cactusfs create secret generic cactusfs-root \
+  --from-literal=access-key='<access key ID>' --from-literal=secret-key='<secret key>'
+kubectl -n cactusfs create secret tls cactusfs-tls --cert=s3.pem --key=s3.key
+kubectl -n cactusfs create secret generic cactusfs-node-ca --from-file=ca.crt=node-ca.pem
+for node in store-meta-0 store-meta-1 store-meta-2 store-data-0; do
+  kubectl -n cactusfs create secret tls "$node-node-tls" --cert="$node.pem" --key="$node.key"
+done
+kubectl -n cactusfs create secret generic cactusfs-vault-token --from-file=token=vault-token   # with kms.type=vault
+
+helm install store deploy/helm/cactusfs -n cactusfs -f my-values.yaml \
+  --set image.repository=registry.example.test/cactusfs --set image.tag=<version>-<build>
+kubectl -n cactusfs get pods        # alive at once, ready when the cluster has formed
+```
+
+`my-values.yaml` names those Secrets and says where the keys are; `ci/cluster-values.yaml`
+is the least it can hold. From the first release on, the chart can be installed from the
+registry instead, with the published image by its digest (the README of the repository,
+"Releases"):
+
+```sh
+helm install store oci://ghcr.io/albievan/charts/cactusfs --version <version> \
+  -n cactusfs -f my-values.yaml --set image.digest=sha256:<digest of the manifest list>
+```
+
+A new deployment has the console user `admin` with the password `admin`
+([ADR-0014](../../../docs/adr/0014-default-console-user.md)); see "Who may reach it"
+before you open the admin port.
 
 **Rotating certificates.** Update the Secret - `secrets.tls`, or a node's
 `<node ID>-node-tls` - and do nothing else: no pod restarts (ADR-0020). The kubelet
@@ -73,9 +131,31 @@ The chart refuses to render what must not run: a number of voters other than 3 o
 fewer than four nodes that store, a shared local key file without `dev.localKMS`, Vault
 with a NetworkPolicy that lets the nodes reach nothing, a missing Secret name.
 
-`ci/` has value sets to start from: a cluster with Vault, five voters, one node, a
-development cluster on one machine's disks, and a cluster opened to its clients.
-`ci/refused/` has what the chart refuses, each with the words of the refusal.
+`ci/` has value sets to start from: a cluster with Vault (`cluster-values.yaml`), five
+voters (`five-voters-values.yaml`), one node (`standalone-values.yaml`), a development
+cluster on one machine's disks (`single-machine-values.yaml`), and a cluster opened to
+its clients (`exposed-values.yaml`). `ci/refused/` has what the chart refuses, each with
+the words of the refusal.
+
+## Other values
+
+| Value | |
+|---|---|
+| `pools` | The nodes: `name`, `replicas`, `roles` (empty for every role; or names separated by commas - `gateway`, `meta`, `storage`, `console`), `topology` (`region`, `zone`, `rack`, for the placement of shards), `nodeSelector`, `tolerations` |
+| `drives.count`, `drives.size` | The drives of every node that stores: one claim each (default 2 of `100Gi`) |
+| `metadata.size` | The claim of a node's metadata (default `10Gi`) |
+| `storageClassName` | The storage class of the claims. Empty: the cluster's default |
+| `localVolumes` | `enabled`, `basePath`, `nodeName`: volumes on the disks of one named machine, for a cluster without a storage driver. The directories `<basePath>/<node ID>/{meta,data1,...}` must exist and belong to user 65532. Not for production |
+| `s3.domain`, `s3.region` | The domain of virtual-hosted-style requests (empty: path-style only); the region reported to S3 clients (`us-east-1`) |
+| `resources` | Requests and limits of a node (default: 500m and 1Gi requested, 4 CPUs and 4Gi at most) |
+| `probes`, `shutdownTimeoutSeconds` | The period, threshold and timeout of the probes, and how long a node may take to start answering (`startupSeconds`); how long requests in flight get after the drain delay |
+| `spread` | `topologyKey` and `whenUnsatisfiable`: pods are kept apart by host; `ScheduleAnyway` lets them share one machine |
+| `podDisruptionBudget.maxUnavailable` | 1: one node at a time |
+| `logLevel`, `otlpEndpoint`, `extraEnv` | The log level; the URL of a trace collector (name it in `networkPolicy.egressTo` as well); further `CACTUSFS_*` variables for every node |
+| `podAnnotations`, `podLabels`, `imagePullSecrets`, `clusterDomain` | As their names say |
+
+Every setting of a node that the chart does not set is listed in the README of the
+repository ("Settings"); `extraEnv` passes one.
 
 ## Who may reach it
 
@@ -109,7 +189,7 @@ operator, and with them off renders nothing of its kinds.
 
 | Value | Renders |
 |---|---|
-| `podMonitor.enabled` | A PodMonitor that scrapes `/metrics` of every pod of the release, over HTTPS on the admin port. The scrape job is named `cactusfs`, whatever the release is called |
+| `podMonitor.enabled` | A PodMonitor that scrapes `/metrics` of every pod of the release, over HTTPS on the admin port, every `podMonitor.interval` (30s) with a `scrapeTimeout` of 10s. The scrape job is named `cactusfs`, whatever the release is called |
 | `prometheusRule.enabled` | A PrometheusRule with the alerting and recording rules of `deploy/observability/rules/`, which the chart carries in `files/`. They look for the job `cactusfs` |
 
 `labels` on each is for the labels your Prometheus selects by. What the PodMonitor
@@ -124,8 +204,9 @@ needs, and the chart refuses to render it without:
   addresses, which no certificate names: `podMonitor.tlsConfig.serverName` is a
   name the certificate of `secrets.tls` carries. `tlsConfig.caSecret` (`name`, `key`)
   is the CA that signed it, when Prometheus does not trust it already.
-  `tlsConfig.insecureSkipVerify: true` scrapes without checking the certificate, and
-  hands the credential to whoever answers: for a test bench only.
+  The certificate is always checked: the chart has no value that scrapes without, since
+  the credential would then go to whoever answers, and refuses a
+  `tlsConfig.insecureSkipVerify` it is given.
 - **A way in.** The NetworkPolicy lets nobody reach port 9001 until
   `networkPolicy.adminFrom` names them, and Prometheus is one of them:
 
@@ -179,6 +260,21 @@ so that the Services have stopped sending to it - then lets requests in flight f
 within `shutdownTimeoutSeconds`. The pod's termination grace period is longer than the
 two together. There is no `preStop` hook: the node does this itself.
 
+**Going back after an upgrade.** While nodes of two releases run side by side, no node
+writes a metadata entry newer than the oldest of them understands, and a node can be
+taken back to the release before. When the last node runs a release that raises the
+entry schema, the cluster begins to write the new schema by itself, and the first such
+write - in practice the first upload, the first flushed count of downloads or the first
+bucket created - ends the way back: nodes of the release before refuse that state and
+do not start. Nothing is lost, but it is an outage until they are rolled forward again
+([ADR-0016](../../../docs/adr/0016-object-access-and-schema-3.md),
+[ADR-0019](../../../docs/adr/0019-bucket-activity-and-schema-4.md)). To keep a way
+back, hold one node at the release before until you are sure, and take a backup first.
+`kubectl -n <namespace> get pods -L app.kubernetes.io/version` shows which node runs
+what; the alert `CactusFSMetadataUpgradeUnfinished` fires when, for six hours, the
+cluster has written an older schema than its nodes support - an upgrade that was begun
+and not finished.
+
 ## Checking the chart
 
 ```sh
@@ -190,9 +286,11 @@ runs, in the builder image: `helm lint --strict`; a render of every value set of
 image carries - it is given no other place to look, so it reads nothing from the
 network, and a kind without a schema fails; `scripts/helm-assert.sh` on each render, which
 asserts what this document promises (the Services, the claims, the security context,
-the probes, the placement, every rule of the NetworkPolicy, the drain delay); and a
+the probes, the placement, every rule of the NetworkPolicy, the drain delay, the image
+and the version label); and a
 render of every file of `ci/refused/`, which must fail with the words its first line
-names. A new value set in `ci/` is picked up by its name.
+names. A new value set in `ci/` is picked up by its name. Without a chart, without a
+value set or without a refusal to ask for, the gate fails.
 
 `make test-k8s` (`test/k8s`) installs the chart on k3s in one privileged container, with
 `ci/single-machine-values.yaml` and the image the tree builds, in a namespace that enforces

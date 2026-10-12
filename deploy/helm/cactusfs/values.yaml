@@ -5,7 +5,10 @@
 # its drives - and keeps it for life.
 
 image:
-  repository: cactusfs
+  # Where a release is published (README, "Releases"). For an image built
+  # here with `make image` and loaded into the cluster, or pushed to a
+  # registry of your own, say its name: repository: cactusfs.
+  repository: ghcr.io/albievan/cactusfs
   # The build to run: <version>-<build>, as `make image` tags it and
   # `cactusfs version` says it (0.7.0-412). When empty, the chart's appVersion:
   # the release, of whatever build. Pods are labelled app.kubernetes.io/version
@@ -169,6 +172,8 @@ podMonitor:
   bearerTokenSecret:
     name: ""
     key: token
+  # The certificate of the pod is always checked: the credential goes to
+  # nobody else, and no value turns that off.
   tlsConfig:
     # Pods are scraped by their addresses, which no certificate names: a
     # name that the certificate of secrets.tls carries. Required when enabled.
@@ -178,9 +183,6 @@ podMonitor:
     caSecret:
       name: ""
       key: ca.crt
-    # Scrape without checking the certificate: the credential then goes to
-    # whoever answers. For a test bench, never for production.
-    insecureSkipVerify: false
   # Labels the Prometheus Operator selects PodMonitors by.
   labels: {}
 # A PrometheusRule (monitoring.coreos.com/v1) with the alerting rules of

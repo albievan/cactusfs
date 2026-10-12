@@ -1,0 +1,49 @@
+# Example - adapt before use; not run by the project's gates.
+#
+# The S3 API behind Traefik with TLS passthrough. This is the example for k3s
+# as it comes: k3s installs Traefik in kube-system and publishes its
+# "websecure" entry point on port 443 of the machines.
+#
+# Placeholders: the release is "cactusfs" in the namespace "cactusfs" (so the
+# S3 Service is "cactusfs", port 9000) and clients use s3.example.com.
+#
+# Traefik reads the server name of the TLS handshake and forwards the
+# connection as it is; the CactusFS pod ends TLS with the certificate of
+# secrets.tls, which must name s3.example.com and, for virtual-hosted-style
+# requests (s3.domain in the chart), *.s3.example.com.
+#
+# The chart's NetworkPolicy must let Traefik in, or every request ends in a
+# timeout. For the Traefik of k3s (check the labels of yours with
+# `kubectl -n kube-system get pods --show-labels`):
+#
+#   networkPolicy:
+#     clientsFrom:
+#       - namespaceSelector:
+#           matchLabels: {kubernetes.io/metadata.name: kube-system}
+#         podSelector:
+#           matchLabels: {app.kubernetes.io/name: traefik}
+#
+# API group: traefik.io/v1alpha1 is served by Traefik 2.10 and later and by
+# Traefik 3. The matcher syntax below is Traefik 3's (a regular expression);
+# Traefik 2 writes the wildcard as HostSNIRegexp(`{bucket:.+}.s3.example.com`).
+apiVersion: traefik.io/v1alpha1
+kind: IngressRouteTCP
+metadata:
+  name: cactusfs-s3
+  namespace: cactusfs
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # Path-style requests, and what everything else falls back to.
+    - match: HostSNI(`s3.example.com`)
+      services:
+        - name: cactusfs
+          port: 9000
+    # Virtual-hosted-style requests. Leave this route out without s3.domain.
+    - match: HostSNIRegexp(`^.+\.s3\.example\.com$`)
+      services:
+        - name: cactusfs
+          port: 9000
+  tls:
+    passthrough: true

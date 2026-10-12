@@ -1,6 +1,8 @@
 # ADR-0018: Tag rules, lower-case tags, and a catalogue of tags
 
-- **Status:** accepted; being implemented (PLAN D.1-D.6)
+- **Status:** accepted; not implemented beyond the domain rules, the port and the
+  replicated store (PLAN D.1, S.3). The use cases, the API and the console are to come
+  (PLAN D.2-D.6)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0011 (tags of buckets and objects), ADR-0016 (entry schema 3),
   ADR-0017 (sub-buckets)

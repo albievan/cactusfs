@@ -35,9 +35,11 @@ for platform in $PLATFORMS; do
 	fi
 	sort -u "$work/list" | grep -vx "$MODULE" >"$work/modules" || true
 
+	# The binary links Raft, bbolt, gRPC and more: a list without any of
+	# them is a list that was not read, and nothing would be checked.
 	if [ ! -s "$work/modules" ]; then
-		echo "licences: go $platform - links no third-party module"
-		continue
+		echo "licences: FAIL - go list for $platform names no module but $MODULE: nothing to check" >&2
+		exit 1
 	fi
 	echo "licences: go $platform - checking $(wc -l <"$work/modules" | tr -d ' ') modules"
 	CGO_ENABLED=0 GOOS=$os GOARCH=$arch \

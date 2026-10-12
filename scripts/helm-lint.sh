@@ -10,27 +10,21 @@ set -eu
 
 CHART=deploy/helm/cactusfs
 
-# The chart deploys the release this tree builds: its appVersion is what
-# internal/buildinfo/VERSION names.
-if [ -f "$CHART/Chart.yaml" ]; then
-	release=$(tr -d ' \t\r\n' <internal/buildinfo/VERSION)
-	app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CHART/Chart.yaml")
-	if [ -z "$release" ] || [ "$app" != "$release" ]; then
-		echo "helm-lint: FAIL - $CHART/Chart.yaml has appVersion '$app', internal/buildinfo/VERSION names '$release'" >&2
-		exit 1
-	fi
-	echo "helm-lint: appVersion $app is the release"
+# There is a chart, and this gate judges it: without one it fails.
+if [ ! -f "$CHART/Chart.yaml" ]; then
+	echo "helm-lint: FAIL - $CHART/Chart.yaml is missing: there is no chart to judge" >&2
+	exit 1
 fi
 
-if [ ! -f "$CHART/Chart.yaml" ]; then
-	if [ -n "$(find deploy/helm -type f 2>/dev/null | head -n 1)" ]; then
-		echo "helm-lint: FAIL - deploy/helm has files but $CHART/Chart.yaml is missing" >&2
-		exit 1
-	fi
-	echo "helm-lint: no chart yet - nothing under deploy/helm ($CHART arrives with PLAN 7.1)"
-	echo "helm-lint: PASS"
-	exit 0
+# The chart deploys the release this tree builds: its appVersion is what
+# internal/buildinfo/VERSION names.
+release=$(tr -d ' \t\r\n' <internal/buildinfo/VERSION)
+app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CHART/Chart.yaml")
+if [ -z "$release" ] || [ "$app" != "$release" ]; then
+	echo "helm-lint: FAIL - $CHART/Chart.yaml has appVersion '$app', internal/buildinfo/VERSION names '$release'" >&2
+	exit 1
 fi
+echo "helm-lint: appVersion $app is the release"
 
 for tool in helm kubeconform yq; do
 	command -v "$tool" >/dev/null 2>&1 || {
@@ -65,7 +59,10 @@ trap 'rm -rf "$tmp"' EXIT
 # Vault, five voters, one node, a development cluster on one machine, and a
 # cluster opened to its clients. Every set is judged before the gate fails.
 failed=0
+sets=0
 for values in "$CHART"/ci/*.yaml; do
+	[ -f "$values" ] || continue
+	sets=$((sets + 1))
 	name=$(basename "$values" .yaml)
 	helm lint --strict "$CHART" -f "$values" >/dev/null
 	helm template cactusfs "$CHART" -n cactusfs --kube-version "$kube" -f "$values" >"$tmp/$name.yaml"
@@ -80,6 +77,10 @@ for values in "$CHART"/ci/*.yaml; do
 	fi
 	scripts/helm-assert.sh "$tmp/$name.yaml" "$name" || failed=1
 done
+if [ "$sets" -eq 0 ]; then
+	echo "helm-lint: FAIL - no value set in $CHART/ci: nothing was rendered" >&2
+	exit 1
+fi
 if [ "$failed" -ne 0 ]; then
 	echo "helm-lint: FAIL" >&2
 	exit 1
@@ -87,7 +88,10 @@ fi
 # And refuses what must not be deployed - for the reason it should: each
 # file of ci/refused is laid over the cluster's values and names, in its first
 # line, words of the refusal it must be met with.
+refused=0
 for values in "$CHART"/ci/refused/*.yaml; do
+	[ -f "$values" ] || continue
+	refused=$((refused + 1))
 	expect=$(sed -n '1s/^# expect: //p' "$values")
 	[ -n "$expect" ] || { echo "helm-lint: FAIL - $values does not say what to expect" >&2; exit 1; }
 	if out=$(helm template cactusfs "$CHART" -n cactusfs -f "$CHART/ci/cluster-values.yaml" -f "$values" 2>&1); then
@@ -103,4 +107,8 @@ for values in "$CHART"/ci/refused/*.yaml; do
 		;;
 	esac
 done
+if [ "$refused" -eq 0 ]; then
+	echo "helm-lint: FAIL - no value set in $CHART/ci/refused: no refusal was asked for" >&2
+	exit 1
+fi
 echo "helm-lint: PASS"

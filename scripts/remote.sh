@@ -65,39 +65,77 @@ COPYFILE_DISABLE=1 tar --null -T "$work/present" -cf "$work/tree.tar"
 # What the other machine must not keep: every file of the commit that is not
 # in the tree as it is sent. A deletion that was added to the index is no
 # longer "tracked and gone" to git, and is still gone.
+# The list is read there a line at a time and each line removed, so a name
+# that would be read as another one is refused here, and with it the run: a
+# name with a newline (git separates them with NUL, so it can hold one; a NUL
+# it cannot), one that begins at the root, and one that climbs with "..".
+# Nothing has been sent when this fails.
 git ls-tree -r --name-only -z HEAD | python3 -c '
 import sys
 present = set(open(sys.argv[1], "rb").read().split(b"\0"))
-sys.stdout.buffer.write(b"".join(p + b"\n" for p in sys.stdin.buffer.read().split(b"\0") if p and p not in present))
+refused = 0
+for p in sys.stdin.buffer.read().split(b"\0"):
+    if not p or p in present:
+        continue
+    if b"\n" in p or p.startswith(b"/") or b".." in p.split(b"/"):
+        sys.stderr.write("remote: %r is not a name this script removes on another machine\n" % p)
+        refused = 1
+        continue
+    sys.stdout.buffer.write(p + b"\n")
+sys.exit(3 if refused else 0)
 ' "$work/present" >"$work/deleted.txt"
 
 # The directory is this script's own: made by it, marked by it, and used by
-# one run at a time.
+# one run at a time. The lock is a directory, and whoever makes it has it:
+# of two starts at one moment, one mkdir fails. A run writes its process ID
+# when it begins and takes it away, and then the lock, when it ends, so that
+# what a later start finds says what is going on:
+#   the lock and no process ID      a start that has not got to its run yet
+#                                   (or one that failed and could not say so)
+#   the lock and a live process     a run
+#   the lock and a dead process     a run that ended without a word. Its lock
+#                                   is taken over by whoever takes its
+#                                   process ID away - a rename, which one of
+#                                   two can do.
+# A start that fails after it has the lock removes it too.
 ssh "$REMOTE" "set -e
 	if [ -e '$dir' ] && [ ! -e '$dir/.cactusfs-remote' ] && [ -n \"\$(ls -A '$dir' 2>/dev/null)\" ]; then
 		echo \"remote: $dir exists and was not made by this script\" >&2; exit 3
 	fi
 	mkdir -p '$dir' && cd '$dir' && touch .cactusfs-remote
-	if ! mkdir $run.lock 2>/dev/null; then
-		if [ -e $run.pid ] && kill -0 \"\$(cat $run.pid)\" 2>/dev/null; then
-			echo 'remote: another run is using this directory' >&2; exit 4
-		fi
+	if mkdir $run.lock 2>/dev/null; then
+		rm -f $run.pid
+	elif [ ! -e $run.pid ]; then
+		echo 'remote: another start is using this directory - or one failed: if none is going, remove $run.lock there' >&2; exit 4
+	elif kill -0 \"\$(cat $run.pid)\" 2>/dev/null; then
+		echo 'remote: another run is using this directory' >&2; exit 4
+	elif mv $run.pid $run.pid.$id 2>/dev/null; then
+		rm -f $run.pid.$id
+	else
+		echo 'remote: another start is using this directory' >&2; exit 4
 	fi
 	[ -d .git ] || git init -q
 	mkdir -p .git/info && printf '%s\n' '.cactusfs-remote' '$run.*' >.git/info/exclude"
+# The lock is this start's until the run has it: if the copy fails, it is
+# given back.
+locked=1
+trap 'rm -rf "$work"; [ "$locked" = 0 ] || ssh "$REMOTE" "rmdir '"'$dir/$run.lock'"'" || echo "remote: could not remove $dir/$run.lock on $REMOTE; remove it there" >&2' EXIT
 scp -q "$work/head.bundle" "$work/tree.tar" "$work/deleted.txt" "$REMOTE:$dir/.git/"
+locked=0
 # The commit, exactly; then nothing that git does not ignore but what the
 # archive brings; then what was removed here, removed there. Build output and
 # caches, which git ignores, stay.
 ssh "$REMOTE" "set -e; cd '$dir'
+	started=
+	trap '[ -n \"\$started\" ] || rmdir $run.lock' EXIT
 	git fetch -q .git/head.bundle HEAD
 	git checkout -q -f --detach $head
 	git clean -q -fd
 	while IFS= read -r gone; do [ -z \"\$gone\" ] || rm -rf -- \"\$gone\"; done <.git/deleted.txt
 	tar -xf .git/tree.tar
 	rm -f .git/head.bundle .git/tree.tar .git/deleted.txt $run.status
-	nohup sh -c 'make $*; echo \$? >$run.status.tmp; mv $run.status.tmp $run.status; rmdir $run.lock' >$run.$id.log 2>&1 </dev/null &
-	echo \$! >$run.pid"
+	nohup sh -c 'echo \$\$ >$run.pid; make $*; echo \$? >$run.status.tmp; mv $run.status.tmp $run.status; rm -f $run.pid; rmdir $run.lock' >$run.$id.log 2>&1 </dev/null &
+	started=1"
 
 # The target runs detached from any connection, which may not outlive it;
 # its output and exit status are fetched as it goes.

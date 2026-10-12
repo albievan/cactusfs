@@ -47,6 +47,15 @@
 #   exit 18  the job can ask for an OIDC token (permissions: id-token: write)
 #   exit 19  there is a user and a token for the registry
 #
+# And --publish refuses, when everything else is pushed, signed and verified
+# and only the tag <version> is still to be given:
+#
+#   exit 20  the registry already has <version>, and it names another list
+#            than the one this run built: a version is released once (a run
+#            that built the very same list may be finished)
+#   exit 21  the registry did not say whether it has <version>: only its
+#            "no such tag" (404) is taken for a no
+#
 # With no argument it refuses (exit 1); with anything else it says how it is
 # used (exit 2). There is no way to publish from a branch or from a desk.
 #
@@ -311,6 +320,23 @@ echo "$RELEASE_REGISTRY/$chart_repo:$VERSION $chart" >>"$out/digests.txt"
 
 # The tag people will read, last: it never names a list that is not signed
 # and verified. There is no tag `latest`.
+# And it is given once. If the registry already has it, it must name this
+# very list - the run that was started again and built the same thing; another
+# list is another build of a version that is out, and the tag that deployments
+# name is not moved to it. Only the registry's own "there is none" (the
+# helper's status 4) lets the tag be written: a question that failed is not
+# an answer. (scripts/sign-verify.sh asks both questions of its registry.)
+status=0
+existing=$(sc_helper find "$repo" "$VERSION") || status=$?
+case $status in
+0)
+	[ "$existing" = "$list" ] ||
+		refuse 20 "$name:$VERSION is already published as $existing and this run built $list: the tag is not moved; release the next version"
+	sc_say "$name:$VERSION already names this list"
+	;;
+4) sc_say "$name:$VERSION is not there yet (the registry's 404 above): it is written now" ;;
+*) refuse 21 "the registry did not say whether $name:$VERSION is already published: the tag was not written" ;;
+esac
 tagged=$(sc_helper retag "$repo" "$release" "$VERSION") || sc_fail "the list did not get the tag $VERSION"
 if [ "$tagged" != "$list" ]; then
 	sc_fail "$repo:$VERSION was written as $tagged, and the list is $list"

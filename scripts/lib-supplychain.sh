@@ -308,16 +308,27 @@ sc_registry_start() {
 	*) sc_fail "REGISTRY_IMAGE in the Dockerfile is not pinned by digest" ;;
 	esac
 
-	SC_RUN="cactusfs-sc-$(date +%s)-$$"
+	# The second and the process ID do not tell two runs apart: a container
+	# numbers its processes from one, and two builders on one engine start in
+	# one second. Eight bytes nobody chose do.
+	sc_random=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+	[ "${#sc_random}" -eq 16 ] || sc_fail "no random bytes from /dev/urandom for the name of the run"
+	SC_RUN="cactusfs-sc-$(date +%s)-$$-$sc_random"
+	# SC_NET and SC_REGISTRY are what sc_cleanup removes. Each is given its
+	# name only once the engine has made it for this run: a name that was
+	# taken is another run's, and is not removed by this one.
+	sc_net="$SC_RUN-net"
+	sc_registry="$SC_RUN-registry"
 	if [ "${CACTUSFS_IN_BUILDER:-}" = 1 ]; then
 		sc_self=$(hostname)
 		docker container inspect "$sc_self" >/dev/null 2>&1 ||
 			sc_fail "this container cannot find itself through the engine by its hostname ($sc_self)"
-		SC_NET="$SC_RUN-net"
-		docker network create "$SC_NET" >/dev/null || sc_fail "docker network create $SC_NET"
-		SC_REGISTRY="$SC_RUN-registry"
-		docker run --detach --name "$SC_REGISTRY" --network "$SC_NET" \
-			--publish 127.0.0.1::5000 "$sc_image" >/dev/null || sc_fail "the registry did not start"
+		docker network create "$sc_net" >/dev/null || sc_fail "docker network create $sc_net"
+		SC_NET=$sc_net
+		docker create --name "$sc_registry" --network "$SC_NET" \
+			--publish 127.0.0.1::5000 "$sc_image" >/dev/null || sc_fail "the registry was not made"
+		SC_REGISTRY=$sc_registry
+		docker start "$SC_REGISTRY" >/dev/null || sc_fail "the registry did not start"
 		docker network connect "$SC_NET" "$sc_self" || sc_fail "docker network connect $SC_NET $sc_self"
 		SC_SELF=$sc_self
 		sc_address=$(docker container inspect \
@@ -325,9 +336,10 @@ sc_registry_start() {
 		[ -n "$sc_address" ] || sc_fail "the registry has no address on $SC_NET"
 		SC_DIRECT_REG="$sc_address:5000"
 	else
-		SC_REGISTRY="$SC_RUN-registry"
-		docker run --detach --name "$SC_REGISTRY" \
-			--publish 127.0.0.1::5000 "$sc_image" >/dev/null || sc_fail "the registry did not start"
+		docker create --name "$sc_registry" \
+			--publish 127.0.0.1::5000 "$sc_image" >/dev/null || sc_fail "the registry was not made"
+		SC_REGISTRY=$sc_registry
+		docker start "$SC_REGISTRY" >/dev/null || sc_fail "the registry did not start"
 	fi
 	sc_port=$(docker port "$SC_REGISTRY" 5000/tcp | sed -n '1s/.*://p')
 	case $sc_port in
@@ -651,6 +663,7 @@ sc_write_helper() {
     att-check <envelopes> <image digest> <predicate type> <package name>
     ping
     digest <repository> <reference>
+    find <repository> <reference>
     platform <repository> <reference> <architecture>
     index <repository> <tag> <reference>=<architecture>...
     retag <repository> <from reference> <to tag>
@@ -660,6 +673,10 @@ which asks for nothing - or, in a release, the public one over HTTPS, which
 answers 401 and says where a token is to be had. A token is asked for only
 when $SC_REGISTRY_USER is set, only of the registry's own host, and is sent
 to nobody else.
+
+find is digest, with one answer more: exit status 4 when the registry says
+that there is nothing under the reference (404). Every other failure is a
+failure (exit status 1), as it is for every other command.
 """
 import base64
 import hashlib
@@ -683,6 +700,10 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 class Failure(Exception):
     """What went wrong, in words for the gate's output."""
+
+
+class Absent(Failure):
+    """The registry answered 404: what was asked for is not there."""
 
 
 # The registry's own token, by the scope it was given for.
@@ -758,6 +779,8 @@ def call(method, path, body=None, content_type=None):
                 bearer = token(error.headers.get("WWW-Authenticate", ""))
                 if bearer:
                     continue
+            if error.code == 404:
+                raise Absent(f"{method} {path}: the registry answers {error.code}") from error
             raise Failure(f"{method} {path}: the registry answers {error.code}") from error
         except OSError as error:
             raise Failure(f"{method} {path}: {error}") from error
@@ -912,6 +935,12 @@ def main(arguments):
         call("GET", "/v2/")
     elif command == "digest":
         print(manifest(*rest)[0])
+    elif command == "find":
+        try:
+            print(manifest(*rest)[0])
+        except Absent as absent:
+            print(f"helper: {absent}", file=sys.stderr)
+            sys.exit(4)
     elif command == "platform":
         print(platform(*rest)["digest"])
     elif command == "index":

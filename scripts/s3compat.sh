@@ -83,8 +83,9 @@ check)
 			fi
 		done
 	fi
-	if [ "$total" -gt 0 ] && [ "$recorded" -eq 0 ]; then
-		echo "s3-compat: FAIL - the suite has $total tests but no baseline is recorded;" >&2
+	# A baseline that records nothing holds the suite to nothing.
+	if [ "$recorded" -eq 0 ]; then
+		echo "s3-compat: FAIL - $baseline records no test (the suite has $total);" >&2
 		echo "           run 'make s3-compat-record' and commit $baseline" >&2
 		exit 1
 	fi

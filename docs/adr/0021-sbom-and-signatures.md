@@ -101,8 +101,22 @@ that is declared is the blessing of `LICENSE.md`.
   the `Dockerfile` and the chart agree), the workflow is `release.yml` at that tag, the
   tree is a clean commit, an OIDC token can be asked for and the registry's token is
   there. The workflow asks the first seven before anything else (`--preflight`), then
-  that the commit is in the history of `main`, then runs `make check` and
-  `make test-chaos` in jobs that have no permission to push or to sign.
+  that the commit is in the history of `main`, then runs `make check`,
+  `make test-chaos` and `make test-rolling` in jobs that have no permission to push or
+  to sign.
+- **A version is released once** (2026-10-12). The tag `<version>` is written last, and
+  just before it `--publish` asks the registry whether it is there. Not there (the
+  registry's 404): it is written. There, and naming the very list this run built - a
+  run that was started again and built the same thing: the run goes on. There, and
+  naming another list: the run refuses (exit 20) and the tag is not moved; what is to
+  be released then is the next version. Any other answer - an error, a refusal, no
+  answer - is not taken for "not there": the run refuses (exit 21). The gate proves
+  that the helper tells the two apart (`make sign-verify`: a tag that was pushed is
+  found, one that never was is said to be absent); the refusals themselves run only in
+  a release. What the guard does not cover: the tags `<version>-<build>` and
+  `-<arch>`, and the chart's `<version>`, are written before the question is asked - a
+  second run at another commit has another `<build>`, and would replace the chart of
+  that version before it is refused.
 - **Why the gate keeps a key.** A keyless signature needs the workflow's identity and
   three public services; a gate that must pass without a network can have neither. So
   two modes exist, on purpose, and share everything but the cosign flags
@@ -144,9 +158,9 @@ that is declared is the blessing of `LICENSE.md`.
   push them): the workflow checks what a workflow can check, not who pushed.
 - The packages `cactusfs` and `charts/cactusfs` on ghcr.io are private when first
   pushed; they must be made public once for anybody to pull and verify.
-- Whether a release that was published may be published again under the same version
-  (today a second run of the workflow at the same tag would move `<version>` to the new
-  list; both would be signed, and both digests stay valid).
+- Whether the chart's tag `<version>` is to be guarded as the image's is ("A version is
+  released once", above): today a second run that builds another list replaces the
+  chart of that version, and is refused only afterwards.
 
 ## Consequences
 

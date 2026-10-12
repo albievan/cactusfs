@@ -1,6 +1,8 @@
 # ADR-0017: Sub-buckets
 
-- **Status:** accepted; being implemented (PLAN C.1-C.8)
+- **Status:** accepted; not implemented beyond the domain rules, the port and the
+  replicated store (PLAN C.1, C.2, S.3). The authorizer, the use cases, the API and the
+  console are to come (PLAN C.3, C.4, C.6-C.8)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)

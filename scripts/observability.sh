@@ -171,7 +171,10 @@ want "by default, resources of the Prometheus Operator" "$tmp/default.yaml" \
 	'select(.kind == "PodMonitor" or .kind == "ServiceMonitor" or .kind == "PrometheusRule") | .kind' ""
 want "the default values, podMonitor.enabled" "$CHART/values.yaml" '.podMonitor.enabled' false
 want "the default values, prometheusRule.enabled" "$CHART/values.yaml" '.prometheusRule.enabled' false
-want "the default values, podMonitor.tlsConfig.insecureSkipVerify" "$CHART/values.yaml" '.podMonitor.tlsConfig.insecureSkipVerify' false
+# The certificate of a pod is always checked: the chart offers no value that
+# turns it off (and refuses one it is given: ci/refused, scripts/helm-lint.sh).
+want "the default values, a way to scrape without checking the certificate" "$CHART/values.yaml" \
+	'.podMonitor.tlsConfig | has("insecureSkipVerify")' false
 
 sets=0
 for values in "$CHART"/ci/monitoring/*.yaml; do
@@ -237,9 +240,15 @@ for values in "$CHART"/ci/monitoring/*.yaml; do
 		"$(q "$values" '.podMonitor.tlsConfig.caSecret.name')"
 	want "[$name] PodMonitor CA key" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig.ca.secret.key' \
 		"$(q "$values" '.podMonitor.tlsConfig.caSecret.key')"
-	# The certificate is checked unless the values say, in so many words, not to.
-	want "[$name] PodMonitor insecureSkipVerify" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig | has("insecureSkipVerify")' \
-		"$(q "$values" '.podMonitor.tlsConfig.insecureSkipVerify // false')"
+	# The certificate is checked, always: the name to check it against and,
+	# when one is given, the CA - and nothing else, so nothing that says not to.
+	want "[$name] PodMonitor insecureSkipVerify" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig | has("insecureSkipVerify")' false
+	tls_keys=serverName
+	if [ -n "$(q "$values" '.podMonitor.tlsConfig.caSecret.name // ""')" ]; then
+		tls_keys=ca,serverName
+	fi
+	want "[$name] PodMonitor keys of the TLS configuration" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig | keys | sort | join(",")' \
+		"$tls_keys"
 	# No credential is written into the resource: it names a Secret.
 	want "[$name] PodMonitor keys of the endpoint" "$pm" '.spec.podMetricsEndpoints[0] | keys | sort | join(",")' \
 		authorization,interval,path,port,scheme,scrapeTimeout,tlsConfig
@@ -290,6 +299,16 @@ echo "observability-check: $checks assertions on the chart hold"
 # --- the registry -----------------------------------------------------------------
 # Every metric a rule, a rule test or a dashboard names is one the binary has.
 # And the list of metrics in docs/ARCHITECTURE.md is the registry's.
-go test -count=1 -run 'TestObservabilityPack|TestChartCarriesTheSameRules|TestRegisteredSeries|TestArchitectureListsTheMetrics' ./internal/adapters/telemetry/
+# `go test -run` is content with a name that matches no test, so each name is
+# first held to the list of the tests there are.
+TESTS='TestObservabilityPack|TestChartCarriesTheSameRules|TestRegisteredSeries|TestArchitectureListsTheMetrics'
+listed=$(go test -list "$TESTS" ./internal/adapters/telemetry/)
+for name in $(echo "$TESTS" | tr '|' ' '); do
+	echo "$listed" | grep -q "^$name" || {
+		echo "observability-check: FAIL - no test named $name* in internal/adapters/telemetry: nothing would hold the pack to the registry" >&2
+		exit 1
+	}
+done
+go test -count=1 -run "$TESTS" ./internal/adapters/telemetry/
 
 echo "observability-check: PASS"

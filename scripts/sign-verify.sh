@@ -16,6 +16,8 @@
 #       5. the attestation of one image, put on another image;
 #     and, besides, an attestation asked of an image that has none and an
 #     attestation checked with another public key.
+#   - the registry helper tells a tag that is absent (404) from a question
+#     that failed: what a release asks before it writes the tag <version>;
 #   - then scripts/release.sh --dry-run: the manifest list and what a release
 #     writes, against a registry of its own.
 #
@@ -30,7 +32,9 @@
 # cleaned up: the head of scripts/lib-supplychain.sh.
 #
 # The key proves that the procedure works. It proves nothing about where an
-# image came from: there is no release key yet (PLAN 7.9).
+# image came from: a release has no key at all - it is signed keyless, as the
+# release workflow at its tag (scripts/release.sh --publish, ADR-0021), and
+# that identity is what a consumer verifies.
 set -eu
 
 # shellcheck source=scripts/lib-supplychain.sh
@@ -57,6 +61,22 @@ fi
 ref_a=$(sc_ref "$repo" "$digest_a")
 ref_b=$(sc_ref "$repo" "$digest_b")
 sc_say "pushed amd64 $digest_a and arm64 $digest_b"
+
+# What a release asks its registry before it gives a list the tag <version>
+# (scripts/release.sh --publish), asked here where both answers are known: a
+# tag that is there is found with its digest, and one that was never written
+# is said to be absent (the helper's status 4) - which is not what a failure
+# says.
+found=$(sc_helper find "$repo" "$tag_a") || sc_fail "the tag $tag_a, pushed by this run, is not found"
+if [ "$found" != "$digest_a" ]; then
+	sc_fail "the tag $tag_a is found as $found, and it names $digest_a"
+fi
+status=0
+sc_helper find "$repo" "$VERSION" >/dev/null 2>&1 || status=$?
+if [ "$status" -ne 4 ]; then
+	sc_fail "the tag $VERSION, never written, is not said to be absent (status $status, want 4)"
+fi
+sc_say "ok - a tag that is there is found, and one that is not is said to be absent"
 
 sc_keygen "$SC_WORK/keys"
 sc_keygen "$SC_WORK/other"

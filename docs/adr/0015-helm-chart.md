@@ -1,6 +1,6 @@
 # ADR-0015: The Helm chart - a StatefulSet for every node
 
-- **Status:** accepted; implemented in part (PLAN 7.1, 7.2, 7.6 in progress)
+- **Status:** accepted; implemented (PLAN 7.1, 7.2, 7.6, 7.10)
 - **Date:** 2026-10-11
 - **Milestone:** 7
 - **Builds on:** ADR-0005 (cluster, node identity), ADR-0006 (Vault), ADR-0014 (the
@@ -63,6 +63,11 @@ formation, an S3 round trip, a pod deleted and returned under load, the policy r
 another pod on the node ports. Not yet: validation of the rendered manifests against the
 Kubernetes schemas in `make helm-lint`; a test in the repository that installs the chart
 (PLAN 7.10); Vault under the NetworkPolicy; more than one machine.
+
+Since then (2026-10-12): the first two exist - `make helm-lint` validates every render
+with `kubeconform`, and `make test-k8s` installs the chart on k3s (PLAN 7.1, 7.10).
+Vault under the NetworkPolicy and more than one machine are still not proved by a test
+of the repository.
 
 ## Alternatives
 

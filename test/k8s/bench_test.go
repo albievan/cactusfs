@@ -37,12 +37,12 @@ import (
 const (
 	// k3sImage is the Kubernetes the chart is installed on: k3s of the minor
 	// version whose schemas "make helm-lint" validates the chart against
-	// (K8S_SCHEMAS_VERSION in the Dockerfile), pinned by digest. The digest
-	// is the one thing of this test that is not filled in yet:
+	// (K8S_SCHEMAS_VERSION in the Dockerfile), pinned by digest. To move the
+	// pin, change the tag AND the digest together:
 	//
-	//	docker buildx imagetools inspect rancher/k3s:v1.36.5-k3s1
+	//	docker buildx imagetools inspect rancher/k3s:<tag>
 	//
-	// prints it ("Digest: sha256:..."); it replaces the placeholder below.
+	// prints the digest of the index ("Digest: sha256:...").
 	k3sImage = "rancher/k3s:v1.36.5-k3s1@sha256:057cfd5a9d51b89f1f0ee139c28d5d5fdd5aa7ddeac2742a0ba90c6dbc0329bb"
 
 	// probeImage has a shell and nc, which the product image has not: the

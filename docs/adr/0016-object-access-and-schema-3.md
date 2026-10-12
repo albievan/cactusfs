@@ -1,6 +1,7 @@
 # ADR-0016: Who uploaded and who read an object - and entry schema 3
 
-- **Status:** accepted; being implemented (PLAN S.1-S.4, B.1-B.5)
+- **Status:** accepted; implemented (PLAN S.1, S.3, B.1-B.5). Not written yet: the
+  rolling-upgrade test from schema 2 to 3 with the binaries themselves (PLAN S.4)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0003 (metadata), ADR-0005 (cluster, levels), ADR-0008 (entry schema 2,
   the leader's time), ADR-0012 (multipart)

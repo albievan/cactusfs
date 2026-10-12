@@ -1,0 +1,69 @@
+# Example - adapt before use; not run by the project's gates.
+#
+# The S3 API behind a Gateway (Gateway API) with TLS passthrough: a listener
+# of protocol TLS in mode Passthrough, and a TLSRoute that sends connections
+# to the S3 Service by the server name of the handshake. The CactusFS pod ends
+# TLS with the certificate of secrets.tls, which must name s3.example.com and,
+# for virtual-hosted-style requests (s3.domain in the chart),
+# *.s3.example.com.
+#
+# Placeholders: the release is "cactusfs" in the namespace "cactusfs" (so the
+# S3 Service is "cactusfs", port 9000); "example-gateway-class" stands for the
+# GatewayClass of the implementation you run.
+#
+# Before use:
+#   - The implementation must support TLSRoute; not all do.
+#   - TLSRoute has moved between API versions and channels. Write the version
+#     your cluster serves: kubectl api-resources --api-group=gateway.networking.k8s.io
+#   - The chart's NetworkPolicy must let the pods of the Gateway's data plane
+#     in, or every request ends in a timeout. Where they run depends on the
+#     implementation; name their namespace (and labels) in the chart's values:
+#
+#       networkPolicy:
+#         clientsFrom:
+#           - namespaceSelector:
+#               matchLabels: {kubernetes.io/metadata.name: example-gateway-system}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cactusfs-s3
+  namespace: cactusfs
+spec:
+  gatewayClassName: example-gateway-class
+  listeners:
+    - name: s3
+      protocol: TLS
+      port: 443
+      hostname: s3.example.com
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # Virtual-hosted-style requests. Leave this listener, and the second
+    # hostname of the route, out without s3.domain.
+    - name: s3-buckets
+      protocol: TLS
+      port: 443
+      hostname: "*.s3.example.com"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: cactusfs-s3
+  namespace: cactusfs
+spec:
+  parentRefs:
+    - name: cactusfs-s3
+  hostnames:
+    - s3.example.com
+    - "*.s3.example.com"
+  rules:
+    - backendRefs:
+        - name: cactusfs
+          port: 9000

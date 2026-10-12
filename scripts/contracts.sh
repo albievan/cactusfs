@@ -5,8 +5,9 @@
 #   2. Every API contract in the repository is validated and checked for
 #      breaking changes by the tool named below.
 #
-# A contract whose checker has not been wired FAILS the gate, so a contract can
-# never be added without its check.
+# The three contracts - the management API, the events, the node RPC - are
+# all there and each has its checker: one that is missing FAILS the gate, and
+# so does a reference commit that has none to compare with.
 set -eu
 
 work=$(mktemp -d)
@@ -43,16 +44,6 @@ fi
 echo "contracts: generated code is in sync"
 
 status=0
-pending() {
-	# $1 = path, $2 = what must be wired, $3 = PLAN step
-	if [ -n "$(find "$1" -type f 2>/dev/null | head -n 1)" ]; then
-		echo "contracts: FAIL - $1 exists but $2 is not wired into scripts/contracts.sh (PLAN $3)" >&2
-		status=1
-	else
-		echo "contracts: $1 - no contract yet ($2 arrives with PLAN $3)"
-	fi
-}
-
 
 # Management API: no change that breaks a client of the previous contract.
 # (That the generated server, the JSON form and the web client are in sync
@@ -80,13 +71,10 @@ elif git cat-file -e "$admin_base:$admin" 2>/dev/null; then
 		status=1
 	fi
 else
-	# Nothing to compare with: check that the tool reads the contract.
-	if oasdiff breaking "$admin" "$admin" --fail-on ERR >/dev/null; then
-		echo "contracts: management API - $admin_base has no contract yet, nothing to compare with"
-	else
-		echo "contracts: FAIL - oasdiff cannot read $admin" >&2
-		status=1
-	fi
+	# The contract has been in the tree since PLAN 5.1: a reference without
+	# it is not one this tree is based on, and nothing was compared.
+	echo "contracts: FAIL - $admin_base has no $admin to compare with; CONTRACT_BASE names a commit of this history" >&2
+	status=1
 fi
 
 # Events: every AsyncAPI document must be valid. The validator runs on the
@@ -131,7 +119,9 @@ elif git ls-tree -r --name-only "$base" -- api/proto | grep -q '\.proto$'; then
 		status=1
 	fi
 else
-	echo "contracts: node RPC - $base has no contract yet, nothing to compare with"
+	# As for the management API: api/proto has been there since PLAN 3.2.
+	echo "contracts: FAIL - $base has no api/proto to compare with; CONTRACT_BASE names a commit of this history" >&2
+	status=1
 fi
 
 [ "$status" -eq 0 ] && echo "contracts: PASS"

@@ -6,8 +6,12 @@ security first. This document describes the design. `CLAUDE.md` holds the rules,
 `PLAN.md` holds the work and its status, and `docs/adr/` holds the decisions that are
 expensive to reverse.
 
-Sections marked **(target)** describe the design the plan builds toward; the milestone
-that implements each is named. Sections marked **(implemented)** describe code that exists.
+Sections marked **(implemented)** describe code that exists. What does not exist yet is
+said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
+events to NATS and webhooks, replication between sites and quotas (milestone 8, not
+started); sub-buckets (ADR-0017) and tag rules with a catalogue of tags (ADR-0018), of
+which only the domain rules, the ports and the replicated store exist. The release is
+0.7.0 (`internal/buildinfo/VERSION`); none has been published.
 
 ## 1. Shape of the system
 
@@ -29,9 +33,12 @@ that implements each is named. Sections marked **(implemented)** describe code t
                                    ▲ ports (interfaces)
    outbound adapters ┌─────────────┼──────────────┬───────────────┬──────────────┐
                   disk         raftmeta          kms            events        noderpc
-              (shards on     (Raft + bbolt)  (Vault Transit  (in-process,   (gRPC, mTLS)
-               local drives)                  or sealed file)  NATS, webhook)
+              (shards on     (Raft + bbolt)  (Vault Transit  (in-process)   (gRPC, mTLS)
+               local drives)                  or sealed file)
 ```
+
+The events adapter is the in-process bus alone; NATS JetStream and webhook adapters are
+milestone 8 and do not exist.
 
 One Go module, `github.com/albievan/cactusfs`. No external database, no proxy in front of
 the gateway, no cgo.
@@ -67,34 +74,42 @@ Conventions that follow from it:
 | Package | Purpose |
 |---|---|
 | `internal/domain` | typed sentinel errors, and their names on the wire between nodes |
-| `internal/domain/bucket` | bucket naming rules |
-| `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, the streaming AEAD (ADR-0002) |
-| `internal/domain/iam` | principals, actions, the policy language and the decision, users, groups, roles, API keys, built-in roles, sealed secrets |
+| `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018: rules only, used by no use case yet) |
+| `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, conditions, tags, Object Lock, multipart, SSE, the record of who read an object (ADR-0016), the streaming AEAD (ADR-0002) |
+| `internal/domain/iam` | principals, actions, the policy language and the decision, bucket policies, users, groups, roles, API keys, built-in roles, sealed secrets |
 | `internal/domain/audit` | audit records and their hash chain |
-| `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement |
+| `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement; a node's settings and their redaction (ADR-0022) |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
-| `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck` |
-| `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
 | `internal/domain/search` | the language of the search field: text, wildcard, `rx:` regular expression |
-| `internal/app` | bucket, object, search and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
+| `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018: rules only, used by no use case yet) |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`; `SubBucketStore` and `TagDefinitionStore`, implemented by the metadata store and called by no use case yet |
+| `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
+| `internal/app` | bucket, object, multipart, lifecycle, search, settings and identity use cases; sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
+| `internal/buildinfo` | the version, build and commit of the binary (section 8) |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
+| `internal/adapters/adminapi` | in: the management API (`api/`: the server generated from the contract) and Swagger UI (`swaggerui/`) (ADR-0007) |
+| `internal/adapters/console` | in: serves the embedded console, or the page that says it was not built in |
+| `internal/adapters/httpsession` | in: session cookie and CSRF header |
 | `internal/adapters/health` | in: `GET /healthz`, `GET /readyz`; the shutdown gate |
 | `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port, interceptors for node RPC, the gauges of the node's state |
-| `internal/adapters/disk` | out: shards on a local drive (ADR-0001) |
+| `internal/adapters/disk` | out: shards on a local drive (ADR-0001); the file system behind a drive, per OS |
 | `internal/adapters/erasurecodec` | out: Reed-Solomon (ADR-0004) |
 | `internal/adapters/fsutil` | durable file creation and directory sync per OS |
 | `internal/adapters/raftmeta` | out: Raft + bbolt metadata, one voter or a cluster (ADR-0003, 0005) |
-| `internal/adapters/noderpc` | both: node-to-node gRPC; drives of other nodes as `ShardStore` (ADR-0005) |
-| `internal/adapters/nodetls` | mutual TLS 1.3 between nodes; development certificates |
+| `internal/adapters/noderpc` | both: node-to-node gRPC (`nodev1/`: generated from `api/proto`); drives of other nodes as `ShardStore` (ADR-0005) |
+| `internal/adapters/nodetls` | mutual TLS 1.3 between nodes; certificates read again from disk (ADR-0020); development certificates |
 | `internal/adapters/events/inproc` | out: in-process event bus |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
 | `internal/adapters/passwords` | out: Argon2id password hashes |
-| `internal/adapters/httpsession` | in: session cookie and CSRF header |
 | `internal/adapters/audit` | out: audit records as JSON lines |
-| `cmd/cactusfs` | composition root: configuration, node wiring, listeners, shutdown |
+| `api/openapi`, `api/asyncapi`, `api/proto` | the contracts: the management API (and the Go package that embeds it for serving), the events, node RPC |
+| `web` | the console (React + TypeScript + Vite), and the Go package that embeds its build with the tag `console` |
+| `cmd/cactusfs` | composition root: the settings, node wiring, listeners, shutdown |
+| `test/integration`, `test/clustertest` | black-box tests of the built binary and of a four-node cluster of containers; fixtures of older schemas for the upgrade tests |
+| `test/s3compat`, `test/chaos`, `test/k8s` | the S3 compatibility suite and its baseline; fault injection; the chart on k3s |
 
-## 3. The binary **(implemented: `version`, `server` standalone and clustered, `dev-init`)**
+## 3. The binary **(implemented: `version`, `server` standalone and clustered, `config`, `dev-init`)**
 
 ```
 cactusfs version
@@ -424,8 +439,8 @@ node RPC `9002`; Raft `9003`.
 
 One binary, four roles selected with `--roles` (default: all): `gateway` (S3 API,
 authentication, erasure encode/decode; holds nothing that cannot be rebuilt), `meta`
-(Raft voter), `storage` (drives; collects garbage on them) and `console` (UI, milestone
-5). Every node answers probes and serves metrics; only gateways open the S3 listener.
+(Raft voter), `storage` (drives; collects garbage on them) and `console` (the UI, on
+the admin port). Every node answers probes and serves metrics; only gateways open the S3 listener.
 
 - **Standalone** — `cactusfs server --data <dir>...` runs every role in one process with
   a single-node Raft group. With four or more drives it erasure-codes across them; with
@@ -458,8 +473,9 @@ What a cluster does when things fail:
   parity is 2 for 4–5 drives, 3 for 6–7 and 4 for 8 or more. Shards of one object never
   share a drive. More than 16 drives form several equal sets. With fewer than four
   drives an object is one shard on one drive, encrypted and checksummed but **without
-  parity**, and the node says so at start. Spreading across nodes, racks and zones, and
-  parity per storage class, are milestone 3.
+  parity**, and the node says so at start. In a cluster the shards of a set are spread
+  across nodes, then racks and zones where they are labelled (implemented, ADR-0005).
+  Parity per storage class is not implemented, and no step of `PLAN.md` holds it yet.
 - **Quorum.** Write quorum is the number of data shards, plus one when data equals
   parity. Read quorum is the number of data shards.
 - **Write path.** Encrypt → erasure-code → write shards under a new immutable ID and
@@ -494,15 +510,30 @@ What a cluster does when things fail:
 ## 5. Metadata **(implemented, ADR-0003, 0005)**
 
 Bucket configuration, the root credential, the record of nodes, the drive topology and
-the object index are replicated with Raft and stored in bbolt. (Users, groups, policies
-and API keys join them in milestone 4.) Every node holds a replica; nodes with the
+the object index are replicated with Raft and stored in bbolt. (So are users, groups, roles, policies,
+API keys, console sessions and the audit trail: ADR-0006.) Every node holds a replica; nodes with the
 `meta` role vote. Changes go through the leader; reads are linearizable on every node,
 by read index. The object index sits behind `ports.ObjectIndex` so it can move to
 sharded Raft groups later; that move needs an ADR. On-disk formats and Raft entries
 carry a version; no node writes an entry format newer than the oldest member of the
 cluster understands, so version N runs alongside N+1 during a rolling upgrade.
 
-The entry schema is at 4 (ADR-0003, 0008, 0016, 0019). Schema 4 adds who created a
+The entry schema is at 4:
+
+| Schema | Adds | ADR |
+|---|---|---|
+| 1 | buckets, the object index, the root credential, nodes and topology, identities, sessions, the audit trail | 0003, 0005, 0006 |
+| 2 | the leader's time on every entry; object versions, delete markers, Object Lock, bucket configuration, multipart uploads | 0008 (with 0009, 0011, 0012) |
+| 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules and tag definitions, which the state machine applies and no use case sends yet | 0016 (with 0017, 0018) |
+| 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
+
+Upgrades from schema 2 and from schema 3 are tested against fixtures written by the
+binaries of those schemas (`test/integration/testdata`), and a rolling upgrade from 3
+to 4 with the binaries themselves (`make test-rolling`). After the last member is
+upgraded, the first entry of the new schema ends the way back to the release before
+(ADR-0016, ADR-0019).
+
+Schema 4 adds who created a
 bucket (`created_by` on `bucket.create`) and no command. It is also the schema a put, a
 completion and a batch of reads are written in once every member knows it: applying
 such an entry, every member keeps `bucketactivity/<bucket>` - the latest three uploads
@@ -544,7 +575,7 @@ records cannot be read, the list fails. How much a bucket holds stays a question
 its own (`GET /api/v1/buckets/{bucket}/usage`), which the console asks row by row,
 four at a time.
 
-## 6. APIs **(S3 subset, management API, node RPC and events implemented; S3 depth is milestone 6)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -575,10 +606,16 @@ four at a time.
   strict server generated by `oapi-codegen`. An API key as a bearer credential, or a
   console session with a CSRF token. Errors are `application/problem+json`; every
   mutation accepts `Idempotency-Key`, whose records are replicated and whose stored
-  answers are sealed through the KMS. Operations: session, buckets (with, when asked, who
-  created each, what its policy is and who used it last), objects (list,
-  upload, download, delete, who uploaded and who downloaded), search, users, groups, roles,
-  policies, API keys, cluster and maintenance status, audit log. The contract is served at `/api/v1/openapi.json` and
+  answers are sealed through the KMS. Paths, under `/api/v1`: `/session`; `/buckets`,
+  `/buckets/{bucket}` and `/buckets/{bucket}/usage` (with, when asked, who created each
+  bucket, what its policy is and who used it last); `/buckets/{bucket}/objects` (list),
+  `/buckets/{bucket}/object` (upload, download, delete), `/buckets/{bucket}/object/metadata`
+  and `/buckets/{bucket}/object/access` (who uploaded and who downloaded); `/search`;
+  `/users`, `/users/{name}`, `/users/{name}/keys` and `/keys/{access_key_id}`; `/groups`,
+  `/roles` and `/policies`, each with `/{name}`; `/cluster` and `/cluster/maintenance`;
+  `/settings`; `/audit`. There is no path yet for a bucket's policy, for sub-buckets or
+  for tags: bucket policies, CORS, tags and lifecycle rules are set through the S3 API.
+  The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
 - **Search (implemented; sub-buckets to come).** `GET /api/v1/search?q=` and the field
@@ -693,12 +730,22 @@ four at a time.
 - **Events.** Every state change other components care about is an event named
   `cactusfs.<aggregate>.<event>.v1`, defined in `api/asyncapi/events.yaml` and derived
   from **applied Raft entries**, never published from a handler. Delivery goes through
-  `ports.EventPublisher`. **Implemented:** the contract, eight events, and the
-  in-process publisher (at most once per node; counted in `cactusfs_events_total`).
-  NATS JetStream and webhooks are milestone 8. Consumers dedupe by event ID.
+  `ports.EventPublisher`. **Implemented:** the contract, sixteen events (buckets,
+  objects, versioning, Object Lock, bucket configuration, tags, the root credential,
+  topology, nodes, the audit trail), and the in-process publisher (at most once per
+  node; counted in `cactusfs_events_total`). NATS JetStream and webhooks are milestone 8
+  and do not exist. Consumers dedupe by event ID.
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
-  with `buf lint` and `buf breaking`. **Implemented:** node description and in-flight
-  questions, the metadata leader's services, and shard storage.
+  with `buf lint` and `buf breaking`. **Implemented**, three services: `NodeService`
+  (`Info`, `InFlight`, `Settings`), `MetaService` for what only the metadata leader
+  can do (`Propose`, `ReadIndex`, `Term`, `Join`, `Leave`), and `StorageService` for
+  shards (`WriteShard`, `StatShard`, `ReadShard`, `DeleteShard`, `ListShards`).
+- **Sub-buckets and tag rules (not implemented).** ADR-0017 and ADR-0018 are accepted,
+  and entry schema 3 carries their commands: the domain rules
+  (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,
+  `TagDefinitionStore`) and the metadata store's side of them exist and are tested. No
+  use case, no path of the management API and no screen of the console uses them, and
+  the authorizer does not read a sub-bucket's policy (`PLAN.md`, Goals C and D).
 
 ## 7. Security **(see the threat model for what is implemented)**
 
@@ -708,8 +755,9 @@ The full analysis is in `docs/threat-model.md`. In brief:
   per-object data key wrapped by a KMS key. KMS adapters: a sealed local key file for
   standalone **(implemented)**, Vault Transit for clusters **(implemented, ADR-0006)**.
   There is no unencrypted fallback.
-- Encryption in transit: TLS 1.2+ for clients **(implemented for the admin listener)**,
-  mTLS 1.3 between nodes including the Raft transport.
+- Encryption in transit: TLS 1.2+ for clients **(implemented for the S3 and the admin
+  listener, which share one configuration)**, mTLS 1.3 between nodes including the Raft
+  transport **(implemented; certificates are replaced without a restart, ADR-0020)**.
 - Every inbound request is authenticated and passes through the single
   `ports.Authorizer` **(implemented, ADR-0006)**: users, groups, roles and IAM-style
   policies; default deny; explicit deny wins; a key never exceeds its owner. The key,
@@ -723,9 +771,9 @@ The full analysis is in `docs/threat-model.md`. In brief:
 - Hash-chained, append-only audit trail **(implemented)**: changes to identities are
   recorded in the same Raft entry as the change; refusals in the background.
   `--audit-export` writes the records to the log stream as JSON lines.
-- Console accounts with Argon2id and replicated, short-lived sessions **(use cases
-  implemented; the console is milestone 5)**.
-- Versioning and Object Lock for ransomware resistance (milestone 6).
+- Console accounts with Argon2id and replicated, short-lived sessions
+  **(implemented, with the console that signs in through them)**.
+- Versioning and Object Lock for ransomware resistance **(implemented, ADR-0008, 0009)**.
 - Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset.
 
 ## 8. Build and delivery **(implemented)**
@@ -747,7 +795,9 @@ images. Developers and CI therefore use identical tool versions.
 |---|---|
 | Go, Node, distroless base | `Dockerfile` `ARG`s, by digest |
 | gofumpt, goimports, govulncheck, go-licenses | `go.mod` `tool` directives |
-| golangci-lint, Helm, Docker CLI | `Dockerfile` `ARG`s, by digest |
+| oapi-codegen, protoc-gen-go, protoc-gen-go-grpc | `go.mod` `tool` directives |
+| golangci-lint, Helm, Docker CLI, buf, oasdiff, the registry of the signing gate | `Dockerfile` `ARG`s, by digest |
+| kubeconform, yq, promtool, cosign, syft, the AWS CLI, ceph/s3-tests | `Dockerfile` `ARG`s, by version and SHA-256 |
 | pnpm | `Dockerfile` `PNPM_VERSION` and `web/package.json` `packageManager` (by version, from the npm registry) |
 | console packages | `web/pnpm-lock.yaml` |
 
@@ -773,10 +823,11 @@ image came from.
 A **release** is the same script with `--publish`, and is made only by
 `.github/workflows/release.yml` on a pushed tag `v<version>`: the script refuses
 anywhere else, and unless the tag is `v` + `internal/buildinfo/VERSION` on a clean
-commit. After `make check` and `make test-chaos` in jobs that can neither push nor
-sign, it publishes to `ghcr.io/albievan/cactusfs` the image of each platform
+commit. After `make check`, `make test-chaos` and `make test-rolling` in jobs that can
+neither push nor sign, it publishes to `ghcr.io/albievan/cactusfs` the image of each platform
 (`<version>-<build>-<arch>`) and one manifest list (`<version>-<build>`, and
-`<version>` once it is signed and verified; never `latest`), the chart to
+`<version>` once it is signed and verified - and only where the registry has no such
+tag, or has it for this very list: a version is released once; never `latest`), the chart to
 `oci://ghcr.io/albievan/charts`, and to the GitHub Release the six binaries with
 `SHA256SUMS`, the SBOMs and the digests. Signing is **keyless** (Sigstore): the list,
 each platform manifest and the chart by digest, each SBOM as an attestation,
@@ -803,28 +854,39 @@ release and pods are labelled with the image tag deployed. A node's build is not
 replicated: knowing every node's build from one answer needs a field in the node
 record, a schema change of its own - entry schema 4 (ADR-0019) does not carry it.
 
-The console (`web/`, React + TypeScript + Vite) is a placeholder until milestone 5. It is
-built by the `Dockerfile` and `make build` but is not embedded or served yet (PLAN 5.4),
-so the `console` build tag has no effect today. Logos come from the brand assets:
+The console (`web/`, React + TypeScript + Vite) is built by the `Dockerfile` and by
+`make build`, embedded in the binary with the build tag `console` and served on the
+admin port by nodes with the `console` role (`internal/adapters/console`). Without the
+tag - plain `go build ./cmd/cactusfs` - the binary serves a page that says the console
+was not built into it. Logos come from the brand assets:
 masters in `docs/brand/`, the console's copies in `web/src/assets/brand/`, the tab icon
 in `web/public/favicon.svg`. They are used as they are and never redrawn.
 
-## 9. Deployment targets **(binary and compose implemented; Helm is milestone 7)**
+## 9. Deployment targets **(implemented: binary, compose and the Helm chart, ADR-0015)**
 
 | Target | Artifact |
 |---|---|
 | Single binary | `dist/cactusfs-<os>-<arch>` — implemented, six targets |
 | Docker Desktop, Podman | `deploy/compose/compose.yaml` — implemented: 4-node development cluster over mTLS, rootless-safe; `make up` / `make down` |
-| k3s, k8s | `deploy/helm/cactusfs` — StatefulSet, PVC per drive, PDB, default-deny NetworkPolicy, `restricted` Pod Security Standard |
+| k3s, k8s | `deploy/helm/cactusfs` — implemented: a StatefulSet per node, a claim per drive, PDB, default-deny NetworkPolicy, `restricted` Pod Security Standard; rendered, validated and asserted by `make helm-lint`, installed on k3s by `make test-k8s` |
 
 Core code uses no cloud-provider API. Hybrid means separate clusters per site linked by
 asynchronous bucket replication; one Raft quorum is never stretched across a WAN.
 
 ## 10. Quality gates **(implemented)**
 
-`make check` runs every gate in `CLAUDE.md` §5. `PLAN.md` ("Gates that have nothing to
-check yet") lists the gates whose subject a later milestone introduces and how each
-behaves until then.
+`make check` runs, in this order: `fmt-check`, `lint`, `vet`, `cover`, `test-int`,
+`s3-compat`, `vuln`, `contracts`, `licences`, `web-check`, `build-all`, `image`, `sbom`,
+`sign-verify`, `helm-lint`, `observability-check`, `verify-clone`. These are the gates of
+`CLAUDE.md` §5 and three more that milestone 7 added: `make sbom`, `make sign-verify`
+and `make observability-check`. Every gate has its
+subject today and fails without it - a chart, a contract, a baseline, a dashboard, a
+value set, a test it names: `PLAN.md` ("Gates and what each fails without") says what
+each one fails on.
+
+- `make test-chaos` and `make test-rolling` are outside `make check` and CI jobs of
+  their own. The second builds the release before this entry schema from the history
+  of the repository, which a clean export has not.
 
 - `make test-k8s` (`test/k8s`, build tag `k8s`) is outside `make check` and a CI job of
   its own, because k3s needs a privileged container: the chart installed on k3s with the

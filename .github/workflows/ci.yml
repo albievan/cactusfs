@@ -42,13 +42,30 @@ jobs:
           persist-credentials: false
       - run: make test-chaos
 
+  # A rolling upgrade with the binaries themselves: three voters of the
+  # release before this entry schema, built from the history of the
+  # repository - which is why the history is fetched, and why this is a job of
+  # its own and no part of make check - and a fourth node of this tree.
+  rolling:
+    name: make test-rolling
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: make test-rolling
+
   # The Helm chart on k3s, with the image built here: admitted as restricted,
   # ready, read with a node away, closed to pods that are not its own. A job
   # of its own, and no part of make check: k3s needs a privileged container.
   k8s:
     name: make test-k8s
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The test itself is given 45 minutes (Makefile), after the builder image
+    # is built.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

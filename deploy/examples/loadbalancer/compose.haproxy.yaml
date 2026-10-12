@@ -1,0 +1,54 @@
+# Example - adapt before use; not run by the project's gates.
+#
+# One entry point in front of the four nodes of the development cluster of
+# deploy/compose/compose.yaml: HAProxy forwarding TCP (TLS passthrough). It is
+# an override file: it adds one service and changes nothing of the project's.
+#
+#   export CACTUSFS_KMS_PASSPHRASE=...        # as for the cluster itself
+#   docker compose -f deploy/compose/compose.yaml \
+#                  -f deploy/examples/loadbalancer/compose.haproxy.yaml up -d
+#   # or: podman compose -f ... -f ... up -d
+#
+#   S3 through the balancer:     https://localhost:9443
+#   Console, management API:     https://localhost:9444   (this machine only)
+#
+# The nodes stay published as before (9000 to 9030, 9001 to 9031).
+#
+# Paths: compose reads the paths of every file given with -f relative to the
+# directory of the FIRST one, deploy/compose. That is why the configuration
+# file below is named as ../examples/loadbalancer/...; with another
+# --project-directory, adapt it.
+#
+# The image is named by a version tag because this file cannot know a digest.
+# A deployment pins the digest: docker.io/library/haproxy:3.0@sha256:<digest>.
+#
+# docs/load-balancing.md, "Docker Desktop (compose)", explains every choice.
+
+services:
+  lb:
+    image: docker.io/library/haproxy:3.0
+    restart: unless-stopped
+    # The names node1 to node4 are looked up while HAProxy runs (see the
+    # resolvers section of the configuration), so the balancer starts whether
+    # or not the nodes are up yet; this only orders a first start.
+    depends_on:
+      - node1
+      - node2
+      - node3
+      - node4
+    ports:
+      # No privileged port: the same file works with Docker Desktop and with
+      # rootless Podman.
+      - "${CACTUSFS_LB_S3_PORT:-9443}:9443"
+      # The admin port on this machine only: a new deployment has the console
+      # user admin with the password admin (ADR-0014). Change or delete that
+      # user before publishing this port more widely.
+      - "127.0.0.1:${CACTUSFS_LB_ADMIN_PORT:-9444}:9444"
+    volumes:
+      # On a host with SELinux and Podman, append ",z" to the options.
+      - ../examples/loadbalancer/haproxy.compose.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    # Long enough for transfers in flight to end when the balancer is stopped.
+    stop_grace_period: 40s

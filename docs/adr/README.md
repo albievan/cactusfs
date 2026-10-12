@@ -36,25 +36,29 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](0001-on-disk-format.md) | On-disk format of drives and shards | accepted |
-| [0002](0002-encryption.md) | Encryption at rest: streaming AEAD and envelope keys | accepted |
-| [0003](0003-metadata.md) | Metadata: embedded Raft with a bbolt state machine | accepted; the single voter is superseded by 0005 |
-| [0004](0004-erasure-and-topology.md) | Erasure coding, drive topology and self-healing | accepted; the one-node topology is superseded by 0005 |
-| [0005](0005-cluster.md) | Cluster: replicated metadata, node RPC and distributed erasure sets | accepted |
-| [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted |
-| [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted |
-| [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted |
-| [0009](0009-object-lock.md) | Object Lock: where it is enforced, and the clock that decides | accepted |
-| [0010](0010-key-hierarchy.md) | Key hierarchy: one data key, several uses | accepted |
-| [0011](0011-bucket-policy-cors-tags.md) | Bucket policies, anonymous access, cross-origin rules and tags | accepted |
-| [0012](0012-multipart-uploads.md) | Multipart uploads | accepted |
-| [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted |
-| [0014](0014-default-console-user.md) | A default console user | accepted |
-| [0015](0015-helm-chart.md) | The Helm chart: a StatefulSet for every node | accepted |
-| [0016](0016-object-access-and-schema-3.md) | Who uploaded and who read an object, and entry schema 3 | accepted |
-| [0017](0017-sub-buckets.md) | Sub-buckets | accepted |
-| [0018](0018-tag-rules-and-catalogue.md) | Tag rules, lower-case tags, and a catalogue of tags | accepted |
-| [0019](0019-bucket-activity-and-schema-4.md) | Who created a bucket, its latest uploads and downloads, and entry schema 4 | accepted |
-| [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted |
-| [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; releases are signed keyless by the release workflow (PLAN 7.9) |
-| [0022](0022-settings.md) | Settings: declared once, shown for every node | accepted |
+| [0001](0001-on-disk-format.md) | On-disk format of drives and shards | accepted; implemented |
+| [0002](0002-encryption.md) | Encryption at rest: streaming AEAD and envelope keys | accepted; implemented |
+| [0003](0003-metadata.md) | Metadata: embedded Raft with a bbolt state machine | accepted; implemented; the single voter is superseded by 0005 |
+| [0004](0004-erasure-and-topology.md) | Erasure coding, drive topology and self-healing | accepted; implemented; the one-node topology is superseded by 0005 |
+| [0005](0005-cluster.md) | Cluster: replicated metadata, node RPC and distributed erasure sets | accepted; implemented |
+| [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted; implemented |
+| [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted; implemented |
+| [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted; implemented |
+| [0009](0009-object-lock.md) | Object Lock - where it is enforced, and the clock that decides | accepted; implemented |
+| [0010](0010-key-hierarchy.md) | Key hierarchy - one data key, several uses | accepted; implemented |
+| [0011](0011-bucket-policy-cors-tags.md) | Bucket policies, anonymous access, cross-origin rules and tags | accepted; implemented |
+| [0012](0012-multipart-uploads.md) | Multipart uploads | accepted; implemented |
+| [0013](0013-lifecycle.md) | Lifecycle rules, and a principal for what the node does by itself | accepted; implemented |
+| [0014](0014-default-console-user.md) | A default console user | accepted; implemented |
+| [0015](0015-helm-chart.md) | The Helm chart - a StatefulSet for every node | accepted; implemented |
+| [0016](0016-object-access-and-schema-3.md) | Who uploaded and who read an object - and entry schema 3 | accepted; implemented; the rolling-upgrade test from schema 2 is not written |
+| [0017](0017-sub-buckets.md) | Sub-buckets | accepted; **not implemented** beyond the domain rules, the port and the replicated store |
+| [0018](0018-tag-rules-and-catalogue.md) | Tag rules, lower-case tags, and a catalogue of tags | accepted; **not implemented** beyond the domain rules, the port and the replicated store |
+| [0019](0019-bucket-activity-and-schema-4.md) | Who created a bucket, its latest uploads and downloads - and entry schema 4 | accepted; implemented |
+| [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted; implemented |
+| [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; the gate is implemented; releases are signed keyless by the release workflow, which is written and has not run: no release is published yet |
+| [0022](0022-settings.md) | Settings - declared once, shown for every node | accepted; implemented |
+
+"Implemented" is the state of the code on 2026-10-12; `PLAN.md` has the step behind each.
+The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a
+list at the top; the format above is that of the first six.

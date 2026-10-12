@@ -133,6 +133,21 @@ spread_key=$(q "$V" '.spread.topologyKey')
 spread_when=$(q "$V" '.spread.whenUnsatisfiable')
 kms=$(q "$V" '.kms.type')
 policy=$(q "$V" '.networkPolicy.enabled // false')
+# The image a node runs: image.repository by image.digest, or else by
+# image.tag, or else by the chart's appVersion. And the version its pod says
+# it runs, as the helper cactusfs.version gives it: the tag, or the appVersion
+# when there is none (an image named by its digest alone has none) - what a
+# label may not hold replaced, 63 characters at most, and none of '-', '_'
+# and '.' at either end.
+image_tag=$(q "$V" '.image.tag // ""')
+image_digest=$(q "$V" '.image.digest // ""')
+app_version=$(q "$CHART/Chart.yaml" '.appVersion')
+if [ -n "$image_digest" ]; then
+	image="$(q "$V" '.image.repository')@$image_digest"
+else
+	image="$(q "$V" '.image.repository'):${image_tag:-$app_version}"
+fi
+version=$(printf '%s\n' "${image_tag:-$app_version}" | sed 's/[^A-Za-z0-9_.-]\{1,\}/_/g' | cut -c 1-63 | sed -e 's/^[-_.]*//' -e 's/[-_.]*$//')
 
 # The nodes the values ask for: id, voter, stores, gateway - a line each.
 NODES=$TMP/nodes
@@ -335,6 +350,7 @@ while read -r id voter stores gateway <&4; do
 	want "$R" "pods carry the label app.kubernetes.io/instance" "$D" '.spec.template.metadata.labels["app.kubernetes.io/instance"]' "$RELEASE"
 	want "$R" "the selector is the pod's labels of the release and its node" "$D" ".spec.selector.matchLabels | $LABELS" "$SELECTOR,cactusfs.io/node=$id"
 	want "$R" "pods carry the label cactusfs.io/node" "$D" '.spec.template.metadata.labels["cactusfs.io/node"]' "$id"
+	want "$R" "pods carry the label app.kubernetes.io/version: the image's tag, or the chart's appVersion without one" "$D" '.spec.template.metadata.labels["app.kubernetes.io/version"]' "$version"
 	if [ "$voter" = yes ]; then
 		voter_pods=$((voter_pods + 1))
 		want "$R" "a voter's pods carry cactusfs.io/voter" "$D" '.spec.template.metadata.labels["cactusfs.io/voter"]' "true"
@@ -362,6 +378,7 @@ while read -r id voter stores gateway <&4; do
 
 	# Every container.
 	want "$R" "the container cactusfs" "$D" "[$C | .name] | join(\",\")" "cactusfs"
+	want "$R" "the image of image.repository, by image.digest, or else image.tag, or else the chart's appVersion" "$D" "$C | .image" "$image"
 	n=$(number "$(q "$D" "$P.containers | length")")
 	i=0
 	while [ "$i" -lt "$n" ]; do

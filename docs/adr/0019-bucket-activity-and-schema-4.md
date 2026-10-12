@@ -1,6 +1,6 @@
 # ADR-0019: Who created a bucket, its latest uploads and downloads - and entry schema 4
 
-- **Status:** accepted; being implemented (PLAN G.1-G.10)
+- **Status:** accepted; implemented (PLAN G.0-G.10)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0003 (metadata), ADR-0005 (cluster, levels), ADR-0008 (the leader's
   time), ADR-0016 (entry schema 3, the level rule as it stands, object access)

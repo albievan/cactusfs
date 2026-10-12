@@ -1,4 +1,7 @@
 # A development cluster on the disks of one machine.
+# The image is the chart's default, the published release; to run a build of
+# this tree, name it: --set image.repository=... --set image.tag=... (as
+# test/k8s does with the image it loads into the cluster).
 secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
 kms:
   type: local

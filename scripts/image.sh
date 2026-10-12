@@ -6,7 +6,8 @@
 # -arm64, where <version> is the release and <build> the number of the build
 # (scripts/buildid.sh; `make image` passes them, with the commit). The Go
 # build stage cross-compiles on the build host, so no emulation is involved.
-# Publishing a signed multi-arch manifest is PLAN step 7.3.
+# Nothing is published here: the signed multi-arch manifest list of a release
+# is made of these two by scripts/release.sh, in the release workflow.
 set -eu
 
 IMAGE=${IMAGE:-cactusfs}

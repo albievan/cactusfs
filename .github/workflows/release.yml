@@ -70,10 +70,25 @@ jobs:
           persist-credentials: false
       - run: make test-chaos
 
+  # As in ci.yml: a rolling upgrade from the release before this entry schema,
+  # which is built from the history of the repository.
+  rolling:
+    name: make test-rolling
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: make test-rolling
+
   # Build, publish, sign, verify - and only then the GitHub Release.
   release:
     name: publish
-    needs: [check, chaos]
+    needs: [check, chaos, rolling]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

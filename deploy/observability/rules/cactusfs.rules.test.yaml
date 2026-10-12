@@ -235,14 +235,21 @@ tests:
           - labels: '{instance="a:9001"}'
             value: 1
 
-  # --- CactusFSS3Slow: p99 of HEAD and list requests > 1.024 s for 15m -------
+  # --- CactusFSS3Slow: p99 of HEAD, list and configuration requests ----------
+  # --- > 1.024 s for 15m -----------------------------------------------------
   # a: every HeadObject takes between 4.096 s and 16.384 s. The 99th
   #    percentile is 99 % of the way through that bucket:
   #    4.096 + 0.99 * (16.384 - 4.096) = 16.26 s. Above 1.024 from 1m, fires
   #    at 16m.
   # b: every HeadObject takes between 0.001 s and 0.004 s:
   #    0.001 + 0.99 * 0.003 = 0.00397 s. Below.
-  # c: only GetObject is slow, which the rule does not look at.
+  # c: only GetObject is slow - as slow as a, 16.26 s - which the rule does
+  #    not look at: no series of c is selected, so there is no value and no
+  #    alert.
+  # d: every ListObjectsV2 (the listing an SDK of today sends; the selector is
+  #    matched whole, so "ListObjects" does not select it) takes between
+  #    4.096 s and 16.384 s: 4.096 + 0.99 * (16.384 - 4.096) = 16.26 s, as a.
+  #    Above 1.024 from 1m, fires at 16m.
   - name: slow S3 requests
     interval: 1m
     input_series:
@@ -268,6 +275,14 @@ tests:
         values: '0+60x30'
       - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="c:9001", operation="GetObject", le="+Inf"}'
         values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="d:9001", operation="ListObjectsV2", le="1.024"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="d:9001", operation="ListObjectsV2", le="4.096"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="d:9001", operation="ListObjectsV2", le="16.384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="d:9001", operation="ListObjectsV2", le="+Inf"}'
+        values: '0+60x30'
     alert_rule_test:
       - eval_time: 10m
         alertname: CactusFSS3Slow
@@ -281,7 +296,14 @@ tests:
               instance: "a:9001"
             exp_annotations:
               summary: "S3 requests that carry no object data are slow"
-              description: "The slowest 1 % of HEAD and list requests answered by a:9001 have taken longer than a second for fifteen minutes."
+              description: "The slowest 1 % of HEAD, list and configuration requests answered by a:9001 have taken longer than a second for fifteen minutes."
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "d:9001"
+            exp_annotations:
+              summary: "S3 requests that carry no object data are slow"
+              description: "The slowest 1 % of HEAD, list and configuration requests answered by d:9001 have taken longer than a second for fifteen minutes."
 
   # --- CactusFSAdminSlow: p99 > 4.096 s for 15m ------------------------------
   # a: every request takes between 4.096 s and 16.384 s: 16.26 s, as above.

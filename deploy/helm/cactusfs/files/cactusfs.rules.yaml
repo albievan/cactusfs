@@ -109,17 +109,22 @@ groups:
 
       # Only operations that move no object data: how long a GetObject or a
       # PutObject takes is the size of the object and the speed of the client.
+      # A selector is matched whole, so every name is written out as the S3
+      # handler gives it (internal/adapters/s3api): the two HEADs, every
+      # listing - ListObjectsV2 is what an SDK of today sends - and the reads
+      # of a bucket's and an object's configuration. A new operation of that
+      # kind is added here.
       - alert: CactusFSS3Slow
         expr: |-
           histogram_quantile(0.99, sum by (job, instance, le) (
-            rate(cactusfs_s3_request_duration_seconds_bucket{operation=~"HeadBucket|HeadObject|ListBuckets|ListObjects|GetBucketLocation"}[5m])
+            rate(cactusfs_s3_request_duration_seconds_bucket{operation=~"HeadBucket|HeadObject|ListBuckets|ListObjects|ListObjectsV2|ListObjectVersions|ListMultipartUploads|ListParts|GetBucketLocation|GetBucketVersioning|GetBucketPolicy|GetBucketCors|GetBucketTagging|GetBucketLifecycle|GetObjectLockConfiguration|GetObjectRetention|GetObjectLegalHold|GetObjectTagging"}[5m])
           )) > 1.024
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "S3 requests that carry no object data are slow"
-          description: "The slowest 1 % of HEAD and list requests answered by {{ $labels.instance }} have taken longer than a second for fifteen minutes."
+          description: "The slowest 1 % of HEAD, list and configuration requests answered by {{ $labels.instance }} have taken longer than a second for fifteen minutes."
 
       - alert: CactusFSAdminSlow
         expr: |-
