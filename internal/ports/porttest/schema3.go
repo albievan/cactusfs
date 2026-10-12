@@ -109,6 +109,31 @@ func (m *MemMetadata) ObjectAccess(_ context.Context, bucketName, key string, re
 	return object.Access{}, fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
 }
 
+// ObjectAccesses implements ports.ObjectAccessStore.
+func (m *MemMetadata) ObjectAccesses(_ context.Context, bucketName string, versions []ports.ListedVersion) ([]object.Access, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(versions) > object.MaxListKeys {
+		return nil, fmt.Errorf("%w: %d versions, at most %d", domain.ErrInvalidArgument, len(versions), object.MaxListKeys)
+	}
+	objects, ok := m.objects[bucketName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	}
+	out := make([]object.Access, len(versions))
+	for i, listed := range versions {
+		for _, v := range objects[listed.Key] {
+			// The version the name finds now, when it is still the one
+			// that was listed.
+			if v.Is(listed.Version) && v.VersionID == listed.VersionID {
+				out[i] = m.access[bucketName][accessKey{key: listed.Key, ref: v.Ref().String()}]
+				out[i].Readers = slices.Clone(out[i].Readers)
+			}
+		}
+	}
+	return out, nil
+}
+
 func cloneSubBucket(s bucket.SubBucket) bucket.SubBucket {
 	s.Policy = slices.Clone(s.Policy)
 	if len(s.Policy) == 0 {

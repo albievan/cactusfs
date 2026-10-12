@@ -336,14 +336,21 @@ type ObjectAccess struct {
 	Access object.Access
 }
 
+// accessRequest is the question of whether a principal may see who uploaded
+// and who read an object. Access asks it as the gate of its answer and
+// ListWithAccess as a filter of what a listing carries: it is made here, once,
+// so that the two cannot come to ask different questions.
+func accessRequest(principal iam.Principal, bucketName, key string) iam.Request {
+	return iam.Request{Principal: principal, Action: iam.ActionGetObjectAccess, Resource: iam.Resource{Bucket: bucketName, Key: key}}
+}
+
 // Access returns who uploaded a version and who read it: the version named
 // as clients name one, or the current version for "". It takes a permission
 // of its own, which reading the object does not give, and it is asked for
 // before anything is said about the request or the object - whether the
 // object exists included.
 func (s *ObjectService) Access(ctx context.Context, principal iam.Principal, bucketName, key, versionID string) (ObjectAccess, error) {
-	resource := iam.Resource{Bucket: bucketName, Key: key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionGetObjectAccess, Resource: resource}); err != nil {
+	if err := s.authz.Authorize(ctx, accessRequest(principal, bucketName, key)); err != nil {
 		return ObjectAccess{}, fmt.Errorf("object.Access: %w", err)
 	}
 	if s.accessStore == nil {
@@ -358,6 +365,112 @@ func (s *ObjectService) Access(ctx context.Context, principal iam.Principal, buc
 		return ObjectAccess{}, fmt.Errorf("object.Access: %w", err)
 	}
 	return ObjectAccess{Version: version, Access: access}, nil
+}
+
+// AccessSummary is what a listing says of the uploading and the reading of
+// an object: who and when, and how often - never who read it.
+type AccessSummary struct {
+	// UploadedBy is who committed the version, empty when that was not
+	// recorded, and UploadedAt when.
+	UploadedBy string
+	UploadedAt time.Time
+	// Downloads and Copies are the totals of the version.
+	Downloads int64
+	Copies    int64
+	// LastDownloadedAt is when the last read of either kind was recorded;
+	// zero when there was none.
+	LastDownloadedAt time.Time
+}
+
+// Summary returns the part of what is known that a listing carries. The
+// listing and the answer about one object are made of the same ObjectAccess,
+// and so say the same.
+func (a ObjectAccess) Summary() AccessSummary {
+	return AccessSummary{
+		UploadedBy: a.Version.CreatedBy, UploadedAt: a.Version.ModifiedAt,
+		Downloads: a.Access.Downloads, Copies: a.Access.Copies, LastDownloadedAt: a.Access.LastAt,
+	}
+}
+
+// AccessListing is a page of a bucket listing and, when it was asked for and
+// the caller may see it, what is known of the access to its objects.
+type AccessListing struct {
+	Page object.ListPage
+	// Included says that the page carries what the caller may see of the
+	// access to its objects. It is false when that was not asked for, when
+	// this node keeps no record of reads, and for a caller who holds the
+	// permission neither on the bucket nor on any object of the page.
+	Included bool
+	// Access is nil unless Included; then Access[i] is of Page.Objects[i],
+	// nil for an object the caller may not see it of.
+	Access []*AccessSummary
+}
+
+// ListWithAccess returns one page of a bucket listing, as List does and
+// allowed as List is, and - when withAccess is set - what Access would say of
+// each of its objects, without the readers.
+//
+// The listing is the operation, and s3:ListBucket its gate. Whether the
+// caller may also see who uploaded and how often each object was read is not
+// a gate of anything: it decides what the result carries, so it is asked
+// with Allowed, and a caller without the permission gets the plain page,
+// with no refusal audited or logged - nobody asked for anything by name that
+// was refused. It is the question Access asks (accessRequest), put for every
+// object of the page: a policy can give or deny the permission by key, and
+// the listing never shows of an object what Access would refuse.
+//
+// The records are read from the store in one call for the page, after the
+// page: an object that was replaced or deleted in between has zero counts.
+func (s *ObjectService) ListWithAccess(
+	ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions, withAccess bool,
+) (AccessListing, error) {
+	page, err := s.List(ctx, principal, bucketName, opts)
+	if err != nil {
+		return AccessListing{}, err
+	}
+	out := AccessListing{Page: page}
+	if !withAccess || s.accessStore == nil {
+		return out, nil
+	}
+	// On the bucket: whether a page that has no objects of its own says
+	// that it would show them.
+	if out.Included, err = s.authz.Allowed(ctx, accessRequest(principal, bucketName, "")); err != nil {
+		return AccessListing{}, fmt.Errorf("object.ListWithAccess: %w", err)
+	}
+	var (
+		shown    []int
+		versions []ports.ListedVersion
+	)
+	for i, v := range page.Objects {
+		allowed, err := s.authz.Allowed(ctx, accessRequest(principal, bucketName, v.Key))
+		if err != nil {
+			return AccessListing{}, fmt.Errorf("object.ListWithAccess: %w", err)
+		}
+		if allowed {
+			shown = append(shown, i)
+			versions = append(versions, ports.ListedVersion{Key: v.Key, Version: v.Ref(), VersionID: v.VersionID})
+		}
+	}
+	if len(shown) == 0 {
+		if out.Included {
+			out.Access = make([]*AccessSummary, len(page.Objects))
+		}
+		return out, nil
+	}
+	records, err := s.accessStore.ObjectAccesses(ctx, bucketName, versions)
+	if err != nil {
+		return AccessListing{}, fmt.Errorf("object.ListWithAccess: %w", err)
+	}
+	if len(records) != len(versions) {
+		return AccessListing{}, fmt.Errorf("object.ListWithAccess: %w: %d records for %d objects", domain.ErrIntegrity, len(records), len(versions))
+	}
+	out.Included = true
+	out.Access = make([]*AccessSummary, len(page.Objects))
+	for n, i := range shown {
+		summary := ObjectAccess{Version: page.Objects[i], Access: records[n]}.Summary()
+		out.Access[i] = &summary
+	}
+	return out, nil
 }
 
 // accessTarget finds the version a question about its readers is about.

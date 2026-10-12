@@ -6,6 +6,7 @@ import {
   objectDownloadUrl,
   unwrap,
   uploadObjectWithProgress,
+  type ObjectAccessSummary,
   type ObjectMetadata,
 } from '../api/client';
 import { routeHref } from '../router';
@@ -68,6 +69,16 @@ const UPLOAD_ICON = {
 
 const UPLOAD_WORD = { waiting: 'Waiting', sending: 'Uploading…', stored: 'Stored', failed: 'Not stored' } as const;
 
+// How who uploaded an object and when it was last downloaded are worded: in
+// its details and in the grid alike.
+function uploaderOf(uploadedBy: string | undefined): string {
+  return uploadedBy ?? 'not recorded';
+}
+
+function lastDownloadOf(lastDownloadedAt: string | undefined): string {
+  return lastDownloadedAt === undefined ? 'never' : formatTime(lastDownloadedAt);
+}
+
 /**
  * The object browser of one bucket: walks prefixes as if they were folders,
  * pages through long listings, uploads, downloads, deletes, and shows what is
@@ -89,6 +100,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               prefix: prefix === '' ? undefined : prefix,
               delimiter: DELIMITER,
               continuation_token: token,
+              // Who uploaded each object and how often it was downloaded,
+              // with the listing: the API says whether the caller may see it.
+              access: true,
             },
           },
         }),
@@ -187,6 +201,15 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
     });
   };
 
+  // Forgets what became of the last upload, and with it what could be sent
+  // again. The files chosen, the key and the objects are left as they are.
+  const clearUploads = () => {
+    setUploads([]);
+    setSent([]);
+    // What the upload was refused for goes with its tiles.
+    action.fail(null);
+  };
+
   // Sends again what was not stored, and only that.
   const retryFailed = () => {
     send(sent.filter((item) => uploads[item.index]?.state === 'failed'));
@@ -255,6 +278,10 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   // Only what is still on the page counts as chosen.
   const selected = chosen.filter((k) => pageKeys.includes(k));
   const allChosen = pageKeys.length > 0 && selected.length === pageKeys.length;
+  // Whether the listing says who uploaded its objects and how often they were
+  // downloaded. Whether the caller may see that is for the API to decide:
+  // without it the columns are not there at all.
+  const withAccess = page?.access_included === true;
 
   return (
     <>
@@ -317,6 +344,11 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                   <i className="bi bi-arrow-repeat" aria-hidden="true" /> <span className="btn-text">Retry failed</span>
                 </button>
               ) : null}
+              {action.busy ? null : (
+                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={clearUploads} title="Clear the upload status">
+                  <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Clear</span>
+                </button>
+              )}
             </p>
             <ul className="uploads" aria-label="Upload progress">
               {uploads.map((entry) => (
@@ -382,7 +414,15 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
       <section className="card card-body panel" aria-labelledby="object-list">
         <h2 id="object-list">Objects</h2>
         {listing.loading ? <Loading /> : null}
-        {empty ? <p>There is nothing here.</p> : null}
+        {listing.error !== null && page !== undefined ? (
+          <p className="list-stale" role="status">
+            The list could not be read again: what is shown is the last one that could.{' '}
+            <button type="button" className="btn btn-outline-secondary btn-sm" onClick={listing.reload} title="Read the list of objects again">
+              <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Reload</span>
+            </button>
+          </p>
+        ) : null}
+        {empty && listing.error === null ? <p>There is nothing here.</p> : null}
         {page !== undefined && pageKeys.length > 0 ? (
           <div className="toolbar">
             <label className="check">
@@ -411,15 +451,30 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         ) : null}
         {page !== undefined && !empty ? (
           <div className="table-responsive grid-scroll">
-            <table className="table table-hover align-middle grid grid-keep">
+            <table className={`table table-hover align-middle grid grid-keep${withAccess ? ' grid-wide' : ''}`}>
               <thead>
                 <tr>
                   <th scope="col" className="grid-check">
                     <span className="visually-hidden">Select</span>
                   </th>
-                  <th scope="col">Name</th>
+                  <th scope="col" className="grid-name">
+                    Name
+                  </th>
                   <th scope="col">Size</th>
                   <th scope="col">Last modified</th>
+                  {withAccess ? (
+                    <>
+                      <th scope="col">Uploaded by</th>
+                      <th scope="col">Uploaded</th>
+                      <th scope="col" className="grid-number">
+                        Downloads
+                      </th>
+                      <th scope="col" className="grid-number">
+                        Copies
+                      </th>
+                      <th scope="col">Last downloaded</th>
+                    </>
+                  ) : null}
                   <th scope="col">Actions</th>
                 </tr>
               </thead>
@@ -439,6 +494,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                     </td>
                     <td data-label="Size">-</td>
                     <td data-label="Last modified">-</td>
+                    {withAccess ? <AccessCells access={undefined} /> : null}
                     <td data-label="Actions">-</td>
                   </tr>
                 ))}
@@ -460,6 +516,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                       <td data-label="Name">{name}</td>
                       <td data-label="Size">{formatBytes(object.size)}</td>
                       <td data-label="Last modified">{formatTime(object.last_modified)}</td>
+                      {withAccess ? <AccessCells access={object.access} /> : null}
                       <td data-label="Actions">
                         <span className="d-flex flex-wrap gap-2">
                           <a
@@ -544,6 +601,38 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
 }
 
 /**
+ * The cells of a row of the grid that say who uploaded an object and how
+ * often it was downloaded, worded as the details of the object word them.
+ * They are empty for a folder, and for an object the API says nothing of.
+ */
+function AccessCells({ access }: { access: ObjectAccessSummary | undefined }) {
+  if (access === undefined) {
+    return (
+      <>
+        <td data-label="Uploaded by" />
+        <td data-label="Uploaded" />
+        <td data-label="Downloads" className="grid-number" />
+        <td data-label="Copies" className="grid-number" />
+        <td data-label="Last downloaded" />
+      </>
+    );
+  }
+  return (
+    <>
+      <td data-label="Uploaded by">{uploaderOf(access.uploaded_by)}</td>
+      <td data-label="Uploaded">{formatTime(access.uploaded_at)}</td>
+      <td data-label="Downloads" className="grid-number">
+        {access.download_count}
+      </td>
+      <td data-label="Copies" className="grid-number">
+        {access.copy_count}
+      </td>
+      <td data-label="Last downloaded">{lastDownloadOf(access.last_downloaded_at)}</td>
+    </>
+  );
+}
+
+/**
  * Who uploaded an object and who downloaded it, as the API tells it. Seeing
  * it takes a permission of its own: a refusal is said in one line, and is no
  * failure of the details above it.
@@ -579,7 +668,7 @@ function ObjectAccessFacts({ bucket, objectKey }: { bucket: string; objectKey: s
       <h3 id="object-access">Uploads and downloads</h3>
       <dl className="facts">
         <dt>Uploaded by</dt>
-        <dd>{record.uploaded_by ?? 'not recorded'}</dd>
+        <dd>{uploaderOf(record.uploaded_by)}</dd>
         <dt>Uploaded</dt>
         <dd>{formatTime(record.uploaded_at)}</dd>
         <dt>Downloads</dt>
@@ -587,7 +676,7 @@ function ObjectAccessFacts({ bucket, objectKey }: { bucket: string; objectKey: s
         <dt>Copies</dt>
         <dd>{record.copy_count}</dd>
         <dt>Last downloaded</dt>
-        <dd>{record.last_downloaded_at === undefined ? 'never' : formatTime(record.last_downloaded_at)}</dd>
+        <dd>{lastDownloadOf(record.last_downloaded_at)}</dd>
       </dl>
       {record.readers.length > 0 ? (
         <div className="table-responsive">

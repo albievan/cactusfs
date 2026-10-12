@@ -451,11 +451,12 @@ code {
   height: 32px;
 }
 
+/* A screen takes the whole width beside the navigation, with a small margin:
+   the grids have many columns and are given the room there is. */
 .screen {
   width: 100%;
-  max-width: 78rem;
-  margin: 0 auto;
-  padding: 2rem clamp(1rem, 3vw, 2.5rem) 3rem;
+  min-width: 0;
+  padding: 1.25rem 1.25rem 2.5rem;
 }
 
 .splash {
@@ -803,6 +804,13 @@ textarea[readonly] {
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 0.85rem;
+}
+
+/* A screen is as wide as the window; a form is not: its fields stay a
+   width a line of text can be read and typed at. */
+.form-row,
+.form-grid {
+  max-width: 72rem;
 }
 
 .form-row .field {
@@ -1242,6 +1250,25 @@ textarea[readonly] {
   border-bottom: 0;
 }
 
+/* A column of counts: the figures stand under one another. */
+.grid .grid-number {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* A grid of many columns - the objects, with who uploaded them and how often
+   they were downloaded - keeps a width at which its cells can be read, and
+   is scrolled sideways inside its panel (.table-responsive) where the panel
+   is narrower: the page itself never is. The name keeps room of its own. */
+.grid.grid-wide {
+  min-width: 68rem;
+}
+
+.grid.grid-wide .grid-name {
+  min-width: 14rem;
+}
+
 /*
  * On a narrow screen the navigation lies across the top, icons alone, and a
  * table becomes a list of cards: every row a block, every cell under the name
@@ -1519,4 +1546,13 @@ textarea[readonly] {
     padding-bottom: 0;
     border-bottom: 0;
   }
+}
+
+/* The list that is shown is the last one that could be read. */
+.list-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--bs-danger-text-emphasis, #842029);
 }

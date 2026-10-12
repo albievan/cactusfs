@@ -292,6 +292,25 @@ func (s *Store) AddObjectReads(ctx context.Context, batch ports.ReadBatch) error
 	return nil
 }
 
+// accessNamed returns the record of who read the version a name finds, and
+// that version; nil and the zero record when the name finds none.
+func accessNamed(tx *bbolt.Tx, h history, bucketName, key, ref string) (object.Access, *versionRecord, error) {
+	target, _, err := h.find(key, ref)
+	if err != nil || target == nil {
+		return object.Access{}, nil, err
+	}
+	place, ok := locator(key, refOf(*target))
+	if !ok {
+		return object.Access{}, nil, fmt.Errorf("%w: stored version ID", domain.ErrIntegrity)
+	}
+	records, err := lazyNested(tx, accessBucket(), bucketName, false)
+	if err != nil {
+		return object.Access{}, nil, err
+	}
+	access, err := readAccess(records, place)
+	return access, target, err
+}
+
 // ObjectAccess implements ports.ObjectAccessStore.
 func (s *Store) ObjectAccess(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Access, error) {
 	var access object.Access
@@ -303,26 +322,51 @@ func (s *Store) ObjectAccess(ctx context.Context, bucketName, key string, ref ob
 		if err != nil {
 			return err
 		}
-		target, _, err := h.find(key, ref.String())
-		if err != nil {
+		var target *versionRecord
+		if access, target, err = accessNamed(tx, h, bucketName, key, ref.String()); err != nil {
 			return err
 		}
 		if target == nil {
 			return fmt.Errorf("%w: %s/%s version %s", domain.ErrVersionNotFound, bucketName, key, ref)
 		}
-		place, ok := locator(key, refOf(*target))
-		if !ok {
-			return fmt.Errorf("%w: stored version ID", domain.ErrIntegrity)
-		}
-		records, err := lazyNested(tx, accessBucket(), bucketName, false)
-		if err != nil {
-			return err
-		}
-		access, err = readAccess(records, place)
-		return err
+		return nil
 	})
 	if err != nil {
 		return object.Access{}, fmt.Errorf("raftmeta.ObjectAccess: %w", err)
 	}
 	return access, nil
+}
+
+// ObjectAccesses implements ports.ObjectAccessStore. The records are read in
+// one transaction, each as ObjectAccess reads one: a few point reads a
+// version and no walk, for at most the versions of one page of a listing.
+func (s *Store) ObjectAccesses(ctx context.Context, bucketName string, versions []ports.ListedVersion) ([]object.Access, error) {
+	if len(versions) > object.MaxListKeys {
+		return nil, fmt.Errorf("raftmeta.ObjectAccesses: %w: %d versions, at most %d", domain.ErrInvalidArgument, len(versions), object.MaxListKeys)
+	}
+	out := make([]object.Access, len(versions))
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
+		if tx.Bucket(objectsBucket()).Bucket([]byte(bucketName)) == nil {
+			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+		}
+		h, err := openHistory(tx, bucketName, false)
+		if err != nil {
+			return err
+		}
+		for i, v := range versions {
+			access, target, err := accessNamed(tx, h, bucketName, v.Key, v.Version.String())
+			if err != nil {
+				return err
+			}
+			// The record of the version that was listed, or nobody's.
+			if target != nil && target.VersionID == v.VersionID.String() {
+				out[i] = access
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("raftmeta.ObjectAccesses: %w", err)
+	}
+	return out, nil
 }

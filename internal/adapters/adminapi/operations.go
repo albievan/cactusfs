@@ -163,18 +163,25 @@ func (o *operations) ListObjects(ctx context.Context, request api.ListObjectsReq
 		}
 		opts.MaxKeys = *l
 	}
-	page, err := o.h.cfg.Objects.List(ctx, who(ctx), request.Bucket, opts)
+	// Whether the caller may be shown what was asked for with "access" is
+	// the use case's to say: this maps what it answers.
+	listing, err := o.h.cfg.Objects.ListWithAccess(ctx, who(ctx), request.Bucket, opts, request.Params.Access != nil && *request.Params.Access)
 	if err != nil {
 		return nil, err
 	}
+	page := listing.Page
 	out := api.ObjectList{
 		Objects: make([]api.ObjectSummary, len(page.Objects)), CommonPrefixes: page.CommonPrefixes, Truncated: page.Truncated,
+		AccessIncluded: listing.Included,
 	}
 	if out.CommonPrefixes == nil {
 		out.CommonPrefixes = []string{}
 	}
 	for i, v := range page.Objects {
 		out.Objects[i] = api.ObjectSummary{Key: v.Key, Size: v.Size, Etag: v.ETag, LastModified: v.ModifiedAt}
+		if i < len(listing.Access) && listing.Access[i] != nil {
+			out.Objects[i].Access = accessSummaryOf(*listing.Access[i])
+		}
 	}
 	if page.Truncated {
 		out.NextContinuationToken = &page.NextContinuation
@@ -198,6 +205,19 @@ func (o *operations) GetObjectMetadata(ctx context.Context, request api.GetObjec
 		return nil, err
 	}
 	return api.GetObjectMetadata200JSONResponse(metadataOf(v)), nil
+}
+
+// accessSummaryOf maps what a listing says of the access to an object to the
+// contract.
+func accessSummaryOf(a app.AccessSummary) *api.ObjectAccessSummary {
+	out := api.ObjectAccessSummary{UploadedAt: a.UploadedAt, DownloadCount: a.Downloads, CopyCount: a.Copies}
+	if a.UploadedBy != "" {
+		out.UploadedBy = &a.UploadedBy
+	}
+	if !a.LastDownloadedAt.IsZero() {
+		out.LastDownloadedAt = &a.LastDownloadedAt
+	}
+	return &out
 }
 
 // accessOf maps what is known of the reading of a version to the contract.

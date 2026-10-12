@@ -115,12 +115,21 @@ func TestObjectAccessIsCountedAndTraced(t *testing.T) {
 	if _, err := store.ObjectAccess(ctx, "nope", "k", v.Ref()); !errors.Is(err, domain.ErrBucketNotFound) {
 		t.Fatalf("error not passed through: %v", err)
 	}
+	page := []ports.ListedVersion{{Key: "k", Version: v.Ref(), VersionID: v.VersionID}}
+	if several, err := store.ObjectAccesses(ctx, "bkt", page); err != nil || len(several) != 1 || several[0].Downloads != 2 {
+		t.Fatalf("behaviour not passed through: %+v, %v", several, err)
+	}
+	if _, err := store.ObjectAccesses(ctx, "nope", page); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
 
 	metrics := scrape(t, tel)
 	for _, want := range []string{
 		"cactusfs_port_calls_total method=AddObjectReads port=object_access result=ok",
 		"cactusfs_port_calls_total method=ObjectAccess port=object_access result=ok",
 		"cactusfs_port_calls_total method=ObjectAccess port=object_access result=error",
+		"cactusfs_port_calls_total method=ObjectAccesses port=object_access result=ok",
+		"cactusfs_port_calls_total method=ObjectAccesses port=object_access result=error",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Errorf("metrics lack %q", want)
@@ -130,7 +139,7 @@ func TestObjectAccessIsCountedAndTraced(t *testing.T) {
 	if strings.Contains(metrics, "alice") {
 		t.Error("a reader is named in the metrics")
 	}
-	for _, want := range []string{"object_access.AddObjectReads", "object_access.ObjectAccess"} {
+	for _, want := range []string{"object_access.AddObjectReads", "object_access.ObjectAccess", "object_access.ObjectAccesses"} {
 		if !contains(spanNames(recorder), want) {
 			t.Errorf("no span named %q among %v", want, spanNames(recorder))
 		}

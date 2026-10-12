@@ -91,7 +91,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the objects of a bucket */
+        /**
+         * List the objects of a bucket
+         * @description One page of the bucket's objects. With `access=true` every object also says who uploaded it and
+         *     when, how often it was downloaded and copied, and when last - the figures of
+         *     `/buckets/{bucket}/object/access`, without the readers - where the caller holds
+         *     `admin:GetObjectAccess` on that object. That permission decides only what the listing carries: a
+         *     caller without it is given the same listing with `access_included: false` and no `access` on any
+         *     object. The listing is never refused for want of that permission, and nothing is written to the audit trail
+         *     for it; where the facts may be shown and cannot be read, the listing fails as any read that fails does.
+         */
         get: operations["listObjects"];
         put?: never;
         post?: never;
@@ -574,6 +583,34 @@ export interface components {
             etag: string;
             /** Format: date-time */
             last_modified: string;
+            access?: components["schemas"]["ObjectAccessSummary"];
+        };
+        /**
+         * @description Who uploaded the current version of an object and how often it was read, as a listing carries it:
+         *     the figures of `ObjectAccess` without the readers. Best-effort counts, not an audit trail. Present
+         *     on an object only in a listing that was asked for with `access=true`, and only where the caller
+         *     holds `admin:GetObjectAccess` on the object.
+         */
+        ObjectAccessSummary: {
+            /** @description Who uploaded the version, as the audit trail names actors. Absent when it was not recorded. */
+            uploaded_by?: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            /**
+             * Format: int64
+             * @description Downloads of the version, every ranged request counted by itself.
+             */
+            download_count: number;
+            /**
+             * Format: int64
+             * @description How often the version was the source of a copy.
+             */
+            copy_count: number;
+            /**
+             * Format: date-time
+             * @description When the last download or copy was recorded. Absent when there was none.
+             */
+            last_downloaded_at?: string;
         };
         BucketUsage: {
             /**
@@ -591,6 +628,13 @@ export interface components {
         };
         ObjectList: {
             objects: components["schemas"]["ObjectSummary"][];
+            /**
+             * @description True only when the listing was asked for with `access=true` and the caller holds
+             *     `admin:GetObjectAccess` on the bucket or on at least one object of this page: the objects the
+             *     caller holds it on then carry `access`. False otherwise - not asked for, not permitted, or a
+             *     node that keeps no such record - and then no object carries `access`.
+             */
+            access_included: boolean;
             common_prefixes: string[];
             truncated: boolean;
             next_continuation_token?: string;
@@ -1145,6 +1189,12 @@ export interface operations {
                 /** @description The `next_continuation_token` of the previous page. */
                 continuation_token?: string;
                 limit?: number;
+                /**
+                 * @description Whether the listing should carry, for each object, who uploaded it and how often it was
+                 *     downloaded. It does so only for a caller who holds `admin:GetObjectAccess`; see
+                 *     `access_included`.
+                 */
+                access?: boolean;
             };
             header?: never;
             path: {

@@ -236,6 +236,13 @@ The admin listener (`--admin-addr`, port 9001) serves:
   (`GET /api/v1/buckets/{bucket}/object/access?key=`, shown in the console under an
   object's details) - to users with the `cluster-admin` or `auditor` role, or a policy
   that allows `admin:GetObjectAccess`; being allowed to read the object is not enough.
+  The listing of a bucket can carry the same five facts for each of its objects - who
+  uploaded it and when, its downloads and copies, when it was last downloaded; never by
+  whom - (`GET /api/v1/buckets/{bucket}/objects?access=true`, shown in the console as
+  columns of the object browser) to those of them who may also list the bucket -
+  `cluster-admin` among the built-in roles; an `auditor` may not list a bucket, and asks
+  about an object by its key. Whoever may list and may not see the facts gets the plain
+  listing, with `access_included: false`.
   These are counts kept as well as can be, recorded every `--access-flush-interval`
   (30 s), not an audit trail;
 - **search** (`GET /api/v1/search?q=`, and the field at the top of the console's

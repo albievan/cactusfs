@@ -40,6 +40,18 @@ type ReadBatch struct {
 	Items []ObjectRead
 }
 
+// ListedVersion names a version that a listing has shown, for a question
+// about several at once.
+type ListedVersion struct {
+	Key string
+	// Version names the version as clients name it.
+	Version object.VersionRef
+	// VersionID is the ID the version has of its own, a null version too:
+	// "null" may have come to name another version since the listing (see
+	// ObjectRead.VersionID).
+	VersionID object.ID
+}
+
 // ObjectAccessStore is the replicated record of who read which object
 // version, how often and when (ADR-0016). It is a count, not evidence.
 type ObjectAccessStore interface {
@@ -59,4 +71,13 @@ type ObjectAccessStore interface {
 	// zero record when it was never read. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrVersionNotFound.
 	ObjectAccess(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Access, error)
+	// ObjectAccesses is ObjectAccess for several versions of one bucket,
+	// answered from one view of the store: the record of versions[i] is at
+	// i of what it returns. A version that is no longer there - or whose
+	// name has come to mean another version than the one with VersionID -
+	// has the zero record, as one that was never read has: a listing is not
+	// refused for an object that was deleted behind it. A listing asks for
+	// one page, so at most object.MaxListKeys versions; more wrap
+	// domain.ErrInvalidArgument. The error wraps domain.ErrBucketNotFound.
+	ObjectAccesses(ctx context.Context, bucketName string, versions []ListedVersion) ([]object.Access, error)
 }

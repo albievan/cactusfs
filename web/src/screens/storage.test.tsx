@@ -1,7 +1,7 @@
 import { File as NodeFile } from 'node:buffer';
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
 import { fakeApi, json, noContent, problem, signedIn } from '../test/fakeApi';
@@ -31,7 +31,7 @@ function access(more: Record<string, unknown> = {}) {
 /** The answers behind the details of one object of the bucket "photos". */
 function detailsOf(key: string) {
   return {
-    'GET /buckets/photos/objects': () => json(200, { objects: [object(key)], common_prefixes: [], truncated: false }),
+    'GET /buckets/photos/objects': () => json(200, { objects: [object(key)], common_prefixes: [], truncated: false, access_included: false }),
     'GET /buckets/photos/object/metadata': () =>
       json(200, {
         bucket: 'photos',
@@ -188,6 +188,7 @@ describe('object browser', () => {
           objects: [object('2026/readme.txt', 2048)],
           common_prefixes: ['2026/january/'],
           truncated: false,
+          access_included: false,
         }),
     });
     render(<ObjectsScreen bucket="photos" prefix="2026/" />);
@@ -201,11 +202,14 @@ describe('object browser', () => {
     expect(call?.query.get('prefix')).toBe('2026/');
     expect(call?.query.get('delimiter')).toBe('/');
     expect(call?.query.has('continuation_token')).toBe(false);
+    // Who uploaded and how often it was downloaded is asked for with the
+    // listing, not object by object.
+    expect(call?.query.get('access')).toBe('true');
   });
 
   it('sends no prefix at the top of the bucket', async () => {
     const api = fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false, access_included: false }),
     });
     render(<ObjectsScreen bucket="photos" prefix="" />);
 
@@ -215,7 +219,7 @@ describe('object browser', () => {
 
   it('shows the way back up as breadcrumbs', async () => {
     fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false, access_included: false }),
     });
     render(<ObjectsScreen bucket="photos" prefix="2026/january/" />);
 
@@ -233,8 +237,8 @@ describe('object browser', () => {
     const api = signedIn({
       'GET /buckets/photos/objects': (call) =>
         call.query.get('prefix') === '2026/'
-          ? json(200, { objects: [object('2026/inside.txt')], common_prefixes: [], truncated: false })
-          : json(200, { objects: [], common_prefixes: ['2026/'], truncated: false }),
+          ? json(200, { objects: [object('2026/inside.txt')], common_prefixes: [], truncated: false, access_included: false })
+          : json(200, { objects: [], common_prefixes: ['2026/'], truncated: false, access_included: false }),
     });
     window.location.hash = '#/buckets/photos';
     render(<App />);
@@ -250,11 +254,12 @@ describe('object browser', () => {
     const api = fakeApi({
       'GET /buckets/photos/objects': (call) =>
         call.query.get('continuation_token') === 'page-2'
-          ? json(200, { objects: [object('b.txt')], common_prefixes: [], truncated: false })
+          ? json(200, { objects: [object('b.txt')], common_prefixes: [], truncated: false, access_included: false })
           : json(200, {
               objects: [object('a.txt')],
               common_prefixes: [],
               truncated: true,
+              access_included: false,
               next_continuation_token: 'page-2',
             }),
     });
@@ -281,7 +286,7 @@ describe('object browser', () => {
   it('downloads through a plain same-origin link', async () => {
     fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: [object('2026/a b.jpg')], common_prefixes: [], truncated: false }),
+        json(200, { objects: [object('2026/a b.jpg')], common_prefixes: [], truncated: false, access_included: false }),
     });
     render(<ObjectsScreen bucket="photos" prefix="2026/" />);
 
@@ -293,7 +298,7 @@ describe('object browser', () => {
   it('shows what is known about an object', async () => {
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false }),
+        json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false, access_included: false }),
       'GET /buckets/photos/object/metadata': () =>
         json(200, {
           bucket: 'photos',
@@ -442,7 +447,7 @@ describe('object browser', () => {
   it('asks again who accessed when the details of another object are opened', async () => {
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false }),
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
       'GET /buckets/photos/object/metadata': (call) =>
         json(200, {
           bucket: 'photos',
@@ -472,7 +477,7 @@ describe('object browser', () => {
   it('deletes an object and lists again', async () => {
     let objects = [object('a.txt')];
     const api = fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false, access_included: false }),
       'DELETE /buckets/photos/object': () => {
         objects = [];
         return noContent();
@@ -490,7 +495,7 @@ describe('object browser', () => {
   it('deletes the objects that are ticked, and only those', async () => {
     let objects = [object('a.txt'), object('b.txt'), object('c.txt')];
     const api = fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: ['dir/'], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: ['dir/'], truncated: false, access_included: false }),
       'DELETE /buckets/photos/object': (call) => {
         objects = objects.filter((o) => o.key !== call.query.get('key'));
         return noContent();
@@ -532,9 +537,10 @@ describe('object browser', () => {
               objects: [object('a.txt'), object('b.txt')],
               common_prefixes: [],
               truncated: true,
+              access_included: false,
               next_continuation_token: 'b.txt',
             })
-          : json(200, { objects: [object('z.txt')], common_prefixes: [], truncated: false }),
+          : json(200, { objects: [object('z.txt')], common_prefixes: [], truncated: false, access_included: false }),
       'DELETE /buckets/photos/object': () => noContent(),
     });
     render(<ObjectsScreen bucket="photos" prefix="" />);
@@ -561,7 +567,7 @@ describe('object browser', () => {
   it('ticks every object of the page at once, and stops at a refusal', async () => {
     const objects = [object('a.txt'), object('b.txt')];
     const api = fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false, access_included: false }),
       'DELETE /buckets/photos/object': (call) =>
         call.query.get('key') === 'a.txt' ? noContent() : problem(403, 'Access denied', undefined, 'req-9'),
     });
@@ -583,7 +589,7 @@ describe('object browser', () => {
     let flaky = 2;
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false }),
+        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false, access_included: false }),
       'PUT /buckets/photos/object': (call) => {
         const key = call.query.get('key') ?? '';
         if (key.endsWith('a.txt') && !allowA) {
@@ -629,6 +635,9 @@ describe('object browser', () => {
     expect(progress.getByText('Not stored')).toBeDefined();
     expect(screen.getByText('5 of 6 stored')).toBeDefined();
     expect(screen.getByText(/1 not stored/)).toBeDefined();
+    // While files were on their way there was nothing to clear: see the test
+    // of the button below. Now that none is, there is.
+    await screen.findByRole('button', { name: 'Clear' });
     // Why, beside the file it is about.
     expect(progress.getByText('Access denied: Not this one.')).toBeDefined();
     const puts = () => api.callsTo('PUT', '/buckets/photos/object');
@@ -662,10 +671,286 @@ describe('object browser', () => {
     expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull();
   });
 
+  it('clears what became of an upload when asked to, and not while files are on their way', async () => {
+    const stored: string[] = [];
+    // The uploads are held until the test lets them go.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false, access_included: false }),
+      'PUT /buckets/photos/object': (call) => {
+        const key = call.query.get('key') ?? '';
+        if (key === 'bad.txt') {
+          return problem(403, 'Access denied');
+        }
+        stored.push(key);
+        return json(200, {
+          bucket: 'photos',
+          key,
+          size: call.body.length,
+          etag: '"e"',
+          last_modified: CREATED,
+          content_type: 'text/plain',
+          encryption: 'SSE-S3',
+        });
+      },
+    });
+    // The fake's XMLHttpRequest answers through fetch: holding fetch for a
+    // PUT holds the upload.
+    const answer = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.method === 'PUT') {
+        await held;
+      }
+      return answer(request);
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+    await screen.findByText('There is nothing here.');
+
+    const files = ['good.txt', 'bad.txt'].map((name) => new NodeFile([name], name, { type: 'text/plain' }));
+    fireEvent.change(screen.getByLabelText('File'), { target: { files } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
+
+    // On their way: there is a status, and no way to clear it.
+    await screen.findByRole('list', { name: 'Upload progress' });
+    expect(screen.getByText('0 of 2 stored')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull();
+
+    release();
+    const clear = await screen.findByRole('button', { name: 'Clear' });
+    expect(screen.getByText('1 of 2 stored')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Retry failed' })).toBeDefined();
+    expect(clear.getAttribute('title')).toBe('Clear the upload status');
+    expect(clear.querySelector('.btn-text')?.textContent).toBe('Clear');
+    expect(clear.querySelector('i.bi')).not.toBeNull();
+    await screen.findByLabelText('Select good.txt');
+    const puts = api.callsTo('PUT', '/buckets/photos/object').length;
+    const lists = api.callsTo('GET', '/buckets/photos/objects').length;
+
+    fireEvent.click(clear);
+
+    // The summary, the tiles and the way to send again are gone...
+    expect(screen.queryByRole('list', { name: 'Upload progress' })).toBeNull();
+    expect(screen.queryByText('1 of 2 stored')).toBeNull();
+    expect(screen.queryByText(/not stored/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull();
+    // ...with what the upload was refused for...
+    expect(screen.queryByRole('alert')).toBeNull();
+    // ...and nothing else is touched: the files chosen, the field, the objects.
+    expect(screen.getByText(/2 files chosen/)).toBeDefined();
+    expect(screen.getByLabelText('Upload under this prefix')).toBeDefined();
+    expect(screen.getByLabelText('Select good.txt')).toBeDefined();
+    expect(api.callsTo('PUT', '/buckets/photos/object')).toHaveLength(puts);
+    expect(api.callsTo('GET', '/buckets/photos/objects')).toHaveLength(lists);
+  });
+
+  it('lists what was uploaded into an empty bucket, with nothing more asked of the user', async () => {
+    const stored: string[] = [];
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false, access_included: false }),
+      'PUT /buckets/photos/object': (call) => {
+        const key = call.query.get('key') ?? '';
+        stored.push(key);
+        return json(200, {
+          bucket: 'photos',
+          key,
+          size: call.body.length,
+          etag: '"e"',
+          last_modified: CREATED,
+          content_type: 'text/plain',
+          encryption: 'SSE-S3',
+        });
+      },
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+    await screen.findByText('There is nothing here.');
+
+    const names = ['one.txt', 'two.txt', 'three.txt', 'four.txt'];
+    const files = names.map((name) => new NodeFile([name], name, { type: 'text/plain' }));
+    fireEvent.change(screen.getByLabelText('File'), { target: { files } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
+
+    await screen.findByText('4 of 4 stored');
+    // Every one of them is in the grid, and the bucket is no longer called
+    // empty - without a click, a reload or a change of page.
+    for (const name of names) {
+      expect(await screen.findByLabelText(`Select ${name}`)).toBeDefined();
+    }
+    expect(screen.queryByText('There is nothing here.')).toBeNull();
+    // The listing was asked for again after the last file was stored.
+    const lastPut = api.calls.findLastIndex((call) => call.method === 'PUT');
+    const lastList = api.calls.findLastIndex((call) => call.method === 'GET' && call.path === '/buckets/photos/objects');
+    expect(lastList).toBeGreaterThan(lastPut);
+    expect(api.callsTo('GET', '/buckets/photos/objects')).toHaveLength(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not call a bucket empty when the list could not be read again, and reads it again when asked', async () => {
+    const stored: string[] = [];
+    let failing = false;
+    fakeApi({
+      'GET /buckets/photos/objects': () =>
+        failing
+          ? json(503, { type: 'about:blank', title: 'Temporarily unavailable', status: 503, code: 'Unavailable' })
+          : json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false, access_included: false }),
+      'PUT /buckets/photos/object': (call) => {
+        const key = call.query.get('key') ?? '';
+        stored.push(key);
+        return json(200, {
+          bucket: 'photos',
+          key,
+          size: call.body.length,
+          etag: '"e"',
+          last_modified: CREATED,
+          content_type: 'text/plain',
+          encryption: 'SSE-S3',
+        });
+      },
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+    await screen.findByText('There is nothing here.');
+
+    // The file is stored, and the list that follows cannot be read.
+    failing = true;
+    const file = new NodeFile(['one'], 'one.txt', { type: 'text/plain' });
+    fireEvent.change(screen.getByLabelText('File'), { target: { files: [file] } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
+    await screen.findByText('1 of 1 stored');
+
+    // What is shown is the list of before: it is said to be that, and the
+    // bucket is not said to hold nothing.
+    await screen.findByText(/The list could not be read again/);
+    expect(screen.queryByText('There is nothing here.')).toBeNull();
+
+    failing = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    expect(await screen.findByLabelText('Select one.txt')).toBeDefined();
+    expect(screen.queryByText(/The list could not be read again/)).toBeNull();
+  });
+
+  it('shows who uploaded each object and how often it was downloaded, when the listing carries it', async () => {
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, {
+          objects: [
+            {
+              ...object('read.txt'),
+              access: {
+                uploaded_by: 'user/alice',
+                uploaded_at: '2026-10-02T08:00:00Z',
+                download_count: 1234,
+                copy_count: 2,
+                last_downloaded_at: '2026-10-05T10:00:00Z',
+              },
+            },
+            // Uploaded before uploaders were recorded, and never read.
+            { ...object('old.txt'), access: { uploaded_at: CREATED, download_count: 0, copy_count: 0 } },
+            // One the caller may not see it of: the API says nothing.
+            object('secret.txt'),
+          ],
+          common_prefixes: ['dir/'],
+          truncated: false,
+          access_included: true,
+        }),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    const table = (await screen.findByRole('table')) as HTMLTableElement;
+    expect(within(table).getAllByRole('columnheader').map((th) => th.textContent)).toEqual([
+      'Select',
+      'Name',
+      'Size',
+      'Last modified',
+      'Uploaded by',
+      'Uploaded',
+      'Downloads',
+      'Copies',
+      'Last downloaded',
+      'Actions',
+    ]);
+    // Wide: it is scrolled inside its panel, the page is not.
+    expect(table.className).toContain('grid-wide');
+    expect(table.className).toContain('grid-keep');
+    expect(table.parentElement?.className).toContain('table-responsive');
+
+    // The five cells after "Last modified" of the row of an object.
+    const facts = (name: string) => {
+      const row = within(table).getByLabelText(`Select ${name}`).closest('tr') as HTMLTableRowElement;
+      const cells = within(row).getAllByRole('cell');
+      expect(cells).toHaveLength(10);
+      expect(cells.map((cell) => cell.getAttribute('data-label')).slice(4, 9)).toEqual([
+        'Uploaded by',
+        'Uploaded',
+        'Downloads',
+        'Copies',
+        'Last downloaded',
+      ]);
+      return cells.slice(4, 9).map((cell) => cell.textContent);
+    };
+    // Worded as the details of an object word the same facts.
+    expect(facts('read.txt')).toEqual([
+      'user/alice',
+      new Date('2026-10-02T08:00:00Z').toLocaleString(),
+      '1234',
+      '2',
+      new Date('2026-10-05T10:00:00Z').toLocaleString(),
+    ]);
+    expect(facts('old.txt')).toEqual(['not recorded', new Date(CREATED).toLocaleString(), '0', '0', 'never']);
+    expect(facts('secret.txt')).toEqual(['', '', '', '', '']);
+    // A folder has none of it: its cells are there, and empty.
+    const folder = within(table).getByRole('link', { name: 'dir/' }).closest('tr') as HTMLTableRowElement;
+    const folderCells = within(folder).getAllByRole('cell');
+    expect(folderCells).toHaveLength(10);
+    expect(folderCells.slice(4, 9).map((cell) => cell.textContent)).toEqual(['', '', '', '', '']);
+    expect(folderCells[9]?.getAttribute('data-label')).toBe('Actions');
+    // The counts are figures in a column of figures.
+    const downloads = within(table).getByRole('columnheader', { name: 'Downloads' });
+    expect(downloads.className).toContain('grid-number');
+    expect(within(table).getByRole('columnheader', { name: 'Copies' }).className).toContain('grid-number');
+    expect(within(table).getByRole('columnheader', { name: 'Uploaded by' }).className).not.toContain('grid-number');
+
+    // All of it came with the one listing: no question an object.
+    expect(api.calls).toHaveLength(1);
+    expect(api.calls[0]?.query.get('access')).toBe('true');
+    expect(api.callsTo('GET', '/buckets/photos/object/access')).toHaveLength(0);
+  });
+
+  it('shows none of those columns when the listing does not carry them', async () => {
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false, access_included: false }),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    const table = (await screen.findByRole('table')) as HTMLTableElement;
+    const headings = within(table)
+      .getAllByRole('columnheader')
+      .map((th) => th.textContent);
+    expect(headings).toEqual(['Select', 'Name', 'Size', 'Last modified', 'Actions']);
+    for (const heading of ['Uploaded by', 'Uploaded', 'Downloads', 'Copies', 'Last downloaded']) {
+      expect(headings).not.toContain(heading);
+      expect(table.querySelector(`[data-label="${heading}"]`)).toBeNull();
+    }
+    // No empty columns either: a row has the cells it always had.
+    for (const row of within(table).getAllByRole('row').slice(1)) {
+      expect(within(row).getAllByRole('cell')).toHaveLength(5);
+    }
+    expect(table.className).not.toContain('grid-wide');
+    // It was asked for all the same: the API said no, and that is no failure.
+    expect(api.calls[0]?.query.get('access')).toBe('true');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('gives every button a hint, and the buttons of a row their name as one', async () => {
     fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false }),
+        json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false, access_included: false }),
     });
     render(<ObjectsScreen bucket="photos" prefix="" />);
     await screen.findByLabelText('Select a.txt');
@@ -688,7 +973,7 @@ describe('object browser', () => {
 
   it('keeps the objects in a table, whatever the width of the screen', async () => {
     fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false, access_included: false }),
     });
     render(<ObjectsScreen bucket="photos" prefix="" />);
 
@@ -707,7 +992,7 @@ describe('object browser', () => {
   it('uploads a file under the current prefix and lists again', async () => {
     let objects: ReturnType<typeof object>[] = [];
     const api = fakeApi({
-      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false, access_included: false }),
       'PUT /buckets/photos/object': (call) => {
         objects = [object(call.query.get('key') ?? '', call.body.length)];
         return json(200, {

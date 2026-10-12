@@ -207,6 +207,14 @@ paths:
       operationId: listObjects
       tags: [objects]
       summary: List the objects of a bucket
+      description: |
+        One page of the bucket's objects. With `access=true` every object also says who uploaded it and
+        when, how often it was downloaded and copied, and when last - the figures of
+        `/buckets/{bucket}/object/access`, without the readers - where the caller holds
+        `admin:GetObjectAccess` on that object. That permission decides only what the listing carries: a
+        caller without it is given the same listing with `access_included: false` and no `access` on any
+        object. The listing is never refused for want of that permission, and nothing is written to the audit trail
+        for it; where the facts may be shown and cannot be read, the listing fails as any read that fails does.
       x-cactusfs-action: s3:ListBucket
       parameters:
         - $ref: '#/components/parameters/BucketName'
@@ -235,6 +243,15 @@ paths:
             minimum: 1
             maximum: 1000
             default: 200
+        - name: access
+          in: query
+          description: |
+            Whether the listing should carry, for each object, who uploaded it and how often it was
+            downloaded. It does so only for a caller who holds `admin:GetObjectAccess`; see
+            `access_included`.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: One page of the listing.
@@ -1189,6 +1206,37 @@ components:
         last_modified:
           type: string
           format: date-time
+        access:
+          $ref: '#/components/schemas/ObjectAccessSummary'
+    ObjectAccessSummary:
+      type: object
+      description: |
+        Who uploaded the current version of an object and how often it was read, as a listing carries it:
+        the figures of `ObjectAccess` without the readers. Best-effort counts, not an audit trail. Present
+        on an object only in a listing that was asked for with `access=true`, and only where the caller
+        holds `admin:GetObjectAccess` on the object.
+      required: [uploaded_at, download_count, copy_count]
+      properties:
+        uploaded_by:
+          type: string
+          description: Who uploaded the version, as the audit trail names actors. Absent when it was not recorded.
+        uploaded_at:
+          type: string
+          format: date-time
+        download_count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Downloads of the version, every ranged request counted by itself.
+        copy_count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: How often the version was the source of a copy.
+        last_downloaded_at:
+          type: string
+          format: date-time
+          description: When the last download or copy was recorded. Absent when there was none.
     BucketUsage:
       type: object
       required: [object_count, total_size, complete]
@@ -1208,12 +1256,19 @@ components:
           description: False when the bucket has more objects than are counted in one request.
     ObjectList:
       type: object
-      required: [objects, common_prefixes, truncated]
+      required: [objects, common_prefixes, truncated, access_included]
       properties:
         objects:
           type: array
           items:
             $ref: '#/components/schemas/ObjectSummary'
+        access_included:
+          type: boolean
+          description: |
+            True only when the listing was asked for with `access=true` and the caller holds
+            `admin:GetObjectAccess` on the bucket or on at least one object of this page: the objects the
+            caller holds it on then carry `access`. False otherwise - not asked for, not permitted, or a
+            node that keeps no such record - and then no object carries `access`.
         common_prefixes:
           type: array
           items:

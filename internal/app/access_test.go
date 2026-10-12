@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -1071,4 +1073,353 @@ func (failingAccess) AddObjectReads(context.Context, ports.ReadBatch) error {
 
 func (failingAccess) ObjectAccess(context.Context, string, string, object.VersionRef) (object.Access, error) {
 	return object.Access{}, domain.ErrUnavailable
+}
+
+func (failingAccess) ObjectAccesses(context.Context, string, []ports.ListedVersion) ([]object.Access, error) {
+	return nil, domain.ErrUnavailable
+}
+
+// countedAccess is the record of reads with a count of the questions put to
+// it, and of the versions the questions about several named.
+type countedAccess struct {
+	ports.ObjectAccessStore
+
+	mu     sync.Mutex
+	single int
+	pages  [][]ports.ListedVersion
+}
+
+func (c *countedAccess) ObjectAccess(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Access, error) {
+	c.mu.Lock()
+	c.single++
+	c.mu.Unlock()
+	return c.ObjectAccessStore.ObjectAccess(ctx, bucketName, key, ref)
+}
+
+func (c *countedAccess) ObjectAccesses(ctx context.Context, bucketName string, versions []ports.ListedVersion) ([]object.Access, error) {
+	c.mu.Lock()
+	c.pages = append(c.pages, append([]ports.ListedVersion(nil), versions...))
+	c.mu.Unlock()
+	return c.ObjectAccessStore.ObjectAccesses(ctx, bucketName, versions)
+}
+
+// asked returns how many questions about one version were put, and the
+// questions about several.
+func (c *countedAccess) asked() (int, [][]ports.ListedVersion) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.single, append([][]ports.ListedVersion(nil), c.pages...)
+}
+
+// TestListWithAccess: a listing can carry, for each of its objects, who
+// uploaded it and how often it was read - exactly what the question about
+// that one object answers, read in one go - for whoever may see it. Whoever
+// may not is given the listing all the same, and no refusal: the permission
+// decides what the listing carries, not whether there is one.
+func TestListWithAccess(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newAccessFixture(t)
+	counted := &countedAccess{ObjectAccessStore: f.meta}
+	f.objects = f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
+		cfg.Access, cfg.AccessStore = f.recorder, counted
+	})
+	f.createBucket(t, "kept")
+	if err := f.meta.SetBucketVersioning(ctx, "kept", bucket.VersioningEnabled); err != nil {
+		t.Fatal(err)
+	}
+	alice := userNamed("alice", "s3:*")
+	put := func(p iam.Principal, bucketName, key string) object.Version {
+		t.Helper()
+		v, err := f.objects.Put(ctx, p, app.PutInput{Bucket: bucketName, Key: key, Body: bytes.NewReader([]byte("data")), Size: 4})
+		if err != nil {
+			t.Fatalf("Put %s/%s: %v", bucketName, key, err)
+		}
+		return v
+	}
+	// In a bucket that keeps no versions: an object nobody read, one that
+	// was downloaded, one that was copied, one of before uploaders were
+	// recorded, and two in a folder.
+	put(alice, "b", "never")
+	put(alice, "b", "downloaded")
+	put(porttest.Root(), "b", "copied")
+	put(alice, "b", "dir/one")
+	put(alice, "b", "dir/two")
+	old := porttest.SampleVersion("b", "old", 1)
+	old.CreatedBy = ""
+	if _, err := f.meta.PutVersion(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	// Where versions are kept: a key with an older version that was read
+	// more than the current one, and beside it a key that was deleted.
+	first := put(alice, "kept", "k")
+	f.clock.Advance(time.Hour)
+	put(porttest.Root(), "kept", "k")
+	put(alice, "kept", "gone")
+	if marked, err := f.objects.Delete(ctx, porttest.Root(), app.DeleteInput{Bucket: "kept", Key: "gone"}); err != nil || marked.Marker == nil {
+		t.Fatalf("Delete = %+v, %v", marked, err)
+	}
+	f.download(t, alice, app.GetInput{Bucket: "b", Key: "downloaded"})
+	f.download(t, porttest.Root(), app.GetInput{Bucket: "b", Key: "downloaded"})
+	f.download(t, alice, app.GetInput{Bucket: "b", Key: "dir/one"})
+	if _, err := f.objects.Copy(ctx, porttest.Root(), app.CopyInput{
+		Source: app.GetInput{Bucket: "b", Key: "copied"}, Destination: app.PutInput{Bucket: "kept", Key: "copy"}, Digest: tagged,
+	}); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	oldest := first.Ref()
+	for range 3 {
+		f.download(t, alice, app.GetInput{Bucket: "kept", Key: "k", Version: &oldest})
+	}
+	f.download(t, alice, app.GetInput{Bucket: "kept", Key: "k"})
+	f.clock.Advance(time.Minute)
+	f.flush(t)
+
+	role := func(name string) iam.Principal {
+		return iam.Principal{AccessKeyID: "K" + name, User: name, Policies: []iam.Document{iam.BuiltInPolicies()[name]}}
+	}
+	statement := func(effect iam.Effect, action string, resources ...string) iam.Statement {
+		return iam.Statement{Effect: effect, Actions: []string{action}, Resources: resources}
+	}
+	with := func(statements ...iam.Statement) iam.Principal {
+		return iam.Principal{AccessKeyID: "KS", User: "scoped", Policies: []iam.Document{{Version: iam.PolicyVersion, Statements: statements}}}
+	}
+	list := statement(iam.Allow, "s3:ListBucket", "*")
+	access := string(iam.ActionGetObjectAccess)
+	delimited := object.ListOptions{MaxKeys: 100, Delimiter: "/"}
+
+	tests := []struct {
+		name      string
+		principal iam.Principal
+		bucket    string
+		opts      object.ListOptions
+		ask       bool
+		want      error
+		// keys are the objects of the page and prefixes its folders.
+		keys     []string
+		prefixes []string
+		included bool
+		// shown are the objects that carry what is known of their access.
+		shown []string
+	}{
+		{
+			name: "root", principal: porttest.Root(), bucket: "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"}, included: true,
+			shown: []string{"copied", "downloaded", "never", "old"},
+		},
+		{
+			name: "under a prefix", principal: role(iam.RoleClusterAdmin), bucket: "b", opts: object.ListOptions{MaxKeys: 100, Prefix: "dir/"}, ask: true,
+			keys: []string{"dir/one", "dir/two"}, included: true, shown: []string{"dir/one", "dir/two"},
+		},
+		// An auditor may see it of every object and may list none: the
+		// permission to see it does not make a listing.
+		{name: "an auditor, who may not list", principal: role(iam.RoleAuditor), bucket: "b", opts: delimited, ask: true, want: domain.ErrAccessDenied},
+		{
+			name: "where versions are kept, beside a deleted key", principal: role(iam.RoleClusterAdmin), bucket: "kept", opts: delimited, ask: true,
+			keys: []string{"copy", "k"}, included: true, shown: []string{"copy", "k"},
+		},
+		{
+			name: "a page cut short", principal: porttest.Root(), bucket: "b", opts: object.ListOptions{MaxKeys: 2}, ask: true,
+			keys: []string{"copied", "dir/one"}, included: true, shown: []string{"copied", "dir/one"},
+		},
+		{
+			name: "not asked for", principal: porttest.Root(), bucket: "b", opts: delimited,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"},
+		},
+		{
+			name: "who may list and may not see it", principal: alice, bucket: "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"},
+		},
+		{
+			name: "a read-write user", principal: role(iam.RoleReadWrite), bucket: "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"},
+		},
+		{
+			name: "a bucket admin", principal: role(iam.RoleBucketAdmin), bucket: "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"},
+		},
+		{
+			name:      "who may see it of the objects of the bucket and of one not",
+			principal: with(list, statement(iam.Allow, access, "*"), statement(iam.Deny, access, "arn:aws:s3:::b/downloaded")),
+			bucket:    "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"}, included: true,
+			shown: []string{"copied", "never", "old"},
+		},
+		{
+			name:      "who may see it of the objects under a prefix only",
+			principal: with(list, statement(iam.Allow, access, "arn:aws:s3:::b/dir/*")),
+			bucket:    "b", opts: object.ListOptions{MaxKeys: 100}, ask: true,
+			keys: []string{"copied", "dir/one", "dir/two", "downloaded", "never", "old"}, included: true,
+			shown: []string{"dir/one", "dir/two"},
+		},
+		{
+			name:      "who may see it under a prefix, of a page that has none of it",
+			principal: with(list, statement(iam.Allow, access, "arn:aws:s3:::b/dir/*")),
+			bucket:    "b", opts: delimited, ask: true,
+			keys: []string{"copied", "downloaded", "never", "old"}, prefixes: []string{"dir/"},
+		},
+		{
+			name: "who may see it, of a page of folders only", principal: porttest.Root(), bucket: "b",
+			opts: object.ListOptions{MaxKeys: 100, Prefix: "di", Delimiter: "/"}, ask: true,
+			prefixes: []string{"dir/"}, included: true,
+		},
+		{name: "who may see it and may not list", principal: with(statement(iam.Allow, access, "*")), bucket: "b", opts: delimited, ask: true, want: domain.ErrAccessDenied},
+		{name: "nobody", principal: anonymous(), bucket: "b", opts: delimited, ask: true, want: domain.ErrAccessDenied},
+		{name: "a bucket there is not", principal: porttest.Root(), bucket: "nope", opts: delimited, ask: true, want: domain.ErrBucketNotFound},
+		{name: "a page of a size there is not", principal: porttest.Root(), bucket: "b", opts: object.ListOptions{MaxKeys: -1}, ask: true, want: domain.ErrInvalidArgument},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gated, filtered := len(f.authz.Requests()), len(f.authz.Filtered())
+			singleBefore, pagesBefore := counted.asked()
+			got, err := f.objects.ListWithAccess(ctx, tt.principal, tt.bucket, tt.opts, tt.ask)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("ListWithAccess = %v, want %v", err, tt.want)
+			}
+			// The listing is the one thing that is gated - and so the one
+			// thing a refusal is recorded for.
+			asked := f.authz.Requests()[gated:]
+			if len(asked) != 1 || asked[0].Action != iam.ActionListBucket || asked[0].Resource != (iam.Resource{Bucket: tt.bucket}) {
+				t.Errorf("the authorizer was asked to gate %+v", asked)
+			}
+			sifted := f.authz.Filtered()[filtered:]
+			single, pages := counted.asked()
+			pages = pages[len(pagesBefore):]
+			if single != singleBefore {
+				t.Errorf("the listing asked the store about %d versions one by one", single-singleBefore)
+			}
+			if err != nil {
+				if len(sifted) != 0 || len(pages) != 0 || got.Included || got.Access != nil || len(got.Page.Objects) != 0 {
+					t.Errorf("a refusal came with %+v, after %d questions of what to show and %d reads", got, len(sifted), len(pages))
+				}
+				return
+			}
+
+			// The page is the page List gives.
+			plain, err := f.objects.List(ctx, tt.principal, tt.bucket, tt.opts)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !reflect.DeepEqual(got.Page, plain) {
+				t.Errorf("the page = %+v, want that of List: %+v", got.Page, plain)
+			}
+			keys := make([]string, len(got.Page.Objects))
+			for i, v := range got.Page.Objects {
+				keys[i] = v.Key
+			}
+			if fmt.Sprint(keys) != fmt.Sprint(tt.keys) || fmt.Sprint(got.Page.CommonPrefixes) != fmt.Sprint(tt.prefixes) {
+				t.Fatalf("the page has %v and %v, want %v and %v", keys, got.Page.CommonPrefixes, tt.keys, tt.prefixes)
+			}
+
+			if !tt.ask {
+				// Nothing is decided and nothing read that was not asked for.
+				if len(sifted) != 0 || len(pages) != 0 || got.Included || got.Access != nil {
+					t.Errorf("a listing without it: %d questions of what to show, %d reads, %+v", len(sifted), len(pages), got)
+				}
+				return
+			}
+			// What may be shown is asked of the bucket and of each object -
+			// the question Access asks - and of nothing else: a folder is
+			// not asked about.
+			if len(sifted) != 1+len(tt.keys) {
+				t.Fatalf("%d questions of what to show, want one for the bucket and one for each of %d objects", len(sifted), len(tt.keys))
+			}
+			for i, req := range sifted {
+				key := ""
+				if i > 0 {
+					key = tt.keys[i-1]
+				}
+				if req.Action != iam.ActionGetObjectAccess || req.Resource != (iam.Resource{Bucket: tt.bucket, Key: key}) {
+					t.Errorf("question %d of what to show = %s on %s", i, req.Action, req.Resource)
+				}
+			}
+			if got.Included != tt.included {
+				t.Errorf("Included = %v, want %v", got.Included, tt.included)
+			}
+			if !tt.included {
+				if got.Access != nil || len(pages) != 0 {
+					t.Errorf("a listing that does not include it carries %+v, after %d reads", got.Access, len(pages))
+				}
+				return
+			}
+			if len(got.Access) != len(tt.keys) {
+				t.Fatalf("%d summaries for %d objects", len(got.Access), len(tt.keys))
+			}
+			// One read for the page, of the objects that are shown and no
+			// others - none when none is.
+			wantPages := 0
+			if len(tt.shown) > 0 {
+				wantPages = 1
+			}
+			if len(pages) != wantPages || (wantPages == 1 && len(pages[0]) != len(tt.shown)) {
+				t.Errorf("the store was asked %d times, for %v; want %d, for %d versions", len(pages), pages, wantPages, len(tt.shown))
+			}
+			for i, key := range tt.keys {
+				summary := got.Access[i]
+				if !slices.Contains(tt.shown, key) {
+					if summary != nil {
+						t.Errorf("%s: %+v is shown to who may not see it", key, *summary)
+					}
+					// And the question about that one object is refused.
+					if _, err := f.objects.Access(ctx, tt.principal, tt.bucket, key, ""); !errors.Is(err, domain.ErrAccessDenied) {
+						t.Errorf("%s: Access = %v, where the listing shows nothing", key, err)
+					}
+					continue
+				}
+				// Key by key what the question about that one object says.
+				one, err := f.objects.Access(ctx, tt.principal, tt.bucket, key, "")
+				if err != nil {
+					t.Fatalf("%s: Access: %v", key, err)
+				}
+				if summary == nil || *summary != one.Summary() {
+					t.Errorf("%s: the listing says %+v, Access says %+v", key, summary, one.Summary())
+				}
+			}
+		})
+	}
+
+	// What the figures are, said once outright and not only by comparison.
+	got, err := f.objects.ListWithAccess(ctx, porttest.Root(), "b", object.ListOptions{MaxKeys: 100}, true)
+	if err != nil || len(got.Access) != 6 {
+		t.Fatalf("ListWithAccess = %+v, %v", got, err)
+	}
+	uploaded, flushed := testNow, testNow.Add(time.Hour+time.Minute)
+	for i, want := range []app.AccessSummary{
+		{UploadedBy: "root", UploadedAt: uploaded, Copies: 1, LastDownloadedAt: flushed},
+		{UploadedBy: "user/alice", UploadedAt: uploaded, Downloads: 1, LastDownloadedAt: flushed},
+		{UploadedBy: "user/alice", UploadedAt: uploaded},
+		{UploadedBy: "user/alice", UploadedAt: uploaded, Downloads: 2, LastDownloadedAt: flushed},
+		{UploadedBy: "user/alice", UploadedAt: uploaded},
+		{UploadedAt: old.ModifiedAt},
+	} {
+		if got.Access[i] == nil || *got.Access[i] != want {
+			t.Errorf("%s: %+v, want %+v", got.Page.Objects[i].Key, got.Access[i], want)
+		}
+	}
+	// The current version's, not the older one's that was read more.
+	kept, err := f.objects.ListWithAccess(ctx, porttest.Root(), "kept", object.ListOptions{MaxKeys: 100, Prefix: "k"}, true)
+	if err != nil || len(kept.Access) != 1 || kept.Access[0] == nil || kept.Access[0].Downloads != 1 || kept.Access[0].UploadedBy != "root" {
+		t.Errorf("the current version of several = %+v, %v", kept.Access, err)
+	}
+
+	// A node that keeps no record of reads lists as it always did.
+	plain := f.objectServiceWith(t, func(*app.ObjectServiceConfig) {})
+	filtered := len(f.authz.Filtered())
+	if got, err := plain.ListWithAccess(ctx, porttest.Root(), "b", delimited, true); err != nil || got.Included || got.Access != nil || len(got.Page.Objects) != 4 {
+		t.Errorf("ListWithAccess without a store = %+v, %v", got, err)
+	}
+	if n := len(f.authz.Filtered()) - filtered; n != 0 {
+		t.Errorf("without a store, %d questions of what to show", n)
+	}
+	// The store's failure is the answer's, for who would have been shown.
+	broken := f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) { cfg.AccessStore = failingAccess{} })
+	if _, err := broken.ListWithAccess(ctx, porttest.Root(), "b", delimited, true); !errors.Is(err, domain.ErrUnavailable) {
+		t.Errorf("ListWithAccess over a store that fails = %v", err)
+	}
+	if got, err := broken.ListWithAccess(ctx, alice, "b", delimited, true); err != nil || got.Included {
+		t.Errorf("ListWithAccess over a store that fails, for who is shown nothing = %+v, %v", got, err)
+	}
+	if got, err := broken.ListWithAccess(ctx, porttest.Root(), "b", delimited, false); err != nil || got.Included {
+		t.Errorf("ListWithAccess over a store that fails, not asked for = %+v, %v", got, err)
+	}
 }

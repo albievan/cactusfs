@@ -397,7 +397,21 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   entry schema 3 the uploader is not recorded and the counts wait in memory.
   `GET /api/v1/buckets/{bucket}/object/access?key=` serves the record to holders of
   `admin:GetObjectAccess` (`cluster-admin`, `auditor`); `s3:GetObject` does not imply
-  it. The figures are counts kept as well as can be, **not an audit trail**: a crash
+  it. The listing (`GET /api/v1/buckets/{bucket}/objects?access=true`,
+  `ObjectService.ListWithAccess`) can carry, for each object of the page, the uploader,
+  the time of upload, the two totals and the time of the last read - what the record
+  says, without the readers. `s3:ListBucket` gates the listing, through `Authorize`, as
+  ever. `admin:GetObjectAccess` only decides what the page carries, so it is asked with
+  `Authorizer.Allowed`, which writes no denial: for the bucket, and for every object of
+  the page with the very request the single read is gated by (`accessRequest`), so that
+  a policy that gives or denies the action by key holds in the listing too. The answer
+  says `access_included` when the caller holds the action on the bucket or on an object
+  of the page, and only the objects the caller holds it on carry `access`; otherwise it
+  is the plain listing, never a refusal. The records of a page are read in one call,
+  `ports.ObjectAccessStore.ObjectAccesses`: one read transaction of point reads, at
+  most 1 000 versions, no walk. The console's object browser asks for it and shows the
+  five columns only when the answer includes them.
+  The figures are counts kept as well as can be, **not an audit trail**: a crash
   loses up to an interval of them.
 - **Console (implemented, ADR-0007).** `web/`, embedded with `-tags console` and served
   at `/` by nodes with the console role. It calls only the admin API, through the client

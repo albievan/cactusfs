@@ -114,6 +114,30 @@ object list and the object's metadata are unchanged, and so is the S3 API. No re
 resets or edits a record. No event is published for a flush: an event must not carry
 who read what to a webhook.
 
+**Listing (added 2026-10-12).** The object list can carry part of it. Asked with
+`access=true`, `GET /api/v1/buckets/{bucket}/objects` says of each object of the page
+who uploaded its current version and when, how often it was downloaded and copied, and
+when last - the five figures, never the readers. This replaces "the object list is
+unchanged" above; the object's metadata and the S3 API stay as they are.
+
+- The list is gated by `s3:ListBucket`, as before. `admin:GetObjectAccess` gates
+  nothing here: it decides what the page carries. It is therefore asked through the
+  authorizer's `Allowed`, and a caller without it gets the plain page, with
+  `access_included: false`, and no denial in the audit trail - nobody was refused what
+  they asked for by name.
+- It is asked for every object of the page, with the request the single read is gated
+  by: a policy may give or deny the action by key, and the list must never say of an
+  object what `/object/access` would refuse. It is asked for the bucket as well:
+  `access_included` is true when the caller holds the action on the bucket or on at
+  least one object of the page, so that a page of folders does not lose its columns.
+- The records of a page are read in one call and one read transaction
+  (`ObjectAccessStore.ObjectAccesses`), by point reads. An object replaced or deleted
+  between the listing and that read has zero counts: the record is of the version
+  that was listed, or nobody's.
+- Nothing is added to the log or to the state: no rise of the entry schema.
+- The figures are as fresh as the listing. The console does not ask again by itself: a
+  download made from the screen shows after the next flush and the next listing.
+
 The action is one of the `admin:Get...` family. A policy written before this release
 that grants `admin:Get*` or `admin:*` therefore grants it too: whoever keeps such a
 policy for a "read-only administrator" should know that it now shows who read what.
@@ -156,3 +180,8 @@ its own rise of the entry schema.
   traffic, and reads that fail or lose their count with no leader.
 - **The audit trail** - one record a read, never deleted, and already dropped under
   flood; a count would be a walk of the chain.
+
+A listing that may show the facts and cannot read them fails, as a read that fails
+does: it is not answered as if there were none. Who may not see them is not affected.
+A version replaced between the listing and the reading of its record is shown with its
+own uploader and no counts, until the list is read again.

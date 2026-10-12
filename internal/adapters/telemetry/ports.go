@@ -433,3 +433,11 @@ func (a *objectAccess) ObjectAccess(ctx context.Context, bucketName, key string,
 	done(err)
 	return access, err
 }
+
+// ObjectAccesses implements ports.ObjectAccessStore.
+func (a *objectAccess) ObjectAccesses(ctx context.Context, bucketName string, versions []ports.ListedVersion) ([]object.Access, error) {
+	ctx, done := a.t.call(ctx, portObjectAccess, "ObjectAccesses")
+	accesses, err := a.next.ObjectAccesses(ctx, bucketName, versions)
+	done(err)
+	return accesses, err
+}

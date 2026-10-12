@@ -332,6 +332,82 @@ func Schema3Contract(t *testing.T, open func(t *testing.T) Schema3) {
 		}
 	})
 
+	t.Run("the records of a page of versions are those of each", func(t *testing.T) {
+		t.Parallel()
+		s := withBucket(t, "plain", "ver")
+		if err := s.SetBucketVersioning(ctx, "ver", bucket.VersioningEnabled); err != nil {
+			t.Fatal(err)
+		}
+		listed := func(v object.Version) ports.ListedVersion {
+			return ports.ListedVersion{Key: v.Key, Version: v.Ref(), VersionID: v.VersionID}
+		}
+		never := put(t, s, "plain", "never-read", 1)
+		read := put(t, s, "plain", "read", 2)
+		copied := put(t, s, "plain", "copied", 3)
+		older := put(t, s, "ver", "k", 4)
+		current := put(t, s, "ver", "k", 5)
+		other := put(t, s, "ver", "other", 6)
+		if deleted, err := s.DeleteObject(ctx, "ver", "gone", ports.DeleteOptions{MarkerID: sampleVersionID(9), At: contractTime}); err != nil || deleted.Marker == nil {
+			t.Fatalf("DeleteObject = %+v, %v", deleted, err)
+		}
+		add(t, s, "node-a", 1, 1,
+			readOf(read, "user/a", false, 3, 0), readOf(read, "user/b", true, 1, 0), readOf(copied, "user/a", false, 0, 2),
+			readOf(older, "user/a", false, 7, 0), readOf(current, "user/b", false, 1, 1))
+
+		for name, tt := range map[string]struct {
+			bucket   string
+			versions []object.Version
+		}{
+			"where no versions are kept":           {"plain", []object.Version{copied, never, read}},
+			"where versions are kept":              {"ver", []object.Version{current, other}},
+			"an older version beside the current":  {"ver", []object.Version{older, current}},
+			"the same version twice, out of order": {"plain", []object.Version{read, never, read}},
+			"none":                                 {"plain", nil},
+		} {
+			names := make([]ports.ListedVersion, len(tt.versions))
+			for i, v := range tt.versions {
+				names[i] = listed(v)
+			}
+			got, err := s.ObjectAccesses(ctx, tt.bucket, names)
+			if err != nil || len(got) != len(tt.versions) {
+				t.Fatalf("%s: ObjectAccesses = %d records, %v; want %d", name, len(got), err, len(tt.versions))
+			}
+			// Key by key what the question about one version answers.
+			for i, v := range tt.versions {
+				if want := access(t, s, v); !reflect.DeepEqual(got[i], want) {
+					t.Errorf("%s: the record of %s/%s %s = %+v, want %+v", name, v.Bucket, v.Key, v.Ref(), got[i], want)
+				}
+			}
+		}
+		if got := access(t, s, read); got.Downloads != 4 || len(got.Readers) != 2 {
+			t.Fatalf("the version that was read = %+v", got)
+		}
+
+		// A version that is not there has the record of one never read, and
+		// so has a name that has come to mean another version: the listing
+		// it was asked for is older than the store.
+		replaced := put(t, s, "plain", "read", 7)
+		add(t, s, "node-a", 1, 2, readOf(replaced, "user/c", false, 5, 0))
+		gone := SampleVersion("plain", "never-put", 8)
+		got, err := s.ObjectAccesses(ctx, "plain", []ports.ListedVersion{listed(gone), listed(read), listed(replaced), listed(copied)})
+		if err != nil || len(got) != 4 {
+			t.Fatalf("ObjectAccesses = %+v, %v", got, err)
+		}
+		if !got[0].Empty() || !got[1].Empty() || got[2].Downloads != 5 || got[3].Copies != 2 {
+			t.Errorf("a version that is gone, one that was replaced, the one that replaced it, another = %+v", got)
+		}
+
+		if _, err := s.ObjectAccesses(ctx, "no-such-bucket", []ports.ListedVersion{listed(read)}); !errors.Is(err, domain.ErrBucketNotFound) {
+			t.Errorf("ObjectAccesses in a bucket that is not there = %v, want %v", err, domain.ErrBucketNotFound)
+		}
+		if _, err := s.ObjectAccesses(ctx, "plain", make([]ports.ListedVersion, object.MaxListKeys+1)); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("ObjectAccesses of more versions than a page has = %v, want %v", err, domain.ErrInvalidArgument)
+		}
+		if got, err := s.ObjectAccesses(ctx, "plain", make([]ports.ListedVersion, object.MaxListKeys)); err != nil || len(got) != object.MaxListKeys {
+			t.Errorf("ObjectAccesses of a full page = %d records, %v", len(got), err)
+		}
+	})
+
 	t.Run("a batch that is sent again is applied once", func(t *testing.T) {
 		t.Parallel()
 		s := withBucket(t, "b")

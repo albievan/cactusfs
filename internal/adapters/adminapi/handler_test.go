@@ -1338,6 +1338,121 @@ func TestObjectAccess(t *testing.T) {
 	}
 }
 
+// TestListObjectsWithAccess: asked to, the listing says of each object who
+// uploaded it and how often it was read - to those who may see that. Who may
+// not is given the same listing without it, and no denial is written for
+// what nobody was refused.
+func TestListObjectsWithAccess(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.meta.Now = f.clock.Now
+	alice := f.userKey("alice", iam.RoleBucketAdmin)
+	stranger := f.userKey("stranger", iam.RoleAuditor)
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "photos"}})
+	for _, key := range []string{"a.txt", "b.txt", "dir/c.txt"} {
+		f.must(http.StatusOK, call{method: "PUT", path: "/buckets/photos/object?key=" + key, raw: []byte("hello"), bearer: alice})
+	}
+	old := porttest.SampleVersion("photos", "old.txt", 1)
+	old.CreatedBy = ""
+	if _, err := f.meta.PutVersion(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt"})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt", bearer: alice})
+	f.clock.Advance(time.Minute)
+	if err := f.access.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	type listing struct {
+		Objects []struct {
+			Key    string `json:"key"`
+			Access *struct {
+				UploadedBy       *string    `json:"uploaded_by"`
+				UploadedAt       *time.Time `json:"uploaded_at"`
+				DownloadCount    *int64     `json:"download_count"`
+				CopyCount        *int64     `json:"copy_count"`
+				LastDownloadedAt *time.Time `json:"last_downloaded_at"`
+			} `json:"access"`
+		} `json:"objects"`
+		CommonPrefixes []string `json:"common_prefixes"`
+		AccessIncluded *bool    `json:"access_included"`
+	}
+	const path = "/buckets/photos/objects?delimiter=/"
+	before := len(f.trail())
+
+	// Root may see it: every object says, a folder nothing.
+	var full listing
+	r := f.must(http.StatusOK, call{method: "GET", path: path + "&access=true"})
+	r.decode(t, &full)
+	if full.AccessIncluded == nil || !*full.AccessIncluded || len(full.Objects) != 3 || fmt.Sprint(full.CommonPrefixes) != "[dir/]" {
+		t.Fatalf("the listing with access = %s", r.body)
+	}
+	read, unread, unsigned := full.Objects[0].Access, full.Objects[1].Access, full.Objects[2].Access
+	if read == nil || unread == nil || unsigned == nil {
+		t.Fatalf("an object without what is known of its access: %s", r.body)
+	}
+	if read.UploadedBy == nil || *read.UploadedBy != "user/alice" || read.UploadedAt == nil || !read.UploadedAt.Equal(testNow) ||
+		read.DownloadCount == nil || *read.DownloadCount != 2 || read.CopyCount == nil || *read.CopyCount != 0 ||
+		read.LastDownloadedAt == nil || !read.LastDownloadedAt.Equal(testNow.Add(time.Minute)) {
+		t.Errorf("an object that was read twice: %s", r.body)
+	}
+	if unread.DownloadCount == nil || *unread.DownloadCount != 0 || unread.CopyCount == nil || unread.LastDownloadedAt != nil {
+		t.Errorf("an object nobody read: %s", r.body)
+	}
+	if unsigned.UploadedBy != nil || unsigned.UploadedAt == nil || !unsigned.UploadedAt.Equal(old.ModifiedAt) {
+		t.Errorf("an object whose uploader was not recorded: %s", r.body)
+	}
+	// The same figures as the question about the one object - and never
+	// who read it.
+	var one struct {
+		DownloadCount int64 `json:"download_count"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object/access?key=a.txt"}).decode(t, &one)
+	if one.DownloadCount != *read.DownloadCount {
+		t.Errorf("the listing says %d downloads, the object's own answer %d", *read.DownloadCount, one.DownloadCount)
+	}
+	for _, never := range []string{"readers", "who", "presigned", `"root"`} {
+		if strings.Contains(string(r.body), never) {
+			t.Errorf("the listing has %q in it: %s", never, r.body)
+		}
+	}
+
+	for name, tt := range map[string]struct {
+		bearer string
+		query  string
+	}{
+		"not asked for":                   {f.root, ""},
+		"asked not to":                    {f.root, "&access=false"},
+		"a bucket admin, who may list":    {alice, "&access=true"},
+		"a bucket admin, who did not ask": {alice, ""},
+	} {
+		var plain listing
+		r := f.must(http.StatusOK, call{method: "GET", path: path + tt.query, bearer: tt.bearer})
+		r.decode(t, &plain)
+		if plain.AccessIncluded == nil || *plain.AccessIncluded || len(plain.Objects) != 3 || fmt.Sprint(plain.CommonPrefixes) != "[dir/]" ||
+			strings.Contains(string(r.body), `"access":`) || strings.Contains(string(r.body), "uploaded_by") {
+			t.Errorf("%s: the listing = %s", name, r.body)
+		}
+	}
+	// Nobody was refused anything, and the trail says nothing.
+	if n := len(f.trail()) - before; n != 0 {
+		t.Errorf("listings left %d audit records: %+v", n, f.trail()[before:])
+	}
+
+	// Who may not list is refused, whatever else they may see, and that is
+	// in the trail - once.
+	r = f.do(call{method: "GET", path: path + "&access=true", bearer: stranger})
+	if p := r.problem(t); r.status != http.StatusForbidden || p["code"] != "AccessDenied" {
+		t.Errorf("a listing by who may not list = %d %s", r.status, r.body)
+	}
+	trail := f.trail()[before:]
+	if len(trail) != 1 || trail[0].Outcome != audit.Denied || trail[0].Action != "s3:ListBucket" || trail[0].Actor != "user/stranger" {
+		t.Errorf("the refusal in the trail: %+v", trail)
+	}
+	f.must(http.StatusBadRequest, call{method: "GET", path: path + "&access=perhaps"})
+}
+
 // searchPage is the answer of a search, as a client reads it.
 type searchPage struct {
 	Results []struct {

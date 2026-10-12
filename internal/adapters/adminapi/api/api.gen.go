@@ -333,8 +333,32 @@ type ObjectAccess struct {
 	UploadedBy *string `json:"uploaded_by,omitempty"`
 }
 
+// ObjectAccessSummary Who uploaded the current version of an object and how often it was read, as a listing carries it:
+// the figures of `ObjectAccess` without the readers. Best-effort counts, not an audit trail. Present
+// on an object only in a listing that was asked for with `access=true`, and only where the caller
+// holds `admin:GetObjectAccess` on the object.
+type ObjectAccessSummary struct {
+	// CopyCount How often the version was the source of a copy.
+	CopyCount int64 `json:"copy_count"`
+
+	// DownloadCount Downloads of the version, every ranged request counted by itself.
+	DownloadCount int64 `json:"download_count"`
+
+	// LastDownloadedAt When the last download or copy was recorded. Absent when there was none.
+	LastDownloadedAt *time.Time `json:"last_downloaded_at,omitempty"`
+	UploadedAt       time.Time  `json:"uploaded_at"`
+
+	// UploadedBy Who uploaded the version, as the audit trail names actors. Absent when it was not recorded.
+	UploadedBy *string `json:"uploaded_by,omitempty"`
+}
+
 // ObjectList defines model for ObjectList.
 type ObjectList struct {
+	// AccessIncluded True only when the listing was asked for with `access=true` and the caller holds
+	// `admin:GetObjectAccess` on the bucket or on at least one object of this page: the objects the
+	// caller holds it on then carry `access`. False otherwise - not asked for, not permitted, or a
+	// node that keeps no such record - and then no object carries `access`.
+	AccessIncluded        bool            `json:"access_included"`
 	CommonPrefixes        []string        `json:"common_prefixes"`
 	NextContinuationToken *string         `json:"next_continuation_token,omitempty"`
 	Objects               []ObjectSummary `json:"objects"`
@@ -372,10 +396,15 @@ type ObjectReader struct {
 
 // ObjectSummary defines model for ObjectSummary.
 type ObjectSummary struct {
-	Etag         string    `json:"etag"`
-	Key          string    `json:"key"`
-	LastModified time.Time `json:"last_modified"`
-	Size         int64     `json:"size"`
+	// Access Who uploaded the current version of an object and how often it was read, as a listing carries it:
+	// the figures of `ObjectAccess` without the readers. Best-effort counts, not an audit trail. Present
+	// on an object only in a listing that was asked for with `access=true`, and only where the caller
+	// holds `admin:GetObjectAccess` on the object.
+	Access       *ObjectAccessSummary `json:"access,omitempty"`
+	Etag         string               `json:"etag"`
+	Key          string               `json:"key"`
+	LastModified time.Time            `json:"last_modified"`
+	Size         int64                `json:"size"`
 }
 
 // Policy defines model for Policy.
@@ -654,6 +683,11 @@ type ListObjectsParams struct {
 	// ContinuationToken The `next_continuation_token` of the previous page.
 	ContinuationToken *string `form:"continuation_token,omitempty" json:"continuation_token,omitempty"`
 	Limit             *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Access Whether the listing should carry, for each object, who uploaded it and how often it was
+	// downloaded. It does so only for a caller who holds `admin:GetObjectAccess`; see
+	// `access_included`.
+	Access *bool `form:"access,omitempty" json:"access,omitempty"`
 }
 
 // CreateGroupParams defines parameters for CreateGroup.
@@ -1661,6 +1695,19 @@ func (siw *ServerInterfaceWrapper) ListObjects(w http.ResponseWriter, r *http.Re
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "access" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "access", r.URL.Query(), &params.Access, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "access"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "access", Err: err})
 		}
 		return
 	}
