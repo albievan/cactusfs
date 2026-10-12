@@ -14,6 +14,8 @@ export interface Call {
   body: string;
   /** What the request asked for credentials (`same-origin`, …). */
   credentials: RequestCredentials;
+  /** The signal of the request: aborted when the console gave the request up. */
+  signal: AbortSignal;
 }
 
 /** Answers one request; the key it is registered under is `METHOD /path`. */
@@ -69,6 +71,7 @@ export function fakeApi(routes: Record<string, Handler> = {}): FakeApi {
       headers: request.headers,
       body: await request.text(),
       credentials: request.credentials,
+      signal: request.signal,
     };
     calls.push(call);
     const handler = handlers.get(`${call.method} ${call.path}`);

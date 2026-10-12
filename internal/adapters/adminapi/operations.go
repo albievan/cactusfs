@@ -293,6 +293,41 @@ func (o *operations) DeleteObject(ctx context.Context, request api.DeleteObjectR
 	return api.DeleteObject204Response{}, nil
 }
 
+// --- search ---
+
+// Search implements api.StrictServerInterface.
+func (o *operations) Search(ctx context.Context, request api.SearchRequestObject) (api.SearchResponseObject, error) {
+	in := app.SearchInput{
+		Query: request.Params.Q, Bucket: optional(request.Params.Bucket), Continuation: optional(request.Params.Continuation),
+	}
+	if l := request.Params.Limit; l != nil {
+		// Zero is the use case's word for "not said"; here it was said.
+		if *l < 1 || *l > app.MaxSearchLimit {
+			return nil, fmt.Errorf("%w: limit must be 1 to %d", domain.ErrInvalidArgument, app.MaxSearchLimit)
+		}
+		in.Limit = *l
+	}
+	found, err := o.h.cfg.Search.Search(ctx, who(ctx), in)
+	if err != nil {
+		return nil, err
+	}
+	out := api.SearchResults{
+		Results: make([]api.SearchResult, len(found.Results)), Match: api.SearchResultsMatch(found.MatchKind),
+		Examined: found.Examined, Complete: found.Complete, NextContinuation: stringOrNil(found.NextContinuation),
+	}
+	for i, r := range found.Results {
+		if r.Kind == app.SearchResultBucket {
+			out.Results[i] = api.SearchResult{Kind: api.SearchResultKindBucket, Bucket: r.Bucket}
+			continue
+		}
+		out.Results[i] = api.SearchResult{
+			Kind: api.SearchResultKindObject, Bucket: r.Bucket, Key: &r.Key, Size: &r.Size,
+			LastModified: timeOrNil(r.ModifiedAt), Etag: stringOrNil(r.ETag),
+		}
+	}
+	return api.Search200JSONResponse(out), nil
+}
+
 // --- users ---
 
 func names(list []string) []string {

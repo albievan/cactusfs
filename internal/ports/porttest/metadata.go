@@ -71,6 +71,9 @@ type MemMetadata struct {
 	FailWrites error
 	// FailParts, when set, is returned by PutPart.
 	FailParts error
+	// PolicyPage, when set, is how many buckets one page of BucketPolicies
+	// reads.
+	PolicyPage int
 }
 
 // NewMemMetadata returns an empty MemMetadata.
@@ -705,6 +708,63 @@ func (m *MemMetadata) GetBucketConfig(_ context.Context, name, kind string) ([]b
 		return append([]byte(nil), document...), nil
 	}
 	return nil, nil
+}
+
+// memPolicyPage is how many buckets MemMetadata reads for one page of
+// BucketPolicies: few, so that a test with a handful of buckets already goes
+// through several pages.
+const memPolicyPage = 3
+
+// BucketPolicies implements ports.BucketPolicies, with pages of PolicyPage
+// buckets (three when it is not set). A document is lent as the port says,
+// and taken back: it is overwritten once visit has returned, so that a test
+// finds out whoever kept one without copying it.
+func (m *MemMetadata) BucketPolicies(ctx context.Context, from string, visit func(name string, document []byte) error) (string, error) {
+	type found struct {
+		name     string
+		document []byte
+	}
+	var page []found
+	next := ""
+	err := func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		size := m.PolicyPage
+		if size <= 0 {
+			size = memPolicyPage
+		}
+		names := slices.Sorted(maps.Keys(m.buckets))
+		at, _ := slices.BinarySearch(names, from)
+		for i, name := range names[at:] {
+			if i == size {
+				next = name
+				break
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if document := m.config[name][bucket.ConfigPolicy]; len(document) > 0 {
+				page = append(page, found{name: name, document: slices.Clone(document)})
+			}
+		}
+		return nil
+	}()
+	if err != nil {
+		return "", err
+	}
+	// As the real store does it: visit is called when the store's lock has
+	// been let go.
+	for _, p := range page {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		err := visit(p.name, p.document)
+		clear(p.document)
+		if err != nil {
+			return "", fmt.Errorf("porttest.BucketPolicies: %w", err)
+		}
+	}
+	return next, nil
 }
 
 // SetTags implements ports.ObjectIndex.

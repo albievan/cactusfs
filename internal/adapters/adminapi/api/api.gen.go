@@ -77,6 +77,45 @@ func (e IdentityVia) Valid() bool {
 	}
 }
 
+// Defines values for SearchResultKind.
+const (
+	SearchResultKindBucket SearchResultKind = "bucket"
+	SearchResultKindObject SearchResultKind = "object"
+)
+
+// Valid indicates whether the value is a known member of the SearchResultKind enum.
+func (e SearchResultKind) Valid() bool {
+	switch e {
+	case SearchResultKindBucket:
+		return true
+	case SearchResultKindObject:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SearchResultsMatch.
+const (
+	Regex     SearchResultsMatch = "regex"
+	Substring SearchResultsMatch = "substring"
+	Wildcard  SearchResultsMatch = "wildcard"
+)
+
+// Valid indicates whether the value is a known member of the SearchResultsMatch enum.
+func (e SearchResultsMatch) Valid() bool {
+	switch e {
+	case Regex:
+		return true
+	case Substring:
+		return true
+	case Wildcard:
+		return true
+	default:
+		return false
+	}
+}
+
 // APIKey defines model for APIKey.
 type APIKey struct {
 	AccessKeyId string     `json:"access_key_id"`
@@ -418,6 +457,49 @@ type ScrubStatus struct {
 	Unrecoverable int64 `json:"unrecoverable"`
 }
 
+// SearchResult defines model for SearchResult.
+type SearchResult struct {
+	// Bucket The bucket, or the bucket of the object.
+	Bucket string `json:"bucket"`
+
+	// Etag The entity tag of the object.
+	Etag *string `json:"etag,omitempty"`
+
+	// Key The key of the object. A bucket has none.
+	Key *string `json:"key,omitempty"`
+
+	// Kind What was found - a bucket, by its name, or an object, by its key.
+	Kind SearchResultKind `json:"kind"`
+
+	// LastModified When the object was stored.
+	LastModified *time.Time `json:"last_modified,omitempty"`
+
+	// Size The size of the object, in bytes.
+	Size *int64 `json:"size,omitempty"`
+}
+
+// SearchResultKind What was found - a bucket, by its name, or an object, by its key.
+type SearchResultKind string
+
+// SearchResults defines model for SearchResults.
+type SearchResults struct {
+	// Complete False when a bound stopped the request before it had looked at everything.
+	Complete bool `json:"complete"`
+
+	// Examined How many keys this request looked at.
+	Examined int `json:"examined"`
+
+	// Match How `q` was read.
+	Match SearchResultsMatch `json:"match"`
+
+	// NextContinuation Where to go on, when `complete` is false.
+	NextContinuation *string        `json:"next_continuation,omitempty"`
+	Results          []SearchResult `json:"results"`
+}
+
+// SearchResultsMatch How `q` was read.
+type SearchResultsMatch string
+
 // Session defines model for Session.
 type Session struct {
 	// CsrfToken Send it back in `X-CSRF-Token` with every request that changes something.
@@ -664,6 +746,21 @@ type UpdateRoleParams struct {
 	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
+// SearchParams defines parameters for Search.
+type SearchParams struct {
+	// Q What to search for - text, a wildcard, or `rx:` and a regular expression.
+	Q string `form:"q" json:"q"`
+
+	// Bucket Search the keys of this bucket only. Its name is then no result.
+	Bucket *string `form:"bucket,omitempty" json:"bucket,omitempty"`
+
+	// Continuation The `next_continuation` of the previous page.
+	Continuation *string `form:"continuation,omitempty" json:"continuation,omitempty"`
+
+	// Limit The most results to return.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
 // SignOutParams defines parameters for SignOut.
 type SignOutParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -840,6 +937,9 @@ type ServerInterface interface {
 	// UpdateRole Change a role
 	// (PUT /roles/{name})
 	UpdateRole(w http.ResponseWriter, r *http.Request, name EntityName, params UpdateRoleParams)
+	// Search Search buckets and objects by name
+	// (GET /search)
+	Search(w http.ResponseWriter, r *http.Request, params SearchParams)
 	// SignOut Sign out
 	// (DELETE /session)
 	SignOut(w http.ResponseWriter, r *http.Request, params SignOutParams)
@@ -2546,6 +2646,85 @@ func (siw *ServerInterfaceWrapper) UpdateRole(w http.ResponseWriter, r *http.Req
 	handler.ServeHTTP(w, r)
 }
 
+// Search operation middleware
+func (siw *ServerInterfaceWrapper) Search(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params SearchParams
+
+	// ------------- Required query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "bucket" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "bucket", r.URL.Query(), &params.Bucket, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "bucket"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "continuation" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "continuation", r.URL.Query(), &params.Continuation, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "continuation"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "continuation", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Search(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // SignOut operation middleware
 func (siw *ServerInterfaceWrapper) SignOut(w http.ResponseWriter, r *http.Request) {
 	var err error
@@ -3190,6 +3369,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.PutObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/metadata", wrapper.GetObjectMetadata)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/access", wrapper.GetObjectAccess)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/search", wrapper.Search)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/users", wrapper.ListUsers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/users", wrapper.CreateUser)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/users/{name}", wrapper.DeleteUser)
@@ -4332,6 +4512,66 @@ func (response UpdateRoledefaultApplicationProblemPlusJSONResponse) VisitUpdateR
 	return err
 }
 
+type SearchRequestObject struct {
+	Params SearchParams
+}
+
+type SearchResponseObject interface {
+	VisitSearchResponse(w http.ResponseWriter) error
+}
+
+type Search200JSONResponse SearchResults
+
+func (response Search200JSONResponse) VisitSearchResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Search429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type Search429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers Search429ResponseHeaders
+}
+
+func (response Search429ApplicationProblemPlusJSONResponse) VisitSearchResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SearchdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response SearchdefaultApplicationProblemPlusJSONResponse) VisitSearchResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type SignOutRequestObject struct {
 	Params SignOutParams
 }
@@ -4804,6 +5044,9 @@ type StrictServerInterface interface {
 	// UpdateRole Change a role
 	// (PUT /roles/{name})
 	UpdateRole(ctx context.Context, request UpdateRoleRequestObject) (UpdateRoleResponseObject, error)
+	// Search Search buckets and objects by name
+	// (GET /search)
+	Search(ctx context.Context, request SearchRequestObject) (SearchResponseObject, error)
 	// SignOut Sign out
 	// (DELETE /session)
 	SignOut(ctx context.Context, request SignOutRequestObject) (SignOutResponseObject, error)
@@ -5703,6 +5946,32 @@ func (sh *strictHandler) UpdateRole(w http.ResponseWriter, r *http.Request, name
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(UpdateRoleResponseObject); ok {
 		if err := validResponse.VisitUpdateRoleResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Search operation middleware
+func (sh *strictHandler) Search(w http.ResponseWriter, r *http.Request, params SearchParams) {
+	var request SearchRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Search(ctx, request.(SearchRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Search")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SearchResponseObject); ok {
+		if err := validResponse.VisitSearchResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

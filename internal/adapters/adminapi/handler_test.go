@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -75,10 +78,15 @@ type fixture struct {
 	// their way to it.
 	meta   *porttest.MemMetadata
 	access *app.AccessRecorder
-	logs   *lockedBuffer
-	root   string // bearer credential of root
-	seen   []adminapi.Observation
-	seenMu sync.Mutex
+	// index is what a search walks: the metadata store, which a test can
+	// hold up; policies where it reads the policies of the buckets, which a
+	// test can make slow.
+	index    *heldIndex
+	policies *slowPolicies
+	logs     *lockedBuffer
+	root     string // bearer credential of root
+	seen     []adminapi.Observation
+	seenMu   sync.Mutex
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -92,7 +100,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	meta := porttest.NewMemMetadata()
 	f.auditor = app.NewAuditor(f.store, f.clock, logger)
-	authz := app.NewAuthorizer(logger, f.clock, f.auditor)
+	authz := app.NewAuthorizer(logger, f.clock, f.auditor).WithBucketPolicies(meta)
 	f.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: f.store, Trail: f.store, Authz: authz, Auditor: f.auditor, KMS: kms, Hasher: &porttest.Hasher{},
 		Clock: f.clock, Entropy: rand.Reader,
@@ -137,6 +145,12 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.index = &heldIndex{ObjectIndex: meta}
+	f.policies = &slowPolicies{next: meta, clock: f.clock}
+	search, err := app.NewSearchService(app.SearchServiceConfig{Buckets: meta, Index: f.index, Policies: f.policies, Authz: authz, Clock: f.clock, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.maintenance = app.NewMaintenance("node-a", f.clock)
 	clusterService := app.NewClusterService(app.ClusterServiceConfig{
 		View: view{topology: topology}, Authz: authz, NodeID: "node-a", Leader: func() string { return "node-a" },
@@ -144,7 +158,7 @@ func newFixture(t *testing.T) *fixture {
 		Probe:       func(_ context.Context, slot cluster.Slot) bool { return slot.DriveID == drive.DriveID() },
 	})
 	handler := adminapi.NewHandler(adminapi.Config{
-		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor), Objects: objects, IAM: f.iam,
+		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(),
@@ -157,6 +171,47 @@ func newFixture(t *testing.T) *fixture {
 	f.Server = httptest.NewTLSServer(handler)
 	t.Cleanup(f.Close)
 	return f
+}
+
+// heldIndex is an index whose walks a test can hold up: while hold is set,
+// a walk says on entered that it has begun and waits for release.
+type heldIndex struct {
+	ports.ObjectIndex
+	hold atomic.Pointer[indexHold]
+}
+
+type indexHold struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *heldIndex) ScanObjects(ctx context.Context, bucketName, start string, visit func(object.Version) ports.ScanControl) error {
+	if hold := h.hold.Load(); hold != nil {
+		select {
+		case hold.entered <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-hold.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return h.ObjectIndex.ScanObjects(ctx, bucketName, start, visit)
+}
+
+// slowPolicies reads the policies of the buckets as the metadata store does,
+// and takes as long as a test says - by the clock of the test - for a page.
+type slowPolicies struct {
+	next  ports.BucketPolicies
+	clock *porttest.Clock
+	takes atomic.Int64
+}
+
+func (s *slowPolicies) BucketPolicies(ctx context.Context, from string, visit func(string, []byte) error) (string, error) {
+	s.clock.Advance(time.Duration(s.takes.Load()))
+	return s.next.BucketPolicies(ctx, from, visit)
 }
 
 // call is one request of a test.
@@ -348,6 +403,11 @@ func TestEveryRequestIsAuthenticated(t *testing.T) {
 			concrete := strings.NewReplacer("{bucket}", "some-bucket", "{name}", "somebody", "{access_key_id}", "AKID").Replace(path)
 			if strings.Contains(path, "/object") && !strings.HasSuffix(path, "/objects") {
 				concrete += "?key=k"
+			}
+			if path == "/search" {
+				// As for a key: a request without what the contract
+				// requires is turned away before anybody asks who sent it.
+				concrete += "?q=k"
 			}
 			c := call{method: strings.ToUpper(method), path: concrete}
 			if method == "post" || method == "put" {
@@ -1275,5 +1335,332 @@ func TestObjectAccess(t *testing.T) {
 	r = f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object/access?key=old.txt"})
 	if strings.Contains(string(r.body), "uploaded_by") {
 		t.Errorf("an uploader that was not recorded: %s", r.body)
+	}
+}
+
+// searchPage is the answer of a search, as a client reads it.
+type searchPage struct {
+	Results []struct {
+		Kind         string     `json:"kind"`
+		Bucket       string     `json:"bucket"`
+		Key          *string    `json:"key"`
+		Size         *int64     `json:"size"`
+		LastModified *time.Time `json:"last_modified"`
+		ETag         *string    `json:"etag"`
+	} `json:"results"`
+	Match            string  `json:"match"`
+	Examined         int     `json:"examined"`
+	Complete         bool    `json:"complete"`
+	NextContinuation *string `json:"next_continuation"`
+}
+
+// names lists what a page found: "bucket" for a bucket, "bucket/key" for
+// an object.
+func (p searchPage) names() []string {
+	found := []string{}
+	for _, r := range p.Results {
+		if r.Key != nil {
+			found = append(found, r.Bucket+"/"+*r.Key)
+		} else {
+			found = append(found, r.Bucket)
+		}
+	}
+	return found
+}
+
+// TestSearch: the search endpoint - what it answers, what it refuses and
+// how, and that a page goes on where the one before stopped.
+func TestSearch(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	reader := f.userKey("reader", iam.RoleReadOnly)
+	// A user with no role may do nothing.
+	f.must(http.StatusCreated, call{method: "POST", path: "/users", body: map[string]any{"name": "stranger", "roles": []string{}}})
+	var created struct {
+		Key struct {
+			AccessKeyID string `json:"access_key_id"`
+		} `json:"key"`
+		SecretKey string `json:"secret_key"`
+	}
+	f.must(http.StatusCreated, call{method: "POST", path: "/users/stranger/keys", body: map[string]any{}}).decode(t, &created)
+	stranger := created.Key.AccessKeyID + ":" + created.SecretKey
+
+	for bucketName, keys := range map[string][]string{
+		"photos":  {"annual/cover.jpg"},
+		"reports": {"2025/annual.pdf", "2026/annual.pdf", "notes.txt"},
+	} {
+		f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": bucketName}})
+		for _, key := range keys {
+			f.must(http.StatusOK, call{method: "PUT", path: "/buckets/" + bucketName + "/object?key=" + url.QueryEscape(key), raw: []byte("hello")})
+		}
+	}
+	search := func(query string, more ...string) string {
+		return "/search?q=" + url.QueryEscape(query) + strings.Join(append([]string{""}, more...), "&")
+	}
+	denials := len(f.trail())
+
+	// The shape of an answer.
+	var page searchPage
+	r := f.must(http.StatusOK, call{method: "GET", path: search("ANNUAL"), bearer: reader})
+	r.decode(t, &page)
+	if got := strings.Join(page.names(), " "); got != "photos/annual/cover.jpg reports/2025/annual.pdf reports/2026/annual.pdf" {
+		t.Errorf("found %q: %s", got, r.body)
+	}
+	if page.Match != "substring" || page.Examined != 4 || !page.Complete || strings.Contains(string(r.body), "next_continuation") {
+		t.Errorf("the answer of a search = %s", r.body)
+	}
+	if first := page.Results[0]; first.Kind != "object" || first.Size == nil || *first.Size != 5 || first.LastModified == nil ||
+		!first.LastModified.Equal(testNow) || first.ETag == nil || *first.ETag == "" {
+		t.Errorf("an object in the answer = %s", r.body)
+	}
+	if got := r.header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	// A bucket is found by its name, and has a name and nothing else.
+	r = f.must(http.StatusOK, call{method: "GET", path: search("REP*")})
+	r.decode(t, &page)
+	if page.Match != "wildcard" || !strings.Contains(string(r.body), `"results":[{"bucket":"reports","kind":"bucket"}]`) {
+		t.Errorf("a bucket in the answer = %s", r.body)
+	}
+	r = f.must(http.StatusOK, call{method: "GET", path: search(`rx:^\d{4}/`, "bucket=reports", "limit=500")})
+	r.decode(t, &page)
+	if page.Match != "regex" || strings.Join(page.names(), " ") != "reports/2025/annual.pdf reports/2026/annual.pdf" || page.Examined != 3 {
+		t.Errorf("a regular expression in one bucket = %s", r.body)
+	}
+	// Nothing found is an answer, with a list in it.
+	r = f.must(http.StatusOK, call{method: "GET", path: search("nothing-like-this")})
+	if !strings.Contains(string(r.body), `"results":[]`) {
+		t.Errorf("nothing found = %s", r.body)
+	}
+
+	// What is no search is a problem that says why.
+	for name, tt := range map[string]struct {
+		path string
+		says string
+	}{
+		"a regular expression that is none": {search("rx:(unclosed"), "regular expression: error parsing regexp: missing closing )"},
+		"rx: and nothing":                   {search("rx:"), "regular expression"},
+		"nothing":                           {search(" "), "nothing to search for"},
+		"no query":                          {"/search", "q"},
+		"a query too long":                  {search(strings.Repeat("a", 257)), "at most 256"},
+		"limit zero":                        {search("a", "limit=0"), "limit must be 1 to 500"},
+		"limit too large":                   {search("a", "limit=501"), "limit must be 1 to 500"},
+		"limit that is no number":           {search("a", "limit=many"), "limit"},
+		"a continuation that is none":       {search("a", "continuation=made-up"), "continuation"},
+	} {
+		r := f.do(call{method: "GET", path: tt.path, bearer: f.root})
+		if r.status != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400: %s", name, r.status, r.body)
+			continue
+		}
+		if p := r.problem(t); p["code"] != "InvalidArgument" || p["title"] != "Invalid request" || !strings.Contains(fmt.Sprint(p["detail"]), tt.says) {
+			t.Errorf("%s: problem = %s, want a detail that says %q", name, r.body, tt.says)
+		}
+	}
+	if n := len(f.trail()); n != denials {
+		t.Errorf("searches left %d audit records", n-denials)
+	}
+
+	// Who may list nothing is refused, with nothing said, and that is in
+	// the trail - once; so is a bucket somebody names and may not list.
+	r = f.do(call{method: "GET", path: search("annual"), bearer: stranger})
+	if p := r.problem(t); r.status != http.StatusForbidden || p["code"] != "AccessDenied" || p["detail"] != nil {
+		t.Errorf("a search by who may list nothing = %d %s", r.status, r.body)
+	}
+	r = f.do(call{method: "GET", path: search("annual", "bucket=reports"), bearer: stranger})
+	if p := r.problem(t); r.status != http.StatusForbidden || p["code"] != "AccessDenied" {
+		t.Errorf("a search of a bucket by who may not list it = %d %s", r.status, r.body)
+	}
+	trail := f.trail()[denials:]
+	if len(trail) != 2 || trail[0].Outcome != audit.Denied || trail[0].Action != "s3:ListAllMyBuckets" || trail[0].Actor != "user/stranger" ||
+		trail[1].Outcome != audit.Denied || trail[1].Action != "s3:ListBucket" {
+		t.Errorf("the refusals in the trail: %+v", trail)
+	}
+	if r := f.do(call{method: "GET", path: search("annual")}); r.status != http.StatusUnauthorized {
+		t.Errorf("a search without a credential = %d", r.status)
+	}
+	f.must(http.StatusNotFound, call{method: "GET", path: search("annual", "bucket=no-such-bucket")})
+
+	// Page by page: each goes on where the one before stopped, and a
+	// token is of its search only.
+	found, continuation, pages := []string{}, "", 0
+	for {
+		path := search("annual", "limit=1")
+		if continuation != "" {
+			path += "&continuation=" + url.QueryEscape(continuation)
+		}
+		var page searchPage
+		r := f.must(http.StatusOK, call{method: "GET", path: path, bearer: reader})
+		r.decode(t, &page)
+		found = append(found, page.names()...)
+		if pages++; page.Complete {
+			if page.NextContinuation != nil {
+				t.Errorf("the last page has a continuation: %s", r.body)
+			}
+			break
+		}
+		if page.NextContinuation == nil || *page.NextContinuation == continuation || len(page.Results) > 1 || pages > 10 {
+			t.Fatalf("page %d = %s", pages, r.body)
+		}
+		continuation = *page.NextContinuation
+	}
+	if got := strings.Join(found, " "); got != "photos/annual/cover.jpg reports/2025/annual.pdf reports/2026/annual.pdf" || pages < 3 {
+		t.Errorf("page by page: %q in %d pages", got, pages)
+	}
+	r = f.do(call{method: "GET", path: search("notes", "continuation="+url.QueryEscape(continuation)), bearer: reader})
+	if p := r.problem(t); r.status != http.StatusBadRequest || !strings.Contains(fmt.Sprint(p["detail"]), "another search") {
+		t.Errorf("a continuation with another search = %d %s", r.status, r.body)
+	}
+
+	// One search at a time for a caller: the second is told to come again
+	// in a moment, and can.
+	hold := &indexHold{entered: make(chan struct{}), release: make(chan struct{})}
+	f.index.hold.Store(hold)
+	type answer struct {
+		status int
+		err    error
+	}
+	first := make(chan answer, 1)
+	go func() {
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, f.URL+adminapi.BasePath+search("annual"), nil)
+		if err != nil {
+			first <- answer{err: err}
+			return
+		}
+		request.Header.Set("Authorization", "Bearer "+reader)
+		response, err := f.Client().Do(request)
+		if err != nil {
+			first <- answer{err: err}
+			return
+		}
+		defer func() { _ = response.Body.Close() }()
+		_, err = io.Copy(io.Discard, response.Body)
+		first <- answer{status: response.StatusCode, err: err}
+	}()
+	select {
+	case <-hold.entered:
+	case a := <-first:
+		t.Fatalf("the search ended before it walked the index: %+v", a)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the search did not reach the index")
+	}
+	r = f.do(call{method: "GET", path: search("annual"), bearer: reader})
+	if p := r.problem(t); r.status != http.StatusTooManyRequests || r.header.Get("Retry-After") != "1" || p["code"] != "TooManyRequests" ||
+		p["title"] != "Too many requests at once" || !strings.Contains(fmt.Sprint(p["detail"]), "still running") {
+		t.Errorf("a second search at once = %d, Retry-After %q, %s", r.status, r.header.Get("Retry-After"), r.body)
+	}
+	f.index.hold.Store(nil)
+	close(hold.release)
+	select {
+	case a := <-first:
+		if a.err != nil || a.status != http.StatusOK {
+			t.Errorf("the search that was held up = %+v", a)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the search that was held up did not end")
+	}
+	f.must(http.StatusOK, call{method: "GET", path: search("annual"), bearer: reader})
+}
+
+// TestSearchSaysWhenItCannotDecideInTime: when deciding which buckets are
+// the caller's takes all the time a search has, the answer is a 503 that
+// says what it is - maybe a limit, and not for root - and nothing of what is
+// inside. The same search by root, who is bound by no bucket policy, is
+// answered.
+func TestSearchSaysWhenItCannotDecideInTime(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	reader := f.userKey("reader", iam.RoleReadOnly)
+	for _, name := range []string{"photos", "reports"} {
+		f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": name}})
+	}
+	f.policies.takes.Store(int64(2 * app.MaxSearchTime))
+	r := f.do(call{method: "GET", path: "/search?q=annual", bearer: reader})
+	p := r.problem(t)
+	detail := fmt.Sprint(p["detail"])
+	if r.status != http.StatusServiceUnavailable || r.header.Get("Retry-After") != "1" || p["code"] != "ServiceUnavailable" {
+		t.Fatalf("a search that could not decide in time = %d, Retry-After %q, %s", r.status, r.header.Get("Retry-After"), r.body)
+	}
+	for _, want := range []string{"a limit of the deployment's size, not an outage", "started not long ago", "root identity"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("the detail does not say %q: %s", want, detail)
+		}
+	}
+	// What the use case said - its own words, the names of its parts - is
+	// for the log.
+	if strings.Contains(detail, "search.Search") || strings.Contains(detail, "temporarily unavailable") {
+		t.Errorf("the detail says what is inside: %s", detail)
+	}
+	if logs := f.logs.String(); !strings.Contains(logs, "too many buckets to decide in time") {
+		t.Errorf("the log does not say why: %s", logs)
+	}
+	// Any other 503 says nothing: only this one has words for the caller.
+	f.must(http.StatusOK, call{method: "GET", path: "/search?q=annual"})
+	f.policies.takes.Store(0)
+	f.must(http.StatusOK, call{method: "GET", path: "/search?q=annual", bearer: reader})
+}
+
+// giveUpASearch asks for a search as a client does and gives the request up
+// once the search has begun, which it says on begun.
+func giveUpASearch(ctx context.Context, t *testing.T, client *http.Client, address, bearer string, begun <-chan struct{}) {
+	t.Helper()
+	asked, giveUp := context.WithCancel(ctx)
+	defer giveUp()
+	gone := make(chan error, 1)
+	go func() {
+		request, err := http.NewRequestWithContext(asked, http.MethodGet, address, nil)
+		if err != nil {
+			gone <- err
+			return
+		}
+		request.Header.Set("Authorization", "Bearer "+bearer)
+		response, err := client.Do(request)
+		if err != nil {
+			gone <- err
+			return
+		}
+		defer func() { _ = response.Body.Close() }()
+		gone <- nil
+	}()
+	select {
+	case <-begun:
+	case err := <-gone:
+		t.Fatalf("the search ended before it walked the index: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the search did not reach the index")
+	}
+	giveUp()
+	if err := <-gone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the client that gave up was answered: %v", err)
+	}
+}
+
+// TestARequestTheClientGaveUpIsNoErrorOfTheNode: the console gives up a
+// search when the user asks for another. The node says so in its log, with
+// the request and what it was doing, and not as an error.
+func TestARequestTheClientGaveUpIsNoErrorOfTheNode(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "reports"}})
+	hold := &indexHold{entered: make(chan struct{}), release: make(chan struct{})}
+	f.index.hold.Store(hold)
+	giveUpASearch(t.Context(), t, f.Client(), f.URL+adminapi.BasePath+"/search?q=annual", f.root, hold.entered)
+	// The node learns of it when the connection closes, a moment later.
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(f.logs.String(), "request cancelled by the client") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the node did not say that the request was given up: %s", f.logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for line := range strings.SplitSeq(f.logs.String(), "\n") {
+		switch {
+		case strings.Contains(line, "request cancelled by the client"):
+			if !strings.Contains(line, `"level":"INFO"`) || !strings.Contains(line, `"request_id":"`) || !strings.Contains(line, "context canceled") {
+				t.Errorf("a request that was given up is logged as: %s", line)
+			}
+		case strings.Contains(line, `"level":"ERROR"`):
+			t.Errorf("a request that was given up left an error in the log: %s", line)
+		}
 	}
 }

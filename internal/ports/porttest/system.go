@@ -104,10 +104,12 @@ func (k *KMS) UnwrapDataKey(_ context.Context, wrapped, aad []byte) ([]byte, err
 }
 
 // Authorizer is a ports.Authorizer that applies the domain's decision and
-// records every request it was asked about.
+// records every request it was asked about: those it was asked to gate and,
+// apart from them, those it was asked to filter by.
 type Authorizer struct {
 	mu       sync.Mutex
 	requests []iam.Request
+	filtered []iam.Request
 }
 
 // Authorize implements ports.Authorizer.
@@ -118,11 +120,26 @@ func (a *Authorizer) Authorize(_ context.Context, req iam.Request) error {
 	return iam.Decide(req)
 }
 
-// Requests returns every request seen so far.
+// Allowed implements ports.Authorizer.
+func (a *Authorizer) Allowed(_ context.Context, req iam.Request) (bool, error) {
+	a.mu.Lock()
+	a.filtered = append(a.filtered, req)
+	a.mu.Unlock()
+	return iam.Decide(req) == nil, nil
+}
+
+// Requests returns every request Authorize has seen so far.
 func (a *Authorizer) Requests() []iam.Request {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]iam.Request(nil), a.requests...)
+}
+
+// Filtered returns every request Allowed has seen so far.
+func (a *Authorizer) Filtered() []iam.Request {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]iam.Request(nil), a.filtered...)
 }
 
 // Root is the root principal used in tests.

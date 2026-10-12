@@ -81,6 +81,7 @@ type Observation struct {
 type Config struct {
 	Buckets     *app.BucketService
 	Objects     *app.ObjectService
+	Search      *app.SearchService
 	IAM         *app.IAMService
 	Sessions    *app.SessionService
 	Cluster     *app.ClusterService
@@ -429,6 +430,20 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	}
 }
 
+// codeTooManyRequests is the code of the problem that says "again in a
+// moment", as against the one that makes a caller wait after failed
+// sign-ins.
+const codeTooManyRequests = "TooManyRequests"
+
+// detailTooManyBuckets is what a caller is told when a search could not
+// decide in its time which buckets are theirs. It is said in so many words
+// because the answer is a 503 with Retry-After like any other, and unlike
+// any other it may be no passing state.
+const detailTooManyBuckets = "Deciding which buckets you may search took longer than a search has. " +
+	"A node that was started not long ago remembers more of the bucket policies with every search and gets further each time: ask again. " +
+	"If the answer stays the same, this deployment has more buckets with policies than a search can decide in its time - " +
+	"a limit of the deployment's size, not an outage. A search of one bucket, and a search by the root identity, are not subject to it."
+
 // problem is a problem+json answer in the making.
 type problem struct {
 	status int
@@ -449,6 +464,8 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusUnauthorized, code: "Unauthenticated", title: "Authentication required"}
 	case is(domain.ErrTooManyAttempts):
 		return problem{status: http.StatusTooManyRequests, code: "TooManyAttempts", title: "Too many attempts"}
+	case is(domain.ErrTooManyRequests):
+		return problem{status: http.StatusTooManyRequests, code: codeTooManyRequests, title: "Too many requests at once"}
 	case is(domain.ErrAccessDenied):
 		return problem{status: http.StatusForbidden, code: "AccessDenied", title: "Access denied"}
 	case is(domain.ErrBucketNotFound):
@@ -507,12 +524,36 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	case p.status >= http.StatusInternalServerError:
 		// What went wrong inside is for the log, not for the caller.
-		h.cfg.Logger.ErrorContext(ctx, "request failed", slog.String("request_id", info.id), slog.Any("error", err))
+		switch {
+		case errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled):
+			// Nothing went wrong inside: the caller went away - the
+			// console asked for something else - and what it had asked for
+			// was given up. That is said, and it is no error of this node.
+			// A fault that only happens to meet a caller who left is
+			// still a fault, and is logged as one below.
+			h.cfg.Logger.InfoContext(ctx, "request cancelled by the client", slog.String("request_id", info.id), slog.Any("error", err))
+		case errors.Is(err, domain.ErrTooManyBuckets):
+			// A limit of the size of the deployment, not an outage.
+			h.cfg.Logger.WarnContext(ctx, "request refused", slog.String("request_id", info.id), slog.Any("error", err))
+		default:
+			h.cfg.Logger.ErrorContext(ctx, "request failed", slog.String("request_id", info.id), slog.Any("error", err))
+		}
 		if p.status == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "1")
 		}
+		if errors.Is(err, domain.ErrTooManyBuckets) {
+			// The one failure of this kind a caller is told about, in
+			// words of this adapter: it tells nothing of what is inside,
+			// and without it the caller would wait for what does not pass.
+			p.detail = detailTooManyBuckets
+		}
 	case p.status == http.StatusUnauthorized:
 		w.Header().Set("WWW-Authenticate", `Bearer realm="cactusfs"`)
+	case p.code == codeTooManyRequests:
+		// The node is busy with this caller's own work, or with as much
+		// as it does at a time: a moment later there is room again.
+		w.Header().Set("Retry-After", "1")
+		p.detail = err.Error()
 	case p.status == http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "300")
 	case p.status == http.StatusForbidden:

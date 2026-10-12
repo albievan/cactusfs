@@ -524,6 +524,13 @@ func (a *switchAuthorizer) Authorize(ctx context.Context, req iam.Request) error
 	return a.inner.Authorize(ctx, req)
 }
 
+func (a *switchAuthorizer) Allowed(ctx context.Context, req iam.Request) (bool, error) {
+	if a.deny.Load() {
+		return false, nil
+	}
+	return a.inner.Allowed(ctx, req)
+}
+
 // TestEveryCallPassesTheAuthorizer: the server asks the one authorizer about
 // every call, as the node whose certificate the caller showed, and serves
 // nothing it refuses.

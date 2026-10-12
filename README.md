@@ -238,6 +238,28 @@ The admin listener (`--admin-addr`, port 9001) serves:
   that allows `admin:GetObjectAccess`; being allowed to read the object is not enough.
   These are counts kept as well as can be, recorded every `--access-flush-interval`
   (30 s), not an audit trail;
+- **search** (`GET /api/v1/search?q=`, and the field at the top of the console's
+  navigation): buckets by their name and objects by their key, among the buckets you
+  may list. What you type is read in one of three ways. Plain text finds the names that
+  contain it, whatever their case (`report`). Text with `*` or `?` is a pattern for the
+  whole name, `*` for any run of characters and `?` for exactly one (`*.pdf`). Text that
+  begins with `rx:` is a regular expression in the RE2 syntax, case as written
+  (`rx:^logs/\d{4}/`). One request looks at a bounded number of keys for a bounded
+  time; when it stops short it says so (`complete: false`) and "Search further" - the
+  `next_continuation` of the answer - goes on from there. Every page decides again
+  which buckets are yours to see, all of them, from the bucket policies as the node
+  that answers has them, so what a page costs depends on how many buckets there are
+  and not on how many of them are yours. The node remembers what a policy says until
+  the policy changes: a page takes some 0.2 s where 5 000 buckets have policies of
+  16 KiB each (measured on an Apple M3). You run one search at a time and a node
+  eight; beyond that the answer is 429 with `Retry-After`, and the console asks once
+  more by itself. **A limit, said plainly:** when deciding the buckets takes the two
+  seconds, the answer is 503 with a `detail` that says so. Just after a node has
+  started this passes - it remembers nothing yet, reads every policy in full (some ten
+  times the work) and gets further with each request. Past about 10 000 buckets with
+  policies of 16 KiB each, or 150 000 with policies of 1 KiB, it does not pass:
+  search for everybody but the root identity, who is bound by no bucket policy, then
+  works only within a bucket you name (`bucket=`);
 - its **contract** at `/api/v1/openapi.yaml` and `.json`, and **Swagger UI** at `/docs`,
   served from the binary - nothing is fetched from the internet;
 - the **console** at `/`, when the binary was built with it (`make build`, or the

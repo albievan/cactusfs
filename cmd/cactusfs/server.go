@@ -163,7 +163,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	// the admin listener, and so one origin.
 	if cfg.Roles.Has(cluster.RoleGateway) {
 		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
-			Buckets: n.buckets, Objects: n.objects, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
+			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
 			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
 		})))

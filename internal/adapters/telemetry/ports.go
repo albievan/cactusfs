@@ -386,6 +386,25 @@ func (m *metadata) SetTags(ctx context.Context, bucketName, key string, ref obje
 	return version, err
 }
 
+// InstrumentBucketPolicies returns next wrapped so that every page it reads
+// is traced and counted, as a read of the metadata store.
+func (t *Telemetry) InstrumentBucketPolicies(next ports.BucketPolicies) ports.BucketPolicies {
+	return &bucketPolicies{t: t, next: next}
+}
+
+type bucketPolicies struct {
+	t    *Telemetry
+	next ports.BucketPolicies
+}
+
+// BucketPolicies implements ports.BucketPolicies.
+func (p *bucketPolicies) BucketPolicies(ctx context.Context, from string, visit func(name string, document []byte) error) (string, error) {
+	ctx, done := p.t.call(ctx, portMetadata, "BucketPolicies")
+	next, err := p.next.BucketPolicies(ctx, from, visit)
+	done(err)
+	return next, err
+}
+
 // InstrumentObjectAccess returns next wrapped so that every call is traced
 // and counted.
 func (t *Telemetry) InstrumentObjectAccess(next ports.ObjectAccessStore) ports.ObjectAccessStore {

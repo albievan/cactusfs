@@ -183,6 +183,104 @@ describe('navigation', () => {
     });
   });
 
+  it('has a search field in the navigation that goes to the search screen with what was typed', async () => {
+    const api = signedIn({
+      'GET /buckets': () => json(200, []),
+      'GET /search': () => json(200, { results: [], match: 'substring', examined: 0, complete: true }),
+    });
+    render(<App />);
+
+    const search = within(await screen.findByRole('search', { name: 'Search' }));
+    const field = search.getByLabelText('Search buckets and objects');
+    const button = search.getByRole('button', { name: 'Search' });
+    expect(button.getAttribute('title')).toContain('rx:');
+    expect(button.querySelector('i.bi')?.getAttribute('aria-hidden')).toBe('true');
+
+    // Nothing typed, nothing asked.
+    fireEvent.click(button);
+    fireEvent.change(field, { target: { value: '   ' } });
+    fireEvent.click(button);
+    expect(window.location.hash).toBe('');
+
+    fireEvent.change(field, { target: { value: ' rx:^2026/a&b #1$ ' } });
+    fireEvent.click(button);
+
+    // What was typed is in the address, encoded, and reaches the API as typed.
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/search?q=rx%3A%5E2026%2Fa%26b%20%231%24');
+    });
+    expect(await screen.findByRole('heading', { name: 'Search' })).toBeDefined();
+    await waitFor(() => {
+      expect(api.callsTo('GET', '/search')).toHaveLength(1);
+    });
+    const [asked] = api.callsTo('GET', '/search');
+    expect(asked?.query.get('q')).toBe('rx:^2026/a&b #1$');
+    expect(asked?.query.has('continuation')).toBe(false);
+    expect(await screen.findByText(/Nothing found\./)).toBeDefined();
+    // No section is the current one on the search screen.
+    expect(screen.queryByRole('link', { current: 'page' })).toBeNull();
+  });
+
+  it('shows in the field of the navigation the search that is on screen, wherever it was asked for', async () => {
+    const api = signedIn({
+      'GET /buckets': () => json(200, []),
+      'GET /search': () => json(200, { results: [], match: 'substring', examined: 0, complete: true }),
+    });
+    // An address typed by hand: the plus is a plus.
+    window.location.hash = '#/search?q=rx:^a+b$';
+    render(<App />);
+
+    const field = within(await screen.findByRole('search', { name: 'Search' })).getByLabelText(
+      'Search buckets and objects',
+    ) as HTMLInputElement;
+    expect(field.value).toBe('rx:^a+b$');
+    await waitFor(() => {
+      expect(api.callsTo('GET', '/search').map((call) => call.query.get('q'))).toEqual(['rx:^a+b$']);
+    });
+
+    // The form of the search screen asks for something else: the field of the navigation follows.
+    const form = within(screen.getByRole('search', { name: 'Search buckets and objects' }));
+    fireEvent.change(form.getByLabelText('Search for'), { target: { value: 'second one' } });
+    fireEvent.click(form.getByRole('button', { name: 'Search' }));
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/search?q=second%20one');
+    });
+    await waitFor(() => {
+      expect(field.value).toBe('second one');
+    });
+
+    // So does it when the address changes under it, as with the back button.
+    window.location.hash = '#/search?q=third';
+    await waitFor(() => {
+      expect(field.value).toBe('third');
+    });
+
+    // Elsewhere the field keeps what it holds, typed or not.
+    fireEvent.change(field, { target: { value: 'typed and not sent' } });
+    window.location.hash = '#/buckets';
+    expect(await screen.findByRole('heading', { name: 'Buckets' })).toBeDefined();
+    expect(field.value).toBe('typed and not sent');
+  });
+
+  it('shows a magnifier when the navigation is folded, which unfolds it and puts the cursor in the field', async () => {
+    signedIn({ 'GET /buckets': () => json(200, []) });
+    render(<App />);
+
+    const fold = await screen.findByRole('button', { name: 'Show icons only' });
+    fireEvent.click(fold);
+    expect(fold.getAttribute('aria-pressed')).toBe('true');
+
+    const magnifier = screen.getByRole('button', { name: 'Show the search field' });
+    expect(magnifier.getAttribute('title')).toBe('Search buckets and objects');
+    fireEvent.click(magnifier);
+
+    expect(fold.getAttribute('aria-pressed')).toBe('false');
+    expect(window.localStorage.getItem('cactusfs.nav.folded')).toBe('0');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByLabelText('Search buckets and objects'));
+    });
+  });
+
   it('says so when the address names no screen', async () => {
     signedIn();
     window.location.hash = '#/nowhere';

@@ -120,6 +120,77 @@ func (l LocalConfig) GetBucketConfig(_ context.Context, name, kind string) ([]by
 	return l.store.bucketConfig(name, kind, l.store.peek)
 }
 
+// Bounds of one page of LocalConfig.BucketPolicies, which is one read
+// transaction: it reads buckets until it has read policyPageBuckets of them
+// or policyPageBytes of their stored records, whichever comes first, and at
+// least one. A stored record holds a document in base64, a third longer than
+// the document: a megabyte of records is some 45 buckets whose policies are
+// 17 KiB each, and takes 1.4 ms to read and decode on the machine it was
+// measured on (BenchmarkLocalBucketPolicies, Apple M3) - that is how long a
+// page holds the read lock of the state, which a change waiting to be applied
+// waits for.
+const (
+	policyPageBuckets = 256
+	policyPageBytes   = 1 << 20
+)
+
+// BucketPolicies implements ports.BucketPolicies: one page of buckets, read
+// in one read transaction on this node's copy of the state. Nothing is asked
+// of the leader; a caller that has just made a consistent read finds the copy
+// at least as new as that read, since the state a node has applied never goes
+// back.
+//
+// The transaction, and with it the read lock of the state, ends before visit
+// is first called: what visit does with a document - hashing it, parsing it -
+// holds up no change. The documents visit is given are decoded copies on the
+// heap, never memory of the database; the port still lends them for the call
+// only.
+func (l LocalConfig) BucketPolicies(ctx context.Context, from string, visit func(name string, document []byte) error) (string, error) {
+	type found struct {
+		name     string
+		document []byte
+	}
+	var page []found
+	next := ""
+	err := l.store.peek(func(tx *bbolt.Tx) error {
+		read, size := 0, 0
+		cursor := tx.Bucket(bucketsBucket()).Cursor()
+		for name, raw := cursor.Seek([]byte(from)); name != nil; name, raw = cursor.Next() {
+			if read >= policyPageBuckets || size >= policyPageBytes {
+				next = string(name)
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			read++
+			size += len(raw)
+			var record bucketRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return fmt.Errorf("%w: stored bucket: %w", domain.ErrIntegrity, err)
+			}
+			if document := record.Config[bucket.ConfigPolicy]; len(document) > 0 {
+				page = append(page, found{name: string(name), document: document})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("raftmeta.BucketPolicies: %w", err)
+	}
+	for _, p := range page {
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("raftmeta.BucketPolicies: %w", err)
+		}
+		if err := visit(p.name, p.document); err != nil {
+			return "", fmt.Errorf("raftmeta.BucketPolicies: %w", err)
+		}
+	}
+	return next, nil
+}
+
+var _ ports.BucketPolicies = LocalConfig{}
+
 // GetBucketConfig implements ports.BucketStore.
 func (s *Store) GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error) {
 	return s.bucketConfig(name, kind, func(fn func(tx *bbolt.Tx) error) error { return s.view(ctx, fn) })

@@ -70,6 +70,7 @@ type node struct {
 
 	buckets    *app.BucketService
 	objects    *app.ObjectService
+	search     *app.SearchService
 	identities *app.IdentityService
 	authorizer *app.Authorizer
 	auditor    *app.Auditor
@@ -204,6 +205,19 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 	n.inFlight.Store(n.objects)
+	// Search reads the same instrumented stores as a listing, behind the
+	// same authorizer. The policies of the buckets it filters by are read
+	// from this node's state page by page, after the consistent listing of
+	// the buckets: one question to the leader a page of a search, not one a
+	// bucket. The authorizer remembers what they say from one search to the
+	// next.
+	n.search, err = app.NewSearchService(app.SearchServiceConfig{
+		Buckets: meta, Index: meta, Policies: n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig()),
+		Authz: n.authorizer, Clock: n.clock, Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
 	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader).WithIAM(n.meta, n.auditor)
 	cost := cfg.passwordParams
 	if cost == (passwords.Params{}) {

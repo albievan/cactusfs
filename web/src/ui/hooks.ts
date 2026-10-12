@@ -21,14 +21,21 @@ interface LoadState<T> {
 /**
  * Loads data when the component mounts and whenever `load` changes, so pass a
  * function made with useCallback.
+ *
+ * `load` is handed a signal that is aborted when its answer is no longer
+ * wanted: the component went away, `load` changed or the data is loaded
+ * again. A loader that passes the signal on to its request has the request
+ * given up then, so that the API does not go on working for nobody; one that
+ * takes no notice of it behaves as it always did.
  */
-export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
+export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>): Loaded<T> {
   const [state, setState] = useState<LoadState<T>>({ data: undefined, error: null, loading: true });
   const [round, setRound] = useState(0);
 
   useEffect(() => {
     let current = true;
-    load().then(
+    const abandoned = new AbortController();
+    load(abandoned.signal).then(
       (data) => {
         if (current) {
           setState({ data, error: null, loading: false });
@@ -42,6 +49,7 @@ export function useLoad<T>(load: () => Promise<T>): Loaded<T> {
     );
     return () => {
       current = false;
+      abandoned.abort();
     };
   }, [load, round]);
 

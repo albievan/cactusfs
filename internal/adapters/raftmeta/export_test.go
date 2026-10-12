@@ -20,3 +20,7 @@ func StateSchemaForTest(t *testing.T, s *Store) uint64 {
 	}
 	return schema
 }
+
+// PolicyPageBuckets is the most buckets one page of
+// LocalConfig.BucketPolicies reads.
+const PolicyPageBuckets = policyPageBuckets

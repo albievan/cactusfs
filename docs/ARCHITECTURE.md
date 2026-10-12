@@ -75,7 +75,8 @@ Conventions that follow from it:
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
 | `internal/ports` | `KMS`, `ShardStore`, `ErasureCodec`, `BucketStore`, `ObjectIndex`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck` |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
+| `internal/domain/search` | the language of the search field: text, wildcard, `rx:` regular expression |
+| `internal/app` | bucket, object, search and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
 | `internal/adapters/health` | in: `GET /healthz`, `GET /readyz`; the shutdown gate |
 | `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port |
@@ -302,10 +303,80 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   console session with a CSRF token. Errors are `application/problem+json`; every
   mutation accepts `Idempotency-Key`, whose records are replicated and whose stored
   answers are sealed through the KMS. Operations: session, buckets, objects (list,
-  upload, download, delete, who uploaded and who downloaded), users, groups, roles,
+  upload, download, delete, who uploaded and who downloaded), search, users, groups, roles,
   policies, API keys, cluster and maintenance status, audit log. The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
+- **Search (implemented; sub-buckets to come).** `GET /api/v1/search?q=` and the field
+  at the top of the console's navigation find buckets by name and objects by key. The
+  query language is `internal/domain/search`: plain text is a case-insensitive
+  substring, `*` and `?` make a wildcard over the whole name, `rx:` begins an RE2
+  regular expression taken as written; every form compiles to one RE2 program, so
+  matching is linear in the name. `app.SearchService` walks the buckets in name order
+  and, in each, the index of current versions in key order. **Scope:** a bucket's name
+  is a result only for a caller allowed `s3:ListAllMyBuckets`, and a bucket's keys are
+  searched only for a caller allowed `s3:ListBucket` on it, the bucket's policy
+  included - asked of the one authorizer through `ports.Authorizer.Allowed`, which is
+  the decision of `Authorize` without its audit record and exists for filtering result
+  sets only, never as the gate of an operation. A caller who may list neither the
+  buckets nor any bucket, or who names a bucket they may not list, is refused through
+  `Authorize`, once, audited. A search is a read and leaves no audit record; the query
+  is never logged. **Bounds of one request:** 50 000 keys examined, 200 buckets, two
+  seconds on the node's clock, `limit` results (100, at most 500), and the index is
+  walked 5 000 keys at a time so that the metadata store's read lock - which an entry
+  waiting to be applied waits for - is let go between walks; matching happens after
+  each walk, outside the lock. One search at a time for a principal and eight for a
+  node (with two, two principals searching without pause shut everybody else out);
+  beyond that 429 with `Retry-After: 1`. **Deciding the buckets:** every page first
+  decides every bucket there is, before it looks at where its token points
+  (`searchWalk.visible`): one linearizable listing of the buckets, then - for a caller
+  a bucket policy binds; root causes none - a walk of all bucket policies in this
+  node's own state through `ports.BucketPolicies`
+  (`BucketPolicies(ctx, from, visit) (next, err)`, implemented by
+  `raftmeta.LocalConfig`), and one decision of the authorizer for each bucket. The port
+  pages: one call is one read transaction over at most 256 buckets or 1 MiB of stored
+  records, the read lock of the state is let go before the visitor is called and
+  between pages (1.5 ms a page of 17 KiB policies, 0.9 ms a page of 256 small ones,
+  Apple M3), and a document is lent to the visitor for the call only. Every page is
+  the node's state at least as new as the listing before it; a policy changed during
+  the walk is seen as it was or as it is - what two requests one after the other get.
+  The search tells the request scope where the policies are (`primeBucketPolicies`,
+  inside `internal/app`); the scope keeps one page of the walk and the search one bit a
+  bucket, never the policies of all buckets. Who is bound by a policy, how it is read
+  and what follows stay in `Authorizer.decide`. **Parsed policies are remembered** in
+  the `Authorizer` value the composition root builds, from one search to the next: by
+  bucket name, under the SHA-256 of the document, asked only with the hash of the bytes
+  just read - so nothing is ever decided from what a policy used to say, a page costs a
+  hash for each policy and a parse only for those that changed, and a document that
+  does not parse is never remembered and hides its bucket every time. The memory is
+  bounded at 131 072 policies and 128 MiB of documents (about 200 MiB of heap); what
+  finds no room is parsed every time, and what a whole walk did not come by - a deleted
+  bucket, a removed policy - is dropped when that walk ends. Only a search uses it: any
+  other request reads the policy of its bucket in one linearizable read and parses
+  what it read. So a page costs one question to the leader and work that is linear in
+  the number of buckets and the same for every caller and every token: measured
+  (`BenchmarkSearchDeciding`, Apple M3), deciding 5 000 buckets with 16 KiB policies
+  takes 40 ms and 2.5 MB warm against 2.6 s and 2.3 GB cold, and 20 000 with 1 KiB
+  policies 20-50 ms warm against 0.8-1 s cold, to which reading the pages adds 0.17 s
+  and 0.07 s. That work counts towards the two seconds, looked at before every bucket;
+  when it takes them all, the request fails with 503 (`domain.ErrUnavailable` together
+  with `domain.ErrTooManyBuckets`, and a `detail` that says what follows) rather than
+  stop where a token would have to name a bucket that is not the caller's. After a
+  restart that passes: what was parsed before the request gave up is remembered, and
+  the next gets further. Past about 10 000 buckets with 16 KiB policies, or 150 000
+  with 1 KiB policies, it is a limit of the deployment's size for everybody but root -
+  a search of one named bucket stays possible - and a quota on buckets (milestone 8)
+  is what keeps a deployment from being put there. A failure to read a page, damage to
+  the store included, fails the search (503); one damaged policy leaves out its bucket
+  alone. The walk is then
+  given only buckets the caller may see, so `examined`, `complete`, the number of
+  pages and every token speak of those alone. A bound that stops a request answers
+  `complete: false` with `next_continuation`: base64url of
+  `{v, q: SHA-256 of the query, b: bucket, k: last key examined, n: bucket name done}`.
+  The token is validated - `b` must be a valid bucket name - and not signed: it is
+  looked at only after every bucket was decided, among those the caller may see, so a
+  made-up token can only skip ahead in what that caller would have been shown.
+  Sub-bucket scope plugs in at one marked place, `searchWalk.mayList`.
 - **Who uploaded and who downloaded (implemented, ADR-0016).** Every version records who
   committed it (`created_by` on a put, a copy's destination and the completion of a
   multipart upload), in the words of the audit trail. Downloads are counted by the node

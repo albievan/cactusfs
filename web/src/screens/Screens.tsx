@@ -7,6 +7,7 @@ import { ObjectsScreen } from './ObjectsScreen';
 import { PoliciesScreen } from './PoliciesScreen';
 import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
+import { SearchScreen } from './SearchScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
 
@@ -23,6 +24,11 @@ export function Screens() {
       const prefix = route.query.get('prefix') ?? '';
       // The key makes a fresh browser, back on its first page, for every prefix.
       return <ObjectsScreen key={`${item}\n${prefix}`} bucket={item} prefix={prefix} />;
+    }
+    case 'search': {
+      const query = route.query.get('q') ?? '';
+      // The key makes a fresh search, back on its first page, for every query.
+      return <SearchScreen key={query} query={query} />;
     }
     case 'users':
       return item === undefined ? <UsersScreen /> : <UserScreen key={item} name={item} />;

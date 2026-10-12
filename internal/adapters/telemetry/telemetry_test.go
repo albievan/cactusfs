@@ -137,6 +137,54 @@ func TestObjectAccessIsCountedAndTraced(t *testing.T) {
 	}
 }
 
+// TestBucketPolicyPagesAreCountedAndTraced: a page of the walk of all bucket
+// policies is a read of the metadata store like any other - counted, traced,
+// and passed through as it is, the error of the visitor included.
+func TestBucketPolicyPagesAreCountedAndTraced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	recorder := tracetest.NewSpanRecorder()
+	tel := newTelemetry(t, recorder)
+	mem := porttest.NewMemMetadata()
+	policies := tel.InstrumentBucketPolicies(mem)
+	for _, name := range []string{"aaa", "bbb", "ccc", "ddd"} {
+		if err := mem.CreateBucket(ctx, bucket.Bucket{Name: name}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mem.SetBucketConfig(ctx, name, bucket.ConfigPolicy, []byte(`{"of":"`+name+`"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seen []string
+	next, err := policies.BucketPolicies(ctx, "", func(name string, document []byte) error {
+		seen = append(seen, name+"="+string(document))
+		return nil
+	})
+	if err != nil || next != "ddd" || len(seen) != 3 || seen[0] != `aaa={"of":"aaa"}` {
+		t.Fatalf("the first page = %v, next %q, %v", seen, next, err)
+	}
+	refusal := errors.New("the visitor has seen enough")
+	if _, err := policies.BucketPolicies(ctx, next, func(string, []byte) error { return refusal }); !errors.Is(err, refusal) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	metrics := scrape(t, tel)
+	for _, want := range []string{
+		"cactusfs_port_calls_total method=BucketPolicies port=metadata result=ok",
+		"cactusfs_port_calls_total method=BucketPolicies port=metadata result=error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	// Neither a bucket nor what its policy says is in a metric.
+	if strings.Contains(metrics, "aaa") {
+		t.Error("a bucket is named in the metrics")
+	}
+	if !contains(spanNames(recorder), "metadata.BucketPolicies") {
+		t.Errorf("no span named metadata.BucketPolicies among %v", spanNames(recorder))
+	}
+}
+
 func TestEveryPortCallIsCountedAndTraced(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

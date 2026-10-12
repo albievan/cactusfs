@@ -45,6 +45,40 @@ type BucketStore interface {
 	GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error)
 }
 
+// BucketPolicies walks the policies of all buckets, a page at a time. It is
+// for a request that needs a decision about every bucket there is - a search
+// - and must neither ask the metadata leader once for each of them nor hold
+// all of their policies at once.
+type BucketPolicies interface {
+	// BucketPolicies reads one page of buckets in name order, beginning
+	// with the first whose name is not before from - the empty string
+	// begins with the first bucket - and calls visit, in name order, with
+	// the policy document of each bucket of the page that has one. It
+	// returns the name of the first bucket it did not read, to be given as
+	// from of the next call, or the empty string when it read the last. A
+	// bucket whose name lies between from and next and that visit was not
+	// called with has no policy. A page is bounded, in buckets and in
+	// bytes, by the implementation, and may hold no policy at all; ctx is
+	// checked at every bucket read and before every call of visit.
+	//
+	// A page is read from this node's own copy of the state: it does not
+	// confirm with the leader that the copy is current, and whatever lock
+	// the read takes is let go before visit is called and between two
+	// pages. A node's copy never goes back, so whoever has just made a
+	// strongly consistent read - of the list of buckets,
+	// BucketStore.ListBuckets - is given, on every page, policies at least
+	// as new as that read. The pages of one walk are not one snapshot: a
+	// policy that is changed while the walk is under way is seen as it was
+	// before the change or as it is after, never in part - what two
+	// requests that follow one another are given.
+	//
+	// document is lent to visit for the duration of that one call: it must
+	// not be changed, and whoever keeps any of it after returning must copy
+	// it. An error of visit ends the call, which returns an error that
+	// wraps it.
+	BucketPolicies(ctx context.Context, from string, visit func(name string, document []byte) error) (next string, err error)
+}
+
 // ObjectIndex is the replicated index from bucket and key to object version.
 // It sits behind this port so that it can move to sharded Raft groups later.
 // Every change is committed through Raft before the call returns: the commit

@@ -19,4 +19,13 @@ type Authorizer interface {
 	// Authorize returns nil when the request is allowed and an error
 	// wrapping domain.ErrAccessDenied when it is not.
 	Authorize(ctx context.Context, req iam.Request) error
+	// Allowed reports whether Authorize would allow the request: the same
+	// decision, from the same reading of the policies, but a refusal is
+	// neither written to the audit trail nor logged. It exists only to
+	// filter a set of results down to what the caller may see - a search
+	// over a hundred buckets must not write a hundred denials - and is
+	// never to be used as the gate of an operation: whatever a caller asks
+	// for by name goes through Authorize. The error is not nil only when
+	// the decision could not be made, and then nothing is allowed.
+	Allowed(ctx context.Context, req iam.Request) (bool, error)
 }

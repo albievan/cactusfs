@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -346,5 +348,253 @@ func TestANodeOnItsOwnUsesTheNewestSchema(t *testing.T) {
 	}
 	if got := raftmeta.StateSchemaForTest(t, store); got != 2 {
 		t.Errorf("state schema of a node on its own = %d, want 2", got)
+	}
+}
+
+// walkPolicies reads the policies of all buckets page by page, as a search
+// does, and returns them with the number of pages it took.
+func walkPolicies(ctx context.Context, t *testing.T, local ports.BucketPolicies) (map[string]string, int) {
+	t.Helper()
+	got, pages, last := map[string]string{}, 0, ""
+	for from := ""; ; {
+		next, err := local.BucketPolicies(ctx, from, func(name string, document []byte) error {
+			if name <= last || name < from {
+				t.Errorf("a page from %q visited %q after %q", from, name, last)
+			}
+			last = name
+			got[name] = string(document)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("BucketPolicies(%q): %v", from, err)
+		}
+		pages++
+		if next == "" {
+			return got, pages
+		}
+		if next <= from || next <= last {
+			t.Fatalf("the page from %q, which visited up to %q, says to go on at %q", from, last, next)
+		}
+		from = next
+	}
+}
+
+// TestLocalBucketPolicies: the policies of all buckets come from this node's
+// copy of the state page by page - of the buckets that have one, each the
+// document that was set, in name order - and follow what is set, removed and
+// deleted.
+func TestLocalBucketPolicies(t *testing.T) {
+	t.Parallel()
+	store := open(t, t.TempDir())
+	var local ports.BucketPolicies = store.LocalConfig()
+	policies := func() map[string]string {
+		t.Helper()
+		got, _ := walkPolicies(t.Context(), t, local)
+		return got
+	}
+	if got := policies(); len(got) != 0 {
+		t.Errorf("the policies of no bucket = %v", got)
+	}
+	for _, name := range []string{"aaa", "bbb", "ccc"} {
+		if err := store.CreateBucket(t.Context(), bucket.Bucket{Name: name, CreatedAt: time.Unix(1, 0)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(name, kind, document string) {
+		t.Helper()
+		if err := store.SetBucketConfig(t.Context(), name, kind, []byte(document)); err != nil {
+			t.Fatalf("SetBucketConfig(%s, %s): %v", name, kind, err)
+		}
+	}
+	set("aaa", bucket.ConfigPolicy, `{"a":1}`)
+	set("bbb", bucket.ConfigCORS, `{"rules":[]}`)
+	set("ccc", bucket.ConfigPolicy, `{"c":3}`)
+	if got, want := policies(), map[string]string{"aaa": `{"a":1}`, "ccc": `{"c":3}`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("BucketPolicies = %v, want %v", got, want)
+	}
+	// Each is what the consistent read of that bucket says.
+	for name, document := range policies() {
+		if got, err := store.GetBucketConfig(t.Context(), name, bucket.ConfigPolicy); err != nil || string(got) != document {
+			t.Errorf("GetBucketConfig(%s) = %q, %v; all at once said %q", name, got, err, document)
+		}
+	}
+	// A page begins with the first bucket that is not before the name it is
+	// given, be that the name of a bucket or not.
+	for from, want := range map[string][]string{"aaa": {"aaa", "ccc"}, "aab": {"ccc"}, "ccc": {"ccc"}, "ccd": {}, "zzz": {}} {
+		got := []string{}
+		next, err := local.BucketPolicies(t.Context(), from, func(name string, _ []byte) error {
+			got = append(got, name)
+			return nil
+		})
+		if err != nil || next != "" || !slices.Equal(got, want) {
+			t.Errorf("BucketPolicies(%q) visited %v and goes on at %q, %v; want %v and the end", from, got, next, err, want)
+		}
+	}
+	// What a visitor does to a document, or keeps of it, changes nothing of
+	// what the store holds.
+	if _, err := local.BucketPolicies(t.Context(), "", func(_ string, document []byte) error {
+		clear(document)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := policies(), map[string]string{"aaa": `{"a":1}`, "ccc": `{"c":3}`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("BucketPolicies after a visitor wrote into its documents = %v, want %v", got, want)
+	}
+	// The error of a visitor ends the page, and is what the page failed of.
+	refusal := errors.New("the visitor has seen enough")
+	visited := 0
+	if _, err := local.BucketPolicies(t.Context(), "", func(string, []byte) error {
+		visited++
+		return refusal
+	}); !errors.Is(err, refusal) || visited != 1 {
+		t.Errorf("BucketPolicies with a visitor that refuses = %v after %d visits", err, visited)
+	}
+	set("aaa", bucket.ConfigPolicy, "")
+	if err := store.DeleteBucket(t.Context(), "ccc"); err != nil {
+		t.Fatal(err)
+	}
+	set("bbb", bucket.ConfigPolicy, `{"b":2}`)
+	if got, want := policies(), map[string]string{"bbb": `{"b":2}`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("BucketPolicies after changes = %v, want %v", got, want)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := local.BucketPolicies(cancelled, "", func(string, []byte) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Errorf("BucketPolicies of a request that is gone = %v", err)
+	}
+}
+
+// TestLocalBucketPoliciesArePaged: a page reads a bounded number of buckets
+// and a bounded number of bytes, so that the read lock of the state is let
+// go between pages; together the pages are every policy there is, each once.
+// A bucket that is made, and a policy that is changed, while the walk is
+// under way are seen by the pages that come after.
+func TestLocalBucketPoliciesArePaged(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store := open(t, t.TempDir())
+	var local ports.BucketPolicies = store.LocalConfig()
+	name := func(i int) string { return fmt.Sprintf("bucket-%04d", i) }
+	want := map[string]string{}
+	const buckets = raftmeta.PolicyPageBuckets + 20
+	for i := range buckets {
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: name(i), CreatedAt: time.Unix(1, 0)}); err != nil {
+			t.Fatal(err)
+		}
+		if i%3 == 1 {
+			continue
+		}
+		want[name(i)] = fmt.Sprintf(`{"of":%d}`, i)
+		if err := store.SetBucketConfig(ctx, name(i), bucket.ConfigPolicy, []byte(want[name(i)])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, pages := walkPolicies(ctx, t, local)
+	if !reflect.DeepEqual(got, want) || pages != 2 {
+		t.Errorf("%d buckets were read in %d pages, want 2; %d policies, want %d", buckets, pages, len(got), len(want))
+	}
+	// The first page ends where the bound in buckets says, whether those
+	// buckets have a policy or not.
+	next, err := local.BucketPolicies(ctx, "", func(string, []byte) error { return nil })
+	if err != nil || next != name(raftmeta.PolicyPageBuckets) {
+		t.Fatalf("the first page goes on at %q, %v; want %q", next, err, name(raftmeta.PolicyPageBuckets))
+	}
+	// Between two pages the state moves on: the next page shows it.
+	last := name(buckets - 1)
+	if err := store.SetBucketConfig(ctx, last, bucket.ConfigPolicy, []byte(`{"changed":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "zzz-new", CreatedAt: time.Unix(1, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBucketConfig(ctx, "zzz-new", bucket.ConfigPolicy, []byte(`{"new":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	rest := map[string]string{}
+	for next != "" {
+		if next, err = local.BucketPolicies(ctx, next, func(bucketName string, document []byte) error {
+			rest[bucketName] = string(document)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rest[last] != `{"changed":true}` || rest["zzz-new"] != `{"new":true}` || rest[name(0)] != "" {
+		t.Errorf("the pages after the changes say %q of %s and %q of the new bucket", rest[last], last, rest["zzz-new"])
+	}
+
+	// Large policies: a page ends at its bound in bytes, long before the
+	// bound in buckets.
+	large := open(t, t.TempDir())
+	document := []byte(`{"padding":"` + strings.Repeat("p", 60<<10) + `"}`)
+	for i := range 16 {
+		if err := large.CreateBucket(ctx, bucket.Bucket{Name: name(i), CreatedAt: time.Unix(1, 0)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := large.SetBucketConfig(ctx, name(i), bucket.ConfigPolicy, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	visited := 0
+	next, err = large.LocalConfig().BucketPolicies(ctx, "", func(_ string, got []byte) error {
+		visited++
+		if !bytes.Equal(got, document) {
+			t.Errorf("a large policy was read as %d bytes", len(got))
+		}
+		return nil
+	})
+	// A stored record holds the document in base64: 82 KiB each, so the
+	// megabyte of a page is reached with the thirteenth.
+	if err != nil || visited != 13 || next != name(13) {
+		t.Errorf("a page of large policies visited %d and goes on at %q, %v; want 13 and %q", visited, next, err, name(13))
+	}
+	if all, pages := walkPolicies(ctx, t, large.LocalConfig()); len(all) != 16 || pages != 2 {
+		t.Errorf("16 large policies were read as %d in %d pages, want 2", len(all), pages)
+	}
+}
+
+// BenchmarkLocalBucketPolicies measures one page of the walk of all bucket
+// policies, where every policy is large and where every policy is of a usual
+// size: one read transaction, which is how long a page holds the read lock of
+// the state, and - with a visitor that does nothing - little else.
+func BenchmarkLocalBucketPolicies(b *testing.B) {
+	for _, size := range []struct {
+		name            string
+		buckets, policy int
+	}{{"17KiB", 100, 17 << 10}, {"1.2KiB", raftmeta.PolicyPageBuckets + 10, 1200}} {
+		b.Run(size.name, func(b *testing.B) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			store, err := raftmeta.Open(ctx, config(b.TempDir()))
+			cancel()
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = store.Close() })
+			document := []byte(`{"padding":"` + strings.Repeat("p", size.policy) + `"}`)
+			for i := range size.buckets {
+				name := fmt.Sprintf("bucket-%04d", i)
+				if err := store.CreateBucket(b.Context(), bucket.Bucket{Name: name, CreatedAt: time.Unix(1, 0)}); err != nil {
+					b.Fatal(err)
+				}
+				if err := store.SetBucketConfig(b.Context(), name, bucket.ConfigPolicy, document); err != nil {
+					b.Fatal(err)
+				}
+			}
+			local := store.LocalConfig()
+			visited := 0
+			b.ReportAllocs()
+			for b.Loop() {
+				visited = 0
+				next, err := local.BucketPolicies(b.Context(), "", func(string, []byte) error {
+					visited++
+					return nil
+				})
+				if err != nil || next == "" {
+					b.Fatalf("a page = %q, %v", next, err)
+				}
+			}
+			b.ReportMetric(float64(visited), "buckets/page")
+		})
 	}
 }

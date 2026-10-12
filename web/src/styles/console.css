@@ -373,6 +373,58 @@ code {
   padding-inline: 0.75rem;
 }
 
+/* Search: a field at the top of the navigation, dark like its surroundings
+   until it is typed into. Folded, a magnifier stands in for it and unfolds
+   the navigation; on a phone the field lies under the logo, as wide as the
+   screen. */
+.sidebar-search {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0 0.25rem;
+}
+
+.sidebar-search .form-control {
+  --bs-border-color: rgb(217 195 154 / 45%);
+
+  flex: 1;
+  min-width: 0;
+  background-color: rgb(244 236 221 / 10%);
+  color: var(--sand);
+}
+
+.sidebar-search .form-control::placeholder {
+  color: var(--dune);
+  opacity: 1;
+}
+
+.sidebar-search .form-control:focus {
+  border-color: var(--sand);
+  background-color: var(--paper);
+  color: var(--ink);
+}
+
+.sidebar-search .form-control:focus::placeholder {
+  color: var(--muted);
+}
+
+.sidebar-search .sidebar-button {
+  flex: none;
+  justify-content: center;
+  padding-inline: 0.55rem;
+}
+
+.sidebar-search-open {
+  display: none;
+}
+
+.layout-folded .sidebar-search {
+  display: none;
+}
+
+.layout-folded .sidebar-search-open {
+  display: inline-flex;
+}
+
 /* Folded: icons alone. The names stay in the page for whoever has it read. */
 .layout-folded .nav-label {
   position: absolute;
@@ -1125,6 +1177,32 @@ textarea[readonly] {
   color: var(--danger);
 }
 
+/* Search: the ways to write a query, said under the field; how much was
+   looked at, said over the results. */
+.search-hint,
+.search-figures {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.search-figures {
+  margin: 0 0 0.85rem;
+}
+
+.search-hint + .notice-region:not(:empty) {
+  margin-top: 0.85rem;
+}
+
+.search-more {
+  margin: 1rem 0 0;
+}
+
+.search-kind {
+  color: var(--saguaro);
+  font-size: 1.1rem;
+}
+
 /* Grids: tables of rows */
 
 .grid {
@@ -1194,6 +1272,31 @@ textarea[readonly] {
   .sidebar-logo,
   .layout-folded .sidebar-logo {
     height: 30px;
+  }
+
+  /* The search field: a row of its own under the logo and the session,
+     folded or not - folding is for a wide screen. */
+  .sidebar,
+  .layout-folded .sidebar {
+    flex-wrap: wrap;
+  }
+
+  .sidebar-search,
+  .layout-folded .sidebar-search {
+    display: flex;
+    flex: 1 1 100%;
+    order: 1;
+    padding: 0;
+  }
+
+  .sidebar-search .form-control {
+    min-height: 2.5rem;
+    font-size: 1rem;
+  }
+
+  .sidebar-search-open,
+  .layout-folded .sidebar-search-open {
+    display: none;
   }
 
   .sections {

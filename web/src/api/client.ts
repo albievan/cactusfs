@@ -22,6 +22,10 @@ export type ObjectList = Schemas['ObjectList'];
 export type ObjectMetadata = Schemas['ObjectMetadata'];
 /** Who uploaded an object and who downloaded it: best-effort counts. */
 export type ObjectAccess = Schemas['ObjectAccess'];
+/** One page of what a search found. */
+export type SearchResults = Schemas['SearchResults'];
+/** A bucket or an object that a search found. */
+export type SearchResult = Schemas['SearchResult'];
 /** A user. */
 export type User = Schemas['User'];
 /** A group. */

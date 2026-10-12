@@ -34,6 +34,8 @@ tags:
     description: Signing in to the console and out of it.
   - name: buckets
   - name: objects
+  - name: search
+    description: Finding buckets and objects by name.
   - name: users
   - name: groups
   - name: roles
@@ -372,6 +374,115 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ObjectAccess'
+        default:
+          $ref: '#/components/responses/Problem'
+  /search:
+    get:
+      operationId: search
+      tags: [search]
+      summary: Search buckets and objects by name
+      description: |
+        Finds the buckets whose name, and the objects whose key, answer to `q`.
+
+        **What is searched.** Only what the caller may list: the name of a bucket is a result for who may list
+        the buckets (`s3:ListAllMyBuckets`), and the keys of a bucket are searched for who may list that bucket
+        (`s3:ListBucket`, the bucket's own policy included). Buckets the caller may not list are passed over
+        without a word. Who may list neither the buckets nor any bucket is refused with 403, as is a `bucket`
+        the caller may not list. Current versions are searched; an object that was deleted is not found.
+
+        **The query** is read in one of three ways.
+        Plain text is found anywhere in a name, whatever its case: `report` finds `2025/Annual-Report.pdf`.
+        Text with `*` or `?` in it is a pattern for the whole name, whatever its case: `*` stands for any run
+        of characters, `/` included, and `?` for exactly one, so `*.pdf` finds every key that ends so.
+        Text that begins with `rx:` is a regular expression in the RE2 syntax, taken as written - case and
+        all - and found anywhere in a name unless it anchors itself: `rx:^logs/\d{4}/`. A regular expression
+        that cannot be read is refused with 400, and `detail` says what the matter with it is.
+
+        **Bounds.** One request looks at no more than 50 000 keys and 200 buckets, for no more than two
+        seconds, and returns no more than `limit` results. When a bound stops it, `complete` is false and
+        `next_continuation` goes on from there: send it as `continuation` with the same `q` and `bucket`.
+        A page can be empty and still not be the last. Only buckets the caller may see count, and only such
+        a bucket is where a page stops: `examined`, `complete` and the number of pages say nothing of the
+        others. A caller runs one search at a time and a node eight; beyond that the answer is 429 with
+        `Retry-After`.
+
+        **What a page costs.** Before it looks at a key, every page decides again which buckets are the
+        caller's to see - all of them, whatever `continuation` says - from the bucket policies as the node
+        that answers has them, read page by page. That takes time in proportion to the number of buckets
+        there are and the size of their policies, not to how many of them the caller may see nor to where the
+        page begins. The node remembers what a policy says for as long as the policy does not change, so a
+        page checks every policy and reads anew only those that changed: some 0.2 seconds for 5 000 buckets
+        whose policies are 16 KiB each, 0.1 for 20 000 with policies of 1 KiB, on the machine it was measured
+        on.
+
+        **503 from a search.** Deciding counts towards the two seconds. When it takes them all, the answer is
+        503 with `Retry-After: 1` and a `detail` that says so, and no part of an answer. That 503 has two
+        causes, and only one of them passes. A node that was started not long ago remembers nothing yet and
+        reads every policy in full - some ten times the work, 2.6 seconds for the 5 000 buckets above - but
+        keeps what it has read when it gives up, so the same request sent again gets further and is soon
+        answered. Past a size of the deployment, though, the two seconds are not enough even then: about
+        10 000 buckets with policies of 16 KiB, or 150 000 with policies of 1 KiB, on that machine (the node
+        remembers 128 MiB of policies and reads the others in full on every page). There the 503 is a limit
+        and repeating the request does not help: search a `bucket` by name, which decides that bucket alone.
+        The root identity is bound by no bucket policy, reads none, and is not subject to this.
+
+        A `continuation` says where to go on and grants nothing. It is refused with 400 when it is not one
+        this API gave out for the same `q` and `bucket`.
+
+        Results come in order: buckets by name, each followed by its objects by key. A search is a read and
+        leaves no audit record.
+      x-cactusfs-action: s3:ListBucket
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: What to search for - text, a wildcard, or `rx:` and a regular expression.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+        - name: bucket
+          in: query
+          description: Search the keys of this bucket only. Its name is then no result.
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 63
+        - name: continuation
+          in: query
+          description: The `next_continuation` of the previous page.
+          schema:
+            type: string
+            maxLength: 4096
+        - name: limit
+          in: query
+          description: The most results to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: One page of what was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResults'
+        '429':
+          description: |
+            The caller has a search running already, or the node is running as many as it runs at a time
+            (`code` is `TooManyRequests`). Nothing was searched; the same request can be sent again.
+          headers:
+            Retry-After:
+              description: After how many seconds to send the request again.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         default:
           $ref: '#/components/responses/Problem'
   /users:
@@ -1201,6 +1312,54 @@ components:
           type: integer
           format: int64
           minimum: 0
+    SearchResult:
+      type: object
+      required: [kind, bucket]
+      properties:
+        kind:
+          type: string
+          enum: [bucket, object]
+          description: What was found - a bucket, by its name, or an object, by its key.
+        bucket:
+          type: string
+          description: The bucket, or the bucket of the object.
+        key:
+          type: string
+          description: The key of the object. A bucket has none.
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The size of the object, in bytes.
+        last_modified:
+          type: string
+          format: date-time
+          description: When the object was stored.
+        etag:
+          type: string
+          description: The entity tag of the object.
+    SearchResults:
+      type: object
+      required: [results, match, examined, complete]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResult'
+        match:
+          type: string
+          enum: [substring, wildcard, regex]
+          description: How `q` was read.
+        examined:
+          type: integer
+          minimum: 0
+          description: How many keys this request looked at.
+        complete:
+          type: boolean
+          description: False when a bound stopped the request before it had looked at everything.
+        next_continuation:
+          type: string
+          description: Where to go on, when `complete` is false.
     User:
       type: object
       required: [name, groups, roles, disabled, has_password, created_at]

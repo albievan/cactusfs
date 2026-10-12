@@ -184,6 +184,17 @@ var (
 	// ErrTooManyAttempts means that the caller must wait before trying
 	// again.
 	ErrTooManyAttempts = errors.New("too many attempts")
+	// ErrTooManyRequests means that the node is already doing as much of
+	// this kind of work as it does at one time - for this caller, or for
+	// everybody. Nothing is wrong with the request; it can be repeated in
+	// a moment.
+	ErrTooManyRequests = errors.New("too many requests at once")
+	// ErrTooManyBuckets means that the deployment has more buckets than a
+	// request that must decide each of them gets through in the time it
+	// has. It comes together with ErrUnavailable, and differs from it:
+	// repeating the request helps only as far as the node remembers work
+	// it has done for the request before; past that, it is a limit.
+	ErrTooManyBuckets = errors.New("too many buckets to decide in time")
 )
 
 // Errors that describe the state of the cluster.
@@ -251,6 +262,8 @@ func wireCodes() []struct {
 		{"sub_bucket_not_found", ErrSubBucketNotFound},
 		{"too_many_sub_buckets", ErrTooManySubBuckets},
 		{"sub_bucket_not_empty", ErrSubBucketNotEmpty},
+		{"too_many_requests", ErrTooManyRequests},
+		{"too_many_buckets", ErrTooManyBuckets},
 	}
 }
 
