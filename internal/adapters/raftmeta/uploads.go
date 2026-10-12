@@ -585,6 +585,11 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 	if removed != nil {
 		unlisted = unlisted[:min(len(unlisted), maxDroppedParts-len(removed.Dropped))]
 	}
+	// The upload is one upload into its bucket, now that it is a version:
+	// neither its creation nor its parts were (ADR-0019).
+	if err := noteUpload(tx, v, now); err != nil {
+		return applyResult{}, err
+	}
 	committed := v
 	return applyResult{previous: removed, stored: &committed, parts: unlisted, events: []ports.Event{
 		{Type: ports.EventObjectCreated, Time: v.ModifiedAt, Data: objectEvent(v)},

@@ -146,6 +146,60 @@ func TestObjectAccessIsCountedAndTraced(t *testing.T) {
 	}
 }
 
+// failingActivity cannot read the record of any bucket.
+type failingActivity struct{}
+
+func (failingActivity) BucketActivities(context.Context, []string) ([]bucket.Activity, error) {
+	return nil, domain.ErrUnavailable
+}
+
+// TestBucketActivityIsCountedAndTraced: the record of the latest use of the
+// buckets is reached through a decorator like every other port, a call that
+// fails is counted as one, and who used a bucket is in no metric and no span.
+func TestBucketActivityIsCountedAndTraced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	recorder := tracetest.NewSpanRecorder()
+	tel := newTelemetry(t, recorder)
+	mem := porttest.NewMemMetadata()
+	store := tel.InstrumentBucketActivity(mem)
+
+	if err := mem.CreateBucket(ctx, bucket.Bucket{Name: "bkt", CreatedBy: "user/alice"}); err != nil {
+		t.Fatal(err)
+	}
+	version := porttest.SampleVersion("bkt", "k", 1)
+	version.CreatedBy = "user/alice"
+	if _, err := mem.PutVersion(ctx, version); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.BucketActivities(ctx, []string{"bkt", "nope"})
+	if err != nil || len(records) != 2 || len(records[0].Uploads) != 1 || records[0].Uploads[0].By != "user/alice" || !records[1].Empty() {
+		t.Fatalf("behaviour not passed through: %+v, %v", records, err)
+	}
+	if _, err := store.BucketActivities(ctx, make([]string, ports.MaxBucketActivities+1)); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	if _, err := tel.InstrumentBucketActivity(failingActivity{}).BucketActivities(ctx, []string{"bkt"}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+
+	metrics := scrape(t, tel)
+	for _, want := range []string{
+		"cactusfs_port_calls_total method=BucketActivities port=bucket_activity result=ok",
+		"cactusfs_port_calls_total method=BucketActivities port=bucket_activity result=error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	if strings.Contains(metrics, "alice") {
+		t.Error("who used a bucket is named in the metrics")
+	}
+	if !contains(spanNames(recorder), "bucket_activity.BucketActivities") {
+		t.Errorf("no span named bucket_activity.BucketActivities among %v", spanNames(recorder))
+	}
+}
+
 // TestBucketPolicyPagesAreCountedAndTraced: a page of the walk of all bucket
 // policies is a read of the metadata store like any other - counted, traced,
 // and passed through as it is, the error of the visitor included.

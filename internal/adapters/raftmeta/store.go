@@ -563,7 +563,7 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 			}
 			level = min(level, limit)
 			held := heldTo(e, level)
-			version := s.versionOf(held)
+			version := writtenAt(held, s.versionOf(held), level)
 			if version > level {
 				return fmt.Errorf("%w: the cluster is being upgraded: this change needs metadata version %d, "+
 					"and a node that only understands version %d is still a member", domain.ErrUnavailable, version, level)
@@ -619,9 +619,15 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 // level. Who made a version is something a write can go without: below
 // schema 3 a put and a completion are proposed without it and succeed, as
 // they did before it was recorded (ADR-0016: nothing is refused that worked
-// before). Everything else that needs a newer schema is refused instead. The
-// caller's entry is not changed.
+// before). So is who created a bucket, below schema 4 (ADR-0019). Everything
+// else that needs a newer schema is refused instead. The caller's entry is
+// not changed.
 func heldTo(e entry, level byte) entry {
+	if level < entrySchema4 && e.CreateBucket != nil && e.CreateBucket.CreatedBy != "" {
+		b := *e.CreateBucket
+		b.CreatedBy = ""
+		e.CreateBucket = &b
+	}
 	if level >= entrySchema3 {
 		return e
 	}
@@ -713,6 +719,12 @@ func translateRaftError(err error) error {
 
 // CreateBucket implements ports.BucketStore.
 func (s *Store) CreateBucket(ctx context.Context, b bucket.Bucket) error {
+	// What the state machine would refuse without looking at the state is
+	// refused here, and nothing proposed: the first entry of schema 4 ends
+	// the way back to the release before, whether it took effect or not.
+	if err := bucket.ValidateCreator(b.CreatedBy); err != nil {
+		return fmt.Errorf("raftmeta.CreateBucket: %w", err)
+	}
 	if _, err := s.propose(ctx, entry{Type: cmdCreateBucket, CreateBucket: bucketToRecord(b)}); err != nil {
 		return fmt.Errorf("raftmeta.CreateBucket: %w", err)
 	}

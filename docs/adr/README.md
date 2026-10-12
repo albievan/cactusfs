@@ -54,3 +54,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0016](0016-object-access-and-schema-3.md) | Who uploaded and who read an object, and entry schema 3 | accepted |
 | [0017](0017-sub-buckets.md) | Sub-buckets | accepted |
 | [0018](0018-tag-rules-and-catalogue.md) | Tag rules, lower-case tags, and a catalogue of tags | accepted |
+| [0019](0019-bucket-activity-and-schema-4.md) | Who created a bucket, its latest uploads and downloads, and entry schema 4 | accepted |

@@ -56,6 +56,11 @@ func TestStoreSchema3Contract(t *testing.T) {
 	porttest.Schema3Contract(t, func(t *testing.T) porttest.Schema3 { return open(t, t.TempDir()) })
 }
 
+func TestStoreSchema4Contract(t *testing.T) {
+	t.Parallel()
+	porttest.Schema4Contract(t, func(t *testing.T) porttest.Schema4 { return open(t, t.TempDir()) })
+}
+
 // dump captures everything a store holds, for comparing states.
 func dump(t *testing.T, store *raftmeta.Store) map[string]any {
 	t.Helper()

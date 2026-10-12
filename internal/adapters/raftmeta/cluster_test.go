@@ -47,10 +47,13 @@ type testCluster struct {
 	// deaf nodes do not answer when asked for their term, though Raft
 	// itself still reaches them.
 	deaf map[string]bool
-	// newer names the nodes that run the binary of the next release, and
-	// older those that run the binary of the release before this one.
-	newer map[string]bool
-	older map[string]bool
+	// newer names the nodes that run the binary of the next release, older
+	// those that run the binary of the release of entry schema 2, and
+	// schema3 those that run the binary of the release of entry schema 3,
+	// the one before this.
+	newer   map[string]bool
+	older   map[string]bool
+	schema3 map[string]bool
 }
 
 type recorder struct {
@@ -75,7 +78,8 @@ func newTestCluster(t *testing.T) *testCluster {
 	t.Helper()
 	return &testCluster{
 		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{},
-		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, deaf: map[string]bool{},
+		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, schema3: map[string]bool{},
+		deaf: map[string]bool{},
 	}
 }
 
@@ -186,6 +190,9 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	if c.older[id] {
 		asPreviousRelease(store)
 	}
+	if c.schema3[id] {
+		asSchema3Release(store)
+	}
 	c.mu.Lock()
 	c.stores[id] = store
 	c.members[id] = Member{ID: id, RaftAddr: listener.Addr().String(), Voter: voter}
@@ -210,13 +217,24 @@ func asNextRelease(s *Store) {
 }
 
 // asPreviousRelease makes a store behave like the binary of the release
-// before this one, which applies entry schema 2 and nothing newer: it
+// before schema 3, which applies entry schema 2 and nothing newer: it
 // announces 2 when it registers, writes nothing above it, and stops at an
 // entry of schema 3.
 func asPreviousRelease(s *Store) {
 	s.supported = entrySchemaTimed
 	s.fsm.supported = entrySchemaTimed
 	s.versionOf = func(e entry) byte { return min(versionOf(e), entrySchemaTimed) }
+}
+
+// asSchema3Release makes a store behave like the binary of the release
+// before this one, which applies entry schema 3 and nothing newer: it
+// announces 3 when it registers, writes nothing above it - no bucket with its
+// creator, and a put, a completion and a batch of reads as it always wrote
+// them - and stops at an entry of schema 4.
+func asSchema3Release(s *Store) {
+	s.supported = entrySchema3
+	s.fsm.supported = entrySchema3
+	s.versionOf = func(e entry) byte { return min(versionOf(e), entrySchema3) }
 }
 
 func (c *testCluster) stop(id string) {
@@ -349,6 +367,32 @@ func TestEveryNodeOfAClusterHonoursTheContractOfSchema3(t *testing.T) {
 		// cluster takes that from nodes it knows, so they are made known:
 		// nodes that are no members of the metadata group, as gateways
 		// without the meta role are none.
+		for _, id := range []string{"node-a", "node-b"} {
+			node := cluster.Node{ID: id, RPCAddr: id + ":9002", Roles: cluster.Roles{cluster.RoleGateway}, MetadataVersion: MetadataVersion}
+			if err := c.store("s4").SetNode(t.Context(), node); err != nil {
+				t.Fatalf("SetNode %s: %v", id, err)
+			}
+		}
+		eventually(t, "the node to see every member's version", func() bool {
+			level, err := c.store("s4").entryVersion()
+			return err == nil && level == MetadataVersion
+		})
+		return c.store("s4")
+	})
+}
+
+// TestEveryNodeOfAClusterHonoursTheContractOfSchema4: what schema 4 added -
+// who created a bucket, and the latest uploads and downloads of every bucket
+// - asked of a node that neither leads nor votes, in a cluster whose members
+// have all said that they apply it.
+func TestEveryNodeOfAClusterHonoursTheContractOfSchema4(t *testing.T) {
+	t.Parallel()
+	porttest.Schema4Contract(t, func(t *testing.T) porttest.Schema4 {
+		c := newTestCluster(t)
+		c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+		c.register("m1", "m2", "m3", "s4")
+		// The gateways that hand in what they counted, made known to the
+		// cluster as the contract of schema 3 makes them known.
 		for _, id := range []string{"node-a", "node-b"} {
 			node := cluster.Node{ID: id, RPCAddr: id + ":9002", Roles: cluster.Roles{cluster.RoleGateway}, MetadataVersion: MetadataVersion}
 			if err := c.store("s4").SetNode(t.Context(), node); err != nil {
@@ -826,6 +870,11 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 // worked before is refused, on any node, at any step. The state stays what
 // the release before wrote until schema 3 is first used; then every node
 // holds the same.
+//
+// The release the nodes come back with is the one of schema 3: with this
+// one, of schema 4, the first put after the last registration would be an
+// entry of schema 4, and the state would say 4 before schema 3 was looked at.
+// That upgrade is TestRollingUpgradeToSchema4.
 func TestRollingUpgradeToSchema3(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -922,10 +971,10 @@ func TestRollingUpgradeToSchema3(t *testing.T) {
 	}
 
 	for i, id := range nodes {
-		// The node is stopped and comes back with this release.
+		// The node is stopped and comes back with the release of schema 3.
 		c.stop(id)
 		c.mu.Lock()
-		c.older[id] = false
+		c.older[id], c.schema3[id] = false, true
 		c.mu.Unlock()
 		store := c.start(id, id != "s4")
 		c.ready(id)
@@ -980,7 +1029,7 @@ func TestRollingUpgradeToSchema3(t *testing.T) {
 		}
 	}
 
-	// All four run this release and have said so. Nothing of schema 3 was
+	// All four run that release and have said so. Nothing of schema 3 was
 	// written yet: every state is still one the release before opens, and
 	// the upgrade could be undone.
 	for _, id := range nodes {
@@ -1057,9 +1106,9 @@ func TestSchema3WhenAMemberHasNotRegistered(t *testing.T) {
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("m1")
-	eventually(t, "m1 to see every member on schema 3", func() bool {
+	eventually(t, "m1 to see every member on the newest schema", func() bool {
 		level, err := store.entryVersion()
-		return err == nil && level == entrySchema3
+		return err == nil && level == MetadataVersion
 	})
 	define := func(s *Store, key string) error {
 		return s.PutTagDefinition(ctx, tagging.Definition{Key: key, CreatedAt: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)}, audit.Record{})
@@ -1148,14 +1197,14 @@ func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("s4")
-	eventually(t, "s4 to see every member on schema 3", func() bool {
+	eventually(t, "s4 to see every member on the newest schema", func() bool {
 		level, err := store.entryVersion()
-		return err == nil && level == entrySchema3
+		return err == nil && level == MetadataVersion
 	})
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
 		t.Fatal(err)
 	}
-	// From here on s4 believes the cluster to be at schema 3, and its
+	// From here on s4 believes the cluster to be at schema 4, and its
 	// leader says 2. (s4 has no vote and never leads: every proposal of
 	// its own goes through this client.)
 	behind := &behindLeader{LeaderClient: store.leader, level: entrySchemaTimed}
@@ -1167,8 +1216,10 @@ func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 	if err != nil || put.Stored.CreatedBy != "" {
 		t.Fatalf("a put that says who, through a node behind its leader = made by %q, %v; want it made, by nobody", put.Stored.CreatedBy, err)
 	}
-	if got := behind.proposed(); len(got) != 2 || got[0] != entrySchema3 || got[1] > entrySchemaTimed {
-		t.Errorf("the put was proposed in the schemas %v, want 3 and then one the leader takes", got)
+	// As schema 4, which a put is written in at that level (ADR-0019);
+	// then as schema 3, which it needs to say who; then without.
+	if got := behind.proposed(); len(got) != 3 || got[0] != entrySchema4 || got[1] != entrySchema3 || got[2] > entrySchemaTimed {
+		t.Errorf("the put was proposed in the schemas %v, want 4, 3 and then one the leader takes", got)
 	}
 	if got, err := store.GetObject(ctx, "b", "by-put"); err != nil || got.CreatedBy != "" || got.VersionID != v.VersionID {
 		t.Errorf("the version that was put = %+v, %v", got, err)
@@ -1191,8 +1242,8 @@ func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 	if err != nil || completed.Stored.CreatedBy != "" {
 		t.Fatalf("a completion that says who, through a node behind its leader = made by %q, %v; want it made, by nobody", completed.Stored.CreatedBy, err)
 	}
-	if got := behind.proposed(); len(got) != 2 || got[0] != entrySchema3 || got[1] != entrySchemaTimed {
-		t.Errorf("the completion was proposed in the schemas %v, want 3 and then 2", got)
+	if got := behind.proposed(); len(got) != 3 || got[0] != entrySchema4 || got[1] != entrySchema3 || got[2] != entrySchemaTimed {
+		t.Errorf("the completion was proposed in the schemas %v, want 4, 3 and then 2", got)
 	}
 
 	tagged := porttest.SampleUpload("b", "tagged", 3)
@@ -1222,10 +1273,16 @@ func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 		if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrUnsupportedFormat) || errors.Is(err, domain.ErrOutcomeUnknown) {
 			t.Errorf("%s through a node behind its leader = %v, want a definite %v and nothing else", what, err, domain.ErrUnavailable)
 		}
-		// Sent once: when the leader has said that the cluster is not at
-		// schema 3, the same entry is not sent again.
-		if got := behind.proposed(); len(got) != 1 || got[0] != entrySchema3 {
-			t.Errorf("%s was proposed in the schemas %v, want 3 and no more", what, got)
+		// Sent once as schema 3: when the leader has said that the cluster
+		// is not at schema 3, the same entry is not sent again. (A batch
+		// of reads is sent as schema 4 before that, as it is written at
+		// the level s4 believed in.)
+		want := []byte{entrySchema3}
+		if what == "reads" {
+			want = []byte{entrySchema4, entrySchema3}
+		}
+		if got := behind.proposed(); !bytes.Equal(got, want) {
+			t.Errorf("%s was proposed in the schemas %v, want %v and no more", what, got, want)
 		}
 	}
 	// Nothing of schema 3 was logged: every state is still one the release
@@ -1716,10 +1773,18 @@ func TestTheLeaderStampsEntries(t *testing.T) {
 // which schema it applies - one that was just added, or one whose record was
 // removed - cannot take it back to schema 1: deletes still make markers and
 // puts are still stamped.
+//
+// The members run the release of schema 3: a put of this one is an entry of
+// schema 4 once all have registered (ADR-0019), and the state would hold
+// what only schema 4 expresses - which TestSchema4WhenAMemberHasNotRegistered
+// is about.
 func TestVersionsWhenAMemberHasNotRegistered(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	c := newTestCluster(t)
+	for _, id := range []string{"m1", "m2", "m3", "s4"} {
+		c.schema3[id] = true
+	}
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("m1")

@@ -312,10 +312,23 @@ func FuzzDecodeEntry(f *testing.F) {
 	f.Add(append([]byte{3}, `{"type":"tag.definition.delete","delete_tag_definition":{"key":"stage"}}`...))
 	f.Add(append([]byte{3}, `{"type":"upload.create","create_upload":{"bucket":"b","key":"k","tags":{"a":"b"}}}`...))
 	f.Add(append([]byte{4}, `{"type":"tag.definition.delete","delete_tag_definition":{"key":"stage"}}`...))
+	// Schema 4 (ADR-0019): a bucket with its creator, in an entry of its own
+	// schema and in one that claims an older; and the three entries that are
+	// written as schema 4 without saying anything new.
+	f.Add(append([]byte{4}, `{"type":"bucket.create","at":"2026-10-12T09:00:00Z","create_bucket":{"name":"b","created_at":"2026-10-12T09:00:00Z","created_by":"user/albie"}}`...))
+	f.Add(append([]byte{3}, `{"type":"bucket.create","create_bucket":{"name":"b","created_at":"2026-10-12T09:00:00Z","created_by":"user/albie"}}`...))
+	f.Add(append([]byte{1}, `{"type":"bucket.create","create_bucket":{"name":"b","created_by":"root"},"created_by":"root"}`...))
+	f.Add(append([]byte{4}, `{"type":"object.put","put_object":{"bucket":"b","key":"k","created_by":"user/x"}}`...))
+	f.Add(append([]byte{4}, `{"type":"upload.complete","complete_upload":{"bucket":"b","key":"k","created_by":"key/AKID","parts":[{"number":1}]}}`...))
+	f.Add(append([]byte{4}, `{"type":"object.reads.add","add_reads":{"node":"n","boot":1,"seq":1,"items":[{"bucket":"b","key":"k","version":"null","version_id":"0102030405060708090a0b0c0d0e0f10","who":"anonymous","presigned":true,"downloads":1}]}}`...))
+	f.Add(append([]byte{5}, `{"type":"bucket.create","create_bucket":{"name":"b","created_by":"user/albie"}}`...))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// A binary of the newest schema: what it decodes has one payload,
 		// the one its type names.
-		if e, err := decodeEntry(data, entrySchema3); err == nil {
+		if e, err := decodeEntry(data, MetadataVersion); err == nil {
+			if data[0] > MetadataVersion {
+				t.Fatalf("an entry of schema %d was decoded: this binary applies %d", data[0], MetadataVersion)
+			}
 			payloads := 0
 			for _, set := range []bool{
 				e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
@@ -346,13 +359,18 @@ func FuzzDecodeEntry(f *testing.F) {
 			if err != nil {
 				t.Fatalf("a decoded entry cannot be encoded: %v", err)
 			}
-			if twice, err := decodeEntry(again, entrySchema3); err != nil || twice.Type != e.Type {
+			if twice, err := decodeEntry(again, MetadataVersion); err != nil || twice.Type != e.Type {
 				t.Fatalf("a decoded entry does not decode again: %v", err)
 			}
 			// A binary of the schema before never accepts what only this
 			// one can apply.
 			if _, err := decodeEntry(data, entrySchemaTimed); err == nil && (data[0] >= entrySchema3 || third) {
 				t.Fatalf("a binary of schema 2 decoded %q from an entry of schema %d", e.Type, data[0])
+			}
+			// Nor does a binary of schema 3 accept an entry of schema 4,
+			// whatever it says: it stops at it.
+			if _, err := decodeEntry(data, entrySchema3); (err == nil) != (data[0] < entrySchema4) {
+				t.Fatalf("a binary of schema 3 and %q in an entry of schema %d: %v", e.Type, data[0], err)
 			}
 		} else if !errors.Is(err, domain.ErrUnsupportedFormat) {
 			t.Fatalf("untyped error: %v", err)
@@ -695,7 +713,7 @@ func TestTimedEntries(t *testing.T) {
 	// A state of a schema this binary does not know is refused, as the
 	// previous release refuses this one.
 	if err := f.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchema3+1))
+		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchema4+1))
 	}); err != nil {
 		t.Fatal(err)
 	}

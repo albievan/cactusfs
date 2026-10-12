@@ -179,7 +179,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 
 	n.maintenance = app.NewMaintenance(n.id, n.clock)
 	drives := n.driveSource(stores)
-	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.meta.LocalConfig())
+	// The list of buckets with details decides every bucket from one walk
+	// of the policies in this node's state, as a search does, and reads the
+	// latest use of the buckets in one call (ADR-0019).
+	bucketPolicies := n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig())
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.meta.LocalConfig()).
+		WithDetails(bucketPolicies, n.telemetry.InstrumentBucketActivity(n.meta))
 	// Who read what: counted in memory and handed to the metadata store in
 	// the background, by this node under its own name (ADR-0016).
 	accessStore := n.telemetry.InstrumentObjectAccess(n.meta)
@@ -212,7 +217,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// bucket. The authorizer remembers what they say from one search to the
 	// next.
 	n.search, err = app.NewSearchService(app.SearchServiceConfig{
-		Buckets: meta, Index: meta, Policies: n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig()),
+		Buckets: meta, Index: meta, Policies: bucketPolicies,
 		Authz: n.authorizer, Clock: n.clock, Logger: logger,
 	})
 	if err != nil {

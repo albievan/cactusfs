@@ -324,6 +324,43 @@ func (a *Authorizer) walkedPolicy(ctx context.Context, w *policyWalk, bucketName
 	return read.policy, read.err
 }
 
+// walkedSummary returns the summary of the policy of a bucket, nil when it
+// has none, from the walk of the policies of all buckets that the request
+// scope of ctx was primed with: the walk the requests of that scope are
+// decided by. For a bucket that was just decided the policy is on the page
+// the walk holds, and nothing is read; for a caller whom no bucket policy
+// binds, who caused no reading, the walk is made here. Either way the policy
+// is the one readPolicies parsed, or remembered under the hash of the
+// document it had just read - never what an older document said - and it is
+// not parsed again for its summary.
+//
+// readable is false when the stored policy of this one bucket is damaged;
+// the error says that a page of the policies could not be read, which says
+// nothing of any bucket, or that ctx carries no such walk. It decides
+// nothing: it classifies a document for whoever was allowed to read it.
+func (a *Authorizer) walkedSummary(ctx context.Context, bucketName string) (summary *iam.BucketPolicySummary, readable bool, err error) {
+	scope, _ := ctx.Value(requestScopeKey{}).(*requestScope)
+	if scope == nil {
+		return nil, false, fmt.Errorf("bucket policies: %w: the request was not told where they are", domain.ErrUnavailable)
+	}
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	if scope.walk == nil {
+		return nil, false, fmt.Errorf("bucket policies: %w: the request was not told where they are", domain.ErrUnavailable)
+	}
+	policy, err := a.walkedPolicy(ctx, scope.walk, bucketName)
+	switch {
+	case errors.Is(err, domain.ErrIntegrity):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
+	case policy == nil:
+		return nil, true, nil
+	}
+	made := policy.Summary()
+	return &made, true, nil
+}
+
 // readPolicies reads the next page of a walk. Each document is hashed, and
 // parsed unless the authorizer remembers what a document of that hash, of
 // that bucket, was parsed to. Nothing of a document is kept.

@@ -1174,21 +1174,60 @@ textarea[readonly] {
   color: var(--danger);
 }
 
-.tile-figures {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.5rem 0 0;
+/* The grid of buckets */
+
+/* A cell that says why it has no figure: counting, not shown, not to be had. */
+.grid .grid-note {
   color: var(--muted);
   font-size: 0.85rem;
 }
 
-.tile-figures .badge {
+.grid-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.grid-badges .badge,
+.activity-line .badge {
   border: 1px solid var(--line);
-  color: var(--night-green);
   font-size: 0.8rem;
   font-weight: 600;
+}
+
+/* The latest upload or download of a bucket: when and who on one line, the
+   object under it; the ones before it behind a line that opens, for whoever
+   cannot hover over the cell for its hint. */
+.activity-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.4rem;
+  min-width: 12rem;
+}
+
+.activity-key {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.activity-earlier {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.activity-earlier summary {
+  width: fit-content;
+  color: var(--saguaro);
+  cursor: pointer;
+}
+
+.activity-earlier li {
+  margin-top: 0.3rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--line);
 }
 
 .state {

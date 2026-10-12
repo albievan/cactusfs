@@ -64,6 +64,10 @@ var Nodes = []string{"node1", "node2", "node3", "node4"}
 type Options struct {
 	// Env is added to the environment of every node.
 	Env map[string]string
+	// Images names, by node, the image of a node that is to run another
+	// release than the one under test: a cluster in the middle of a rolling
+	// upgrade. A node that is not named runs the image under test.
+	Images map[string]string
 }
 
 // Cluster is a running test cluster.
@@ -75,6 +79,9 @@ type Cluster struct {
 	cluster *testcontainers.DockerNetwork
 	prefix  string
 	env     map[string]string
+	// images holds, by node, the image of a node that does not run the
+	// image under test.
+	images map[string]string
 
 	// AccessKey and SecretKey are the root credential of the cluster.
 	AccessKey string
@@ -158,13 +165,18 @@ func Start(t *testing.T, opts Options) *Cluster {
 
 	c := &Cluster{
 		t: t, image: img, docker: docker, prefix: "cactusfs-test-" + randomHex(t, 4),
-		containers: map[string]*testcontainers.DockerContainer{},
+		containers: map[string]*testcontainers.DockerContainer{}, images: map[string]string{},
 		// Credentials and passphrase are made up for this run; none is
 		// written anywhere.
 		AccessKey: "TEST" + strings.ToUpper(randomHex(t, 8)),
 		SecretKey: randomHex(t, 24),
 	}
 	passphrase := randomHex(t, 24)
+	for id, name := range opts.Images {
+		if name != "" {
+			c.images[id] = name
+		}
+	}
 
 	if c.edge, err = tcnetwork.New(ctx); err != nil {
 		t.Fatalf("edge network: %v", err)
@@ -274,7 +286,7 @@ func (c *Cluster) run(ctx context.Context, id string) error {
 	if id == "node4" {
 		env["CACTUSFS_ROLES"] = "gateway,storage,console"
 	}
-	ctr, err := testcontainers.Run(ctx, c.image,
+	ctr, err := testcontainers.Run(ctx, c.ImageOf(id),
 		testcontainers.WithCmd("server"),
 		testcontainers.WithEnv(env),
 		testcontainers.WithExposedPorts(s3Port, adminPort),
@@ -298,6 +310,77 @@ func (c *Cluster) run(ctx context.Context, id string) error {
 		return fmt.Errorf("node %s: %w\n%s", id, err, logsOf(ctx, ctr))
 	}
 	return nil
+}
+
+// ImageOf returns the image a node runs.
+func (c *Cluster) ImageOf(id string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if name := c.images[id]; name != "" {
+		return name
+	}
+	return c.image
+}
+
+// Upgrade replaces the binary of a node, as a rolling upgrade does it for
+// one node: the node is stopped gracefully, its container is removed, and a
+// new one is started from the image - from the image under test when none is
+// named - with the volumes, the name and the environment the node had.
+// Upgrade returns when the node says it has started; whether it serves is
+// for WaitReady to say.
+func (c *Cluster) Upgrade(id, name string) {
+	c.t.Helper()
+	c.Stop(id)
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	// Without its volumes: they are named, and are the node.
+	if _, err := c.docker.ContainerRemove(ctx, c.container(id).GetContainerID(), client.ContainerRemoveOptions{Force: true}); err != nil {
+		c.t.Fatalf("remove the container of %s: %v", id, err)
+	}
+	c.mu.Lock()
+	delete(c.containers, id)
+	delete(c.images, id)
+	if name != "" {
+		c.images[id] = name
+	}
+	c.mu.Unlock()
+	if err := c.run(ctx, id); err != nil {
+		c.t.Fatalf("start %s from %s: %v", id, c.ImageOf(id), err)
+	}
+}
+
+// MetaFile returns a file of the metadata directory of a node, which must be
+// stopped: the file is read as it lies in the node's volume, by a helper
+// container, so that a test can look at the state a member holds and not at
+// what some read path makes of it.
+func (c *Cluster) MetaFile(id, name string) []byte {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if state, err := c.container(id).State(ctx); err != nil || state.Running {
+		c.t.Fatalf("the metadata of %s is read while it is stopped: state %v, %v", id, state, err)
+	}
+	// The helper only has to be there while the file is copied out of it.
+	helper, err := testcontainers.Run(ctx, helperImage,
+		testcontainers.WithCmd("sleep", "120"),
+		testcontainers.WithMounts(testcontainers.VolumeMount(c.volume(id+"-meta"), "/meta")),
+	)
+	if helper != nil {
+		defer func() { _ = helper.Terminate(context.WithoutCancel(ctx)) }()
+	}
+	if err != nil {
+		c.t.Fatalf("helper on the metadata of %s: %v", id, err)
+	}
+	reader, err := helper.CopyFileFromContainer(ctx, "/meta/"+name)
+	if err != nil {
+		c.t.Fatalf("read %s of the metadata of %s: %v", name, id, err)
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		c.t.Fatalf("read %s of the metadata of %s: %v", name, id, err)
+	}
+	return data
 }
 
 func logsOf(ctx context.Context, ctr *testcontainers.DockerContainer) string {

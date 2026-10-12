@@ -203,7 +203,10 @@ func anonymousReadable(action Action) bool {
 }
 
 // OpenToAnyone reports whether some statement of the policy allows something
-// to every caller, authenticated or not.
+// to every caller: an Allow whose principal is "*". Conditions and Deny
+// statements are not weighed, and it does not say that a caller who has not
+// authenticated is let in - that is Decide's to say, and only for the
+// actions of anonymousReadable.
 func (p BucketPolicy) OpenToAnyone() bool {
 	for i, s := range p.Document.Statements {
 		if s.Effect == Allow && slices.Contains(p.Principals[i], PrincipalAnyone) {
@@ -211,4 +214,21 @@ func (p BucketPolicy) OpenToAnyone() bool {
 		}
 	}
 	return false
+}
+
+// BucketPolicySummary says what a bucket's policy is without what it says:
+// what a list of buckets shows of each to who may read the policy.
+type BucketPolicySummary struct {
+	// Statements is how many statements the policy has.
+	Statements int
+	// OpenToAnyone says that some statement allows something to every
+	// caller, whatever its conditions and the other statements say
+	// (BucketPolicy.OpenToAnyone).
+	OpenToAnyone bool
+}
+
+// Summary returns the summary of the policy. It classifies the document and
+// decides nothing: what a caller may do under the policy is Decide's to say.
+func (p BucketPolicy) Summary() BucketPolicySummary {
+	return BucketPolicySummary{Statements: len(p.Document.Statements), OpenToAnyone: p.OpenToAnyone()}
 }

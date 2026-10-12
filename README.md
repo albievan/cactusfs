@@ -287,6 +287,21 @@ The admin listener (`--admin-addr`, port 9001) serves:
   `cluster-admin` among the built-in roles; an `auditor` may not list a bucket, and asks
   about an object by its key. Whoever may list and may not see the facts gets the plain
   listing, with `access_included: false`.
+  The list of buckets can say more of each bucket (`GET /api/v1/buckets?details=true`,
+  shown in the console as the grid of buckets): who created it and its three latest
+  uploads and downloads, with who and when, to those who hold `admin:GetObjectAccess`
+  on the bucket - the keys of the objects only to those who may also list it
+  (`s3:ListBucket`) - and how many statements its policy has and whether one of them
+  allows something to every caller, to those who may read the policy
+  (`s3:GetBucketPolicy`). An upload or a download is shown only where the caller also
+  holds `admin:GetObjectAccess` on the object it names, as
+  `GET /api/v1/buckets/{bucket}/object/access` decides it: a policy that denies the
+  action by key takes those rows out of the list, whole. Of the built-in
+  roles a `cluster-admin` is shown all of it, a `bucket-admin` the policy, `read-write`
+  and `read-only` the plain list; an `auditor` may not list the buckets. A part the
+  caller may not see is left out (`access_included`, `policy_included`), bucket by
+  bucket: the list is never refused for it. A bucket created before release 0.7 says
+  nothing of its creator.
   These are counts kept as well as can be, recorded every `--access-flush-interval`
   (30 s), not an audit trail;
 - **search** (`GET /api/v1/search?q=`, and the field at the top of the console's

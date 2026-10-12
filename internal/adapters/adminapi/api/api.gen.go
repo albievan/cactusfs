@@ -174,12 +174,97 @@ type AuditRecord struct {
 // Bucket defines model for Bucket.
 type Bucket struct {
 	CreatedAt time.Time `json:"created_at"`
-	Name      string    `json:"name"`
+
+	// Details What the list of buckets says of one bucket beyond its name, when it was asked for with
+	// `details=true`: every bucket of such a list has it, and no bucket of any other answer. Each part
+	// is given as far as the caller may see it of this bucket; a part that is left out was not refused
+	// and is not audited.
+	Details *BucketDetails `json:"details,omitempty"`
+	Name    string         `json:"name"`
+}
+
+// BucketActivity The latest uploads into and downloads from a bucket, newest first, at most three of each. Kept as
+// well as can be without making a request wait for it: not an audit trail. An upload has one row a
+// key; a download one row for a key, a reader and whether the reader came with a presigned URL.
+// The rows outlive the objects they name. A row of an object the caller does not hold
+// `admin:GetObjectAccess` on is left out, as `GET /buckets/{bucket}/object/access` would refuse it:
+// there may be fewer rows than are kept, or both arrays may be empty, and nothing says how many
+// were left out. No older row takes the place of one that is left out.
+type BucketActivity struct {
+	Downloads []BucketActivityEntry `json:"downloads"`
+	Uploads   []BucketActivityEntry `json:"uploads"`
+}
+
+// BucketActivityEntry defines model for BucketActivityEntry.
+type BucketActivityEntry struct {
+	// At When the version was committed, for an upload; for a download, when the node that served it
+	// handed its count over, which is up to a flush interval after the bytes left.
+	At time.Time `json:"at"`
+
+	// By Who uploaded or downloaded, as the audit trail names actors, or `anonymous`. Empty for an
+	// upload whose uploader was not recorded; never empty for a download.
+	By string `json:"by"`
+
+	// Key The key of the object, which may have been deleted since. Absent when the caller does not
+	// hold `s3:ListBucket` on the bucket.
+	Key *string `json:"key,omitempty"`
+
+	// Presigned Present and true for a download made with a URL that `by` signed: whoever held the URL made
+	// it, not necessarily the signer.
+	Presigned *bool `json:"presigned,omitempty"`
 }
 
 // BucketCreate defines model for BucketCreate.
 type BucketCreate struct {
 	Name string `json:"name"`
+}
+
+// BucketDetails What the list of buckets says of one bucket beyond its name, when it was asked for with
+// `details=true`: every bucket of such a list has it, and no bucket of any other answer. Each part
+// is given as far as the caller may see it of this bucket; a part that is left out was not refused
+// and is not audited.
+type BucketDetails struct {
+	// AccessIncluded True when the caller holds `admin:GetObjectAccess` on the bucket itself and this node keeps
+	// the record: `activity` is then given, and `created_by` when it was recorded. False otherwise -
+	// also for a caller who holds the action on objects of the bucket and not on the bucket - and
+	// then neither is given. True says nothing of any one object: the rows of `activity` are
+	// decided object by object, and may be none.
+	AccessIncluded bool `json:"access_included"`
+
+	// Activity The latest uploads into and downloads from a bucket, newest first, at most three of each. Kept as
+	// well as can be without making a request wait for it: not an audit trail. An upload has one row a
+	// key; a download one row for a key, a reader and whether the reader came with a presigned URL.
+	// The rows outlive the objects they name. A row of an object the caller does not hold
+	// `admin:GetObjectAccess` on is left out, as `GET /buckets/{bucket}/object/access` would refuse it:
+	// there may be fewer rows than are kept, or both arrays may be empty, and nothing says how many
+	// were left out. No older row takes the place of one that is left out.
+	Activity *BucketActivity `json:"activity,omitempty"`
+
+	// CreatedBy Who created the bucket, as the audit trail names actors. Absent when it was not recorded -
+	// the bucket is older than the record - and when `access_included` is false.
+	CreatedBy *string `json:"created_by,omitempty"`
+
+	// Policy What a bucket's policy is, without what it says.
+	Policy *BucketPolicySummary `json:"policy,omitempty"`
+
+	// PolicyIncluded True when the caller holds `s3:GetBucketPolicy` on the bucket: `policy` then says what the
+	// bucket's policy is, and is absent when the bucket has none. False otherwise - not permitted,
+	// or the stored policy of the bucket cannot be read - and then `policy` is absent and says
+	// nothing of whether there is one.
+	PolicyIncluded bool `json:"policy_included"`
+}
+
+// BucketPolicySummary What a bucket's policy is, without what it says.
+type BucketPolicySummary struct {
+	// OpenToAnyone True when some statement of the policy allows something to every caller: an `Allow` whose
+	// principal is `*`. It classifies the document and decides nothing - conditions and `Deny`
+	// statements are not weighed, and it does not say that callers who have not authenticated are
+	// let in: a statement that allows every caller `s3:PutObject` sets it, and nobody writes
+	// without authenticating.
+	OpenToAnyone bool `json:"open_to_anyone"`
+
+	// Statements How many statements the policy has.
+	Statements int `json:"statements"`
 }
 
 // BucketUsage defines model for BucketUsage.
@@ -634,6 +719,13 @@ type ListAuditParams struct {
 	Limit *int   `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// ListBucketsParams defines parameters for ListBuckets.
+type ListBucketsParams struct {
+	// Details Whether every bucket should carry `details`: its creator, its latest uploads and downloads
+	// and a summary of its policy, each as far as the caller may see it. See `BucketDetails`.
+	Details *bool `form:"details,omitempty" json:"details,omitempty"`
+}
+
 // CreateBucketParams defines parameters for CreateBucket.
 type CreateBucketParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -914,7 +1006,7 @@ type ServerInterface interface {
 	ListAudit(w http.ResponseWriter, r *http.Request, params ListAuditParams)
 	// ListBuckets List buckets
 	// (GET /buckets)
-	ListBuckets(w http.ResponseWriter, r *http.Request)
+	ListBuckets(w http.ResponseWriter, r *http.Request, params ListBucketsParams)
 	// CreateBucket Create a bucket
 	// (POST /buckets)
 	CreateBucket(w http.ResponseWriter, r *http.Request, params CreateBucketParams)
@@ -1098,6 +1190,9 @@ func (siw *ServerInterfaceWrapper) ListAudit(w http.ResponseWriter, r *http.Requ
 
 // ListBuckets operation middleware
 func (siw *ServerInterfaceWrapper) ListBuckets(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
 	ctx := r.Context()
 
 	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
@@ -1106,8 +1201,24 @@ func (siw *ServerInterfaceWrapper) ListBuckets(w http.ResponseWriter, r *http.Re
 
 	r = r.WithContext(ctx)
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListBucketsParams
+
+	// ------------- Optional query parameter "details" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "details", r.URL.Query(), &params.Details, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "details"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "details", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListBuckets(w, r)
+		siw.Handler.ListBuckets(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3514,7 +3625,9 @@ func (response ListAuditdefaultApplicationProblemPlusJSONResponse) VisitListAudi
 	return err
 }
 
-type ListBucketsRequestObject struct{}
+type ListBucketsRequestObject struct {
+	Params ListBucketsParams
+}
 
 type ListBucketsResponseObject interface {
 	VisitListBucketsResponse(w http.ResponseWriter) error
@@ -5222,8 +5335,10 @@ func (sh *strictHandler) ListAudit(w http.ResponseWriter, r *http.Request, param
 }
 
 // ListBuckets operation middleware
-func (sh *strictHandler) ListBuckets(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) ListBuckets(w http.ResponseWriter, r *http.Request, params ListBucketsParams) {
 	var request ListBucketsRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ListBuckets(ctx, request.(ListBucketsRequestObject))

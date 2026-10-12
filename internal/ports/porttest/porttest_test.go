@@ -34,6 +34,11 @@ func TestMemSchema3Contract(t *testing.T) {
 	})
 }
 
+func TestMemSchema4Contract(t *testing.T) {
+	t.Parallel()
+	porttest.Schema4Contract(t, func(*testing.T) porttest.Schema4 { return porttest.NewMemMetadata() })
+}
+
 func TestMemShardStoreContract(t *testing.T) {
 	t.Parallel()
 	porttest.ShardStoreContract(t, func(*testing.T) ports.ShardStore { return porttest.NewMemShardStore("mem-drive") })

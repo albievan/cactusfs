@@ -35,7 +35,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List buckets */
+        /**
+         * List buckets
+         * @description Every bucket, in name order. With `details=true` every bucket also carries `details`: who created
+         *     it and its latest uploads and downloads, where the caller holds `admin:GetObjectAccess` on that
+         *     bucket - the keys of the objects only where the caller holds `s3:ListBucket` on it as well - and a
+         *     summary of the bucket's policy, where the caller holds `s3:GetBucketPolicy` on it. Every upload
+         *     and download is of an object, and is additionally decided for that object as
+         *     `GET /buckets/{bucket}/object/access` decides it: a row is given only where the caller holds
+         *     `admin:GetObjectAccess` on its key, and is otherwise left out whole - who, when and key - so a
+         *     policy that denies the action by key holds here too. The action is required on the bucket as
+         *     well: a caller who holds it on objects only is given `access_included: false` and no row, which
+         *     is stricter than the object list's `access_included`. Those
+         *     permissions decide only what the list carries, bucket by bucket: a caller without them is given
+         *     the same list with `access_included: false` or `policy_included: false`. The list is authorized
+         *     as it is without `details`, is never refused for want of those permissions, and nothing is written
+         *     to the audit trail for a part that is left out; where a part may be shown and cannot be read, the
+         *     list fails as any read that fails does.
+         */
         get: operations["listBuckets"];
         put?: never;
         /** Create a bucket */
@@ -592,6 +609,86 @@ export interface components {
             name: string;
             /** Format: date-time */
             created_at: string;
+            details?: components["schemas"]["BucketDetails"];
+        };
+        /**
+         * @description What the list of buckets says of one bucket beyond its name, when it was asked for with
+         *     `details=true`: every bucket of such a list has it, and no bucket of any other answer. Each part
+         *     is given as far as the caller may see it of this bucket; a part that is left out was not refused
+         *     and is not audited.
+         */
+        BucketDetails: {
+            /**
+             * @description True when the caller holds `admin:GetObjectAccess` on the bucket itself and this node keeps
+             *     the record: `activity` is then given, and `created_by` when it was recorded. False otherwise -
+             *     also for a caller who holds the action on objects of the bucket and not on the bucket - and
+             *     then neither is given. True says nothing of any one object: the rows of `activity` are
+             *     decided object by object, and may be none.
+             */
+            access_included: boolean;
+            /**
+             * @description Who created the bucket, as the audit trail names actors. Absent when it was not recorded -
+             *     the bucket is older than the record - and when `access_included` is false.
+             */
+            created_by?: string;
+            activity?: components["schemas"]["BucketActivity"];
+            /**
+             * @description True when the caller holds `s3:GetBucketPolicy` on the bucket: `policy` then says what the
+             *     bucket's policy is, and is absent when the bucket has none. False otherwise - not permitted,
+             *     or the stored policy of the bucket cannot be read - and then `policy` is absent and says
+             *     nothing of whether there is one.
+             */
+            policy_included: boolean;
+            policy?: components["schemas"]["BucketPolicySummary"];
+        };
+        /**
+         * @description The latest uploads into and downloads from a bucket, newest first, at most three of each. Kept as
+         *     well as can be without making a request wait for it: not an audit trail. An upload has one row a
+         *     key; a download one row for a key, a reader and whether the reader came with a presigned URL.
+         *     The rows outlive the objects they name. A row of an object the caller does not hold
+         *     `admin:GetObjectAccess` on is left out, as `GET /buckets/{bucket}/object/access` would refuse it:
+         *     there may be fewer rows than are kept, or both arrays may be empty, and nothing says how many
+         *     were left out. No older row takes the place of one that is left out.
+         */
+        BucketActivity: {
+            uploads: components["schemas"]["BucketActivityEntry"][];
+            downloads: components["schemas"]["BucketActivityEntry"][];
+        };
+        BucketActivityEntry: {
+            /**
+             * Format: date-time
+             * @description When the version was committed, for an upload; for a download, when the node that served it
+             *     handed its count over, which is up to a flush interval after the bytes left.
+             */
+            at: string;
+            /**
+             * @description Who uploaded or downloaded, as the audit trail names actors, or `anonymous`. Empty for an
+             *     upload whose uploader was not recorded; never empty for a download.
+             */
+            by: string;
+            /**
+             * @description The key of the object, which may have been deleted since. Absent when the caller does not
+             *     hold `s3:ListBucket` on the bucket.
+             */
+            key?: string;
+            /**
+             * @description Present and true for a download made with a URL that `by` signed: whoever held the URL made
+             *     it, not necessarily the signer.
+             */
+            presigned?: boolean;
+        };
+        /** @description What a bucket's policy is, without what it says. */
+        BucketPolicySummary: {
+            /** @description How many statements the policy has. */
+            statements: number;
+            /**
+             * @description True when some statement of the policy allows something to every caller: an `Allow` whose
+             *     principal is `*`. It classifies the document and decides nothing - conditions and `Deny`
+             *     statements are not weighed, and it does not say that callers who have not authenticated are
+             *     let in: a statement that allows every caller `s3:PutObject` sets it, and nobody writes
+             *     without authenticating.
+             */
+            open_to_anyone: boolean;
         };
         BucketCreate: {
             name: string;
@@ -1082,7 +1179,13 @@ export interface operations {
     };
     listBuckets: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Whether every bucket should carry `details`: its creator, its latest uploads and downloads
+                 *     and a summary of its policy, each as far as the caller may see it. See `BucketDetails`.
+                 */
+                details?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;

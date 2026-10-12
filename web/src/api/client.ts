@@ -17,6 +17,12 @@ export type Identity = Schemas['Identity'];
 export type ServerVersion = Schemas['ServerVersion'];
 /** A bucket. */
 export type Bucket = Schemas['Bucket'];
+/** What the list of buckets says of a bucket beyond its name, as far as the caller may see it. */
+export type BucketDetails = Schemas['BucketDetails'];
+/** One upload into or download from a bucket, as the list of buckets tells it. */
+export type BucketActivityEntry = Schemas['BucketActivityEntry'];
+/** How much a bucket holds. */
+export type BucketUsage = Schemas['BucketUsage'];
 /** One page of an object listing. */
 export type ObjectList = Schemas['ObjectList'];
 /** What is known about one object. */

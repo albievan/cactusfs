@@ -480,6 +480,9 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 			return applyResult{}, err
 		}
 	}
+	if err := noteUpload(tx, v, now); err != nil {
+		return applyResult{}, err
+	}
 	stored := v
 	return applyResult{previous: removed, stored: &stored, events: []ports.Event{
 		{Type: ports.EventObjectCreated, Time: v.ModifiedAt, Data: objectEvent(v)},

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -52,9 +53,11 @@ func stateOf(t *testing.T, metaDir string) (schema uint64, buckets []string) {
 // opened by this tree's metadata store. Migration: none (ADR-0016) - the
 // state opens as it is, and stays a state the release that wrote it still
 // opens for as long as nothing of schema 3 is written, whatever else is.
-// Then a sub-bucket, tag rules, a tag definition and a record of reads are
-// written over it, the state says schema 3, and all of it is there after a
-// restart, beside everything the fixture held.
+// Then a sub-bucket, tag rules and a tag definition are written over it, and
+// the state says schema 3. A record of reads follows: a node on its own is at
+// the level of this release, where a batch of reads is written as an entry of
+// schema 4 (ADR-0019), so from then on the state says 4. All of it is there
+// after a restart, beside everything the fixture held.
 func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -131,6 +134,12 @@ func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	if err := store.PutTagDefinition(ctx, tagging.Definition{Key: "stage", Values: []string{"draft", "final"}, CreatedAt: created}, audit.Record{}); err != nil {
 		t.Fatalf("a tag definition over the fixture: %v", err)
 	}
+	// So far the state is of schema 3, and holds what was written of it.
+	shut(store)
+	if schema, buckets := stateOf(t, dir); schema != 3 || !slices.Equal(buckets, []string{"subbuckets", "tagdefs"}) {
+		t.Fatalf("after a sub-bucket, tag rules and a definition: schema %d, buckets %v; want 3 and those two", schema, buckets)
+	}
+	store = open()
 	batch := ports.ReadBatch{Node: store.NodeID(), Boot: 1, Seq: 1, Items: []ports.ObjectRead{
 		{Bucket: schema2Bucket, Key: summary.Key, Version: summary.Ref(), VersionID: summary.VersionID, Read: object.Read{Who: "user/albie", Downloads: 2}},
 	}}
@@ -177,8 +186,8 @@ func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	check(store)
 	shut(store)
 	schema, buckets := stateOf(t, dir)
-	if schema != 3 || len(buckets) != 4 {
-		t.Errorf("after schema 3 was written: schema %d, buckets %v; want 3 and all four", schema, buckets)
+	if schema != 4 || len(buckets) != 4 {
+		t.Errorf("after the reads were written: schema %d, buckets %v; want 4 and all four", schema, buckets)
 	}
 	// The log is replayed over the state at the next start, and changes
 	// nothing in it.

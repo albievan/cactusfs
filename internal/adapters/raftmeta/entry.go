@@ -14,7 +14,8 @@ import (
 
 // Raft entry schema. Version 1 is docs/adr/0003-metadata.md; version 2 is
 // docs/adr/0008-object-versions.md; version 3 is
-// docs/adr/0016-object-access-and-schema-3.md. Any change that an older
+// docs/adr/0016-object-access-and-schema-3.md; version 4 is
+// docs/adr/0019-bucket-activity-and-schema-4.md. Any change that an older
 // binary could not apply needs a new version, an ADR, a migration and an
 // upgrade test.
 //
@@ -34,6 +35,14 @@ import (
 // bucket, and the commands of object access, sub-buckets and the catalogue of
 // tags. An entry is of version 3 only when it carries one of them: everything
 // else is written as before.
+//
+// Version 4 adds who created a bucket, and no command. It is also the
+// schema in which a put, the completion of an upload and a batch of reads are
+// written once every member knows it, though none of the three says anything
+// new: an entry of version 4 tells every member that applies it to keep the
+// record of the bucket's latest uploads and downloads (bucketactivity.go).
+// What is derived from the log must follow from the log alone, and the
+// version byte is in the log.
 const (
 	// entrySchemaVersion is the oldest entry schema, which every binary
 	// applies.
@@ -45,11 +54,13 @@ const (
 	// together: one rise for all three, so that no binary knows a part of
 	// it.
 	entrySchema3 = 3
+	// entrySchema4 is the schema of ADR-0019.
+	entrySchema4 = 4
 )
 
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
-const MetadataVersion = entrySchema3
+const MetadataVersion = entrySchema4
 
 // Command types.
 const (
@@ -275,6 +286,9 @@ type bucketRecord struct {
 	// Config holds the configuration documents of the bucket by kind:
 	// policy, CORS rules, tags (schema 2), tag rules (schema 3).
 	Config map[string][]byte `json:"config,omitempty"`
+	// CreatedBy is who created the bucket (schema 4). A record without it
+	// was written before that was recorded.
+	CreatedBy string `json:"created_by,omitempty"`
 }
 
 // versionRecord is an object version as it is stored and replicated.
@@ -420,6 +434,12 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
+	// A bucket created with what only the fourth schema knows: a binary of
+	// the third would drop the field, and store another bucket record than
+	// the others.
+	if e.CreateBucket != nil && e.CreateBucket.CreatedBy != "" {
+		return entrySchema4
+	}
 	switch e.Type {
 	case cmdAddReads, cmdPutSubBucket, cmdDeleteSubBucket, cmdPutTagDefinition, cmdDeleteTagDefinition:
 		return entrySchema3
@@ -448,6 +468,26 @@ func versionOf(e entry) byte {
 		return entrySchemaTimed
 	}
 	return entrySchemaVersion
+}
+
+// writtenAt returns the schema an entry is written in while the cluster is
+// at level, given the oldest schema that can express it (versionOf). The two
+// differ for the three entries the record of a bucket's latest uploads and
+// downloads is kept from - a put, the completion of an upload, a batch of
+// reads: once every member knows schema 4 they are written as schema 4,
+// though they carry nothing a member of schema 3 could not read. The schema
+// byte is what tells every member, alike, to keep the record (ADR-0019); and
+// below level 4 the same entries are written as they always were, so that no
+// member of the release before meets one it would stop at.
+func writtenAt(e entry, needs, level byte) byte {
+	if level < entrySchema4 {
+		return needs
+	}
+	switch e.Type {
+	case cmdPutObject, cmdCompleteUpload, cmdAddReads:
+		return max(needs, entrySchema4)
+	}
+	return needs
 }
 
 // decodeEntry parses a Raft log entry. An entry of another schema version, or
@@ -545,7 +585,9 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 }
 
 func bucketToRecord(b bucket.Bucket) *bucketRecord {
-	record := &bucketRecord{Name: b.Name, CreatedAt: b.CreatedAt.UTC(), Versioning: string(b.Versioning), ObjectLock: b.ObjectLock}
+	record := &bucketRecord{
+		Name: b.Name, CreatedAt: b.CreatedAt.UTC(), Versioning: string(b.Versioning), ObjectLock: b.ObjectLock, CreatedBy: b.CreatedBy,
+	}
 	if d := b.DefaultRetention; d != nil {
 		record.DefaultRetention = &retentionRule{Mode: string(d.Mode), Days: d.Days, Years: d.Years}
 	}
@@ -553,7 +595,9 @@ func bucketToRecord(b bucket.Bucket) *bucketRecord {
 }
 
 func (r bucketRecord) toDomain() bucket.Bucket {
-	b := bucket.Bucket{Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock}
+	b := bucket.Bucket{
+		Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock, CreatedBy: r.CreatedBy,
+	}
 	if d := r.DefaultRetention; d != nil {
 		b.DefaultRetention = &bucket.DefaultRetention{Mode: object.RetentionMode(d.Mode), Days: d.Days, Years: d.Years}
 	}

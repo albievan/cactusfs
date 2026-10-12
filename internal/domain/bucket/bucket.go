@@ -24,6 +24,11 @@ type Bucket struct {
 	Name string
 	// CreatedAt is when the bucket was created.
 	CreatedAt time.Time
+	// CreatedBy is who created the bucket, as the audit trail names actors
+	// ("root", "user/<name>", "key/<id>"), like object.Version.CreatedBy.
+	// Empty when that was not recorded: the bucket is older than the
+	// record, or a member of the cluster did not know it yet (ADR-0019).
+	CreatedBy string
 	// Versioning says whether the bucket keeps the versions of its objects.
 	Versioning Versioning
 	// ObjectLock says that the versions of the bucket can be locked. It is

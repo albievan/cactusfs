@@ -16,6 +16,13 @@ import (
 type BucketStore interface {
 	// CreateBucket adds a bucket. The error wraps
 	// domain.ErrBucketAlreadyExists when the name is taken.
+	//
+	// b.CreatedBy, who creates the bucket, is recorded where every member
+	// of the cluster knows the field (entry schema 4, ADR-0019). Until then
+	// the bucket is created without it, and is created all the same:
+	// GetBucket says what was recorded. A name that cannot be kept
+	// (bucket.ValidateCreator) wraps domain.ErrInvalidArgument, and no
+	// bucket is created.
 	CreateBucket(ctx context.Context, b bucket.Bucket) error
 	// DeleteBucket removes an empty bucket. The error wraps
 	// domain.ErrBucketNotFound or domain.ErrBucketNotEmpty.

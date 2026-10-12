@@ -147,6 +147,13 @@ func TestBucketPolicyDecisions(t *testing.T) {
 	if !public.OpenToAnyone() || forAlice.OpenToAnyone() || !denyDrafts.OpenToAnyone() {
 		t.Error("OpenToAnyone")
 	}
+	// The summary counts the statements and says the same of who is let in.
+	for name, policy := range map[string]*iam.BucketPolicy{"public": public, "forAlice": forAlice, "denyDrafts": denyDrafts} {
+		want := iam.BucketPolicySummary{Statements: len(policy.Document.Statements), OpenToAnyone: policy.OpenToAnyone()}
+		if got := policy.Summary(); got != want || got.Statements == 0 {
+			t.Errorf("%s: Summary = %+v, want %+v", name, got, want)
+		}
+	}
 }
 
 // FuzzBucketPolicy: whatever the document, parsing never panics; what

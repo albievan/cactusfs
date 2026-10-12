@@ -209,6 +209,9 @@ func applyAddReads(tx *bbolt.Tx, cmd addReadsCmd, now applied) (applyResult, err
 			return applyResult{}, err
 		}
 	}
+	if err := noteDownloads(tx, cmd.Items, now); err != nil {
+		return applyResult{}, err
+	}
 	data, err := json.Marshal(flushRecord{Boot: cmd.Boot, Seq: cmd.Seq})
 	if err != nil {
 		return applyResult{}, err

@@ -54,43 +54,7 @@ describe('buckets', () => {
     expect(link.getAttribute('href')).toBe('#/buckets/photos');
   });
 
-  it('shows how many objects each bucket holds and how much they are together', async () => {
-    const api = fakeApi({
-      'GET /buckets': () =>
-        json(200, [
-          { name: 'photos', created_at: CREATED },
-          { name: 'huge', created_at: CREATED },
-          { name: 'private', created_at: CREATED },
-          { name: 'later', created_at: CREATED },
-        ]),
-      'GET /buckets/photos/usage': () => json(200, { object_count: 1234, total_size: 5 * 1024 * 1024, complete: true }),
-      'GET /buckets/huge/usage': () => json(200, { object_count: 1000000, total_size: 1024, complete: false }),
-      'GET /buckets/private/usage': () => problem(403, 'Access denied'),
-    });
-    let down = true;
-    api.on({
-      'GET /buckets/later/usage': () =>
-        down ? problem(503, 'No metadata leader') : json(200, { object_count: 1, total_size: 3, complete: true }),
-    });
-    render(<BucketsScreen />);
-
-    const photos = within((await screen.findByRole('heading', { name: 'photos' })).closest('article') as HTMLElement);
-    expect(await photos.findByText(/1,234\s+objects/)).toBeDefined();
-    expect(photos.getByText('5.0 MiB')).toBeDefined();
-    // A count that stopped at its bound says so.
-    const huge = within(screen.getByRole('heading', { name: 'huge' }).closest('article') as HTMLElement);
-    expect(await huge.findByText(/1,000,000\s+or more\s+objects/)).toBeDefined();
-    // Whoever may not list a bucket is shown no figure, and no alarm.
-    const hidden = within(screen.getByRole('heading', { name: 'private' }).closest('article') as HTMLElement);
-    expect(await hidden.findByText('Usage not shown')).toBeDefined();
-    expect(screen.queryByRole('alert')).toBeNull();
-    // A figure that could not be had just now can be asked for again.
-    const later = within(screen.getByRole('heading', { name: 'later' }).closest('article') as HTMLElement);
-    expect(await later.findByText(/Usage unavailable/)).toBeDefined();
-    down = false;
-    fireEvent.click(later.getByRole('button', { name: 'Count again' }));
-    expect(await later.findByText(/1\s+object$/)).toBeDefined();
-  });
+  // How much each bucket holds, and the rest of the grid: buckets.test.tsx.
 
   it('says so when there are none', async () => {
     fakeApi({ 'GET /buckets': () => json(200, []) });

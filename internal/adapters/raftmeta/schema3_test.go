@@ -300,8 +300,8 @@ func TestVersionOf(t *testing.T) {
 			}
 		})
 	}
-	if MetadataVersion != entrySchema3 {
-		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema3)
+	if MetadataVersion != entrySchema4 {
+		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema4)
 	}
 }
 
@@ -659,14 +659,14 @@ func TestStateBecomesSchema3WithItsFirstEntryOfSchema3(t *testing.T) {
 	if got := stateSchema(t, f); got != stateSchema3 {
 		t.Errorf("after reopening: state schema %d", got)
 	}
-	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema3+1) }); err != nil {
+	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema4+1) }); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema3+1, err, domain.ErrUnsupportedFormat)
+		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema4+1, err, domain.ErrUnsupportedFormat)
 	}
 }
 
@@ -1470,10 +1470,16 @@ func TestTheTagsOfAnUploadAreBoundedInBytes(t *testing.T) {
 // took effect or not. So what the state machine would refuse without looking
 // at the state - a name, a size, a number - the store refuses by itself, and
 // proposes nothing: the state stays at schema 2.
+//
+// The store is held to schema 3: at schema 4 the put below would itself be
+// written as an entry of schema 4 (ADR-0019), and the state would say so
+// before any of these calls. What schema 4 refuses before it proposes is
+// asked in schema4_test.go.
 func TestWhatCannotBeIsRefusedBeforeItIsProposed(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store := openStore(t, t.TempDir())
+	asSchema3Release(store)
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
 		t.Fatal(err)
 	}

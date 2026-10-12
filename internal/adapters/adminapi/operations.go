@@ -95,16 +95,68 @@ func (o *operations) SignOut(ctx context.Context, _ api.SignOutRequestObject) (a
 // --- buckets ---
 
 // ListBuckets implements api.StrictServerInterface.
-func (o *operations) ListBuckets(ctx context.Context, _ api.ListBucketsRequestObject) (api.ListBucketsResponseObject, error) {
-	buckets, err := o.h.cfg.Buckets.List(ctx, who(ctx))
+func (o *operations) ListBuckets(ctx context.Context, request api.ListBucketsRequestObject) (api.ListBucketsResponseObject, error) {
+	if d := request.Params.Details; d == nil || !*d {
+		buckets, err := o.h.cfg.Buckets.List(ctx, who(ctx))
+		if err != nil {
+			return nil, err
+		}
+		out := make(api.ListBuckets200JSONResponse, len(buckets))
+		for i, b := range buckets {
+			out[i] = api.Bucket{Name: b.Name, CreatedAt: b.CreatedAt}
+		}
+		return out, nil
+	}
+	// What of each bucket the caller may be shown is the use case's to
+	// say: this maps what it answers.
+	detailed, err := o.h.cfg.Buckets.ListDetailed(ctx, who(ctx))
 	if err != nil {
 		return nil, err
 	}
-	out := make(api.ListBuckets200JSONResponse, len(buckets))
-	for i, b := range buckets {
-		out[i] = api.Bucket{Name: b.Name, CreatedAt: b.CreatedAt}
+	out := make(api.ListBuckets200JSONResponse, len(detailed))
+	for i, d := range detailed {
+		out[i] = api.Bucket{Name: d.Bucket.Name, CreatedAt: d.Bucket.CreatedAt, Details: bucketDetailsOf(d)}
 	}
 	return out, nil
+}
+
+// bucketDetailsOf maps what a list says of a bucket beyond its name to the
+// contract.
+func bucketDetailsOf(d app.BucketDetail) *api.BucketDetails {
+	out := api.BucketDetails{AccessIncluded: d.AccessIncluded, PolicyIncluded: d.PolicyIncluded}
+	if d.AccessIncluded {
+		if d.Bucket.CreatedBy != "" {
+			out.CreatedBy = &d.Bucket.CreatedBy
+		}
+		activity := api.BucketActivity{
+			Uploads:   make([]api.BucketActivityEntry, len(d.Activity.Uploads)),
+			Downloads: make([]api.BucketActivityEntry, len(d.Activity.Downloads)),
+		}
+		for i, u := range d.Activity.Uploads {
+			activity.Uploads[i] = activityEntryOf(u.At, u.By, u.Key, false)
+		}
+		for i, r := range d.Activity.Downloads {
+			activity.Downloads[i] = activityEntryOf(r.At, r.By, r.Key, r.Presigned)
+		}
+		out.Activity = &activity
+	}
+	if d.PolicyIncluded && d.Policy != nil {
+		out.Policy = &api.BucketPolicySummary{Statements: d.Policy.Statements, OpenToAnyone: d.Policy.OpenToAnyone}
+	}
+	return &out
+}
+
+// activityEntryOf maps one upload or download to the contract. A key the
+// use case withheld is empty, and is left out.
+func activityEntryOf(at time.Time, by, key string, presigned bool) api.BucketActivityEntry {
+	entry := api.BucketActivityEntry{At: at, By: by}
+	if key != "" {
+		entry.Key = &key
+	}
+	if presigned {
+		entry.Presigned = &presigned
+	}
+	return entry
 }
 
 // CreateBucket implements api.StrictServerInterface.

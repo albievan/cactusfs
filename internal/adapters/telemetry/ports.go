@@ -441,3 +441,24 @@ func (a *objectAccess) ObjectAccesses(ctx context.Context, bucketName string, ve
 	done(err)
 	return accesses, err
 }
+
+// InstrumentBucketActivity returns next wrapped so that every call is traced
+// and counted.
+func (t *Telemetry) InstrumentBucketActivity(next ports.BucketActivityStore) ports.BucketActivityStore {
+	return &bucketActivity{t: t, next: next}
+}
+
+type bucketActivity struct {
+	t    *Telemetry
+	next ports.BucketActivityStore
+}
+
+const portBucketActivity = "bucket_activity"
+
+// BucketActivities implements ports.BucketActivityStore.
+func (a *bucketActivity) BucketActivities(ctx context.Context, names []string) ([]bucket.Activity, error) {
+	ctx, done := a.t.call(ctx, portBucketActivity, "BucketActivities")
+	activities, err := a.next.BucketActivities(ctx, names)
+	done(err)
+	return activities, err
+}

@@ -57,6 +57,8 @@ type MemMetadata struct {
 	flushes map[string][2]uint64
 	subs    map[string]map[string]bucket.SubBucket
 	tagDefs map[string]tagging.Definition
+	// activity holds the latest uploads and downloads of every bucket.
+	activity map[string]bucket.Activity
 
 	// Audit, when set, receives the audit records that changes to
 	// sub-buckets and to the catalogue of tags carry, as the real store
@@ -79,15 +81,16 @@ type MemMetadata struct {
 // NewMemMetadata returns an empty MemMetadata.
 func NewMemMetadata() *MemMetadata {
 	return &MemMetadata{
-		buckets: map[string]bucket.Bucket{},
-		objects: map[string]map[string][]object.Version{},
-		uploads: map[string]map[object.ID]*memUpload{},
-		extents: map[object.ID][]object.Part{},
-		config:  map[string]map[string][]byte{},
-		access:  map[string]map[accessKey]object.Access{},
-		flushes: map[string][2]uint64{},
-		subs:    map[string]map[string]bucket.SubBucket{},
-		tagDefs: map[string]tagging.Definition{},
+		buckets:  map[string]bucket.Bucket{},
+		objects:  map[string]map[string][]object.Version{},
+		uploads:  map[string]map[object.ID]*memUpload{},
+		extents:  map[object.ID][]object.Part{},
+		config:   map[string]map[string][]byte{},
+		access:   map[string]map[accessKey]object.Access{},
+		flushes:  map[string][2]uint64{},
+		subs:     map[string]map[string]bucket.SubBucket{},
+		tagDefs:  map[string]tagging.Definition{},
+		activity: map[string]bucket.Activity{},
 	}
 }
 
@@ -100,6 +103,11 @@ func (m *MemMetadata) CreateBucket(_ context.Context, b bucket.Bucket) error {
 	}
 	if _, ok := m.buckets[b.Name]; ok {
 		return fmt.Errorf("%w: %s", domain.ErrBucketAlreadyExists, b.Name)
+	}
+	// Who created it is kept, as by a cluster whose members all know entry
+	// schema 4 - when it is a name that can be kept.
+	if err := bucket.ValidateCreator(b.CreatedBy); err != nil {
+		return err
 	}
 	// As the real store does it: a bucket begins without versions, or -
 	// created with Object Lock - keeping them.
@@ -133,6 +141,8 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	// So do its sub-buckets and what is known of who read its versions.
 	delete(m.subs, name)
 	delete(m.access, name)
+	// And what is known of its latest uploads and downloads.
+	delete(m.activity, name)
 	return nil
 }
 
@@ -242,6 +252,9 @@ func (m *MemMetadata) commit(b bucket.Bucket, v object.Version) (ports.PutResult
 	}
 	parts := m.forget(removed)
 	m.store(v.Bucket, v.Key, append([]object.Version{stored}, versions...))
+	// Every version that is committed - by a put, a copy, a completion - is
+	// an upload into its bucket, as of the store's time.
+	m.activity[v.Bucket] = m.activity[v.Bucket].Uploaded(m.now(), stored.CreatedBy, stored.Key)
 	return ports.PutResult{Stored: CloneVersion(stored), Removed: removed, RemovedParts: parts}, nil
 }
 

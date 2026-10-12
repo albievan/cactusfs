@@ -8,6 +8,7 @@ run:
   build-tags:
     - integration
     - fixturegen
+    - rollingupgrade
     - s3compat
     - s3tools
     - chaos

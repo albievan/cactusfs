@@ -21,6 +21,32 @@ export function formatBytes(size: number): string {
   return `${value.toFixed(digits)} ${UNITS[unit] ?? ''}`.trim();
 }
 
+const GIGABYTE = 1_000_000_000;
+
+/**
+ * Shows a number of bytes in decimal gigabytes (10^9 bytes): two decimals
+ * below 100 GB, none from there up. What is too little to show so is said to
+ * be less than the smallest figure there is, and nothing at all is "0 GB".
+ * formatExactBytes is the hint that goes with it.
+ */
+export function formatGigabytes(size: number): string {
+  if (size <= 0) {
+    return '0 GB';
+  }
+  const value = size / GIGABYTE;
+  if (value < 0.01) {
+    return '< 0.01 GB';
+  }
+  // 99.999 GB is "100 GB", not "100.00 GB": the digits follow what is shown.
+  const digits = Number(value.toFixed(2)) >= 100 ? 0 : 2;
+  return `${value.toLocaleString('en', { minimumFractionDigits: digits, maximumFractionDigits: digits })} GB`;
+}
+
+/** Shows a number of bytes exactly, for the hint of a rounded figure. */
+export function formatExactBytes(size: number): string {
+  return `${size.toLocaleString('en')} ${size === 1 ? 'byte' : 'bytes'}`;
+}
+
 /** Splits a list of names typed with commas or spaces between them. */
 export function parseNames(text: string): string[] {
   return text.split(/[\s,]+/).filter((name) => name !== '');

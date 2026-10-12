@@ -48,6 +48,11 @@ import (
 //	subbuckets  <bucket name> (nested bucket) -> <sub-bucket name> -> subBucketRecord (JSON)
 //	tagdefs     <tag key> -> tagDefinitionRecord (JSON)
 //
+// From state schema 4 on, and only once something was written to it
+// (bucketactivity.go):
+//
+//	bucketactivity <bucket name> -> activityRecord (JSON)
+//
 // State schema 1 is what entries of schema 1 produce. The first entry of
 // schema 2 that is applied marks the state as schema 2, in its own
 // transaction: until a cluster actually uses the newer entries, its state and
@@ -55,11 +60,14 @@ import (
 // previous release refuses them instead of misreading them. The first entry
 // of schema 3 marks it as schema 3 in the same way. Nothing that schema 3
 // adds to the state exists before that: a state of schema 2 that was never
-// written with schema 3 is the state the previous release wrote.
+// written with schema 3 is the state the previous release wrote. And so for
+// schema 4 (ADR-0019): its first entry marks the state, and until then a
+// state of schema 3 is the state the release of schema 3 wrote.
 const (
 	stateSchemaVersion = 1
 	stateSchemaTimed   = 2
 	stateSchema3       = 3
+	stateSchema4       = 4
 	stateFileMode      = 0o600
 )
 
@@ -246,7 +254,7 @@ func openState(path string) (*bbolt.DB, error) {
 		switch raw := meta.Get(schemaKey()); {
 		case raw == nil:
 			return meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaVersion))
-		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchema3:
+		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchema4:
 			return fmt.Errorf("%w: metadata state schema", domain.ErrUnsupportedFormat)
 		}
 		return nil
@@ -453,13 +461,25 @@ func (f *fsm) Apply(log *raft.Log) any {
 				e.CreateUpload.Tags = nil
 			}
 		}
+		if log.Data[0] < entrySchema4 && e.CreateBucket != nil {
+			// Nor does an entry of the third schema say who created a
+			// bucket: a binary of that schema would store it without.
+			e.CreateBucket.CreatedBy = ""
+		}
 		now := applied{index: log.Index, schema: log.Data[0]}
 		if !e.At.IsZero() {
 			if now.at, err = stampState(tx, e.At); err != nil {
 				return err
 			}
 		}
-		if log.Data[0] >= entrySchema3 {
+		switch {
+		case log.Data[0] >= entrySchema4:
+			// The same for the release of schema 3, which would stop at
+			// this entry whatever becomes of it (ADR-0019).
+			if err := raiseStateSchema(tx, stateSchema4); err != nil {
+				return err
+			}
+		case log.Data[0] >= entrySchema3:
 			// From here on the state may hold what the previous release
 			// cannot express, and that release must refuse it.
 			if err := raiseStateSchema(tx, stateSchema3); err != nil {
@@ -567,6 +587,12 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord) (applyResult, error) {
 	// A bucket begins without versions, or - created with Object Lock -
 	// keeping them, for good. Nothing else is said at creation.
 	b.Versioning, b.DefaultRetention = "", nil
+	// Who created it is kept as it was said, when it can be: a name is
+	// judged by its bytes alone, as every build judges it (and only an entry
+	// of schema 4 still has one here).
+	if err := bucket.ValidateCreator(b.CreatedBy); err != nil {
+		return applyResult{err: err}, nil
+	}
 	if b.ObjectLock {
 		b.Versioning = string(bucket.VersioningEnabled)
 	}
@@ -615,6 +641,11 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 				return applyResult{}, err
 			}
 		}
+	}
+	// And what was known of its latest uploads and downloads: a bucket
+	// created under the name later begins with nothing (ADR-0019).
+	if err := dropBucketActivity(tx, name); err != nil {
+		return applyResult{}, err
 	}
 	if err := buckets.Delete([]byte(name)); err != nil {
 		return applyResult{}, err

@@ -74,6 +74,11 @@ func (m *MemMetadata) AddObjectReads(_ context.Context, batch ports.ReadBatch) e
 		if item.Read.Validate() != nil {
 			continue
 		}
+		// A download is a download from its bucket, whatever has become
+		// of the version since (ADR-0019); a copy's source is not one.
+		if _, ok := m.buckets[item.Bucket]; ok && item.Read.Downloads > 0 {
+			m.activity[item.Bucket] = m.activity[item.Bucket].Downloaded(at, item.Read.Who, item.Read.Presigned, item.Key)
+		}
 		for _, v := range m.objects[item.Bucket][item.Key] {
 			// The version the name finds now, when it is still the one
 			// that was read.

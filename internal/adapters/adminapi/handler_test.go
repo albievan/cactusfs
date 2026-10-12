@@ -24,6 +24,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/audit"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -158,7 +159,7 @@ func newFixture(t *testing.T) *fixture {
 		Probe:       func(_ context.Context, slot cluster.Slot) bool { return slot.DriveID == drive.DriveID() },
 	})
 	handler := adminapi.NewHandler(adminapi.Config{
-		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor), Objects: objects, Search: search, IAM: f.iam,
+		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
@@ -1451,6 +1452,278 @@ func TestListObjectsWithAccess(t *testing.T) {
 		t.Errorf("the refusal in the trail: %+v", trail)
 	}
 	f.must(http.StatusBadRequest, call{method: "GET", path: path + "&access=perhaps"})
+}
+
+// listedBucket is a bucket of the list, as a client reads it.
+type listedBucket struct {
+	Name      string     `json:"name"`
+	CreatedAt *time.Time `json:"created_at"`
+	Details   *struct {
+		AccessIncluded *bool   `json:"access_included"`
+		CreatedBy      *string `json:"created_by"`
+		Activity       *struct {
+			Uploads   []listedActivity `json:"uploads"`
+			Downloads []listedActivity `json:"downloads"`
+		} `json:"activity"`
+		PolicyIncluded *bool `json:"policy_included"`
+		Policy         *struct {
+			Statements   *int  `json:"statements"`
+			OpenToAnyone *bool `json:"open_to_anyone"`
+		} `json:"policy"`
+	} `json:"details"`
+}
+
+// listedActivity is one upload or download of a bucket of the list.
+type listedActivity struct {
+	At        *time.Time `json:"at"`
+	By        *string    `json:"by"`
+	Key       *string    `json:"key"`
+	Presigned *bool      `json:"presigned"`
+}
+
+// says renders a row as "by key", with "presigned" after it when it says so.
+func (a listedActivity) says() string {
+	out := "?"
+	if a.By != nil {
+		out = *a.By
+	}
+	if a.Key != nil {
+		out += " " + *a.Key
+	}
+	if a.Presigned != nil {
+		out += fmt.Sprintf(" presigned=%v", *a.Presigned)
+	}
+	return out
+}
+
+// TestListBucketsWithDetails: asked to, the list of buckets says of each who
+// created it, who used it last and what its policy is - each to those who
+// may see it, the others being given the same list without it, and no denial
+// written for what nobody was refused.
+func TestListBucketsWithDetails(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.meta.Now = f.clock.Now
+	alice := f.userKey("alice", iam.RoleBucketAdmin)
+	carol := f.userKey("carol", iam.RoleClusterAdmin)
+	bob := f.userKey("bob", iam.RoleReadOnly)
+	oscar := f.userKey("oscar", iam.RoleAuditor)
+	// grace may see who uses the buckets and may list none of them.
+	f.must(http.StatusCreated, call{method: "POST", path: "/policies", body: map[string]any{"name": "who-uses", "document": map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []any{map[string]any{
+			"Effect": "Allow", "Action": []any{"s3:ListAllMyBuckets", "admin:GetObjectAccess"}, "Resource": "*",
+		}},
+	}}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/roles", body: map[string]any{"name": "usage-viewer", "policies": []string{"who-uses"}}})
+	grace := f.userKey("grace", "usage-viewer")
+	// heidi may do everything, and is denied who uses the objects a.* of
+	// photos.
+	f.must(http.StatusCreated, call{method: "POST", path: "/policies", body: map[string]any{"name": "not-a", "document": map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []any{
+			map[string]any{"Effect": "Allow", "Action": []any{"s3:*", "admin:*"}, "Resource": "*"},
+			map[string]any{"Effect": "Deny", "Action": "admin:GetObjectAccess", "Resource": "arn:aws:s3:::photos/a.*"},
+		},
+	}}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/roles", body: map[string]any{"name": "all-but-a", "policies": []string{"not-a"}}})
+	heidi := f.userKey("heidi", "all-but-a")
+
+	// Three buckets: one made by root, one by a user, one of before
+	// creators were kept; the first is used, the second is open to anyone.
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "photos"}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "site"}, bearer: alice})
+	if err := f.meta.CreateBucket(t.Context(), bucket.Bucket{Name: "archive", CreatedAt: testNow}); err != nil {
+		t.Fatal(err)
+	}
+	open := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`
+	if err := f.meta.SetBucketConfig(t.Context(), "site", bucket.ConfigPolicy, []byte(open)); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(time.Minute)
+	uploadedAt := f.clock.Now()
+	f.must(http.StatusOK, call{method: "PUT", path: "/buckets/photos/object?key=a.txt", raw: []byte("hello"), bearer: alice})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt"})
+	f.clock.Advance(time.Minute)
+	if err := f.access.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	// And a download with a URL somebody signed, as another node hands it in.
+	version, err := f.meta.GetObject(t.Context(), "photos", "a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Advance(time.Minute)
+	downloadedAt := f.clock.Now()
+	if err := f.meta.AddObjectReads(t.Context(), ports.ReadBatch{Node: "node-b", Boot: 1, Seq: 1, Items: []ports.ObjectRead{{
+		Bucket: "photos", Key: "a.txt", Version: version.Ref(), VersionID: version.VersionID,
+		Read: object.Read{Who: "user/bob", Presigned: true, Downloads: 1},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.trail())
+
+	list := func(bearer, query string) (map[string]listedBucket, reply) {
+		t.Helper()
+		var buckets []listedBucket
+		r := f.must(http.StatusOK, call{method: "GET", path: "/buckets" + query, bearer: bearer})
+		r.decode(t, &buckets)
+		byName := map[string]listedBucket{}
+		names := make([]string, len(buckets))
+		for i, b := range buckets {
+			byName[b.Name], names[i] = b, b.Name
+			if b.CreatedAt == nil || b.CreatedAt.IsZero() {
+				t.Errorf("GET /buckets%s: %s has no time of creation", query, b.Name)
+			}
+		}
+		if fmt.Sprint(names) != "[archive photos site]" {
+			t.Fatalf("GET /buckets%s lists %v", query, names)
+		}
+		return byName, r
+	}
+	// included reports what a bucket says is included, and fails the test
+	// when it does not say.
+	included := func(b listedBucket) (access, policy bool) {
+		t.Helper()
+		if b.Details == nil || b.Details.AccessIncluded == nil || b.Details.PolicyIncluded == nil {
+			t.Fatalf("%s: details that do not say what they include: %+v", b.Name, b.Details)
+		}
+		return *b.Details.AccessIncluded, *b.Details.PolicyIncluded
+	}
+
+	// Not asked for: the list is what it always was.
+	for name, tt := range map[string]struct{ bearer, query string }{
+		"not asked for":                   {f.root, ""},
+		"asked not to":                    {f.root, "?details=false"},
+		"a bucket admin, who did not ask": {alice, ""},
+	} {
+		if _, r := list(tt.bearer, tt.query); strings.Contains(string(r.body), "details") || strings.Contains(string(r.body), "created_by") {
+			t.Errorf("%s: the list = %s", name, r.body)
+		}
+	}
+
+	// Who may see everything: root, and a cluster admin.
+	for name, bearer := range map[string]string{"root": f.root, "a cluster admin": carol} {
+		buckets, r := list(bearer, "?details=true")
+		for _, b := range buckets {
+			if access, policy := included(b); !access || !policy || b.Details.Activity == nil ||
+				b.Details.Activity.Uploads == nil || b.Details.Activity.Downloads == nil {
+				t.Fatalf("%s: %s = %s", name, b.Name, r.body)
+			}
+		}
+		photos, site, archive := buckets["photos"].Details, buckets["site"].Details, buckets["archive"].Details
+		if photos.CreatedBy == nil || *photos.CreatedBy != "root" || site.CreatedBy == nil || *site.CreatedBy != "user/alice" || archive.CreatedBy != nil {
+			t.Errorf("%s: the creators: %s", name, r.body)
+		}
+		uploads, downloads := photos.Activity.Uploads, photos.Activity.Downloads
+		if len(uploads) != 1 || uploads[0].says() != "user/alice a.txt" || uploads[0].At == nil || !uploads[0].At.Equal(uploadedAt) {
+			t.Errorf("%s: the uploads of photos: %s", name, r.body)
+		}
+		// Newest first; only a download with a signed URL says so.
+		if len(downloads) != 2 || downloads[0].says() != "user/bob a.txt presigned=true" || downloads[1].says() != "root a.txt" ||
+			downloads[0].At == nil || !downloads[0].At.Equal(downloadedAt) {
+			t.Errorf("%s: the downloads of photos: %s", name, r.body)
+		}
+		if len(site.Activity.Uploads) != 0 || len(site.Activity.Downloads) != 0 || len(archive.Activity.Uploads) != 0 {
+			t.Errorf("%s: buckets nobody used: %s", name, r.body)
+		}
+		if site.Policy == nil || site.Policy.Statements == nil || *site.Policy.Statements != 1 ||
+			site.Policy.OpenToAnyone == nil || !*site.Policy.OpenToAnyone || photos.Policy != nil || archive.Policy != nil {
+			t.Errorf("%s: the policies: %s", name, r.body)
+		}
+	}
+
+	// A bucket admin holds all of S3 and nothing of administration: the
+	// policy, and not who uses the bucket.
+	buckets, r := list(alice, "?details=true")
+	for _, b := range buckets {
+		if access, policy := included(b); access || !policy || b.Details.CreatedBy != nil || b.Details.Activity != nil {
+			t.Errorf("a bucket admin: %s = %s", b.Name, r.body)
+		}
+	}
+	if site := buckets["site"].Details; site.Policy == nil || *site.Policy.Statements != 1 || buckets["photos"].Details.Policy != nil {
+		t.Errorf("a bucket admin, the policies: %s", r.body)
+	}
+	for _, never := range []string{"created_by", "activity", "uploads", "a.txt", "user/"} {
+		if strings.Contains(string(r.body), never) {
+			t.Errorf("a bucket admin's list has %q in it: %s", never, r.body)
+		}
+	}
+
+	// A read-only user is shown neither part.
+	buckets, r = list(bob, "?details=true")
+	for _, b := range buckets {
+		if access, policy := included(b); access || policy {
+			t.Errorf("a read-only user: %s = %s", b.Name, r.body)
+		}
+	}
+	for _, never := range []string{"created_by", "activity", `"policy":`, "statements", "user/"} {
+		if strings.Contains(string(r.body), never) {
+			t.Errorf("a read-only user's list has %q in it: %s", never, r.body)
+		}
+	}
+
+	// Who may see who uses a bucket and may not list it: who and when, and
+	// no key.
+	buckets, r = list(grace, "?details=true")
+	for _, b := range buckets {
+		if access, policy := included(b); !access || policy || b.Details.Activity == nil {
+			t.Fatalf("who may not list: %s = %s", b.Name, r.body)
+		}
+	}
+	photos := buckets["photos"].Details
+	if len(photos.Activity.Uploads) != 1 || photos.Activity.Uploads[0].says() != "user/alice" ||
+		len(photos.Activity.Downloads) != 2 || photos.Activity.Downloads[0].says() != "user/bob presigned=true" ||
+		photos.CreatedBy == nil || *photos.CreatedBy != "root" {
+		t.Errorf("who may not list, photos: %s", r.body)
+	}
+	if strings.Contains(string(r.body), `"key"`) || strings.Contains(string(r.body), "a.txt") {
+		t.Errorf("a key was shown to who may not list the bucket: %s", r.body)
+	}
+
+	// Who is denied who uses an object is shown no row of it - not who, not
+	// when - while the bucket says what it says of itself: the activity is
+	// there, and empty.
+	buckets, r = list(heidi, "?details=true")
+	for _, b := range buckets {
+		if access, policy := included(b); !access || !policy || b.Details.Activity == nil ||
+			b.Details.Activity.Uploads == nil || b.Details.Activity.Downloads == nil {
+			t.Fatalf("who is denied an object: %s = %s", b.Name, r.body)
+		}
+	}
+	photos = buckets["photos"].Details
+	if len(photos.Activity.Uploads) != 0 || len(photos.Activity.Downloads) != 0 || photos.CreatedBy == nil || *photos.CreatedBy != "root" {
+		t.Errorf("who is denied an object, photos: %s", r.body)
+	}
+	for _, never := range []string{"a.txt", "user/bob", "presigned", `"key"`} {
+		if strings.Contains(string(r.body), never) {
+			t.Errorf("the list of who is denied an object has %q in it: %s", never, r.body)
+		}
+	}
+
+	// Nobody was refused anything, and the trail says nothing.
+	if n := len(f.trail()) - before; n != 0 {
+		t.Errorf("lists left %d audit records: %+v", n, f.trail()[before:])
+	}
+
+	// Who may not list the buckets is refused, whatever else they may see,
+	// and that is in the trail - once.
+	r = f.do(call{method: "GET", path: "/buckets?details=true", bearer: oscar})
+	if p := r.problem(t); r.status != http.StatusForbidden || p["code"] != "AccessDenied" {
+		t.Errorf("a list by who may not list = %d %s", r.status, r.body)
+	}
+	trail := f.trail()[before:]
+	if len(trail) != 1 || trail[0].Outcome != audit.Denied || trail[0].Action != "s3:ListAllMyBuckets" || trail[0].Actor != "user/oscar" {
+		t.Errorf("the refusal in the trail: %+v", trail)
+	}
+	f.must(http.StatusBadRequest, call{method: "GET", path: "/buckets?details=perhaps"})
+	if r := f.do(call{method: "GET", path: "/buckets?details=true"}); r.status != http.StatusUnauthorized {
+		t.Errorf("a list by nobody = %d %s", r.status, r.body)
+	}
+	// What the list left out for heidi is what the answer about that one
+	// object refuses her, and gives a cluster admin.
+	f.must(http.StatusForbidden, call{method: "GET", path: "/buckets/photos/object/access?key=a.txt", bearer: heidi})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object/access?key=a.txt", bearer: carol})
 }
 
 // searchPage is the answer of a search, as a client reads it.
