@@ -1,20 +1,26 @@
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 
 import {
   api,
   ApiError,
   objectDownloadUrl,
   unwrap,
-  uploadObjectWithProgress,
   type ObjectAccessSummary,
+  type ObjectList,
   type ObjectMetadata,
 } from '../api/client';
+import { useNoticeActions } from '../notices/context';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatBytes, formatTime } from '../ui/format';
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
+import { reasonOf } from '../ui/reason';
+import { useUploadList, useUploads } from '../uploads/context';
+import { UPLOADS_AT_ONCE } from '../uploads/engine';
+import { totalsOf } from '../uploads/state';
+import { UploadTile } from '../uploads/UploadTile';
 
 const DELIMITER = '/';
 
@@ -25,49 +31,12 @@ interface ObjectsScreenProps {
   prefix: string;
 }
 
-/** How many files are on their way at once. */
-const UPLOADS_AT_ONCE = 4;
-
-/** How often an upload is tried when it fails for a reason that may pass. */
-const UPLOAD_ATTEMPTS = 3;
-const UPLOAD_RETRY_MS = 400;
-
-/** One file of an upload and how far it is. */
-interface Upload {
-  name: string;
-  state: 'waiting' | 'sending' | 'stored' | 'failed';
-  sent: number;
-  total: number;
-  /** Why it was not stored, in the words of the API. */
-  reason?: string;
-}
-
-/** Whether a failed attempt is worth making again: the connection, or a server that says "not now". */
-function mayPass(error: unknown): boolean {
-  if (!(error instanceof ApiError)) {
-    return false;
-  }
-  const { status } = error.problem;
-  return status === 0 || status === 502 || status === 503 || status === 504;
-}
-
-function reasonOf(error: unknown, otherwise = 'The upload failed'): string {
-  if (error instanceof ApiError) {
-    return error.problem.detail === undefined || error.problem.detail === ''
-      ? error.problem.title
-      : `${error.problem.title}: ${error.problem.detail}`;
-  }
-  return error instanceof Error ? error.message : otherwise;
-}
-
-const UPLOAD_ICON = {
-  waiting: 'bi-hourglass',
-  sending: 'bi-arrow-up-circle',
-  stored: 'bi-check-circle',
-  failed: 'bi-x-circle',
-} as const;
-
-const UPLOAD_WORD = { waiting: 'Waiting', sending: 'Uploading…', stored: 'Stored', failed: 'Not stored' } as const;
+/**
+ * How long the list waits, while files keep being stored, before it is read
+ * again: thirty-nine files that are stored one after the other are not
+ * thirty-nine readings of the list.
+ */
+const RELOAD_EVERY_MS = 1000;
 
 // How who uploaded an object and when it was last downloaded are worded: in
 // its details and in the grid alike.
@@ -79,10 +48,70 @@ function lastDownloadOf(lastDownloadedAt: string | undefined): string {
   return lastDownloadedAt === undefined ? 'never' : formatTime(lastDownloadedAt);
 }
 
+/** An object as a listing has it. */
+type ObjectSummary = ObjectList['objects'][number];
+
+/** A column of the grid of objects, as its heading names it. */
+interface Column {
+  /** What the heading says. */
+  label: string;
+  /** The class of the heading, where it has one. */
+  className?: string;
+  /** True where the heading is read out and not shown. */
+  hidden?: boolean;
+}
+
+// The columns that say who uploaded an object and how often it was
+// downloaded: there only when the listing carries that.
+const ACCESS_COLUMNS: readonly Column[] = [
+  { label: 'Uploaded by' },
+  { label: 'Uploaded' },
+  { label: 'Downloads', className: 'grid-number' },
+  { label: 'Copies', className: 'grid-number' },
+  { label: 'Last downloaded' },
+];
+
+/**
+ * The columns of the grid of objects. The headings are drawn from this, and
+ * the details of an object, which lie across the whole grid, span as many
+ * columns as it names.
+ */
+function columnsOf(withAccess: boolean): readonly Column[] {
+  return [
+    { label: 'Select', className: 'grid-check', hidden: true },
+    { label: 'Name', className: 'grid-name' },
+    { label: 'Size' },
+    { label: 'Last modified' },
+    ...(withAccess ? ACCESS_COLUMNS : []),
+    { label: 'Actions' },
+  ];
+}
+
+/**
+ * What tells one version of an object from the next in a listing: when it
+ * changes, the object was replaced and what was known of it no longer holds.
+ */
+function stampOf(object: ObjectSummary): string {
+  return `${object.etag} ${object.last_modified}`;
+}
+
+/** What was read of an object, and of which version of it. */
+interface KnownDetails {
+  /** The stamp of the listed object the details were asked for. */
+  stamp: string;
+  /** What the API said of it. */
+  metadata: ObjectMetadata;
+}
+
 /**
  * The object browser of one bucket: walks prefixes as if they were folders,
  * pages through long listings, uploads, downloads, deletes, and shows what is
- * known about an object.
+ * known about an object - in the grid, under the row of the object, and of
+ * as many objects at a time as are opened.
+ *
+ * The uploads are the console's, not this screen's: the form hands the files
+ * over, and they go on when another screen is shown. What is shown here of
+ * them is how the uploads into this bucket stand - the same on coming back.
  */
 export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   // The continuation tokens of the pages before this one and of this one; the
@@ -111,128 +140,135 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   );
   const listing = useLoad(load);
   const action = useAction();
-  const [metadata, setMetadata] = useState<ObjectMetadata | null>(null);
+  // The keys of the objects whose details are open, of this page. Several can
+  // be: one compares objects by reading them side by side.
+  const [open, setOpen] = useState<string[]>([]);
+  // What was read of the objects of this page, kept for as long as the page
+  // is shown: an object is asked about once, and again only when the listing
+  // says that it was replaced.
+  const [known, setKnown] = useState<ReadonlyMap<string, KnownDetails>>(() => new Map());
+  // The ids of the regions the details are in start with this. They are made
+  // of the place of the row, never of the key: a key holds any character.
+  const detailsId = useId();
+  const uploads = useUploads();
+  const { notify } = useNoticeActions();
+  const uploadForm = useRef<HTMLFormElement>(null);
   // The files chosen for upload. One file can be given any key; several go
   // under a prefix, each by its own name.
   const [files, setFiles] = useState<File[]>([]);
   const [key, setKey] = useState('');
-  // What became of each file of the last upload.
-  const [uploads, setUploads] = useState<Upload[]>([]);
-  // What the last upload was asked to send, so that what failed can be sent again.
-  const [sent, setSent] = useState<{ file: File; key: string; index: number }[]>([]);
+  // The batch this form sent off and that is still on its way: until it is
+  // over the form sends nothing more, so that the same files are not sent
+  // twice by a second click.
+  const submitted = useRef<string | null>(null);
+  // The files that batch was made of, and the files that are chosen now: the
+  // form is emptied when the batch is stored only if they are still the same.
+  const submittedFiles = useRef<File[] | null>(null);
+  const chosenFiles = useRef<File[]>(files);
+  const [sending, setSending] = useState(false);
   // The keys ticked for deletion, of this page.
   const [chosen, setChosen] = useState<string[]>([]);
 
   const several = files.length > 1;
+  const { reload } = listing;
 
-  // Uploads files, a few at a time, each with a request of its own, as the
-  // API has it. Every file is tried: one that fails does not hold the others
-  // up. An attempt that fails for a reason that may pass - the connection, a
-  // node that is restarting, no leader for a moment - is made again, with the
-  // same Idempotency-Key, so that nothing is stored twice.
-  const send = (sending: { file: File; key: string; index: number }[], allStored?: () => void) => {
-    const update = (index: number, change: Partial<Upload>) => {
-      setUploads((list) => list.map((entry, i) => (i === index ? { ...entry, ...change } : entry)));
+  // What the uploads tell this screen. A file stored under the prefix that
+  // is shown belongs in the list, so the list is read again: when the batch
+  // the file is of is over, and while files keep being stored a moment after
+  // the first of them, once for all that were stored in it. A batch of which
+  // a file was cancelled is read after too: the API may have stored the file
+  // before it heard that it was given up. And when the batch this form sent
+  // off is over, the form is free again - and empty, if every file of it was
+  // stored and no other files were chosen meanwhile.
+  useEffect(() => {
+    // Whether something was stored that the list does not show yet.
+    let behind = false;
+    let later: ReturnType<typeof setTimeout> | undefined;
+    const catchUp = () => {
+      clearTimeout(later);
+      later = undefined;
+      if (behind) {
+        behind = false;
+        reload();
+      }
     };
-    void action
-      .run(async () => {
-        let next = 0;
-        let failures = 0;
-        let firstFailure: unknown = null;
-        const worker = async () => {
-          while (next < sending.length) {
-            const item = sending[next];
-            next += 1;
-            if (item === undefined) {
-              return;
-            }
-            const idempotencyKey = crypto.randomUUID();
-            update(item.index, { state: 'sending', sent: 0, reason: undefined });
-            for (let attempt = 1; ; attempt += 1) {
-              try {
-                await uploadObjectWithProgress(
-                  bucket,
-                  item.key,
-                  item.file,
-                  (sent, total) => {
-                    update(item.index, { sent, total });
-                  },
-                  idempotencyKey,
-                );
-                update(item.index, { state: 'stored', sent: item.file.size, total: item.file.size });
-                break;
-              } catch (error) {
-                if (attempt < UPLOAD_ATTEMPTS && mayPass(error)) {
-                  await new Promise((resolve) => setTimeout(resolve, UPLOAD_RETRY_MS * attempt));
-                  continue;
-                }
-                failures += 1;
-                firstFailure ??= error;
-                update(item.index, { state: 'failed', reason: reasonOf(error) });
-                break;
-              }
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(UPLOADS_AT_ONCE, sending.length) }, worker));
-        if (failures > 0) {
-          throw firstFailure instanceof Error ? firstFailure : new Error('The upload failed');
+    const stopListening = uploads.listen((event) => {
+      if (event.type === 'stored') {
+        if (event.bucket === bucket && event.key.startsWith(prefix)) {
+          behind = true;
+          later ??= setTimeout(catchUp, RELOAD_EVERY_MS);
         }
-        allStored?.();
-      })
-      .then(() => {
-        listing.reload();
-      });
-  };
+        return;
+      }
+      if (event.bucket === bucket) {
+        if (event.cancelled > 0) {
+          behind = true;
+        }
+        catchUp();
+      }
+      if (event.batch === submitted.current) {
+        const sent = submittedFiles.current;
+        submitted.current = null;
+        submittedFiles.current = null;
+        setSending(false);
+        // Files chosen while these were on their way are another choice:
+        // it stays, with its key, for the next upload.
+        if (event.stored === event.files && chosenFiles.current === sent) {
+          uploadForm.current?.reset();
+          chosenFiles.current = [];
+          setFiles([]);
+          setKey('');
+        }
+      }
+    });
+    return () => {
+      stopListening();
+      clearTimeout(later);
+    };
+  }, [uploads, bucket, prefix, reload]);
 
+  // Hands the files over to the console's uploads: they are sent a few at a
+  // time, and go on whatever screen is shown.
   const upload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = event.currentTarget;
-    if (files.length === 0) {
+    if (files.length === 0 || submitted.current !== null) {
       return;
     }
-    const sending = files.map((file, index) => ({ file, key: several ? key + file.name : key, index }));
-    setSent(sending);
-    setUploads(sending.map(({ file, key: objectKey }) => ({ name: objectKey, state: 'waiting', sent: 0, total: file.size })));
-    send(sending, () => {
-      form.reset();
-      setFiles([]);
-      setKey('');
-    });
+    submittedFiles.current = files;
+    submitted.current = uploads.start(
+      bucket,
+      files.map((file) => ({ file, key: several ? key + file.name : key })),
+    );
+    setSending(true);
   };
 
-  // Forgets what became of the last upload, and with it what could be sent
-  // again. The files chosen, the key and the objects are left as they are.
-  const clearUploads = () => {
-    setUploads([]);
-    setSent([]);
-    // What the upload was refused for goes with its tiles.
-    action.fail(null);
+  // An object that was deleted has no details: its row closes.
+  const forget = (objectKey: string) => {
+    setOpen((keys) => keys.filter((k) => k !== objectKey));
+    setKnown((old) => new Map([...old].filter(([k]) => k !== objectKey)));
   };
-
-  // Sends again what was not stored, and only that.
-  const retryFailed = () => {
-    send(sent.filter((item) => uploads[item.index]?.state === 'failed'));
-  };
-
-  const storedCount = uploads.filter((entry) => entry.state === 'stored').length;
-  const failedCount = uploads.filter((entry) => entry.state === 'failed').length;
 
   const remove = (objectKey: string) => {
-    void action.run(async () => {
-      await unwrap(
-        api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
-      );
-      setMetadata((shown) => (shown?.key === objectKey ? null : shown));
-      setChosen((left) => left.filter((k) => k !== objectKey));
-      listing.reload();
-    });
+    void action.run(
+      async () => {
+        await unwrap(
+          api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
+        );
+        forget(objectKey);
+        setChosen((left) => left.filter((k) => k !== objectKey));
+        listing.reload();
+      },
+      { done: `Deleted ${objectKey} from ${bucket}`, failed: `${objectKey} was not deleted from ${bucket}` },
+    );
   };
 
   // Another page is another choice: what was ticked on the page left behind
-  // is not carried along, where nobody can see it.
+  // is not carried along, where nobody can see it. Nor are the details that
+  // were open on it.
   const turnTo = (pages: string[]) => {
     setChosen([]);
+    setOpen([]);
+    setKnown(new Map());
     setTokens(pages);
   };
 
@@ -243,35 +279,62 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   // Deletes what is ticked on the page shown - the keys the count and the
   // question name, and no others - one request an object, as the API has it.
   // It stops at the first refusal; what was deleted until then stays deleted.
+  // It goes on when another screen is shown, and this one is then no longer
+  // there to say how it ended: so that is said as a notice, here or not.
   const removeChosen = (keys: string[]) => {
+    const link = { href: routeHref(['buckets', bucket]), label: `Open ${bucket}` };
+    const count = (n: number) => (n === 1 ? '1 object' : `${String(n)} objects`);
     void action
       .run(async () => {
-        for (const objectKey of keys) {
-          await unwrap(
-            api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
-          );
-          setChosen((left) => left.filter((k) => k !== objectKey));
-          setMetadata((shown) => (shown?.key === objectKey ? null : shown));
+        let deleted = 0;
+        try {
+          for (const objectKey of keys) {
+            await unwrap(
+              api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
+            );
+            deleted += 1;
+            setChosen((left) => left.filter((k) => k !== objectKey));
+            forget(objectKey);
+          }
+        } catch (error) {
+          notify({
+            kind: 'error',
+            title: `Deleted ${String(deleted)} of ${count(keys.length)} from ${bucket}, and stopped`,
+            detail: reasonOf(error, 'The request failed'),
+            link,
+          });
+          throw error;
         }
+        notify({ kind: 'success', title: `Deleted ${count(keys.length)} from ${bucket}`, link });
       })
       .then(() => {
         listing.reload();
       });
   };
 
-  const showMetadata = (objectKey: string) => {
-    void action.run(async () => {
-      setMetadata(
-        await unwrap(
-          api.GET('/buckets/{bucket}/object/metadata', {
-            params: { path: { bucket }, query: { key: objectKey } },
-          }),
-        ),
-      );
-    });
-  };
+  const toggleDetails = useCallback((objectKey: string) => {
+    setOpen((keys) => (keys.includes(objectKey) ? keys.filter((k) => k !== objectKey) : [...keys, objectKey]));
+  }, []);
+
+  const closeDetails = useCallback((objectKey: string) => {
+    setOpen((keys) => keys.filter((k) => k !== objectKey));
+  }, []);
+
+  const remember = useCallback((objectKey: string, stamp: string, metadata: ObjectMetadata) => {
+    setKnown((old) => new Map(old).set(objectKey, { stamp, metadata }));
+  }, []);
 
   const page = listing.data;
+  // When the list was read again: the details of an object that is still in
+  // it stay open, those of one that is gone close - and stay closed should a
+  // key of that name come back.
+  const [listed, setListed] = useState(page);
+  if (page !== listed) {
+    setListed(page);
+    const there = new Set(page?.objects.map((object) => object.key) ?? []);
+    setOpen((keys) => keys.filter((k) => there.has(k)));
+    setKnown((old) => new Map([...old].filter(([k]) => there.has(k))));
+  }
   const nextToken = page?.truncated === true ? page.next_continuation_token : undefined;
   const empty = page !== undefined && page.objects.length === 0 && page.common_prefixes.length === 0;
   const pageKeys = page?.objects.map((object) => object.key) ?? [];
@@ -282,6 +345,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   // downloaded. Whether the caller may see that is for the API to decide:
   // without it the columns are not there at all.
   const withAccess = page?.access_included === true;
+  const columns = columnsOf(withAccess);
 
   return (
     <>
@@ -291,7 +355,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
 
       <section className="card card-body panel" aria-labelledby="upload-object">
         <h2 id="upload-object">Upload an object</h2>
-        <form className="form-row" onSubmit={upload}>
+        <form className="form-row" ref={uploadForm} onSubmit={upload}>
           <label className="field">
             <span>File</span>
             <input
@@ -302,8 +366,8 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               required
               onChange={(event) => {
                 const chosen = Array.from(event.target.files ?? []);
+                chosenFiles.current = chosen;
                 setFiles(chosen);
-                setUploads([]);
                 const [only] = chosen;
                 setKey(chosen.length === 1 && only !== undefined ? prefix + only.name : prefix);
               }}
@@ -322,7 +386,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               }}
             />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={action.busy} title="Upload the chosen files to this bucket">
+          <button type="submit" className="btn btn-primary" disabled={sending} title="Upload the chosen files to this bucket">
             <i className="bi bi-upload" aria-hidden="true" /> <span className="btn-text">Upload</span>
           </button>
         </form>
@@ -332,84 +396,12 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             file whose key already exists replaces it.
           </p>
         ) : null}
-        {uploads.length > 0 ? (
-          <>
-            <p className="uploads-summary" role="status">
-              <strong>
-                {storedCount} of {uploads.length} stored
-              </strong>
-              {failedCount > 0 ? <span className="uploads-failed"> · {failedCount} not stored</span> : null}
-              {failedCount > 0 && !action.busy ? (
-                <button type="button" className="btn btn-outline-danger btn-sm" onClick={retryFailed} title="Send again the files that were not stored">
-                  <i className="bi bi-arrow-repeat" aria-hidden="true" /> <span className="btn-text">Retry failed</span>
-                </button>
-              ) : null}
-              {action.busy ? null : (
-                <button type="button" className="btn btn-outline-secondary btn-sm" onClick={clearUploads} title="Clear the upload status">
-                  <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Clear</span>
-                </button>
-              )}
-            </p>
-            <ul className="uploads" aria-label="Upload progress">
-              {uploads.map((entry) => (
-                <li key={entry.name} className={`upload upload-${entry.state}`}>
-                  <div className="upload-head">
-                    <i className={`bi ${UPLOAD_ICON[entry.state]}`} aria-hidden="true" />
-                    <span className="upload-name">{entry.name}</span>
-                    <span className="upload-state">
-                      {entry.state === 'sending' && entry.total > 0
-                        ? `${String(Math.floor((entry.sent / entry.total) * 100))} %`
-                        : UPLOAD_WORD[entry.state]}
-                    </span>
-                  </div>
-                  <progress
-                    className="upload-bar"
-                    aria-label={`Upload of ${entry.name}`}
-                    value={entry.state === 'stored' ? 1 : entry.total > 0 ? entry.sent / entry.total : 0}
-                    max={1}
-                  />
-                  {entry.reason === undefined ? null : <p className="upload-reason">{entry.reason}</p>}
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : null}
+        <p className="form-hint">
+          An upload goes on when you open another screen of the console, and the bar at the top says how it stands.
+          Reloading or closing the page stops it.
+        </p>
+        <BucketUploads bucket={bucket} />
       </section>
-
-      {metadata === null ? null : (
-        <section className="card card-body panel" aria-labelledby="object-metadata">
-          <h2 id="object-metadata">Object details</h2>
-          <dl className="facts">
-            <dt>Bucket</dt>
-            <dd>{metadata.bucket}</dd>
-            <dt>Key</dt>
-            <dd>{metadata.key}</dd>
-            <dt>Size</dt>
-            <dd>{metadata.size} bytes</dd>
-            <dt>ETag</dt>
-            <dd>
-              <code>{metadata.etag}</code>
-            </dd>
-            <dt>Last modified</dt>
-            <dd>{formatTime(metadata.last_modified)}</dd>
-            <dt>Content type</dt>
-            <dd>{metadata.content_type}</dd>
-            <dt>Encryption</dt>
-            <dd>{metadata.encryption}</dd>
-          </dl>
-          <ObjectAccessFacts key={metadata.key} bucket={metadata.bucket} objectKey={metadata.key} />
-          <button
-            type="button"
-            className="btn btn-outline-secondary"
-            onClick={() => {
-              setMetadata(null);
-            }}
-            title="Close the details"
-          >
-            <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Close details</span>
-          </button>
-        </section>
-      )}
 
       <section className="card card-body panel" aria-labelledby="object-list">
         <h2 id="object-list">Objects</h2>
@@ -450,32 +442,15 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           </div>
         ) : null}
         {page !== undefined && !empty ? (
-          <div className="table-responsive grid-scroll">
+          <div className="table-responsive grid-scroll grid-scroll-details">
             <table className={`table table-hover align-middle grid grid-keep${withAccess ? ' grid-wide' : ''}`}>
               <thead>
                 <tr>
-                  <th scope="col" className="grid-check">
-                    <span className="visually-hidden">Select</span>
-                  </th>
-                  <th scope="col" className="grid-name">
-                    Name
-                  </th>
-                  <th scope="col">Size</th>
-                  <th scope="col">Last modified</th>
-                  {withAccess ? (
-                    <>
-                      <th scope="col">Uploaded by</th>
-                      <th scope="col">Uploaded</th>
-                      <th scope="col" className="grid-number">
-                        Downloads
-                      </th>
-                      <th scope="col" className="grid-number">
-                        Copies
-                      </th>
-                      <th scope="col">Last downloaded</th>
-                    </>
-                  ) : null}
-                  <th scope="col">Actions</th>
+                  {columns.map((column) => (
+                    <th key={column.label} scope="col" className={column.className}>
+                      {column.hidden === true ? <span className="visually-hidden">{column.label}</span> : column.label}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -498,61 +473,26 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                     <td data-label="Actions">-</td>
                   </tr>
                 ))}
-                {page.objects.map((object) => {
-                  const name = object.key.slice(prefix.length);
-                  return (
-                    <tr key={`object ${object.key}`} className={selected.includes(object.key) ? 'grid-chosen' : undefined}>
-                      <td className="grid-check">
-                        <input
-                          className="form-check-input"
-                          type="checkbox"
-                          aria-label={`Select ${name}`}
-                          checked={selected.includes(object.key)}
-                          onChange={(event) => {
-                            choose(object.key, event.target.checked);
-                          }}
-                        />
-                      </td>
-                      <td data-label="Name">{name}</td>
-                      <td data-label="Size">{formatBytes(object.size)}</td>
-                      <td data-label="Last modified">{formatTime(object.last_modified)}</td>
-                      {withAccess ? <AccessCells access={object.access} /> : null}
-                      <td data-label="Actions">
-                        <span className="d-flex flex-wrap gap-2">
-                          <a
-                            className="btn btn-outline-secondary"
-                            href={objectDownloadUrl(bucket, object.key)}
-                            download
-                            aria-label={`Download ${name}`}
-                            title="Download this object"
-                          >
-                            <i className="bi bi-download" aria-hidden="true" /> <span className="btn-text">Download</span>
-                          </a>
-                          <button
-                            type="button"
-                            className="btn btn-outline-secondary"
-                            aria-label={`Details of ${name}`}
-                            disabled={action.busy}
-                            onClick={() => {
-                              showMetadata(object.key);
-                            }}
-                            title="Show what is known about this object"
-                          >
-                            <i className="bi bi-info-circle" aria-hidden="true" /> <span className="btn-text">Details</span>
-                          </button>
-                          <ConfirmButton
-                            label="Delete"
-                            question={`Delete ${name}?`}
-                            disabled={action.busy}
-                            onConfirm={() => {
-                              remove(object.key);
-                            }}
-                          />
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {page.objects.map((object, index) => (
+                  <ObjectRow
+                    key={`object ${object.key}`}
+                    bucket={bucket}
+                    object={object}
+                    name={object.key.slice(prefix.length)}
+                    regionId={`${detailsId}-details-${String(index)}`}
+                    columns={columns.length}
+                    withAccess={withAccess}
+                    chosen={selected.includes(object.key)}
+                    open={open.includes(object.key)}
+                    known={known.get(object.key)}
+                    busy={action.busy}
+                    onChoose={choose}
+                    onToggle={toggleDetails}
+                    onClose={closeDetails}
+                    onKnown={remember}
+                    onRemove={remove}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
@@ -597,6 +537,355 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         </div>
       </section>
     </>
+  );
+}
+
+/**
+ * How the uploads into one bucket stand, whichever screen they were sent off
+ * from and whatever prefix is shown: a tile a file, with what was stored and
+ * what was not counted above them. It is a part of its own, so that the
+ * progress of the files draws this again and not the whole screen.
+ */
+function BucketUploads({ bucket }: { bucket: string }) {
+  const uploads = useUploads();
+  const all = useUploadList();
+  const mine = all.filter((upload) => upload.bucket === bucket);
+  if (mine.length === 0) {
+    return null;
+  }
+  const totals = totalsOf(mine);
+  return (
+    <>
+      <p className="uploads-summary" role="status">
+        <strong>
+          {totals.stored} of {totals.files} stored
+        </strong>
+        {totals.failed > totals.undecided ? (
+          <span className="uploads-failed"> · {totals.failed - totals.undecided} not stored</span>
+        ) : null}
+        {totals.undecided > 0 ? <span className="uploads-failed"> · {totals.undecided} not confirmed</span> : null}
+        {totals.cancelled > 0 ? <span className="uploads-cancelled"> · {totals.cancelled} cancelled</span> : null}
+        {totals.failed > 0 && totals.inFlight === 0 ? (
+          <button
+            type="button"
+            className="btn btn-outline-danger btn-sm"
+            onClick={() => {
+              uploads.retryFailed({ bucket });
+            }}
+            title="Send again the files that were not stored"
+          >
+            <i className="bi bi-arrow-repeat" aria-hidden="true" /> <span className="btn-text">Retry failed</span>
+          </button>
+        ) : null}
+        {totals.inFlight > 0 ? null : (
+          <button
+            type="button"
+            className="btn btn-outline-secondary btn-sm"
+            onClick={() => {
+              uploads.dismissFinished({ bucket });
+            }}
+            title="Clear the upload status"
+          >
+            <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Clear</span>
+          </button>
+        )}
+      </p>
+      <ul className="uploads" aria-label="Upload progress">
+        {mine.map((upload) => (
+          <UploadTile key={upload.id} upload={upload} barLabel={`Upload of ${upload.key}`} onCancel={uploads.cancel} />
+        ))}
+      </ul>
+    </>
+  );
+}
+
+interface ObjectRowProps {
+  /** The bucket the object is in. */
+  bucket: string;
+  /** The object, as the listing has it. */
+  object: ObjectSummary;
+  /** Its key below the prefix that is shown. */
+  name: string;
+  /** The id of the region its details are in when they are open. */
+  regionId: string;
+  /** How many columns the grid has: the details lie across all of them. */
+  columns: number;
+  /** Whether the grid says who uploaded its objects and how often they were downloaded. */
+  withAccess: boolean;
+  /** Whether the object is ticked. */
+  chosen: boolean;
+  /** Whether its details are open. */
+  open: boolean;
+  /** What was read of it before, if anything. */
+  known: KnownDetails | undefined;
+  /** True while a change is being carried out. */
+  busy: boolean;
+  /** Ticks the object, or not. */
+  onChoose: (objectKey: string, on: boolean) => void;
+  /** Opens its details, or closes them. */
+  onToggle: (objectKey: string) => void;
+  /** Closes its details. */
+  onClose: (objectKey: string) => void;
+  /** Keeps what was read of it. */
+  onKnown: (objectKey: string, stamp: string, metadata: ObjectMetadata) => void;
+  /** Deletes it. */
+  onRemove: (objectKey: string) => void;
+}
+
+/**
+ * The row of an object, and under it - when it is opened by the name or by
+ * the details button - a row with everything that is known of the object,
+ * across the whole grid. Opening it moves nothing: the page is not scrolled
+ * and the keyboard stays on what opened it. Closing it from inside, with its
+ * button or with Escape, puts the keyboard back there.
+ */
+function ObjectRow({
+  bucket,
+  object,
+  name,
+  regionId,
+  columns,
+  withAccess,
+  chosen,
+  open,
+  known,
+  busy,
+  onChoose,
+  onToggle,
+  onClose,
+  onKnown,
+  onRemove,
+}: ObjectRowProps) {
+  const nameButton = useRef<HTMLButtonElement>(null);
+  const detailsButton = useRef<HTMLButtonElement>(null);
+  // Which of the two opened the details: where the keyboard goes back to.
+  const opener = useRef<'name' | 'details'>('name');
+  const hint = open ? 'Hide details' : 'Show details';
+
+  const toggle = (by: 'name' | 'details') => {
+    opener.current = by;
+    onToggle(object.key);
+  };
+
+  const close = () => {
+    (opener.current === 'details' ? detailsButton : nameButton).current?.focus();
+    onClose(object.key);
+  };
+
+  // Escape closes the details the keyboard is in - it is heard here only
+  // when it is - and no others.
+  const closeOnEscape = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && !event.defaultPrevented) {
+      event.stopPropagation();
+      close();
+    }
+  };
+
+  return (
+    <>
+      <tr className={chosen ? 'grid-chosen' : undefined}>
+        <td className="grid-check">
+          <input
+            className="form-check-input"
+            type="checkbox"
+            aria-label={`Select ${name}`}
+            checked={chosen}
+            onChange={(event) => {
+              onChoose(object.key, event.target.checked);
+            }}
+          />
+        </td>
+        <td data-label="Name">
+          <button
+            type="button"
+            ref={nameButton}
+            className="grid-name-toggle"
+            aria-expanded={open}
+            aria-controls={regionId}
+            onClick={() => {
+              toggle('name');
+            }}
+            title={hint}
+          >
+            <i className="bi bi-chevron-right grid-name-mark" aria-hidden="true" />
+            {name === '' ? object.key : name}
+          </button>
+        </td>
+        <td data-label="Size">{formatBytes(object.size)}</td>
+        <td data-label="Last modified">{formatTime(object.last_modified)}</td>
+        {withAccess ? <AccessCells access={object.access} /> : null}
+        <td data-label="Actions">
+          <span className="d-flex flex-wrap gap-2">
+            <a
+              className="btn btn-outline-secondary"
+              href={objectDownloadUrl(bucket, object.key)}
+              download
+              aria-label={`Download ${name}`}
+              title="Download this object"
+            >
+              <i className="bi bi-download" aria-hidden="true" /> <span className="btn-text">Download</span>
+            </a>
+            <button
+              type="button"
+              ref={detailsButton}
+              className={`btn btn-outline-secondary${open ? ' active' : ''}`}
+              aria-label={`Details of ${name}`}
+              aria-expanded={open}
+              aria-controls={regionId}
+              onClick={() => {
+                toggle('details');
+              }}
+              title={hint}
+            >
+              <i className={open ? 'bi bi-info-circle-fill' : 'bi bi-info-circle'} aria-hidden="true" />{' '}
+              <span className="btn-text">Details</span>
+            </button>
+            <ConfirmButton
+              label="Delete"
+              question={`Delete ${name}?`}
+              disabled={busy}
+              onConfirm={() => {
+                onRemove(object.key);
+              }}
+            />
+          </span>
+        </td>
+      </tr>
+      {open ? (
+        <tr className="grid-detail">
+          <td colSpan={columns}>
+            {/* Escape is heard on the region for the controls inside it: the
+                region itself is not something to press. */}
+            <div
+              className="grid-detail-body"
+              role="region"
+              id={regionId}
+              aria-label={`Details of ${object.key}`}
+              onKeyDown={closeOnEscape}
+            >
+              <ObjectDetails bucket={bucket} object={object} known={known} onKnown={onKnown} />
+              <div className="grid-detail-end">
+                <button type="button" className="btn btn-outline-secondary" onClick={close} title="Close the details">
+                  <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Close details</span>
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+interface ObjectDetailsProps {
+  /** The bucket the object is in. */
+  bucket: string;
+  /** The object, as the listing has it. */
+  object: ObjectSummary;
+  /** What was read of it before, if anything. */
+  known: KnownDetails | undefined;
+  /** Keeps what is read of it. */
+  onKnown: (objectKey: string, stamp: string, metadata: ObjectMetadata) => void;
+}
+
+/**
+ * Everything that is known of one object: what it is, and who uploaded and
+ * downloaded it. It is asked for when the details are first opened and when
+ * the listing says the object was replaced, and not otherwise. That it is on
+ * its way, and that it could not be had, is said here, in the row: the
+ * details of one object failing are no failure of the screen, nor of the
+ * details of another.
+ */
+function ObjectDetails({ bucket, object, known, onKnown }: ObjectDetailsProps) {
+  const objectKey = object.key;
+  const stamp = stampOf(object);
+  const fresh = known?.stamp === stamp;
+  // How often it was asked for again after a failure.
+  const [attempt, setAttempt] = useState(0);
+  const [failure, setFailure] = useState<{ stamp: string; attempt: number; error: unknown } | null>(null);
+
+  useEffect(() => {
+    if (fresh) {
+      return undefined;
+    }
+    let current = true;
+    const abandoned = new AbortController();
+    unwrap(
+      api.GET('/buckets/{bucket}/object/metadata', {
+        params: { path: { bucket }, query: { key: objectKey } },
+        signal: abandoned.signal,
+      }),
+    ).then(
+      (metadata) => {
+        if (current) {
+          onKnown(objectKey, stamp, metadata);
+        }
+      },
+      (error: unknown) => {
+        if (current) {
+          setFailure({ stamp, attempt, error });
+        }
+      },
+    );
+    return () => {
+      current = false;
+      abandoned.abort();
+    };
+  }, [bucket, objectKey, stamp, attempt, fresh, onKnown]);
+
+  if (known !== undefined && fresh) {
+    const { metadata } = known;
+    return (
+      <>
+        <div className="grid-detail-group">
+          <h3>Object</h3>
+          <dl className="facts">
+            <dt>Bucket</dt>
+            <dd>{metadata.bucket}</dd>
+            <dt>Key</dt>
+            <dd>{metadata.key}</dd>
+            <dt>Size</dt>
+            <dd>{metadata.size} bytes</dd>
+            <dt>ETag</dt>
+            <dd>
+              <code>{metadata.etag}</code>
+            </dd>
+            <dt>Last modified</dt>
+            <dd>{formatTime(metadata.last_modified)}</dd>
+            <dt>Content type</dt>
+            <dd>{metadata.content_type}</dd>
+            <dt>Encryption</dt>
+            <dd>{metadata.encryption}</dd>
+          </dl>
+        </div>
+        <div className="grid-detail-group">
+          {/* Asked for again when the object was replaced: another upload has another uploader. */}
+          <ObjectAccessFacts key={stamp} bucket={metadata.bucket} objectKey={metadata.key} />
+        </div>
+      </>
+    );
+  }
+  if (failure !== null && failure.stamp === stamp && failure.attempt === attempt) {
+    return (
+      <div className="grid-detail-group grid-detail-problem">
+        <ProblemNotice error={failure.error} />
+        <button
+          type="button"
+          className="btn btn-outline-secondary"
+          onClick={() => {
+            setAttempt((n) => n + 1);
+          }}
+          title="Ask for the details of this object again"
+        >
+          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Try again</span>
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="grid-detail-group">
+      <Loading />
+    </div>
   );
 }
 
@@ -648,6 +937,8 @@ function ObjectAccessFacts({ bucket, objectKey }: { bucket: string; objectKey: s
     [bucket, objectKey],
   );
   const access = useLoad(load);
+  // Several objects can be open at once: each heading has an id of its own.
+  const headingId = useId();
 
   if (access.loading) {
     return <Loading />;
@@ -664,8 +955,8 @@ function ObjectAccessFacts({ bucket, objectKey }: { bucket: string; objectKey: s
     );
   }
   return (
-    <section className="object-access" aria-labelledby="object-access">
-      <h3 id="object-access">Uploads and downloads</h3>
+    <section className="object-access" aria-labelledby={headingId}>
+      <h3 id={headingId}>Uploads and downloads</h3>
       <dl className="facts">
         <dt>Uploaded by</dt>
         <dd>{uploaderOf(record.uploaded_by)}</dd>

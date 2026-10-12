@@ -27,6 +27,15 @@
   --gap: 1rem;
   --sidebar: 15rem;
   --sidebar-folded: 4.25rem;
+  /* The bar that says what the console is doing: its height on a wide
+     screen, where it is one line. */
+  --activitybar: 2.75rem;
+  /* The tabs along the bottom of a phone: how tall one is, and how tall the
+     bar of them is with its padding, its line and the room the phone keeps
+     free under it. Said once, here: the tabs are made that tall, and what
+     opens from the activity bar ends that far above the bottom. */
+  --tab: 3rem;
+  --tabbar: calc(var(--tab) + 0.6rem + 1px + env(safe-area-inset-bottom, 0px));
   --shadow: 0 1px 2px rgb(22 59 44 / 6%), 0 8px 24px rgb(22 59 44 / 7%);
 
   /* Bootstrap, in those colours. */
@@ -103,6 +112,10 @@ code {
   .tile {
     transition: none;
     transform: none;
+  }
+
+  .upload-bar::-webkit-progress-value {
+    transition: none;
   }
 
   .btn:active:not(:disabled),
@@ -262,13 +275,22 @@ code {
   text-align: left;
 }
 
-/* Frame: the navigation down the left, the screen beside it. */
+/* Frame: the navigation down the left; beside it the bar that says what the
+   console is doing, and under that the screen. */
 
 .layout {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  grid-template-rows: var(--activitybar) 1fr;
   min-height: 100vh;
   min-height: 100dvh;
+}
+
+/* The navigation and the bar are one element for the sake of a phone, where
+   they are held at the top together. On a wide screen that element is not
+   there for the layout: each of the two has a place of its own in the grid. */
+.layout-top {
+  display: contents;
 }
 
 .layout-folded {
@@ -278,6 +300,8 @@ code {
 .sidebar {
   position: sticky;
   top: 0;
+  grid-row: 1 / -1;
+  grid-column: 1;
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -480,9 +504,245 @@ code {
 /* A screen takes the whole width beside the navigation, with a small margin:
    the grids have many columns and are given the room there is. */
 .screen {
+  grid-row: 2;
+  grid-column: 2;
   width: 100%;
   min-width: 0;
   padding: 1.25rem 1.25rem 2.5rem;
+}
+
+/*
+ * The activity bar: what the console is doing, always in view. Every class
+ * of it begins with "activitybar": "activity-line" and its like belong to
+ * the grid of buckets, and no rule of the one may meet the other.
+ *
+ * It is held at the top of the window while the screen scrolls under it. An
+ * element is only ever held within the room its parent gives it, so the bar
+ * is given the whole column - both rows of the grid - and stands at the top
+ * of it; the first row is as tall as the bar, which keeps the screen clear
+ * of it. That takes a bar of one known height: its line does not wrap here
+ * - what it says is cut short where the room ends, with all of it in the
+ * hint, and its buttons keep their width - and what opens from it - the
+ * uploads, the notices, a question - opens over the screen rather than
+ * pushing it down.
+ */
+
+/* What the keyboard goes to is scrolled into view below the bar, not under it. */
+html {
+  scroll-padding-top: calc(var(--activitybar) + 0.75rem);
+}
+
+.activitybar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  grid-row: 1 / -1;
+  grid-column: 2;
+  align-self: start;
+  height: var(--activitybar);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: 0 1px 2px rgb(22 59 44 / 6%);
+}
+
+.activitybar-line {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  height: 100%;
+  padding: 0 1.25rem;
+}
+
+/* The part that gives way: the line is cut short before a button moves. */
+.activitybar-summary {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.activitybar-summary .bi {
+  flex: none;
+}
+
+.activitybar-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* How it stands is said in the words and in the sign before them; the colour
+   only goes with them. */
+.activitybar-is-idle .activitybar-summary {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.activitybar-is-active .activitybar-summary .bi,
+.activitybar-is-stored .activitybar-summary .bi {
+  color: var(--saguaro);
+}
+
+.activitybar-is-incomplete .activitybar-summary {
+  color: var(--danger);
+}
+
+.activitybar-progress {
+  flex: 1 1 6rem;
+  width: auto;
+  min-width: 3rem;
+  max-width: 16rem;
+}
+
+.activitybar-buttons {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.activitybar-buttons .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.activitybar-count {
+  border: 1px solid var(--dune);
+  background: var(--sand);
+  color: var(--night-green);
+  font-variant-numeric: tabular-nums;
+}
+
+.activitybar .btn:hover .activitybar-count,
+.activitybar .btn:active .activitybar-count {
+  border-color: var(--dune);
+}
+
+/* The bar is at the top of the window: a hint above a button of its line
+   would be out of sight, so it is shown beneath, and held to the right edge
+   the buttons stand at. */
+.activitybar-line [title].btn:hover::after,
+.activitybar-line [title].btn:focus-visible::after {
+  top: calc(100% + 0.4rem);
+  right: 0;
+  bottom: auto;
+  left: auto;
+  transform: none;
+}
+
+/* What opens from the bar scrolls, and would cut such a hint off: there the
+   browser's own, from the same title, is the one that shows. */
+.activitybar-drop [title].btn::after {
+  display: none;
+}
+
+.activitybar-drop {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: calc(100vh - var(--activitybar) - 2rem);
+  max-height: calc(100dvh - var(--activitybar) - 2rem);
+  padding: 0.85rem 1.25rem 1rem;
+  border-bottom: 1px solid var(--dune);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.activitybar-drop .uploads-summary {
+  margin-top: 0;
+}
+
+.activitybar-batch + .activitybar-batch {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.activitybar-empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.activitybar-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activitybar-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left-width: 6px;
+  border-radius: var(--bs-border-radius);
+  background: var(--wash);
+}
+
+.activitybar-notice > .bi {
+  margin-top: 0.15rem;
+}
+
+.activitybar-notice-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activitybar-notice-body p {
+  margin: 0;
+}
+
+.activitybar-notice-title,
+.activitybar-notice-kind {
+  font-weight: 600;
+}
+
+.activitybar-notice-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.activitybar-notice-success {
+  border-left-color: var(--saguaro);
+}
+
+.activitybar-notice-success > .bi {
+  color: var(--saguaro);
+}
+
+.activitybar-notice-error {
+  border-color: #e3b6b2;
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.activitybar-notice-error > .bi,
+.activitybar-notice-error .activitybar-notice-kind {
+  color: var(--danger);
+}
+
+.activitybar-notice-info {
+  border-left-color: var(--dune);
 }
 
 .splash {
@@ -1174,6 +1434,41 @@ textarea[readonly] {
   color: var(--danger);
 }
 
+/* Not known to be stored and not known to be refused: neither the sign nor
+   the colour of a refusal. */
+.upload-failed.upload-undecided {
+  border-color: var(--dune);
+  background: var(--wash);
+}
+
+.upload-failed.upload-undecided .bi,
+.upload-failed.upload-undecided .upload-state {
+  color: var(--muted);
+}
+
+.upload-failed.upload-undecided .upload-bar::-webkit-progress-value {
+  background: var(--dune);
+}
+
+.upload-failed.upload-undecided .upload-bar::-moz-progress-bar {
+  background: var(--dune);
+}
+
+.upload-cancelled,
+.uploads-cancelled {
+  color: var(--muted);
+}
+
+/* The button that stops a file: small, at the end of the line of its name. */
+.upload .upload-cancel {
+  --bs-btn-padding-y: 0.1rem;
+  --bs-btn-padding-x: 0.35rem;
+
+  flex: none;
+  align-self: center;
+  min-height: 0;
+}
+
 /* The grid of buckets */
 
 /* A cell that says why it has no figure: counting, not shown, not to be had. */
@@ -1334,6 +1629,116 @@ textarea[readonly] {
   min-width: 14rem;
 }
 
+/* The name of an object opens its details: a button that reads as the name
+   it carries, with a mark that points down once they are open. */
+.grid-name-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  max-width: 100%;
+  margin: -0.2rem -0.3rem;
+  padding: 0.2rem 0.3rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.grid-name-toggle:hover {
+  color: var(--saguaro);
+  text-decoration: underline;
+}
+
+.grid-name-toggle[aria-expanded='true'] {
+  font-weight: 600;
+}
+
+.grid-name-mark {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.grid-name-toggle[aria-expanded='true'] > .grid-name-mark {
+  transform: rotate(90deg);
+}
+
+/* The details of an object, in a row of their own under the row of the
+   object and across the whole grid. The row is not one to hover over or to
+   tick: it belongs to the one above it, and is set apart from it by a bar
+   down its left and a tint. */
+.grid tbody tr.grid-detail > td {
+  --bs-table-bg-state: transparent;
+  --detail-pad: 0.85rem;
+
+  padding: 0 var(--detail-pad) 0.85rem;
+}
+
+/* The grid of objects is scrolled sideways inside this where it is wider
+   than its panel. It is a container so that the details can be given its
+   width - what is seen - and not the width of the table. */
+.grid-scroll-details {
+  container-type: inline-size;
+}
+
+/* Two groups side by side where there is room for both, one under the other
+   where there is not. It keeps to the left edge of what is seen while the
+   grid is scrolled sideways, and is as wide as what is seen: a browser that
+   does not know the unit leaves it as wide as the table. */
+.grid-detail-body {
+  position: sticky;
+  left: var(--detail-pad);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+  gap: 0.5rem 2.5rem;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 0.9rem 1.1rem;
+  border-left: 4px solid var(--dune);
+  border-radius: 0 0.6rem 0.6rem 0;
+  background: var(--wash);
+}
+
+@supports (width: 1cqi) {
+  .grid-detail-body {
+    width: calc(100cqi - 2 * var(--detail-pad));
+  }
+}
+
+.grid-detail-group {
+  min-width: 0;
+}
+
+.grid-detail-body h3 {
+  margin-top: 0;
+}
+
+.grid-detail-body .object-access,
+.grid-detail-body .object-access-note {
+  margin-bottom: 0;
+}
+
+.grid-detail-problem .btn {
+  margin-top: 0.5rem;
+}
+
+.grid-detail-end {
+  grid-column: 1 / -1;
+}
+
+/* In the details a button has room for its name. */
+.grid td .grid-detail-body .btn:not(.btn-link-row) .btn-text {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+}
+
 /* Settings: what holds for the deployment, and a card a node that opens */
 
 .settings-toolbar {
@@ -1460,10 +1865,135 @@ details[open] > summary .node-card-mark {
     grid-template-rows: auto 1fr;
   }
 
+  /* The navigation across the top and, right under it, the activity bar:
+     the two are held at the top together, as one, however tall the
+     navigation is. The bar is then never behind it, and the screen begins
+     under both.
+
+     Held there, the element begins at the top of the window, so it can be
+     told where to end: above the tabs, which are --tabbar tall. It is a
+     column - the navigation, the line of the bar, what opens from the bar -
+     and only the last of them gives way. So an open panel, however much is
+     in it and however tall the navigation is, ends above the tabs and
+     scrolls by itself; no height is guessed. */
+  .layout-top {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    grid-row: 1;
+    grid-column: 1;
+    min-width: 0;
+    max-height: calc(100vh - var(--tabbar));
+    max-height: calc(100dvh - var(--tabbar));
+  }
+
+  .layout-top > .sidebar {
+    flex: none;
+  }
+
+  .screen {
+    grid-column: 1;
+  }
+
+  /* How far the navigation and the bar reach down is not known here, so
+     nothing is said of it: the room above what the keyboard goes to is the
+     browser's. */
+  html {
+    scroll-padding-top: auto;
+  }
+
+  /* Here the bar is as tall as what it says needs: its line wraps. */
+  .activitybar {
+    position: relative;
+    z-index: auto;
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    align-self: stretch;
+    height: auto;
+    min-height: 0;
+  }
+
+  .activitybar-line {
+    flex: none;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.5rem;
+    height: auto;
+    min-height: var(--activitybar);
+    padding: 0.3rem 0.75rem;
+  }
+
+  /* All of it is said: how many files, what was stored and what was not,
+     and how much. Nothing is cut short here - it goes onto a second line. */
+  .activitybar-summary {
+    flex: 1 1 8rem;
+    align-items: flex-start;
+    overflow: visible;
+    font-size: 0.85rem;
+  }
+
+  .activitybar-summary .bi {
+    margin-top: 0.1rem;
+  }
+
+  .activitybar-text {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  /* While files are on their way the line has the most to say: it is given
+     the whole width, and the bar for all of them stands under it, beside
+     the two buttons. */
+  .activitybar-is-active .activitybar-summary {
+    flex-basis: 100%;
+  }
+
+  .activitybar-progress {
+    flex: 1 1 4rem;
+    max-width: none;
+  }
+
+  /* The icon and the count are the button; its name stays in the page for
+     whoever has it read. */
+  .activitybar-buttons .btn-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* What opens from the bar is the part of the column that gives way: it
+     takes the room that is left above the tabs, and scrolls within it. On a
+     phone it stands under the bar and the screen under it, rather than over
+     the screen: that is what lets it be measured against the tabs. */
+  .activitybar-drop {
+    position: static;
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: none;
+    padding: 0.75rem 0.75rem 0.9rem;
+    border-top: 1px solid var(--line);
+    box-shadow: none;
+  }
+
+  .activitybar-notice {
+    flex-wrap: wrap;
+  }
+
+  .upload .upload-cancel {
+    min-width: 2.4rem;
+    min-height: 2.4rem;
+  }
+
   .sidebar,
   .layout-folded .sidebar {
-    position: sticky;
-    z-index: 20;
+    position: static;
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
@@ -1526,7 +2056,10 @@ details[open] > summary .node-card-mark {
     bottom: 0;
     left: 0;
     z-index: 30;
-    padding: 0.3rem 0.25rem calc(0.3rem + env(safe-area-inset-bottom));
+    /* As tall as --tabbar says, which is made of what stands here: a tab,
+       the padding above and under it, the line, the room the phone keeps. */
+    height: var(--tabbar);
+    padding: 0.3rem 0.25rem calc(0.3rem + env(safe-area-inset-bottom, 0px));
     border-top: 1px solid rgb(217 195 154 / 30%);
     background: var(--night-green);
   }
@@ -1559,7 +2092,7 @@ details[open] > summary .node-card-mark {
     flex-direction: column;
     justify-content: center;
     gap: 0.15rem;
-    min-height: 3rem;
+    min-height: var(--tab);
     padding: 0.3rem 0.1rem;
     font-size: 0.66rem;
     line-height: 1.1;
@@ -1645,7 +2178,8 @@ details[open] > summary .node-card-mark {
   }
 
   .screen {
-    padding: 1.25rem 0.9rem calc(5.5rem + env(safe-area-inset-bottom));
+    /* Clear of the tabs, and a little more. */
+    padding: 1.25rem 0.9rem calc(var(--tabbar) + 1.9rem);
   }
 
   h1 {
@@ -1742,6 +2276,28 @@ details[open] > summary .node-card-mark {
 
   .grid-keep .btn-link-row {
     white-space: nowrap;
+  }
+
+  /* The name is a control a finger can hit. A long key goes onto further
+     lines: on one line it would make the grid as wide as the key. */
+  .grid-name-toggle {
+    min-height: 2.4rem;
+    max-width: 16rem;
+    align-items: center;
+    overflow-wrap: anywhere;
+    text-align: start;
+    white-space: normal;
+  }
+
+  /* The details follow the narrower cells, and are read without scrolling
+     sideways: as wide as what is seen of the grid, one group under the other. */
+  .grid tbody tr.grid-detail > td {
+    --detail-pad: 0.55rem;
+  }
+
+  .grid-detail-body {
+    padding: 0.75rem 0.8rem;
+    white-space: normal;
   }
 
   .facts {

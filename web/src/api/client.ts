@@ -74,15 +74,28 @@ export type AuditRecord = Schemas['AuditRecord'];
 /** One page of the audit trail. */
 export type AuditPage = Schemas['AuditPage'];
 
+/**
+ * The header the API sets on an answer it did not make now but kept: the
+ * answer it gave before to a request with the same Idempotency-Key.
+ */
+export const REPLAYED_HEADER = 'Idempotent-Replayed';
+
 /** A request the API refused. It carries the problem the API described. */
 export class ApiError extends Error {
   /** The problem as the API reported it. */
   readonly problem: Problem;
+  /**
+   * Whether the API said that this is an answer it kept, given again to the
+   * Idempotency-Key it was first given for. Only the upload with progress
+   * tells: no other call of the console is made twice with one key.
+   */
+  readonly replayed: boolean;
 
-  constructor(problem: Problem) {
+  constructor(problem: Problem, replayed = false) {
     super(problem.title);
     this.name = 'ApiError';
     this.problem = problem;
+    this.replayed = replayed;
   }
 }
 
@@ -208,6 +221,10 @@ export type UploadProgress = (sent: number, total: number) => void;
  * session middleware adds to every other call: the CSRF token, an
  * Idempotency-Key, the session cookie, and the report of a 401. A failure of
  * the connection is an ApiError of status 0.
+ *
+ * An upload whose `signal` is aborted is given up: the request is aborted and
+ * the promise rejects with an ApiError of status 0, "The upload was stopped".
+ * Whoever aborted tells that from a failure by looking at the signal.
  */
 export function uploadObjectWithProgress(
   bucket: string,
@@ -215,12 +232,27 @@ export function uploadObjectWithProgress(
   file: File,
   onProgress: UploadProgress,
   idempotencyKey: string = crypto.randomUUID(),
+  signal?: AbortSignal,
 ): Promise<ObjectMetadata> {
   const path: keyof paths = '/buckets/{bucket}/object';
   const query = new URLSearchParams({ key });
   const url = `${API_BASE}${path.replace('{bucket}', encodeURIComponent(bucket))}?${query.toString()}`;
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
+    const unexpected = (title: string) =>
+      new ApiError({ type: 'about:blank', title, status: request.status, code: 'UnexpectedResponse' });
+    if (signal?.aborted === true) {
+      reject(unexpected('The upload was stopped'));
+      return;
+    }
+    const stop = () => {
+      request.abort();
+    };
+    signal?.addEventListener('abort', stop, { once: true });
+    // However the request ends, nobody listens to the signal for it any more.
+    request.onloadend = () => {
+      signal?.removeEventListener('abort', stop);
+    };
     request.open('PUT', url);
     request.responseType = 'text';
     request.setRequestHeader('Content-Type', file.type === '' ? 'application/octet-stream' : file.type);
@@ -236,8 +268,6 @@ export function uploadObjectWithProgress(
         onProgress(event.loaded, event.total);
       }
     };
-    const unexpected = (title: string) =>
-      new ApiError({ type: 'about:blank', title, status: request.status, code: 'UnexpectedResponse' });
     request.onerror = () => {
       reject(unexpected('The upload did not reach the server'));
     };
@@ -260,7 +290,9 @@ export function uploadObjectWithProgress(
         onProgress(file.size, file.size);
         resolve(body as ObjectMetadata);
       } else if (isProblem(body)) {
-        reject(new ApiError(body));
+        // The console and the API are one origin: every header of the answer
+        // can be read.
+        reject(new ApiError(body, request.getResponseHeader(REPLAYED_HEADER) === 'true'));
       } else {
         reject(unexpected(`The server answered ${String(request.status)} ${request.statusText}`.trim()));
       }

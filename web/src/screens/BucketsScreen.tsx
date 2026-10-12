@@ -29,18 +29,28 @@ export function BucketsScreen() {
 
   const create = (event: FormEvent) => {
     event.preventDefault();
-    void action.run(async () => {
-      await unwrap(api.POST('/buckets', { body: { name } }));
-      setName('');
-      buckets.reload();
-    });
+    void action.run(
+      async () => {
+        await unwrap(api.POST('/buckets', { body: { name } }));
+        setName('');
+        buckets.reload();
+      },
+      {
+        done: `Created bucket ${name}`,
+        failed: `Bucket ${name} was not created`,
+        link: { href: routeHref(['buckets', name]), label: `Open ${name}` },
+      },
+    );
   };
 
   const remove = (bucket: string) => {
-    void action.run(async () => {
-      await unwrap(api.DELETE('/buckets/{bucket}', { params: { path: { bucket } } }));
-      buckets.reload();
-    });
+    void action.run(
+      async () => {
+        await unwrap(api.DELETE('/buckets/{bucket}', { params: { path: { bucket } } }));
+        buckets.reload();
+      },
+      { done: `Deleted bucket ${bucket}`, failed: `Bucket ${bucket} was not deleted` },
+    );
   };
 
   // A column is there when the API told its part of at least one bucket. A

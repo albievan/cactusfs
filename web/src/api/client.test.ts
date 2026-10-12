@@ -3,7 +3,16 @@ import { File as NodeFile } from 'node:buffer';
 import { describe, expect, it, vi } from 'vitest';
 
 import { fakeApi, json, noContent, problem } from '../test/fakeApi';
-import { api, ApiError, objectDownloadUrl, onUnauthorized, unwrap, uploadObject } from './client';
+import {
+  api,
+  ApiError,
+  objectDownloadUrl,
+  onUnauthorized,
+  REPLAYED_HEADER,
+  unwrap,
+  uploadObject,
+  uploadObjectWithProgress,
+} from './client';
 import { dropCsrfToken, readCsrfToken, storeCsrfToken } from './csrf';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -139,6 +148,95 @@ describe('the API client', () => {
     expect(call?.headers.get('X-CSRF-Token')).toBe('token');
     expect(call?.headers.get('Idempotency-Key')).toMatch(UUID);
     expect(call?.body).toBe('hello');
+  });
+
+  it('gives an upload up when its signal is aborted, and says that it was stopped', async () => {
+    const fake = fakeApi({ 'PUT /buckets/photos/object': () => json(200, {}) });
+    // The answer is held: the upload is on its way for as long as the test has it.
+    const answer = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      await new Promise(() => undefined);
+      return answer(input, init);
+    });
+    const file = new NodeFile(['hello'], 'hello.txt', { type: 'text/plain' }) as unknown as File;
+    const stop = new AbortController();
+
+    const upload = uploadObjectWithProgress('photos', 'hello.txt', file, () => undefined, 'the-same-key', stop.signal);
+    expect(fake.xhrs).toHaveLength(1);
+    expect(fake.xhrs[0]?.aborted).toBe(false);
+    stop.abort();
+
+    const refused: unknown = await upload.catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(ApiError);
+    expect((refused as ApiError).problem.title).toBe('The upload was stopped');
+    expect((refused as ApiError).problem.status).toBe(0);
+    expect(fake.xhrs[0]?.aborted).toBe(true);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('does not begin an upload whose signal was aborted before', async () => {
+    const fake = fakeApi({ 'PUT /buckets/photos/object': () => json(200, {}) });
+    const file = new NodeFile(['hello'], 'hello.txt', { type: 'text/plain' }) as unknown as File;
+    const stop = new AbortController();
+    stop.abort();
+
+    const refused: unknown = await uploadObjectWithProgress('photos', 'hello.txt', file, () => undefined, 'key', stop.signal).catch(
+      (error: unknown) => error,
+    );
+
+    expect(refused).toBeInstanceOf(ApiError);
+    expect((refused as ApiError).problem.title).toBe('The upload was stopped');
+    // The request was made and never sent: nothing reached the API.
+    expect(fake.xhrs.every((xhr) => !xhr.aborted)).toBe(true);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('sends an upload that is not stopped with the key it was given, and no longer listens to its signal', async () => {
+    const fake = fakeApi({ 'PUT /buckets/photos/object': () => json(200, { key: 'hello.txt' }) });
+    const file = new NodeFile(['hello'], 'hello.txt', { type: 'text/plain' }) as unknown as File;
+    const stop = new AbortController();
+    const listened = vi.spyOn(stop.signal, 'addEventListener');
+    const unlistened = vi.spyOn(stop.signal, 'removeEventListener');
+
+    await uploadObjectWithProgress('photos', 'hello.txt', file, () => undefined, 'the-same-key', stop.signal);
+    // What listened to the signal for this request was taken off it again.
+    const [listener] = listened.mock.calls.filter(([type]) => type === 'abort').map(([, heard]) => heard);
+    expect(listener).toBeTypeOf('function');
+    expect(unlistened).toHaveBeenCalledWith('abort', listener);
+    // Aborting afterwards is word of nothing: the request is not even asked to stop.
+    stop.abort();
+
+    expect(fake.calls[0]?.headers.get('Idempotency-Key')).toBe('the-same-key');
+    expect(fake.xhrs[0]?.abortCalls).toBe(0);
+    expect(fake.xhrs[0]?.aborted).toBe(false);
+  });
+
+  it('says of a refusal whether the API gave it now or had kept it under the Idempotency-Key', async () => {
+    let kept = false;
+    fakeApi({
+      'PUT /buckets/photos/object': () => {
+        const refusal = problem(400, 'Incomplete body');
+        if (kept) {
+          refusal.headers.set(REPLAYED_HEADER, 'true');
+        }
+        return refusal;
+      },
+    });
+    const file = new NodeFile(['hello'], 'hello.txt', { type: 'text/plain' }) as unknown as File;
+    const send = () =>
+      uploadObjectWithProgress('photos', 'hello.txt', file, () => undefined, 'the-same-key').catch((error: unknown) => error);
+
+    const first = await send();
+    expect(first).toBeInstanceOf(ApiError);
+    expect((first as ApiError).replayed).toBe(false);
+
+    kept = true;
+    const again = await send();
+    expect(again).toBeInstanceOf(ApiError);
+    expect((again as ApiError).problem.status).toBe(400);
+    expect((again as ApiError).replayed).toBe(true);
+    // The header is the one the API sets: adminapi/handler.go, headerReplayed.
+    expect(REPLAYED_HEADER).toBe('Idempotent-Replayed');
   });
 });
 

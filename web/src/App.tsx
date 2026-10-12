@@ -3,10 +3,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError, onUnauthorized, unwrap, type Identity } from './api/client';
 import { dropCsrfToken, readCsrfToken, storeCsrfToken } from './api/csrf';
 import { Layout } from './Layout';
+import { NoticesProvider } from './notices/NoticesProvider';
 import { Screens } from './screens/Screens';
 import { SignIn } from './screens/SignIn';
 import { Loading } from './ui/Loading';
 import { ProblemNotice } from './ui/ProblemNotice';
+import { UploadsProvider } from './uploads/UploadsProvider';
 
 type SessionState =
   | { status: 'loading' }
@@ -107,10 +109,17 @@ export function App() {
     case 'signed-out':
       return <SignIn onSignedIn={signedIn} signOutError={session.error} />;
     case 'signed-in':
+      // Uploads and notices are the console's, not a screen's: they stand
+      // above the screens, so that an upload goes on whichever is shown, and
+      // within the signed-in part, so that they end with the session.
       return (
-        <Layout identity={session.identity} onSignOut={signOut}>
-          <Screens />
-        </Layout>
+        <NoticesProvider>
+          <UploadsProvider>
+            <Layout identity={session.identity} onSignOut={signOut}>
+              <Screens />
+            </Layout>
+          </UploadsProvider>
+        </NoticesProvider>
       );
   }
 }

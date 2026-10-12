@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+import { useNoticeActions } from '../notices/context';
+import type { NoticeLink } from '../notices/state';
+import { reasonOf } from './reason';
 
 /** What useLoad knows about the data it fetches. */
 export interface Loaded<T> {
@@ -60,14 +64,31 @@ export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>): Loaded<T>
   return { ...state, reload };
 }
 
+/** What is said, as a notice, of how a change ended. */
+export interface Outcome {
+  /** What is said when the change was carried out, for example "Created bucket photos". */
+  done: string;
+  /**
+   * What is said when it was not and the screen that asked for it is no
+   * longer there to show why; the reason the API gave goes with it.
+   */
+  failed: string;
+  /** Where the notice points. */
+  link?: NoticeLink;
+}
+
 /** What useAction knows about the change it carries out. */
 export interface Action {
   /** True while a change is being carried out. */
   busy: boolean;
   /** Why the last change failed, or null. */
   error: unknown;
-  /** Carries out a change. Resolves to true when it succeeded. */
-  run: (change: () => Promise<void>) => Promise<boolean>;
+  /**
+   * Carries out a change. Resolves to true when it succeeded. With an
+   * outcome, how it ended is said as a notice as well: that it was done,
+   * or - when the screen was left meanwhile - that it was not.
+   */
+  run: (change: () => Promise<void>, outcome?: Outcome) => Promise<boolean>;
   /** Shows an error that was found before anything was sent. */
   fail: (error: unknown) => void;
 }
@@ -76,20 +97,45 @@ export interface Action {
 export function useAction(): Action {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-
-  const run = useCallback(async (change: () => Promise<void>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await change();
-      return true;
-    } catch (cause) {
-      setError(cause);
-      return false;
-    } finally {
-      setBusy(false);
-    }
+  const { notify } = useNoticeActions();
+  // Whether the screen that carries the change out is still shown.
+  const shown = useRef(true);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
   }, []);
+
+  const run = useCallback(
+    async (change: () => Promise<void>, outcome?: Outcome) => {
+      setBusy(true);
+      setError(null);
+      try {
+        await change();
+        if (outcome !== undefined) {
+          notify({ kind: 'success', title: outcome.done, link: outcome.link });
+        }
+        return true;
+      } catch (cause) {
+        setError(cause);
+        // The screen shows why while it is there; once it is not, the
+        // notice is the only place left to say it.
+        if (outcome !== undefined && !shown.current) {
+          notify({
+            kind: 'error',
+            title: outcome.failed,
+            detail: reasonOf(cause, 'The request failed'),
+            link: outcome.link,
+          });
+        }
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [notify],
+  );
 
   return { busy, error, run, fail: setError };
 }

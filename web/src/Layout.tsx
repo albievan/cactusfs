@@ -4,6 +4,8 @@ import type { Identity, ServerVersion } from './api/client';
 import logo from './assets/brand/cactusfs-logo-reversed.svg';
 import mark from './assets/brand/cactusfs-mark.svg';
 import { navigate, routeHref, useRoute } from './router';
+import { ActivityBar } from './ui/ActivityBar';
+import { useUploads } from './uploads/context';
 
 const SECTIONS = [
   { segment: 'buckets', label: 'Buckets', icon: 'bi-bucket' },
@@ -63,6 +65,15 @@ interface LayoutProps {
  * navigation folds to its icons, and remembers that it was folded; the
  * search field is then a magnifier that unfolds it, and the version line is
  * not shown. On a phone the line is beside the logo.
+ *
+ * Above the screen, and always in view, is the bar that says what the
+ * console is doing: on a wide screen at the top of the column of the screen,
+ * on a phone under the navigation that lies across the top, and held there
+ * with it. The stylesheet does that; here the navigation and the bar are
+ * together in one element so that it can.
+ *
+ * Signing out ends the uploads with the session. While files are on their
+ * way it is asked first, in the bar, where the uploads are.
  */
 export function Layout({ identity, onSignOut, children }: LayoutProps) {
   const route = useRoute();
@@ -82,6 +93,11 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
       setSought(searched);
     }
   }
+  const uploads = useUploads();
+  // Whether the question "sign out and stop the uploads?" is being asked.
+  const [leaving, setLeaving] = useState(false);
+  // The control that asked it: the keyboard is back on it when the answer is "stay".
+  const signOutButton = useRef<HTMLButtonElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
   const focusSearch = useRef(false);
   // A node of the release before this line was added answers without
@@ -110,6 +126,15 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
     }
   }, [folded]);
 
+  // Signing out with nothing on its way is done at once, as it always was.
+  const signOut = () => {
+    if (uploads.busy()) {
+      setLeaving(true);
+    } else {
+      onSignOut();
+    }
+  };
+
   const search = (event: FormEvent) => {
     event.preventDefault();
     const q = sought.trim();
@@ -120,96 +145,123 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
 
   return (
     <div className={folded ? 'layout layout-folded' : 'layout'}>
-      <header className="sidebar">
-        <div className="sidebar-head">
-          <a className="sidebar-brand" href={routeHref(['buckets'])}>
-            <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
-          </a>
-          {build !== null && (
-            <p className="sidebar-version" title={build.hint}>
-              {build.line}
-            </p>
-          )}
-        </div>
-        <form className="sidebar-search" role="search" aria-label="Search" onSubmit={search}>
-          <label className="visually-hidden" htmlFor="sidebar-search-field">
-            Search buckets and objects
-          </label>
-          <input
-            ref={searchField}
-            id="sidebar-search-field"
-            className="form-control form-control-sm"
-            type="search"
-            name="q"
-            placeholder="Search"
-            maxLength={256}
-            autoCapitalize="none"
-            autoComplete="off"
-            spellCheck={false}
-            value={sought}
-            onChange={(event) => {
-              setSought(event.target.value);
-            }}
-          />
-          <button
-            type="submit"
-            className="btn btn-outline-light btn-sm sidebar-button"
-            title="Search buckets and objects: text, wild*card? or rx:regular expression"
-          >
-            <i className="bi bi-search" aria-hidden="true" />
-            <span className="visually-hidden">Search</span>
-          </button>
-        </form>
-        <button
-          type="button"
-          className="btn btn-outline-light btn-sm sidebar-button sidebar-search-open"
-          onClick={openSearch}
-          aria-label="Show the search field"
-          title="Search buckets and objects"
-        >
-          <i className="bi bi-search" aria-hidden="true" />
-        </button>
-        <nav className="sections" aria-label="Sections">
-          <ul className="nav nav-pills flex-column">
-            {SECTIONS.map((section) => (
-              <li className="nav-item" key={section.segment}>
-                <a
-                  className={section.segment === active ? 'nav-link active' : 'nav-link'}
-                  href={routeHref([section.segment])}
-                  aria-current={section.segment === active ? 'page' : undefined}
-                  title={folded ? section.label : undefined}
-                >
-                  <i className={`bi ${section.icon}`} aria-hidden="true" />
-                  <span className="nav-label">{section.label}</span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-        <div className="sidebar-session">
-          <span className="sidebar-user">
-            <i className="bi bi-person-circle" aria-hidden="true" />
-            <span className="nav-label">Signed in as {identity.user ?? identity.kind}</span>
-          </span>
-          <button type="button" className="btn btn-outline-light btn-sm sidebar-button" onClick={onSignOut} title="End this session">
-            <i className="bi bi-box-arrow-right" aria-hidden="true" />
-            <span className="nav-label">Sign out</span>
-          </button>
+      <div className="layout-top">
+        <header className="sidebar">
+          <div className="sidebar-head">
+            <a className="sidebar-brand" href={routeHref(['buckets'])}>
+              <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
+            </a>
+            {build !== null && (
+              <p className="sidebar-version" title={build.hint}>
+                {build.line}
+              </p>
+            )}
+          </div>
+          <form className="sidebar-search" role="search" aria-label="Search" onSubmit={search}>
+            <label className="visually-hidden" htmlFor="sidebar-search-field">
+              Search buckets and objects
+            </label>
+            <input
+              ref={searchField}
+              id="sidebar-search-field"
+              className="form-control form-control-sm"
+              type="search"
+              name="q"
+              placeholder="Search"
+              maxLength={256}
+              autoCapitalize="none"
+              autoComplete="off"
+              spellCheck={false}
+              value={sought}
+              onChange={(event) => {
+                setSought(event.target.value);
+              }}
+            />
+            <button
+              type="submit"
+              className="btn btn-outline-light btn-sm sidebar-button"
+              title="Search buckets and objects: text, wild*card? or rx:regular expression"
+            >
+              <i className="bi bi-search" aria-hidden="true" />
+              <span className="visually-hidden">Search</span>
+            </button>
+          </form>
           <button
             type="button"
-            className="btn btn-outline-light btn-sm sidebar-button sidebar-fold"
-            onClick={fold}
-            aria-pressed={folded}
-            aria-label="Show icons only"
-            title={folded ? 'Show the names of the sections' : 'Fold the navigation to icons'}
+            className="btn btn-outline-light btn-sm sidebar-button sidebar-search-open"
+            onClick={openSearch}
+            aria-label="Show the search field"
+            title="Search buckets and objects"
           >
-            <i className={folded ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left'} aria-hidden="true" />
-            <span className="nav-label" aria-hidden="true">
-              Fold
-            </span>
+            <i className="bi bi-search" aria-hidden="true" />
           </button>
-        </div>
-      </header>
+          <nav className="sections" aria-label="Sections">
+            <ul className="nav nav-pills flex-column">
+              {SECTIONS.map((section) => (
+                <li className="nav-item" key={section.segment}>
+                  <a
+                    className={section.segment === active ? 'nav-link active' : 'nav-link'}
+                    href={routeHref([section.segment])}
+                    aria-current={section.segment === active ? 'page' : undefined}
+                    title={folded ? section.label : undefined}
+                  >
+                    <i className={`bi ${section.icon}`} aria-hidden="true" />
+                    <span className="nav-label">{section.label}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <div className="sidebar-session">
+            <span className="sidebar-user">
+              <i className="bi bi-person-circle" aria-hidden="true" />
+              <span className="nav-label">Signed in as {identity.user ?? identity.kind}</span>
+            </span>
+            <button
+              ref={signOutButton}
+              type="button"
+              className="btn btn-outline-light btn-sm sidebar-button"
+              onClick={signOut}
+              title="End this session"
+            >
+              <i className="bi bi-box-arrow-right" aria-hidden="true" />
+              <span className="nav-label">Sign out</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline-light btn-sm sidebar-button sidebar-fold"
+              onClick={fold}
+              aria-pressed={folded}
+              aria-label="Show icons only"
+              title={folded ? 'Show the names of the sections' : 'Fold the navigation to icons'}
+            >
+              <i className={folded ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left'} aria-hidden="true" />
+              <span className="nav-label" aria-hidden="true">
+                Fold
+              </span>
+            </button>
+          </div>
+        </header>
+        <ActivityBar
+          leaving={
+            leaving
+              ? {
+                  onLeave: () => {
+                    setLeaving(false);
+                    uploads.cancelAll();
+                    onSignOut();
+                  },
+                  onStay: () => {
+                    setLeaving(false);
+                    // The answer was given in the bar, and the question goes
+                    // with it: the keyboard returns to where it was asked.
+                    signOutButton.current?.focus();
+                  },
+                }
+              : null
+          }
+        />
+      </div>
       <main className="screen">{children}</main>
     </div>
   );

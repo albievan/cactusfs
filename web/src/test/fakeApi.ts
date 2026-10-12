@@ -29,6 +29,8 @@ export interface FakeApi {
   callsTo: (method: string, path: string) => Call[];
   /** Adds or replaces answers. */
   on: (routes: Record<string, Handler>) => void;
+  /** Every upload made with XMLHttpRequest so far, oldest first. */
+  xhrs: FakeXHR[];
 }
 
 /** A JSON answer. */
@@ -51,6 +53,28 @@ export function problem(status: number, title: string, detail?: string, requestI
     status,
     headers: { 'Content-Type': 'application/problem+json' },
   });
+}
+
+/**
+ * What the API answers to an Idempotency-Key whose first request has not
+ * finished: 409 with the code `RequestInProgress`, as adminapi/handler.go
+ * has it.
+ */
+export function inProgress(): Response {
+  const body = { type: 'about:blank', title: 'Request in progress', status: 409, code: 'RequestInProgress' };
+  return new Response(JSON.stringify(body), {
+    status: 409,
+    headers: { 'Content-Type': 'application/problem+json' },
+  });
+}
+
+/**
+ * The same answer as the API gives it again to the Idempotency-Key it kept
+ * it under: with the header that says so.
+ */
+export function replayed(answer: Response): Response {
+  answer.headers.set('Idempotent-Replayed', 'true');
+  return answer;
 }
 
 /**
@@ -82,10 +106,19 @@ export function fakeApi(routes: Record<string, Handler> = {}): FakeApi {
 
   // The upload with progress is made with XMLHttpRequest; here it asks the
   // same fake API, and reports its progress in two steps.
-  vi.stubGlobal('XMLHttpRequest', FakeXHR);
+  // Each is kept, so that a test can tell whether it was aborted.
+  const xhrs: FakeXHR[] = [];
+  class TrackedXHR extends FakeXHR {
+    constructor() {
+      super();
+      xhrs.push(this);
+    }
+  }
+  vi.stubGlobal('XMLHttpRequest', TrackedXHR);
 
   return {
     calls,
+    xhrs,
     callsTo: (method, path) => calls.filter((call) => call.method === method && call.path === path),
     on: (more) => {
       for (const [key, handler] of Object.entries(more)) {
@@ -113,8 +146,18 @@ export function signedIn(routes: Record<string, Handler> = {}): FakeApi {
   });
 }
 
-/** As much of XMLHttpRequest as an upload needs, answered by the stubbed fetch. */
-class FakeXHR {
+/**
+ * As much of XMLHttpRequest as an upload needs, answered by the stubbed
+ * fetch. Aborted, it says so and takes no answer any more - as a browser's
+ * does.
+ */
+export class FakeXHR {
+  /** True once the console gave the request up. */
+  aborted = false;
+  /** How often the console asked to give the request up, whether or not it was over by then. */
+  abortCalls = 0;
+  /** The address the request was opened for. */
+  url = '';
   status = 0;
   statusText = '';
   responseText = '';
@@ -125,9 +168,11 @@ class FakeXHR {
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onabort: (() => void) | null = null;
+  onloadend: (() => void) | null = null;
   private method = 'GET';
-  private url = '';
+  private ended = false;
   private readonly headers = new Headers();
+  private answered = new Headers();
 
   open(method: string, url: string): void {
     this.method = method;
@@ -136,6 +181,11 @@ class FakeXHR {
 
   setRequestHeader(name: string, value: string): void {
     this.headers.set(name, value);
+  }
+
+  /** A header of the answer, or null: there is none, or no answer yet. */
+  getResponseHeader(name: string): string | null {
+    return this.answered.get(name);
   }
 
   send(body: Blob): void {
@@ -149,14 +199,36 @@ class FakeXHR {
         ),
       )
       .then(async (response) => {
+        const text = await response.text();
+        if (this.ended) {
+          return;
+        }
         this.status = response.status;
         this.statusText = response.statusText;
-        this.responseText = await response.text();
-        this.onload?.();
+        this.responseText = text;
+        this.answered = response.headers;
+        this.end(this.onload);
       })
       .catch(() => {
-        this.onerror?.();
+        if (!this.ended) {
+          this.end(this.onerror);
+        }
       });
+  }
+
+  abort(): void {
+    this.abortCalls += 1;
+    if (this.ended) {
+      return;
+    }
+    this.aborted = true;
+    this.end(this.onabort);
+  }
+
+  private end(tell: (() => void) | null): void {
+    this.ended = true;
+    tell?.();
+    this.onloadend?.();
   }
 }
 

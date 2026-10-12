@@ -1,14 +1,24 @@
 import { File as NodeFile } from 'node:buffer';
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
 import { fakeApi, json, noContent, problem, signedIn } from '../test/fakeApi';
+import { UploadsProvider } from '../uploads/UploadsProvider';
 import { BucketsScreen } from './BucketsScreen';
 import { ObjectsScreen } from './ObjectsScreen';
 
 const CREATED = '2026-10-01T00:00:00Z';
+
+/**
+ * Shows the object browser as the console does: beneath the uploads of the
+ * console, which the screen hands its files to and reads its tiles from.
+ */
+function renderObjects(screenOfABucket: ReactElement) {
+  return render(<UploadsProvider>{screenOfABucket}</UploadsProvider>);
+}
 
 function object(key: string, size = 10) {
   return { key, size, etag: '"e"', last_modified: CREATED };
@@ -28,20 +38,74 @@ function access(more: Record<string, unknown> = {}) {
   };
 }
 
+/** What the API says of an object of the bucket "photos", with what a test changes of it. */
+function metadataOf(key: string, more: Record<string, unknown> = {}) {
+  return {
+    bucket: 'photos',
+    key,
+    size: 10,
+    etag: '"0123abcd"',
+    last_modified: CREATED,
+    content_type: 'text/plain',
+    encryption: 'SSE-S3',
+    ...more,
+  };
+}
+
 /** The answers behind the details of one object of the bucket "photos". */
 function detailsOf(key: string) {
   return {
     'GET /buckets/photos/objects': () => json(200, { objects: [object(key)], common_prefixes: [], truncated: false, access_included: false }),
-    'GET /buckets/photos/object/metadata': () =>
-      json(200, {
-        bucket: 'photos',
-        key,
-        size: 10,
-        etag: '"0123abcd"',
-        last_modified: CREATED,
-        content_type: 'text/plain',
-        encryption: 'SSE-S3',
-      }),
+    'GET /buckets/photos/object/metadata': () => json(200, metadataOf(key)),
+  };
+}
+
+/** The row of an object in the grid: the one its tick is in. */
+function rowOf(name: string): HTMLTableRowElement {
+  return screen.getByLabelText(`Select ${name}`).closest('tr') as HTMLTableRowElement;
+}
+
+/** The row of an object, once the grid shows it. */
+async function findRow(name: string): Promise<HTMLTableRowElement> {
+  return (await screen.findByLabelText(`Select ${name}`)).closest('tr') as HTMLTableRowElement;
+}
+
+/** The name of an object in its row: the button that opens its details. */
+function nameButton(row: HTMLElement, name: string): HTMLElement {
+  return within(row).getByRole('button', { name });
+}
+
+/** The details button among the actions of a row. */
+function detailsButton(row: HTMLElement, name: string): HTMLElement {
+  return within(row).getByRole('button', { name: `Details of ${name}` });
+}
+
+/** What the details of an object say of one fact: the value beside its name. */
+function factOf(region: HTMLElement, name: string): string | null | undefined {
+  return within(region).getByText(name, { selector: 'dt' }).nextElementSibling?.textContent;
+}
+
+/**
+ * Watches for the page being scrolled by the console: with `window.scrollTo`,
+ * `window.scrollBy` or `scrollIntoView` of an element. jsdom has no
+ * `scrollIntoView`; one is put there for the watch, and what was there
+ * before - nothing, or another - is put back by `restore`.
+ */
+function watchScrolling() {
+  const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined);
+  const scrollBy = vi.spyOn(window, 'scrollBy').mockImplementation(() => undefined);
+  const before = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+  const scrollIntoView = vi.fn();
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: scrollIntoView });
+  return {
+    count: () => scrollTo.mock.calls.length + scrollBy.mock.calls.length + scrollIntoView.mock.calls.length,
+    restore: () => {
+      if (before === undefined) {
+        Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+      } else {
+        Object.defineProperty(Element.prototype, 'scrollIntoView', before);
+      }
+    },
   };
 }
 
@@ -155,7 +219,7 @@ describe('object browser', () => {
           access_included: false,
         }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="2026/" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="2026/" />);
 
     const folder = await screen.findByRole('link', { name: 'january/' });
     expect(folder.getAttribute('href')).toBe('#/buckets/photos?prefix=2026%2Fjanuary%2F');
@@ -175,7 +239,7 @@ describe('object browser', () => {
     const api = fakeApi({
       'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false, access_included: false }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     expect(await screen.findByText('There is nothing here.')).toBeDefined();
     expect(api.calls[0]?.query.has('prefix')).toBe(false);
@@ -185,7 +249,7 @@ describe('object browser', () => {
     fakeApi({
       'GET /buckets/photos/objects': () => json(200, { objects: [], common_prefixes: [], truncated: false, access_included: false }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="2026/january/" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="2026/january/" />);
 
     const crumbs = within(screen.getByRole('navigation', { name: 'Prefix' }));
     expect(crumbs.getByRole('link', { name: 'Buckets' }).getAttribute('href')).toBe('#/buckets');
@@ -227,7 +291,7 @@ describe('object browser', () => {
               next_continuation_token: 'page-2',
             }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     await screen.findByText('a.txt');
     expect(screen.getByText('Page 1')).toBeDefined();
@@ -252,41 +316,177 @@ describe('object browser', () => {
       'GET /buckets/photos/objects': () =>
         json(200, { objects: [object('2026/a b.jpg')], common_prefixes: [], truncated: false, access_included: false }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="2026/" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="2026/" />);
 
     const link = await screen.findByRole('link', { name: 'Download a b.jpg' });
     expect(link.getAttribute('href')).toBe('/api/v1/buckets/photos/object?key=2026%2Fa+b.jpg');
     expect(link.hasAttribute('download')).toBe(true);
   });
 
-  it('shows what is known about an object', async () => {
+  it('opens what is known about an object under its row, when its name is clicked', async () => {
+    const scrolling = watchScrolling();
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
-        json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false, access_included: false }),
-      'GET /buckets/photos/object/metadata': () =>
-        json(200, {
-          bucket: 'photos',
-          key: 'a.txt',
-          size: 10,
-          etag: '"0123abcd"',
-          last_modified: CREATED,
-          content_type: 'text/plain',
-          encryption: 'SSE-S3',
-        }),
-      'GET /buckets/photos/object/access': () => json(200, access()),
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () =>
+        json(200, access({ uploaded_by: 'user/alice', download_count: 9, copy_count: 2 })),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    try {
+      renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+      const row = await findRow('a.txt');
+      const name = nameButton(row, 'a.txt');
+      const details = detailsButton(row, 'a.txt');
+      // Closed: both say so, and there is no row under it but the next object's.
+      expect(name.getAttribute('aria-expanded')).toBe('false');
+      expect(details.getAttribute('aria-expanded')).toBe('false');
+      expect(row.nextElementSibling).toBe(rowOf('b.txt'));
 
-    expect(await screen.findByRole('heading', { name: 'Object details' })).toBeDefined();
-    expect(screen.getByText('"0123abcd"')).toBeDefined();
-    expect(screen.getByText('text/plain')).toBeDefined();
-    expect(screen.getByText('SSE-S3')).toBeDefined();
+      name.focus();
+      fireEvent.click(name);
+
+      // The details are in the row directly under the row of the object, and
+      // nowhere else: there is no panel above the grid any more.
+      const region = screen.getByRole('region', { name: 'Details of a.txt' });
+      const detailRow = region.closest('tr');
+      expect(detailRow).not.toBeNull();
+      expect(row.nextElementSibling).toBe(detailRow);
+      expect(detailRow?.className).toBe('grid-detail');
+      expect(detailRow?.nextElementSibling).toBe(rowOf('b.txt'));
+      expect(screen.queryByRole('heading', { name: 'Object details' })).toBeNull();
+      expect(row.closest('table')?.contains(region)).toBe(true);
+
+      // Everything the panel showed.
+      await within(region).findByText('Bucket', { selector: 'dt' });
+      expect(factOf(region, 'Bucket')).toBe('photos');
+      expect(factOf(region, 'Key')).toBe('a.txt');
+      expect(factOf(region, 'Size')).toBe('10 bytes');
+      expect(factOf(region, 'ETag')).toBe('"0123abcd"');
+      expect(factOf(region, 'Last modified')).toBe(new Date(CREATED).toLocaleString());
+      expect(factOf(region, 'Content type')).toBe('text/plain');
+      expect(factOf(region, 'Encryption')).toBe('SSE-S3');
+      await within(region).findByRole('heading', { name: 'Uploads and downloads' });
+      expect(factOf(region, 'Uploaded by')).toBe('user/alice');
+      expect(factOf(region, 'Uploaded')).toBe(new Date(CREATED).toLocaleString());
+      expect(factOf(region, 'Downloads')).toBe('9');
+      expect(factOf(region, 'Copies')).toBe('2');
+      expect(factOf(region, 'Last downloaded')).toBe('never');
+      expect(within(region).getByText(/counts kept as well as can be, not an audit trail/)).toBeDefined();
+      expect(within(region).getByRole('button', { name: 'Close details' })).toBeDefined();
+
+      // Both of what opens it say that it is open, and what they opened.
+      expect(name.getAttribute('aria-expanded')).toBe('true');
+      expect(details.getAttribute('aria-expanded')).toBe('true');
+      expect(region.id).not.toBe('');
+      expect(name.getAttribute('aria-controls')).toBe(region.id);
+      expect(details.getAttribute('aria-controls')).toBe(region.id);
+      // The id is not made of the key.
+      expect(region.id).not.toContain('a.txt');
+      // The other row is as it was.
+      expect(nameButton(rowOf('b.txt'), 'b.txt').getAttribute('aria-expanded')).toBe('false');
+
+      // Nothing moved: the keyboard is where it was, and the page was not scrolled.
+      expect(document.activeElement).toBe(name);
+      expect(scrolling.count()).toBe(0);
+      expect(screen.queryByRole('alert')).toBeNull();
+      const asked = api.callsTo('GET', '/buckets/photos/object/metadata');
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.query.get('key')).toBe('a.txt');
+
+      // The same click closes it.
+      fireEvent.click(name);
+      expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+      expect(row.nextElementSibling).toBe(rowOf('b.txt'));
+      expect(name.getAttribute('aria-expanded')).toBe('false');
+      expect(details.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(name);
+      expect(scrolling.count()).toBe(0);
+    } finally {
+      scrolling.restore();
+    }
+  });
+
+  it('opens and closes them with the details button too, which says which of the two it will do', async () => {
+    const api = fakeApi({ ...detailsOf('a.txt'), 'GET /buckets/photos/object/access': () => json(200, access()) });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    const row = await findRow('a.txt');
+    const name = nameButton(row, 'a.txt');
+    const details = detailsButton(row, 'a.txt');
+    expect(details.getAttribute('title')).toBe('Show details');
+    expect(name.getAttribute('title')).toBe('Show details');
+
+    details.focus();
+    fireEvent.click(details);
+
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    expect(row.nextElementSibling).toBe(region.closest('tr'));
+    await waitFor(() => {
+      expect(factOf(region, 'Content type')).toBe('text/plain');
+    });
+    expect(details.getAttribute('aria-expanded')).toBe('true');
+    expect(name.getAttribute('aria-expanded')).toBe('true');
+    expect(details.getAttribute('aria-controls')).toBe(region.id);
+    expect(details.getAttribute('title')).toBe('Hide details');
+    expect(name.getAttribute('title')).toBe('Hide details');
+    // That it is open is not said by colour alone.
+    expect(details.className).toContain('active');
+    expect(document.activeElement).toBe(details);
     expect(api.callsTo('GET', '/buckets/photos/object/metadata')[0]?.query.get('key')).toBe('a.txt');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
-    expect(screen.queryByRole('heading', { name: 'Object details' })).toBeNull();
+    fireEvent.click(details);
+
+    expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    expect(row.nextElementSibling).toBeNull();
+    expect(details.getAttribute('aria-expanded')).toBe('false');
+    expect(name.getAttribute('aria-expanded')).toBe('false');
+    expect(details.getAttribute('title')).toBe('Show details');
+    expect(document.activeElement).toBe(details);
+  });
+
+  it('closes them with their own button and with Escape, and gives the keyboard back to what opened them', async () => {
+    const api = fakeApi({ ...detailsOf('a.txt'), 'GET /buckets/photos/object/access': () => json(200, access()) });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    const row = await findRow('a.txt');
+    const name = nameButton(row, 'a.txt');
+    const details = detailsButton(row, 'a.txt');
+    const region = () => screen.queryByRole('region', { name: 'Details of a.txt' });
+    const closeButton = () => within(region() as HTMLElement).getByRole('button', { name: 'Close details' });
+
+    // Opened by the name, closed by the button at its end.
+    fireEvent.click(name);
+    await within(region() as HTMLElement).findByText('Encryption', { selector: 'dt' });
+    const close = closeButton();
+    expect(close.getAttribute('title')).toBe('Close the details');
+    close.focus();
+    fireEvent.click(close);
+    expect(region()).toBeNull();
+    expect(name.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(name);
+
+    // Opened by the details button, closed by Escape from inside.
+    fireEvent.click(details);
+    expect(region()).not.toBeNull();
+    closeButton().focus();
+    fireEvent.keyDown(closeButton(), { key: 'Escape' });
+    expect(region()).toBeNull();
+    expect(details.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(details);
+
+    // Escape anywhere else closes nothing, and neither does another key inside.
+    fireEvent.click(name);
+    expect(region()).not.toBeNull();
+    name.focus();
+    fireEvent.keyDown(name, { key: 'Escape' });
+    expect(region()).not.toBeNull();
+    fireEvent.keyDown(closeButton(), { key: 'Enter' });
+    expect(region()).not.toBeNull();
+
+    // What was read of the object was read once, however often it was opened.
+    await within(region() as HTMLElement).findByText('Encryption', { selector: 'dt' });
+    expect(api.callsTo('GET', '/buckets/photos/object/metadata')).toHaveLength(1);
   });
 
   it('shows who uploaded an object and who downloaded it', async () => {
@@ -311,11 +511,12 @@ describe('object browser', () => {
           }),
         ),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
 
-    const panel = (await screen.findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    const panel = (await within(region).findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
     expect(panel).not.toBeNull();
     const facts = within(panel as HTMLElement);
     const fact = (name: string) => facts.getByText(name, { selector: 'dt' }).nextElementSibling?.textContent;
@@ -359,11 +560,12 @@ describe('object browser', () => {
 
   it('says so when the uploader was not recorded and nobody downloaded the object', async () => {
     fakeApi({ ...detailsOf('a.txt'), 'GET /buckets/photos/object/access': () => json(200, access()) });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
 
-    const panel = (await screen.findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    const panel = (await within(region).findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
     const facts = within(panel as HTMLElement);
     const fact = (name: string) => facts.getByText(name, { selector: 'dt' }).nextElementSibling?.textContent;
     expect(fact('Uploaded by')).toBe('not recorded');
@@ -373,19 +575,21 @@ describe('object browser', () => {
     expect(facts.queryByText(/others/)).toBeNull();
   });
 
-  it('says in one line, and without an alert, that who accessed an object may not be seen', async () => {
+  it('says in one line, in the row and without an alert, that who accessed an object may not be seen', async () => {
     fakeApi({
       ...detailsOf('a.txt'),
       'GET /buckets/photos/object/access': () => problem(403, 'Access denied'),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
 
-    expect(await screen.findByText('You may not see who accessed this object.')).toBeDefined();
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    expect(await within(region).findByText('You may not see who accessed this object.')).toBeDefined();
     // The details themselves are shown, and nothing is reported as failed.
-    expect(screen.getByRole('heading', { name: 'Object details' })).toBeDefined();
-    expect(screen.getByText('text/plain')).toBeDefined();
+    expect(factOf(region, 'Content type')).toBe('text/plain');
+    expect(factOf(region, 'Encryption')).toBe('SSE-S3');
+    expect(factOf(region, 'ETag')).toBe('"0123abcd"');
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Uploads and downloads' })).toBeNull();
     expect(screen.queryByText('Uploaded by')).toBeNull();
@@ -397,45 +601,371 @@ describe('object browser', () => {
       ...detailsOf('a.txt'),
       'GET /buckets/photos/object/access': () => problem(503, 'Temporarily unavailable'),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
 
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
     expect(
-      await screen.findByText('Who accessed this object could not be loaded: Temporarily unavailable'),
+      await within(region).findByText('Who accessed this object could not be loaded: Temporarily unavailable'),
     ).toBeDefined();
-    expect(screen.getByText('text/plain')).toBeDefined();
+    expect(factOf(region, 'Content type')).toBe('text/plain');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('asks again who accessed when the details of another object are opened', async () => {
+  it('keeps the details of several objects open at once, each asked for once and each with its own', async () => {
+    const scrolling = watchScrolling();
     const api = fakeApi({
       'GET /buckets/photos/objects': () =>
         json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
       'GET /buckets/photos/object/metadata': (call) =>
-        json(200, {
-          bucket: 'photos',
-          key: call.query.get('key'),
-          size: 10,
-          etag: '"e"',
-          last_modified: CREATED,
-          content_type: 'text/plain',
-          encryption: 'SSE-S3',
-        }),
+        json(200, metadataOf(call.query.get('key') ?? '', { content_type: call.query.get('key') === 'a.txt' ? 'text/plain' : 'image/png' })),
       'GET /buckets/photos/object/access': (call) =>
         json(200, access({ uploaded_by: call.query.get('key') === 'a.txt' ? 'user/alice' : 'user/bob' })),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    try {
+      renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
-    expect(await screen.findByText('user/alice')).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Details of b.txt' }));
-    expect(await screen.findByText('user/bob')).toBeDefined();
-    expect(screen.queryByText('user/alice')).toBeNull();
-    expect(api.callsTo('GET', '/buckets/photos/object/access').map((call) => call.query.get('key'))).toEqual([
-      'a.txt',
-      'b.txt',
-    ]);
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+      const regionA = screen.getByRole('region', { name: 'Details of a.txt' });
+      await within(regionA).findByRole('heading', { name: 'Uploads and downloads' });
+      // The one lower down is opened by its name: the table grows downward.
+      fireEvent.click(nameButton(rowOf('b.txt'), 'b.txt'));
+      const regionB = screen.getByRole('region', { name: 'Details of b.txt' });
+      await within(regionB).findByRole('heading', { name: 'Uploads and downloads' });
+
+      // Both are open, each under its own row.
+      expect(screen.getByRole('region', { name: 'Details of a.txt' })).toBe(regionA);
+      expect(rowOf('a.txt').nextElementSibling).toBe(regionA.closest('tr'));
+      expect(regionA.closest('tr')?.nextElementSibling).toBe(rowOf('b.txt'));
+      expect(rowOf('b.txt').nextElementSibling).toBe(regionB.closest('tr'));
+      expect(regionB.closest('tr')?.nextElementSibling).toBeNull();
+      // Each says what is known of its own object.
+      expect(factOf(regionA, 'Key')).toBe('a.txt');
+      expect(factOf(regionA, 'Content type')).toBe('text/plain');
+      expect(factOf(regionA, 'Uploaded by')).toBe('user/alice');
+      expect(factOf(regionB, 'Key')).toBe('b.txt');
+      expect(factOf(regionB, 'Content type')).toBe('image/png');
+      expect(factOf(regionB, 'Uploaded by')).toBe('user/bob');
+      // Two regions, two ids, and two headings that do not share one either.
+      expect(regionA.id).not.toBe(regionB.id);
+      const headings = screen.getAllByRole('heading', { name: 'Uploads and downloads' });
+      expect(headings).toHaveLength(2);
+      expect(new Set(headings.map((heading) => heading.id)).size).toBe(2);
+
+      // The screen is drawn again - an object is ticked, and unticked - and
+      // nothing is asked for a second time.
+      fireEvent.click(screen.getByLabelText('Select a.txt'));
+      fireEvent.click(screen.getByLabelText('Select a.txt'));
+      expect(api.callsTo('GET', '/buckets/photos/object/metadata').map((call) => call.query.get('key'))).toEqual([
+        'a.txt',
+        'b.txt',
+      ]);
+      expect(api.callsTo('GET', '/buckets/photos/object/access').map((call) => call.query.get('key'))).toEqual([
+        'a.txt',
+        'b.txt',
+      ]);
+
+      // Closing one leaves the other.
+      fireEvent.click(within(regionA).getByRole('button', { name: 'Close details' }));
+      expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+      expect(screen.getByRole('region', { name: 'Details of b.txt' })).toBe(regionB);
+      expect(factOf(regionB, 'Key')).toBe('b.txt');
+      expect(scrolling.count()).toBe(0);
+    } finally {
+      scrolling.restore();
+    }
+  });
+
+  it('lays the details across every column of the grid, with the access columns and without', async () => {
+    for (const withAccess of [false, true]) {
+      fakeApi({
+        'GET /buckets/photos/objects': () =>
+          json(200, {
+            objects: [
+              withAccess
+                ? { ...object('a.txt'), access: { uploaded_at: CREATED, download_count: 0, copy_count: 0 } }
+                : object('a.txt'),
+            ],
+            common_prefixes: ['dir/'],
+            truncated: false,
+            access_included: withAccess,
+          }),
+        'GET /buckets/photos/object/metadata': () => json(200, metadataOf('a.txt')),
+        'GET /buckets/photos/object/access': () => json(200, access()),
+      });
+      const shown = renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+      const row = await findRow('a.txt');
+      fireEvent.click(nameButton(row, 'a.txt'));
+      const region = screen.getByRole('region', { name: 'Details of a.txt' });
+      await within(region).findByText('Bucket', { selector: 'dt' });
+
+      const table = row.closest('table') as HTMLTableElement;
+      const headings = table.tHead?.rows[0]?.cells.length;
+      expect(headings).toBe(withAccess ? 10 : 5);
+      const detailRow = row.nextElementSibling as HTMLTableRowElement;
+      expect(detailRow.cells).toHaveLength(1);
+      expect(detailRow.cells[0]?.colSpan).toBe(headings);
+      // The row of the object has a cell a column, as it had.
+      expect(row.cells).toHaveLength(withAccess ? 10 : 5);
+      // The row of the details has nothing to tick.
+      expect(within(detailRow).queryByRole('checkbox')).toBeNull();
+
+      shown.unmount();
+    }
+  });
+
+  it('says in the row, and not above the page, that the details of an object could not be read, and reads them when asked again', async () => {
+    let failing = true;
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) =>
+        failing && call.query.get('key') === 'a.txt'
+          ? problem(503, 'Temporarily unavailable', 'No metadata leader.', 'req-5')
+          : json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
+    });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(nameButton(await findRow('a.txt'), 'a.txt'));
+    const regionA = screen.getByRole('region', { name: 'Details of a.txt' });
+
+    // Why, in the words of the API, inside the row that was opened...
+    const alert = await within(regionA).findByRole('alert');
+    expect(alert.textContent).toContain('Temporarily unavailable');
+    expect(alert.textContent).toContain('No metadata leader.');
+    expect(alert.textContent).toContain('req-5');
+    // ...and nowhere else: the page reports no failure of its own.
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getAllByRole('alert')[0]).toBe(alert);
+    expect(within(regionA).queryByText('Bucket', { selector: 'dt' })).toBeNull();
+    expect(within(regionA).queryByRole('heading', { name: 'Uploads and downloads' })).toBeNull();
+    // The row stays open, and can be closed.
+    expect(nameButton(rowOf('a.txt'), 'a.txt').getAttribute('aria-expanded')).toBe('true');
+    expect(within(regionA).getByRole('button', { name: 'Close details' })).toBeDefined();
+
+    // Another object is not held up by it.
+    fireEvent.click(nameButton(rowOf('b.txt'), 'b.txt'));
+    const regionB = screen.getByRole('region', { name: 'Details of b.txt' });
+    await waitFor(() => {
+      expect(factOf(regionB, 'Key')).toBe('b.txt');
+    });
+    expect(within(regionB).queryByRole('alert')).toBeNull();
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getAllByRole('alert')[0]).toBe(alert);
+
+    // Asked again, it is read.
+    failing = false;
+    const again = within(regionA).getByRole('button', { name: 'Try again' });
+    expect(again.getAttribute('title')).toBe('Ask for the details of this object again');
+    fireEvent.click(again);
+    await waitFor(() => {
+      expect(factOf(regionA, 'Key')).toBe('a.txt');
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(within(regionA).queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(
+      api.callsTo('GET', '/buckets/photos/object/metadata').map((call) => call.query.get('key')),
+    ).toEqual(['a.txt', 'b.txt', 'a.txt']);
+  });
+
+  it('keeps the details open when the list is read again, and asks again only about an object that was replaced', async () => {
+    let objects = [object('a.txt'), object('b.txt'), object('c.txt'), object('d.txt')];
+    let etag = '"first"';
+    let uploader = 'user/alice';
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '', { etag })),
+      'GET /buckets/photos/object/access': () => json(200, access({ uploaded_by: uploader })),
+      'DELETE /buckets/photos/object': (call) => {
+        objects = objects.filter((o) => o.key !== call.query.get('key'));
+        return noContent();
+      },
+    });
+    const lists = () => api.callsTo('GET', '/buckets/photos/objects').length;
+    const metadataAsked = () => api.callsTo('GET', '/buckets/photos/object/metadata').length;
+    const accessAsked = () => api.callsTo('GET', '/buckets/photos/object/access').length;
+    // Deleting another object is what has the list read again.
+    const deleteOther = async (name: string) => {
+      const before = lists();
+      fireEvent.click(within(rowOf(name)).getByRole('button', { name: 'Delete' }));
+      fireEvent.click(within(rowOf(name)).getByRole('button', { name: 'Yes, delete' }));
+      await waitFor(() => {
+        expect(screen.queryByLabelText(`Select ${name}`)).toBeNull();
+      });
+      expect(lists()).toBe(before + 1);
+    };
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(nameButton(await findRow('a.txt'), 'a.txt'));
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    await within(region).findByRole('heading', { name: 'Uploads and downloads' });
+    expect(factOf(region, 'ETag')).toBe('"first"');
+    expect(metadataAsked()).toBe(1);
+    expect(accessAsked()).toBe(1);
+
+    // Read again, and the object is as it was: its details stay, and nothing is asked.
+    await deleteOther('b.txt');
+    expect(screen.getByRole('region', { name: 'Details of a.txt' })).toBe(region);
+    expect(rowOf('a.txt').nextElementSibling).toBe(region.closest('tr'));
+    expect(factOf(region, 'ETag')).toBe('"first"');
+    expect(nameButton(rowOf('a.txt'), 'a.txt').getAttribute('aria-expanded')).toBe('true');
+    expect(metadataAsked()).toBe(1);
+    expect(accessAsked()).toBe(1);
+
+    // Read again, and the object was replaced: its details stay open and are asked for anew.
+    objects = objects.map((o) => (o.key === 'a.txt' ? { ...o, etag: '"second"' } : o));
+    etag = '"second"';
+    uploader = 'user/bob';
+    await deleteOther('c.txt');
+    await waitFor(() => {
+      expect(factOf(screen.getByRole('region', { name: 'Details of a.txt' }), 'ETag')).toBe('"second"');
+    });
+    await waitFor(() => {
+      expect(factOf(screen.getByRole('region', { name: 'Details of a.txt' }), 'Uploaded by')).toBe('user/bob');
+    });
+    expect(nameButton(rowOf('a.txt'), 'a.txt').getAttribute('aria-expanded')).toBe('true');
+    expect(metadataAsked()).toBe(2);
+    expect(accessAsked()).toBe(2);
+
+    // Read again, and the object is gone: so are its details.
+    objects = objects.filter((o) => o.key !== 'a.txt');
+    await deleteOther('d.txt');
+    await waitFor(() => {
+      expect(screen.queryByLabelText('Select a.txt')).toBeNull();
+    });
+    expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    expect(metadataAsked()).toBe(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('closes the details when another page is turned to', async () => {
+    const api = fakeApi({
+      'GET /buckets/photos/objects': (call) =>
+        call.query.get('continuation_token') === 'page-2'
+          ? json(200, { objects: [object('b.txt')], common_prefixes: [], truncated: false, access_included: false })
+          : json(200, {
+              objects: [object('a.txt')],
+              common_prefixes: [],
+              truncated: true,
+              access_included: false,
+              next_continuation_token: 'page-2',
+            }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
+    });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(nameButton(await findRow('a.txt'), 'a.txt'));
+    await within(screen.getByRole('region', { name: 'Details of a.txt' })).findByText('Bucket', { selector: 'dt' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await findRow('b.txt');
+    expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    expect(rowOf('b.txt').nextElementSibling).toBeNull();
+
+    // Back on the page it was opened on, it is closed.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+    const row = await findRow('a.txt');
+    expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    expect(row.nextElementSibling).toBeNull();
+    expect(nameButton(row, 'a.txt').getAttribute('aria-expanded')).toBe('false');
+    expect(detailsButton(row, 'a.txt').getAttribute('aria-expanded')).toBe('false');
+    expect(api.callsTo('GET', '/buckets/photos/object/metadata')).toHaveLength(1);
+  });
+
+  it('closes the details when another prefix is walked into', async () => {
+    signedIn({
+      'GET /buckets/photos/objects': (call) =>
+        call.query.get('prefix') === '2026/'
+          ? json(200, { objects: [object('2026/inside.txt')], common_prefixes: [], truncated: false, access_included: false })
+          : json(200, { objects: [object('top.txt')], common_prefixes: ['2026/'], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
+    });
+    window.location.hash = '#/buckets/photos';
+    render(<App />);
+
+    fireEvent.click(nameButton(await findRow('top.txt'), 'top.txt'));
+    await within(screen.getByRole('region', { name: 'Details of top.txt' })).findByText('Bucket', { selector: 'dt' });
+
+    window.location.hash = screen.getByRole('link', { name: '2026/' }).getAttribute('href') ?? '';
+    await findRow('inside.txt');
+    expect(screen.queryByRole('region', { name: 'Details of top.txt' })).toBeNull();
+
+    window.location.hash = '#/buckets/photos';
+    const row = await findRow('top.txt');
+    expect(screen.queryByRole('region', { name: 'Details of top.txt' })).toBeNull();
+    expect(nameButton(row, 'top.txt').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes the details of an object that is deleted, and of no other', async () => {
+    // The list is slow to forget what was deleted: that the details close is
+    // the doing of the deletion, not of the object having left the list.
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
+      'DELETE /buckets/photos/object': () => noContent(),
+    });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(nameButton(await findRow('a.txt'), 'a.txt'));
+    fireEvent.click(nameButton(rowOf('b.txt'), 'b.txt'));
+    await within(screen.getByRole('region', { name: 'Details of a.txt' })).findByText('Bucket', { selector: 'dt' });
+    await within(screen.getByRole('region', { name: 'Details of b.txt' })).findByText('Bucket', { selector: 'dt' });
+
+    fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Delete' }));
+    fireEvent.click(within(rowOf('a.txt')).getByRole('button', { name: 'Yes, delete' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    });
+    await waitFor(() => {
+      expect(api.callsTo('GET', '/buckets/photos/objects')).toHaveLength(2);
+    });
+    expect(api.callsTo('DELETE', '/buckets/photos/object')[0]?.query.get('key')).toBe('a.txt');
+    expect(screen.queryByRole('region', { name: 'Details of a.txt' })).toBeNull();
+    expect(nameButton(rowOf('a.txt'), 'a.txt').getAttribute('aria-expanded')).toBe('false');
+    const regionB = screen.getByRole('region', { name: 'Details of b.txt' });
+    expect(rowOf('b.txt').nextElementSibling).toBe(regionB.closest('tr'));
+    expect(factOf(regionB, 'Key')).toBe('b.txt');
+  });
+
+  it('keeps opening the details and ticking an object apart', async () => {
+    fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': (call) => json(200, metadataOf(call.query.get('key') ?? '')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
+    });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+
+    // The name opens the details and ticks nothing.
+    const row = await findRow('a.txt');
+    fireEvent.click(nameButton(row, 'a.txt'));
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    await within(region).findByText('Bucket', { selector: 'dt' });
+    expect((screen.getByLabelText('Select a.txt') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByText('0 selected')).toBeDefined();
+    expect(row.className).not.toContain('grid-chosen');
+
+    // The tick opens nothing, and closes nothing.
+    fireEvent.click(screen.getByLabelText('Select b.txt'));
+    expect(screen.getByText('1 selected')).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Details of b.txt' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Details of a.txt' })).toBe(region);
+
+    // The row of the details is no object: all of the page is the two objects, and it has nothing to tick.
+    fireEvent.click(screen.getByLabelText('Select all on this page'));
+    expect(screen.getByText('2 selected')).toBeDefined();
+    expect(within(row.closest('table') as HTMLTableElement).getAllByRole('checkbox')).toHaveLength(2);
+    expect(region.closest('tr')?.className).toBe('grid-detail');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
+    expect(screen.getByRole('group', { name: 'Delete 2 objects?' })).toBeDefined();
   });
 
   it('deletes an object and lists again', async () => {
@@ -447,7 +977,7 @@ describe('object browser', () => {
         return noContent();
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
     fireEvent.click(screen.getByRole('button', { name: 'Yes, delete' }));
@@ -465,7 +995,7 @@ describe('object browser', () => {
         return noContent();
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     // Nothing is ticked: nothing can be deleted.
     const bulk = await screen.findByRole('button', { name: 'Delete selected' });
@@ -507,7 +1037,7 @@ describe('object browser', () => {
           : json(200, { objects: [object('z.txt')], common_prefixes: [], truncated: false, access_included: false }),
       'DELETE /buckets/photos/object': () => noContent(),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByLabelText('Select a.txt'));
     fireEvent.click(screen.getByLabelText('Select b.txt'));
@@ -535,7 +1065,7 @@ describe('object browser', () => {
       'DELETE /buckets/photos/object': (call) =>
         call.query.get('key') === 'a.txt' ? noContent() : problem(403, 'Access denied', undefined, 'req-9'),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     fireEvent.click(await screen.findByLabelText('Select all on this page'));
     expect(screen.getByText('2 selected')).toBeDefined();
@@ -576,7 +1106,7 @@ describe('object browser', () => {
         });
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="notes/" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="notes/" />);
     await screen.findByText('There is nothing here.');
 
     const names = ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt'];
@@ -672,7 +1202,7 @@ describe('object browser', () => {
       }
       return answer(request);
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
     await screen.findByText('There is nothing here.');
 
     const files = ['good.txt', 'bad.txt'].map((name) => new NodeFile([name], name, { type: 'text/plain' }));
@@ -692,6 +1222,10 @@ describe('object browser', () => {
     expect(clear.querySelector('.btn-text')?.textContent).toBe('Clear');
     expect(clear.querySelector('i.bi')).not.toBeNull();
     await screen.findByLabelText('Select good.txt');
+    // Why a file was not stored stands in its tile, and nowhere else: the
+    // page has no alert for it.
+    expect(within(screen.getByRole('list', { name: 'Upload progress' })).getByText('Access denied')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
     const puts = api.callsTo('PUT', '/buckets/photos/object').length;
     const lists = api.callsTo('GET', '/buckets/photos/objects').length;
 
@@ -703,7 +1237,8 @@ describe('object browser', () => {
     expect(screen.queryByText(/not stored/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull();
-    // ...with what the upload was refused for...
+    // ...with what the upload was refused for, which went with its tile...
+    expect(screen.queryByText('Access denied')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
     // ...and nothing else is touched: the files chosen, the field, the objects.
     expect(screen.getByText(/2 files chosen/)).toBeDefined();
@@ -711,6 +1246,75 @@ describe('object browser', () => {
     expect(screen.getByLabelText('Select good.txt')).toBeDefined();
     expect(api.callsTo('PUT', '/buckets/photos/object')).toHaveLength(puts);
     expect(api.callsTo('GET', '/buckets/photos/objects')).toHaveLength(lists);
+  });
+
+  it('empties the form when its files are stored, unless other files were chosen meanwhile', async () => {
+    const stored: string[] = [];
+    // The uploads are held until the test lets them go.
+    let release: () => void = () => undefined;
+    let held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: stored.map((k) => object(k)), common_prefixes: [], truncated: false, access_included: false }),
+      'PUT /buckets/photos/object': (call) => {
+        const key = call.query.get('key') ?? '';
+        stored.push(key);
+        return json(200, metadataOf(key));
+      },
+    });
+    const answer = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.method === 'PUT') {
+        await held;
+      }
+      return answer(request);
+    });
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
+    await screen.findByText('There is nothing here.');
+    const choose = (name: string) => {
+      fireEvent.change(screen.getByLabelText('File'), { target: { files: [new NodeFile([name], name, { type: 'text/plain' })] } });
+    };
+    const submit = () => {
+      fireEvent.submit(screen.getByRole('button', { name: 'Upload' }).closest('form') as HTMLFormElement);
+    };
+    const keyField = () => screen.getByLabelText('Object key') as HTMLInputElement;
+
+    choose('one.txt');
+    expect(keyField().value).toBe('one.txt');
+    submit();
+    await screen.findByText('0 of 1 stored');
+
+    // While it is on its way another file is chosen, for the next upload.
+    choose('two.txt');
+    expect(keyField().value).toBe('two.txt');
+    release();
+    await screen.findByText('1 of 1 stored');
+    await screen.findByLabelText('Select one.txt');
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: 'Upload' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+    // The first is stored, and the choice made meanwhile is still there.
+    expect(keyField().value).toBe('two.txt');
+    expect(api.callsTo('PUT', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual(['one.txt']);
+
+    // It is sent as it stands, with nothing chosen again...
+    held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    submit();
+    await waitFor(() => {
+      expect((screen.getByRole('button', { name: 'Upload' }) as HTMLButtonElement).disabled).toBe(true);
+    });
+    release();
+    await screen.findByText('2 of 2 stored');
+    expect(api.callsTo('PUT', '/buckets/photos/object').map((call) => call.query.get('key'))).toEqual(['one.txt', 'two.txt']);
+    // ...and this time nothing else was chosen meanwhile: the form is empty again.
+    await waitFor(() => {
+      expect(keyField().value).toBe('');
+    });
   });
 
   it('lists what was uploaded into an empty bucket, with nothing more asked of the user', async () => {
@@ -732,7 +1336,7 @@ describe('object browser', () => {
         });
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
     await screen.findByText('There is nothing here.');
 
     const names = ['one.txt', 'two.txt', 'three.txt', 'four.txt'];
@@ -777,7 +1381,7 @@ describe('object browser', () => {
         });
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
     await screen.findByText('There is nothing here.');
 
     // The file is stored, and the list that follows cannot be read.
@@ -823,7 +1427,7 @@ describe('object browser', () => {
           access_included: true,
         }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     const table = (await screen.findByRole('table')) as HTMLTableElement;
     expect(within(table).getAllByRole('columnheader').map((th) => th.textContent)).toEqual([
@@ -890,7 +1494,7 @@ describe('object browser', () => {
       'GET /buckets/photos/objects': () =>
         json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false, access_included: false }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     const table = (await screen.findByRole('table')) as HTMLTableElement;
     const headings = within(table)
@@ -915,8 +1519,10 @@ describe('object browser', () => {
     fakeApi({
       'GET /buckets/photos/objects': () =>
         json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false, access_included: false }),
+      'GET /buckets/photos/object/metadata': () => json(200, metadataOf('a.txt')),
+      'GET /buckets/photos/object/access': () => json(200, access()),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
     await screen.findByLabelText('Select a.txt');
 
     for (const control of [...screen.getAllByRole('button'), ...screen.getAllByRole('link')]) {
@@ -927,19 +1533,39 @@ describe('object browser', () => {
     // In a row the icon is the button: its name is still there to be read
     // out, in the element the stylesheet folds away.
     const details = screen.getByRole('button', { name: 'Details of a.txt' });
-    expect(details.getAttribute('title')).toBe('Show what is known about this object');
+    expect(details.getAttribute('title')).toBe('Show details');
     expect(details.querySelector('.btn-text')?.textContent).toBe('Details');
     expect(details.querySelector('i.bi')).not.toBeNull();
+    // The name of an object is a button too, with the same hint and a mark
+    // beside it; a folder keeps its link.
+    const name = nameButton(rowOf('a.txt'), 'a.txt');
+    expect(name.getAttribute('title')).toBe('Show details');
+    expect(name.querySelector('i.bi')).not.toBeNull();
+    expect(screen.getByRole('link', { name: 'dir/' }).getAttribute('title')).toBe('Open this folder');
     const remove = screen.getByRole('button', { name: 'Delete' });
     expect(remove.getAttribute('title')).toContain('Delete a.txt?');
     expect(remove.querySelector('.btn-text')?.textContent).toBe('Delete');
+
+    // Opened, the row has buttons of its own: they have hints as well.
+    fireEvent.click(name);
+    const region = screen.getByRole('region', { name: 'Details of a.txt' });
+    const close = await within(region).findByRole('button', { name: 'Close details' });
+    expect(close.getAttribute('title')).toBe('Close the details');
+    expect(close.querySelector('.btn-text')?.textContent).toBe('Close details');
+    for (const control of [...screen.getAllByRole('button'), ...screen.getAllByRole('link')]) {
+      if (control.className.includes('btn')) {
+        expect(control.getAttribute('title'), control.textContent).toBeTruthy();
+      }
+    }
+    // Nothing of the details is styled in the page itself: the policy of the server forbids it.
+    expect(region.closest('tr')?.querySelector('[style]')).toBeNull();
   });
 
   it('keeps the objects in a table, whatever the width of the screen', async () => {
     fakeApi({
       'GET /buckets/photos/objects': () => json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false, access_included: false }),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     const table = (await screen.findByRole('table')) as HTMLTableElement;
     // The class that keeps it from being turned into cards on a phone.
@@ -970,7 +1596,7 @@ describe('object browser', () => {
         });
       },
     });
-    render(<ObjectsScreen bucket="photos" prefix="notes/" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="notes/" />);
     await screen.findByText('There is nothing here.');
 
     const file = new NodeFile(['hello'], 'hello.txt', { type: 'text/plain' });
@@ -994,7 +1620,7 @@ describe('object browser', () => {
     fakeApi({
       'GET /buckets/photos/objects': () => problem(404, 'No such bucket', 'There is no bucket photos.', 'req-7'),
     });
-    render(<ObjectsScreen bucket="photos" prefix="" />);
+    renderObjects(<ObjectsScreen bucket="photos" prefix="" />);
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('No such bucket');
