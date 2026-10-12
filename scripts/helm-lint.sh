@@ -1,9 +1,11 @@
 #!/bin/sh
-# Deployment gate: lints the Helm chart and renders it to prove the templates
-# produce manifests. Run through `make helm-lint`.
+# Deployment gate: lints the Helm chart, renders it with each value set of
+# its ci directory, validates every render against the Kubernetes schemas and
+# asserts what the render must say. Run through `make helm-lint`.
 #
-# The chart is PLAN step 7.1. Validation of the rendered manifests against the
-# Kubernetes schemas (kubeconform) is still to be added to this gate.
+# The schemas are a directory of the builder image (the Dockerfile says which
+# Kubernetes version and from where), so kubeconform reads no network: a kind
+# without a schema there fails the gate, and none is skipped.
 set -eu
 
 CHART=deploy/helm/cactusfs
@@ -30,14 +32,58 @@ if [ ! -f "$CHART/Chart.yaml" ]; then
 	exit 0
 fi
 
+for tool in helm kubeconform yq; do
+	command -v "$tool" >/dev/null 2>&1 || {
+		echo "helm-lint: FAIL - $tool is not installed (it is in the builder image: run make helm-lint)" >&2
+		exit 1
+	}
+done
+# The one version of the schemas the builder image has.
+SCHEMAS=${KUBERNETES_SCHEMAS:-/opt/kubernetes-schemas}
+kube=
+for dir in "$SCHEMAS"/v*-standalone-strict; do
+	[ -d "$dir" ] || continue
+	if [ -n "$kube" ]; then
+		echo "helm-lint: FAIL - $SCHEMAS has the schemas of more than one Kubernetes version" >&2
+		exit 1
+	fi
+	kube=$(basename "$dir" -standalone-strict)
+done
+if [ -z "$kube" ]; then
+	echo "helm-lint: FAIL - no Kubernetes schemas in $SCHEMAS (they are in the builder image: run make helm-lint)" >&2
+	exit 1
+fi
+
+# How kubeconform finds a schema in that directory (its own template).
+LAYOUT='{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json'
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 # The chart renders nothing without the Secrets it is told to use, so it is
 # linted and rendered with each of the value sets in ci/: a cluster with
-# Vault, five voters, one node, and a development cluster on one machine.
+# Vault, five voters, one node, a development cluster on one machine, and a
+# cluster opened to its clients. Every set is judged before the gate fails.
+failed=0
 for values in "$CHART"/ci/*.yaml; do
+	name=$(basename "$values" .yaml)
 	helm lint --strict "$CHART" -f "$values" >/dev/null
-	helm template cactusfs "$CHART" -n cactusfs -f "$values" >/dev/null
-	echo "helm-lint: $(basename "$values") renders"
+	helm template cactusfs "$CHART" -n cactusfs --kube-version "$kube" -f "$values" >"$tmp/$name.yaml"
+	echo "helm-lint: $name.yaml renders"
+	# -strict: no field the schema does not know, no key twice. No schema
+	# location but the directory, and no kind skipped or forgiven.
+	if kubeconform -strict -summary -kubernetes-version "${kube#v}" -schema-location "$SCHEMAS/$LAYOUT" "$tmp/$name.yaml"; then
+		echo "helm-lint: $name.yaml is valid for Kubernetes $kube"
+	else
+		echo "helm-lint: FAIL - $name.yaml is not valid for Kubernetes $kube" >&2
+		failed=1
+	fi
+	scripts/helm-assert.sh "$tmp/$name.yaml" "$name" || failed=1
 done
+if [ "$failed" -ne 0 ]; then
+	echo "helm-lint: FAIL" >&2
+	exit 1
+fi
 # And refuses what must not be deployed - for the reason it should: each
 # file of ci/refused is laid over the cluster's values and names, in its first
 # line, words of the refusal it must be met with.

@@ -40,6 +40,23 @@ ARG AWSCLI_SHA256_AMD64=e6d3c672fb36ed4b12c354c39a993eee2b34da1437cafb10bac44808
 ARG AWSCLI_SHA256_ARM64=829c76096e05f743267d75098bc7cc7cfae799fc7e568554ebaa6d78e6aba753
 ARG S3TESTS_COMMIT=5522d1c351f75bc00ae0f64f742f3f095f5939d9
 ARG S3TESTS_SHA256=f0943e3ca3a68f5c8d9ce19d12879a3edca68de3293eef687533ab5caf2aca13
+# What `make helm-lint` judges the chart's renders with: kubeconform, the
+# Kubernetes JSON schemas of ONE version (so that it validates with the network
+# off) and yq, which scripts/helm-assert.sh reads the renders with. Tools of
+# the builder image only. Each is pinned by the checksum of what is downloaded;
+# to move a pin, change the version (or commit) AND its checksums together.
+# The schemas are single files of yannh/kubernetes-json-schema at one commit,
+# from its directory v<version>-standalone-strict: one for each kind the chart
+# renders, listed with its checksum in the helmtools stage. (The whole
+# repository is several GB.) The version is that of the Kubernetes deployed to.
+ARG KUBECONFORM_VERSION=0.8.0
+ARG KUBECONFORM_SHA256_AMD64=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+ARG KUBECONFORM_SHA256_ARM64=1f53fc8e81258197a35e8603054162a5af1de8c5af13746c71ab680d9534ed87
+ARG YQ_VERSION=4.54.1
+ARG YQ_SHA256_AMD64=e68a456f90c577af3fe4960184b3a3cf5c461e0348407c10f107da3a5fec8972
+ARG YQ_SHA256_ARM64=8c27f6e7476fb5acefb9352e3d30f6bc2dc93f1956eb92e8da727173fb7ec6d3
+ARG K8S_SCHEMAS_VERSION=1.36.0
+ARG K8S_SCHEMAS_COMMIT=817113f21a2643311cbc3e992bb44ffe1c416c54
 
 # --- node: Node.js and pnpm, on the build host's architecture -----------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS node
@@ -110,6 +127,48 @@ RUN python /usr/local/bin/fetch.py "https://github.com/ceph/s3-tests/archive/${S
  && /opt/s3tests/venv/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r /tmp/requirements.lock \
  && /opt/s3tests/venv/bin/python -c "import boto3, pytest, munch, isodate, pytz, requests"
 
+# --- helmtools: kubeconform, its schemas and yq, for the chart's gate ------------
+FROM ${PYTHON_IMAGE} AS helmtools
+ARG TARGETARCH
+ARG KUBECONFORM_VERSION
+ARG KUBECONFORM_SHA256_AMD64
+ARG KUBECONFORM_SHA256_ARM64
+ARG YQ_VERSION
+ARG YQ_SHA256_AMD64
+ARG YQ_SHA256_ARM64
+ARG K8S_SCHEMAS_VERSION
+ARG K8S_SCHEMAS_COMMIT
+COPY scripts/fetch.py /usr/local/bin/fetch.py
+# The binaries of the releases, each by its checksum.
+RUN case "${TARGETARCH}" in \
+      amd64) kubeconform_sum="${KUBECONFORM_SHA256_AMD64}"; yq_sum="${YQ_SHA256_AMD64}" ;; \
+      arm64) kubeconform_sum="${KUBECONFORM_SHA256_ARM64}"; yq_sum="${YQ_SHA256_ARM64}" ;; \
+      *) echo "no kubeconform or yq for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && python /usr/local/bin/fetch.py "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-${TARGETARCH}.tar.gz" "$kubeconform_sum" /tmp/kubeconform kubeconform \
+ && python /usr/local/bin/fetch.py "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${TARGETARCH}.tar.gz" "$yq_sum" /tmp/yq "yq_linux_${TARGETARCH}" \
+ && mkdir -p /opt/helmtools/bin \
+ && install -m 0755 /tmp/kubeconform/kubeconform /opt/helmtools/bin/kubeconform \
+ && install -m 0755 "/tmp/yq/yq_linux_${TARGETARCH}" /opt/helmtools/bin/yq \
+ && rm -rf /tmp/kubeconform /tmp/yq \
+ && /opt/helmtools/bin/kubeconform -v && /opt/helmtools/bin/yq --version
+# The schema of each kind the chart renders, each file by its checksum, named
+# as kubeconform looks for it: <kind>-<group>-<version>.json, the kind in lower
+# case, the first label of the group, and no group for the core one. A kind
+# that is not in this list fails `make helm-lint` - kubeconform is given no
+# other place to look and skips nothing - so a new kind of the chart is a new
+# line here.
+RUN schema() { python /usr/local/bin/fetch.py --file \
+      "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${K8S_SCHEMAS_COMMIT}/v${K8S_SCHEMAS_VERSION}-standalone-strict/$1.json" \
+      "$2" "/opt/kubernetes-schemas/v${K8S_SCHEMAS_VERSION}-standalone-strict/$1.json"; } \
+ && schema statefulset-apps-v1           cfa6579916fc2a1be0deb6372a3c67c3747a212131d0cb7b342d645f65639987 \
+ && schema service-v1                    8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b \
+ && schema networkpolicy-networking-v1   f6324cc464f62228b0418f438d167208e4f86c7e3677ba30f608e79a8b26ba79 \
+ && schema poddisruptionbudget-policy-v1 92b2b2cf7c193b9d10943e7785ebe6eefce439d9e1e34e5fd9e820155a657137 \
+ && schema storageclass-storage-v1       9704bb88ec73ed37f8d565dbd2d2ee1e8ee61b5ec63c96a5a61926d6971ef3c9 \
+ && schema persistentvolume-v1           ddff73572bf0965cecf9c160949a1c416f4f9e8ade7f46a649767589a1e2783c \
+ && ls -l "/opt/kubernetes-schemas/v${K8S_SCHEMAS_VERSION}-standalone-strict"
+
 # --- builder: the image every `make` target runs in ----------------------------
 # Go tools (gofumpt, goimports, govulncheck, go-licenses) are NOT installed
 # here: they are pinned by `tool` directives in go.mod and run with `go tool`.
@@ -128,6 +187,10 @@ COPY --from=s3tools /usr/local/lib/libpython3.13.so.1.0 /usr/local/lib/libpython
 COPY --from=s3tools /usr/local/lib/python3.13/ /usr/local/lib/python3.13/
 COPY --from=s3tools /opt/aws-cli/ /opt/aws-cli/
 COPY --from=s3tools /opt/s3tests/ /opt/s3tests/
+# kubeconform, yq and the Kubernetes schemas kubeconform reads from this
+# directory instead of the network (scripts/helm-lint.sh).
+COPY --from=helmtools /opt/helmtools/bin/ /usr/local/bin/
+COPY --from=helmtools /opt/kubernetes-schemas/ /opt/kubernetes-schemas/
 RUN git config --system --add safe.directory '*' \
  && ldconfig \
  && ln -s /opt/aws-cli/bin/aws /usr/local/bin/aws \
@@ -135,6 +198,7 @@ RUN git config --system --add safe.directory '*' \
  && go version && node --version && pnpm --version \
  && golangci-lint version && helm version --short && docker --version && buf --version && oasdiff --version \
  && aws --version && /opt/s3tests/venv/bin/python -c "import ssl, boto3, pytest; print('s3-tests', ssl.OPENSSL_VERSION)"
+RUN kubeconform -v && yq --version && ls -d /opt/kubernetes-schemas/v*-standalone-strict
 ENV CACTUSFS_IN_BUILDER=1 \
     GOTOOLCHAIN=local \
     GOCACHE=/cache/go-build \

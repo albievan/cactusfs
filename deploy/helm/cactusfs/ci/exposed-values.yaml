@@ -1,0 +1,46 @@
+# A cluster opened to those who use it: S3 to an ingress controller's
+# namespace and to one network, the admin port to another network, Vault and
+# a collector of traces named for egress, a storage class named, the image by
+# its digest, voters in three zones. Every name and address is an example.
+image:
+  repository: registry.example.test/cactusfs
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+pools:
+  - {name: meta-a, replicas: 1, roles: "", topology: {region: example, zone: a}}
+  - {name: meta-b, replicas: 1, roles: "", topology: {region: example, zone: b}}
+  - {name: meta-c, replicas: 1, roles: "", topology: {region: example, zone: c}}
+  - {name: data, replicas: 2, roles: "gateway,storage", topology: {region: example, zone: a}}
+drives: {count: 3, size: 50Gi}
+metadata: {size: 5Gi}
+storageClassName: example-ssd
+secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
+kms:
+  type: vault
+  vault:
+    addr: "https://vault.example.test:8200"
+    key: cactusfs
+    namespace: storage
+    tokenSecret: cactusfs-vault-token
+    caSecret: cactusfs-vault-ca
+s3: {domain: s3.example.test}
+service:
+  type: LoadBalancer
+  annotations: {example.test/address-pool: public}
+otlpEndpoint: "https://collector.example.test:4318"
+podAnnotations: {example.test/scrape: "true"}
+networkPolicy:
+  clientsFrom:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: ingress}
+    - ipBlock: {cidr: 198.51.100.0/24}
+  adminFrom:
+    - ipBlock: {cidr: 192.0.2.0/28}
+  egressTo:
+    - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+      ports: [8200]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: observability}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: collector}
+      ports: [4318]
