@@ -18,6 +18,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/domain/tagging"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -49,7 +50,19 @@ type MemMetadata struct {
 	// config holds the configuration documents of buckets, by bucket and
 	// kind.
 	config map[string]map[string][]byte
+	// access holds who read which version, by bucket and by key and
+	// version; flushes the last batch of reads of every node; subs the
+	// sub-buckets of every bucket; tagDefs the catalogue of tags.
+	access  map[string]map[accessKey]object.Access
+	flushes map[string][2]uint64
+	subs    map[string]map[string]bucket.SubBucket
+	tagDefs map[string]tagging.Definition
 
+	// Audit, when set, receives the audit records that changes to
+	// sub-buckets and to the catalogue of tags carry, as the real store
+	// appends them to its one trail. Without it they are checked and
+	// dropped.
+	Audit ports.AuditLog
 	// Now, when set, is the store's time: what Object Lock is judged on.
 	// The real store uses the time its leader stamps entries with.
 	Now func() time.Time
@@ -68,6 +81,10 @@ func NewMemMetadata() *MemMetadata {
 		uploads: map[string]map[object.ID]*memUpload{},
 		extents: map[object.ID][]object.Part{},
 		config:  map[string]map[string][]byte{},
+		access:  map[string]map[accessKey]object.Access{},
+		flushes: map[string][2]uint64{},
+		subs:    map[string]map[string]bucket.SubBucket{},
+		tagDefs: map[string]tagging.Definition{},
 	}
 }
 
@@ -110,6 +127,9 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	// Uploads that were never completed go with the bucket.
 	delete(m.uploads, name)
 	delete(m.config, name)
+	// So do its sub-buckets and what is known of who read its versions.
+	delete(m.subs, name)
+	delete(m.access, name)
 	return nil
 }
 
@@ -473,7 +493,12 @@ func (m *MemMetadata) inUse(id object.ID) bool {
 // forget drops what a version that was removed for good leaves behind, and
 // returns the parts it was made of.
 func (m *MemMetadata) forget(removed *object.Version) []object.Part {
-	if removed == nil || !removed.Multipart() {
+	if removed == nil {
+		return nil
+	}
+	// The record of who read a version goes with the version.
+	delete(m.access[removed.Bucket], accessKey{key: removed.Key, ref: removed.Ref().String()})
+	if !removed.Multipart() {
 		return nil
 	}
 	parts := m.extents[removed.DataID]
@@ -653,7 +678,7 @@ func (m *MemMetadata) SetBucketConfig(_ context.Context, name, kind string, docu
 	switch _, ok := m.buckets[name]; {
 	case !ok:
 		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
-	case !bucket.ValidConfigKind(kind):
+	case !bucket.ValidConfigKind(kind) && kind != bucket.ConfigTagRules:
 		return fmt.Errorf("%w: bucket configuration %q", domain.ErrInvalidArgument, kind)
 	case len(document) > bucket.MaxConfigBytes:
 		return fmt.Errorf("%w: bucket configuration of %d bytes", domain.ErrInvalidArgument, len(document))

@@ -2,7 +2,6 @@ package raftmeta
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,7 +41,10 @@ type LeaderClient interface {
 	// The error must say what is known about the entry: it wraps
 	// domain.ErrNotLeader or domain.ErrUnavailable only when the entry was
 	// certainly not logged - the node refused it, or was never reached -
-	// and domain.ErrOutcomeUnknown whenever it may have been.
+	// and domain.ErrOutcomeUnknown whenever it may have been. Whatever
+	// carries the error from the leader must keep every domain error it
+	// wraps (domain.Codes does): an entry the leader refused for its schema
+	// is known by wrapping two of them (see Store.ProposeLocal).
 	Propose(ctx context.Context, leaderID string, entry []byte) ([]byte, error)
 	// ReadIndex returns the leader's read index (see Store.ReadIndexLocal).
 	ReadIndex(ctx context.Context, leaderID string) (uint64, error)
@@ -231,10 +233,44 @@ func (s *Store) WaitReady(ctx context.Context) error {
 	}
 }
 
+// aboveLevel is the refusal of an entry written in a schema the cluster does
+// not write yet. It is definite - nothing was logged - and it passes: the
+// node that proposed it saw the cluster a moment behind this one, and when it
+// has caught up it either writes the entry as the cluster can take it or
+// knows that it must wait. So it wraps domain.ErrUnavailable. It also wraps
+// domain.ErrUnsupportedFormat, and by the two together the proposer knows it
+// from every other refusal, on the far side of a node boundary too, where
+// only the domain errors of an error arrive.
+func aboveLevel(version, level byte) error {
+	return fmt.Errorf("%w: %w: metadata entry version %d, the cluster is at %d", domain.ErrUnavailable, domain.ErrUnsupportedFormat, version, level)
+}
+
+// isAboveLevel reports whether err is a leader's refusal of an entry for its
+// schema (aboveLevel), here or as it arrives from another node.
+func isAboveLevel(err error) bool {
+	return errors.Is(err, domain.ErrUnavailable) && errors.Is(err, domain.ErrUnsupportedFormat) && !errors.Is(err, domain.ErrOutcomeUnknown)
+}
+
+// levelRefusal is aboveLevel as the proposer holds it between two attempts.
+// It wraps nothing, so that nothing on the way takes it for a leader that
+// could not be reached and sends the same entry again.
+type levelRefusal struct {
+	cause error
+}
+
+// Error implements error.
+func (r *levelRefusal) Error() string { return r.cause.Error() }
+
 // ProposeLocal commits an entry that another node proposed, and returns the
 // state machine's result in encoded form. The node must lead the group; the
 // error wraps domain.ErrNotLeader when it does not, and
 // domain.ErrOutcomeUnknown whenever the entry may have been logged.
+//
+// An entry written in a newer schema than the cluster writes now is refused
+// with an error that wraps domain.ErrUnavailable (and
+// domain.ErrUnsupportedFormat with it; see aboveLevel): its proposer knew
+// the cluster less well than this node, and can try again when it has caught
+// up. Nothing was logged.
 func (s *Store) ProposeLocal(ctx context.Context, data []byte) ([]byte, error) {
 	var encoded []byte
 	err := s.use(func() error {
@@ -249,13 +285,17 @@ func (s *Store) ProposeLocal(ctx context.Context, data []byte) ([]byte, error) {
 		if _, err := decodeEntry(data, s.supported); err != nil {
 			return err
 		}
+		// Only the leader says what the cluster's level is: a member that
+		// was asked by mistake may not have applied what the leader has, and
+		// its "above the level" would make the proposer write less than the
+		// cluster takes.
+		if s.raft.State() != raft.Leader {
+			return domain.ErrNotLeader
+		}
 		if level, err := s.entryVersion(); err != nil {
 			return err
 		} else if data[0] > level {
-			return fmt.Errorf("%w: metadata entry version %d, the cluster is at %d", domain.ErrUnsupportedFormat, data[0], level)
-		}
-		if s.raft.State() != raft.Leader {
-			return domain.ErrNotLeader
+			return aboveLevel(data[0], level)
 		}
 		result, err := s.apply(ctx, data)
 		if err != nil && result.err == nil {
@@ -275,19 +315,22 @@ func (s *Store) ProposeLocal(ctx context.Context, data []byte) ([]byte, error) {
 
 // Subject says what an encoded entry is about, for whoever must decide
 // whether its proposer may propose it: the node whose record the entry sets
-// or removes. Both are empty for every other entry.
-func (s *Store) Subject(data []byte) (registers, removes string, err error) {
+// (registers) or removes, or whose count of reads it reports (counts). All
+// three are empty for every other entry.
+func (s *Store) Subject(data []byte) (registers, removes, counts string, err error) {
 	e, err := decodeEntry(data, s.supported)
 	if err != nil {
-		return "", "", fmt.Errorf("raftmeta.Subject: %w", err)
+		return "", "", "", fmt.Errorf("raftmeta.Subject: %w", err)
 	}
 	switch e.Type {
 	case cmdSetNode:
-		return e.SetNode.ID, "", nil
+		return e.SetNode.ID, "", "", nil
 	case cmdRemoveNode:
-		return "", e.RemoveNode.ID, nil
+		return "", e.RemoveNode.ID, "", nil
+	case cmdAddReads:
+		return "", "", e.AddReads.Node, nil
 	default:
-		return "", "", nil
+		return "", "", "", nil
 	}
 }
 
@@ -306,10 +349,14 @@ func (s *Store) entryVersion() (byte, error) {
 	// A state that holds what only schema 2 can express has no member of
 	// the previous release: such a member stopped at the first of those
 	// entries. A member that has merely not registered yet - one that was
-	// just added - does not take the cluster back.
+	// just added - does not take the cluster back. The same holds for a
+	// state of schema 3 and the release before this one.
 	floor := byte(entrySchemaVersion)
 	if err := s.fsm.view(func(tx *bbolt.Tx) error {
-		if raw := tx.Bucket(metaBucket()).Get(schemaKey()); len(raw) == 8 && binary.BigEndian.Uint64(raw) >= stateSchemaTimed {
+		switch schema := readStateSchema(tx); {
+		case schema >= stateSchema3:
+			floor = entrySchema3
+		case schema >= stateSchemaTimed:
 			floor = entrySchemaTimed
 		}
 		return nil

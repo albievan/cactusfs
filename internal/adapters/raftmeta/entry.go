@@ -13,8 +13,10 @@ import (
 )
 
 // Raft entry schema. Version 1 is docs/adr/0003-metadata.md; version 2 is
-// docs/adr/0008-object-versions.md. Any change that an older binary could not
-// apply needs a new version, an ADR, a migration and an upgrade test.
+// docs/adr/0008-object-versions.md; version 3 is
+// docs/adr/0016-object-access-and-schema-3.md. Any change that an older
+// binary could not apply needs a new version, an ADR, a migration and an
+// upgrade test.
 //
 // An entry is one version byte followed by a JSON document:
 //
@@ -27,6 +29,11 @@ import (
 // Version 2 adds "at": the time the metadata leader gave the entry when it
 // logged it. The state machine never reads a clock; what must be decided on
 // time - whether a retention period has passed - is decided on this.
+//
+// Version 3 adds who made a version, tags on an upload, the tag rules of a
+// bucket, and the commands of object access, sub-buckets and the catalogue of
+// tags. An entry is of version 3 only when it carries one of them: everything
+// else is written as before.
 const (
 	// entrySchemaVersion is the oldest entry schema, which every binary
 	// applies.
@@ -34,11 +41,15 @@ const (
 	// entrySchemaTimed is the schema whose entries carry the leader's time
 	// and the commands of milestone 6.
 	entrySchemaTimed = 2
+	// entrySchema3 is the schema of ADR-0016, ADR-0017 and ADR-0018
+	// together: one rise for all three, so that no binary knows a part of
+	// it.
+	entrySchema3 = 3
 )
 
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
-const MetadataVersion = entrySchemaTimed
+const MetadataVersion = entrySchema3
 
 // Command types.
 const (
@@ -88,10 +99,16 @@ type entry struct {
 	// Bucket configuration and tags (schema 2).
 	SetBucketConfig *bucketConfigCmd `json:"set_bucket_config,omitempty"`
 	SetTags         *tagsCmd         `json:"set_tags,omitempty"`
+	// Object access, sub-buckets and the catalogue of tags (schema 3).
+	AddReads            *addReadsCmd         `json:"add_reads,omitempty"`
+	PutSubBucket        *subBucketCmd        `json:"put_sub_bucket,omitempty"`
+	DeleteSubBucket     *subBucketRefCmd     `json:"delete_sub_bucket,omitempty"`
+	PutTagDefinition    *tagDefinitionCmd    `json:"put_tag_definition,omitempty"`
+	DeleteTagDefinition *tagDefinitionRefCmd `json:"delete_tag_definition,omitempty"`
 }
 
 // bucketConfigCmd replaces one configuration document of a bucket; without
-// a document it removes it.
+// a document it removes it. The kind "tagrules" is of schema 3.
 type bucketConfigCmd struct {
 	Bucket   string `json:"bucket"`
 	Kind     string `json:"kind"`
@@ -256,7 +273,7 @@ type bucketRecord struct {
 	// DefaultRetention is given to versions put without a retention.
 	DefaultRetention *retentionRule `json:"default_retention,omitempty"`
 	// Config holds the configuration documents of the bucket by kind:
-	// policy, CORS rules, tags (schema 2).
+	// policy, CORS rules, tags (schema 2), tag rules (schema 3).
 	Config map[string][]byte `json:"config,omitempty"`
 }
 
@@ -281,6 +298,9 @@ type versionRecord struct {
 	Parts int `json:"parts,omitempty"`
 	// Tags are the tags of the version (schema 2).
 	Tags map[string]string `json:"tags,omitempty"`
+	// CreatedBy is who committed the version (schema 3). A record without
+	// it was written before that was recorded.
+	CreatedBy string `json:"created_by,omitempty"`
 	// Dropped is set only in the answer to an entry that removed this
 	// version, never in the state: the parts that went with it, whose
 	// data the proposer may now remove.
@@ -401,6 +421,20 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
 	switch e.Type {
+	case cmdAddReads, cmdPutSubBucket, cmdDeleteSubBucket, cmdPutTagDefinition, cmdDeleteTagDefinition:
+		return entrySchema3
+	}
+	// A command of an older schema that carries what only the third knows:
+	// a binary of the second would drop the field, or refuse the kind, and
+	// its replica would part from the others.
+	switch {
+	case e.PutObject != nil && e.PutObject.CreatedBy != "",
+		e.CompleteUpload != nil && e.CompleteUpload.CreatedBy != "",
+		e.CreateUpload != nil && len(e.CreateUpload.Tags) != 0,
+		e.SetBucketConfig != nil && e.SetBucketConfig.Kind == bucket.ConfigTagRules:
+		return entrySchema3
+	}
+	switch e.Type {
 	case cmdSetVersioning, cmdDeleteVersion, cmdSetBucketLock, cmdSetRetention, cmdSetLegalHold,
 		cmdCreateUpload, cmdPutPart, cmdCompleteUpload, cmdAbortUpload, cmdSetBucketConfig, cmdSetTags:
 		return entrySchemaTimed
@@ -430,6 +464,11 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 	if err := json.Unmarshal(data[1:], &e); err != nil {
 		return entry{}, fmt.Errorf("%w: malformed metadata entry: %w", domain.ErrUnsupportedFormat, err)
 	}
+	if data[0] < entrySchema3 {
+		// A binary of an older schema does not see these payloads at all:
+		// in an entry of its schema they say nothing here either.
+		e.AddReads, e.PutSubBucket, e.DeleteSubBucket, e.PutTagDefinition, e.DeleteTagDefinition = nil, nil, nil, nil, nil
+	}
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
@@ -437,6 +476,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.SetBucketLock != nil, e.SetRetention != nil, e.SetLegalHold != nil,
 		e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
 		e.SetBucketConfig != nil, e.SetTags != nil,
+		e.AddReads != nil, e.PutSubBucket != nil, e.DeleteSubBucket != nil, e.PutTagDefinition != nil, e.DeleteTagDefinition != nil,
 	} {
 		if present {
 			set++
@@ -482,6 +522,16 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.SetBucketConfig != nil && data[0] >= entrySchemaTimed
 	case cmdSetTags:
 		ok = ok && e.SetTags != nil && data[0] >= entrySchemaTimed
+	case cmdAddReads:
+		ok = ok && e.AddReads != nil && data[0] >= entrySchema3
+	case cmdPutSubBucket:
+		ok = ok && e.PutSubBucket != nil && data[0] >= entrySchema3
+	case cmdDeleteSubBucket:
+		ok = ok && e.DeleteSubBucket != nil && data[0] >= entrySchema3
+	case cmdPutTagDefinition:
+		ok = ok && e.PutTagDefinition != nil && data[0] >= entrySchema3
+	case cmdDeleteTagDefinition:
+		ok = ok && e.DeleteTagDefinition != nil && data[0] >= entrySchema3
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -529,6 +579,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		Lock:               lockToRecord(v.Lock),
 		Parts:              v.Parts,
 		Tags:               v.Tags,
+		CreatedBy:          v.CreatedBy,
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -569,6 +620,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		Lock:               r.Lock.toDomain(),
 		Parts:              r.Parts,
 		Tags:               r.Tags,
+		CreatedBy:          r.CreatedBy,
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,

@@ -531,6 +531,15 @@ func (s *Store) peek(fn func(tx *bbolt.Tx) error) error {
 // machine or never reached the log. An error wrapping domain.ErrOutcomeUnknown
 // means the entry may be in the log and may still take effect, now or after a
 // restart; nothing it refers to may be cleaned up.
+//
+// The entry is written in the schema the cluster writes now, as this node
+// knows it - and a node that does not lead may know it a moment late: a
+// member whose record was just removed is, to this node, still one that
+// understands the newest. The leader then refuses the entry for its schema,
+// having logged nothing. This node catches up with the leader and writes the
+// entry again, below the schema that was refused: without what a write can
+// go without (heldTo), or not at all - and then the error wraps
+// domain.ErrUnavailable, as it does when this node knew by itself.
 func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 	var result applyResult
 	err := s.use(func() error {
@@ -544,35 +553,89 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 		if err := s.fsm.health(); err != nil {
 			return err
 		}
-		version := s.versionOf(e)
-		if level, err := s.entryVersion(); err != nil {
-			return err
-		} else if version > level {
-			return fmt.Errorf("%w: the cluster is being upgraded: this change needs metadata version %d, "+
-				"and a node that only understands version %d is still a member", domain.ErrUnavailable, version, level)
-		}
-		data, err := encodeEntry(e, version)
-		if err != nil {
-			return err
-		}
-		return s.onLeader(ctx,
-			func() (err error) {
-				result, err = s.apply(ctx, data)
+		// limit is the newest schema the leader has not refused. Every
+		// refusal lowers it, so there are fewer attempts than schemas.
+		limit := s.supported
+		for {
+			level, err := s.entryVersion()
+			if err != nil {
 				return err
-			},
-			func(leaderID string) error {
-				raw, err := s.leader.Propose(ctx, leaderID, data)
-				if err != nil {
+			}
+			level = min(level, limit)
+			held := heldTo(e, level)
+			version := s.versionOf(held)
+			if version > level {
+				return fmt.Errorf("%w: the cluster is being upgraded: this change needs metadata version %d, "+
+					"and a node that only understands version %d is still a member", domain.ErrUnavailable, version, level)
+			}
+			data, err := encodeEntry(held, version)
+			if err != nil {
+				return err
+			}
+			err = s.onLeader(ctx,
+				func() (err error) {
+					result, err = s.apply(ctx, data)
 					return err
+				},
+				func(leaderID string) error {
+					raw, err := s.leader.Propose(ctx, leaderID, data)
+					if isAboveLevel(err) {
+						// Not a leader out of reach, which would be
+						// asked the same again: an answer, to act on.
+						return &levelRefusal{cause: err}
+					}
+					if err != nil {
+						return err
+					}
+					if result, err = decodeResult(raw); err != nil {
+						// The leader applied the entry; what it answered is lost.
+						return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, err)
+					}
+					return result.err
+				})
+			var refused *levelRefusal
+			if !errors.As(err, &refused) {
+				return err
+			}
+			// The leader knows the cluster better than this node did.
+			// What it knew when it refused, this node knows after
+			// catching up; and whatever this node then sees, the schema
+			// that was refused is not tried again.
+			if err := s.consistent(ctx); err != nil {
+				if errors.Is(err, domain.ErrNotLeader) || errors.Is(err, domain.ErrUnavailable) {
+					// Nothing was logged, and the caller can try again.
+					return fmt.Errorf("%w: the metadata leader refused the entry for its schema and could not be asked again: %s",
+						domain.ErrUnavailable, err.Error())
 				}
-				if result, err = decodeResult(raw); err != nil {
-					// The leader applied the entry; what it answered is lost.
-					return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, err)
-				}
-				return result.err
-			})
+				return err
+			}
+			limit = version - 1
+		}
 	})
 	return result, err
+}
+
+// heldTo returns an entry as it can be written while the cluster is at
+// level. Who made a version is something a write can go without: below
+// schema 3 a put and a completion are proposed without it and succeed, as
+// they did before it was recorded (ADR-0016: nothing is refused that worked
+// before). Everything else that needs a newer schema is refused instead. The
+// caller's entry is not changed.
+func heldTo(e entry, level byte) entry {
+	if level >= entrySchema3 {
+		return e
+	}
+	if e.PutObject != nil && e.PutObject.CreatedBy != "" {
+		v := *e.PutObject
+		v.CreatedBy = ""
+		e.PutObject = &v
+	}
+	if e.CompleteUpload != nil && e.CompleteUpload.CreatedBy != "" {
+		c := *e.CompleteUpload
+		c.CreatedBy = ""
+		e.CompleteUpload = &c
+	}
+	return e
 }
 
 // stamp gives an entry the leader's time, once every member applies the
@@ -723,7 +786,9 @@ func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResu
 	}
 	out := ports.PutResult{Stored: v, Removed: removed, RemovedParts: removedParts(result.previous)}
 	// A leader of the previous release does not say what it stored; then
-	// the bucket cannot keep versions, and what was proposed is it.
+	// the bucket cannot keep versions, and what was proposed is it - less
+	// who made it, which such a leader cannot have recorded.
+	out.Stored.CreatedBy = ""
 	if stored, err := versionOfRecord(result.stored); err != nil {
 		return ports.PutResult{}, fmt.Errorf("raftmeta.PutVersion: %w: %w", domain.ErrOutcomeUnknown, err)
 	} else if stored != nil {

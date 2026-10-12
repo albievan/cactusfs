@@ -18,6 +18,22 @@ func TestMemMetadataContract(t *testing.T) {
 	porttest.MetadataContract(t, func(*testing.T) porttest.Metadata { return porttest.NewMemMetadata() })
 }
 
+// memSchema3 is the in-memory stores as one: the metadata, and the trail
+// that its audited changes are appended to.
+type memSchema3 struct {
+	*porttest.MemMetadata
+	*porttest.MemIAM
+}
+
+func TestMemSchema3Contract(t *testing.T) {
+	t.Parallel()
+	porttest.Schema3Contract(t, func(*testing.T) porttest.Schema3 {
+		store := memSchema3{MemMetadata: porttest.NewMemMetadata(), MemIAM: porttest.NewMemIAM()}
+		store.Audit = store.MemIAM
+		return store
+	})
+}
+
 func TestMemShardStoreContract(t *testing.T) {
 	t.Parallel()
 	porttest.ShardStoreContract(t, func(*testing.T) ports.ShardStore { return porttest.NewMemShardStore("mem-drive") })

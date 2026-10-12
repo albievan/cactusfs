@@ -88,6 +88,11 @@ type Version struct {
 	// Seq orders the versions of a key: the newest has the greatest. It
 	// is given when the version is committed.
 	Seq uint64
+	// CreatedBy is who committed the version, as the audit trail names
+	// actors ("root", "user/<name>", "key/<id>"): whoever put the object,
+	// copied it here, or completed its multipart upload. Empty for a
+	// version written before this was recorded (entry schema 3, ADR-0016).
+	CreatedBy string
 	// DeleteMarker says that this version stands for the object having
 	// been deleted: it has no content.
 	DeleteMarker bool

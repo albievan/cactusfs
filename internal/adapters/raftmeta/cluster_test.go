@@ -19,9 +19,11 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/domain/tagging"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -45,8 +47,10 @@ type testCluster struct {
 	// deaf nodes do not answer when asked for their term, though Raft
 	// itself still reaches them.
 	deaf map[string]bool
-	// newer names the nodes that run the binary of the next release.
+	// newer names the nodes that run the binary of the next release, and
+	// older those that run the binary of the release before this one.
 	newer map[string]bool
+	older map[string]bool
 }
 
 type recorder struct {
@@ -71,7 +75,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	t.Helper()
 	return &testCluster{
 		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{},
-		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, deaf: map[string]bool{},
+		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, deaf: map[string]bool{},
 	}
 }
 
@@ -179,6 +183,9 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	if c.newer[id] {
 		asNextRelease(store)
 	}
+	if c.older[id] {
+		asPreviousRelease(store)
+	}
 	c.mu.Lock()
 	c.stores[id] = store
 	c.members[id] = Member{ID: id, RaftAddr: listener.Addr().String(), Voter: voter}
@@ -200,6 +207,16 @@ func asNextRelease(s *Store) {
 		}
 		return entrySchemaVersion
 	}
+}
+
+// asPreviousRelease makes a store behave like the binary of the release
+// before this one, which applies entry schema 2 and nothing newer: it
+// announces 2 when it registers, writes nothing above it, and stops at an
+// entry of schema 3.
+func asPreviousRelease(s *Store) {
+	s.supported = entrySchemaTimed
+	s.fsm.supported = entrySchemaTimed
+	s.versionOf = func(e entry) byte { return min(versionOf(e), entrySchemaTimed) }
 }
 
 func (c *testCluster) stop(id string) {
@@ -311,6 +328,33 @@ func TestEveryNodeOfAClusterHonoursTheContract(t *testing.T) {
 		c.register("m1", "m2", "m3", "s4")
 		// The node that is asked has to have seen the registrations
 		// itself before it will write what needs the newer schema.
+		eventually(t, "the node to see every member's version", func() bool {
+			level, err := c.store("s4").entryVersion()
+			return err == nil && level == MetadataVersion
+		})
+		return c.store("s4")
+	})
+}
+
+// TestEveryNodeOfAClusterHonoursTheContractOfSchema3: what schema 3 added,
+// asked of a node that neither leads nor votes, in a cluster whose members
+// have all said that they apply it.
+func TestEveryNodeOfAClusterHonoursTheContractOfSchema3(t *testing.T) {
+	t.Parallel()
+	porttest.Schema3Contract(t, func(t *testing.T) porttest.Schema3 {
+		c := newTestCluster(t)
+		c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+		c.register("m1", "m2", "m3", "s4")
+		// The contract has two gateways hand in what they counted. A
+		// cluster takes that from nodes it knows, so they are made known:
+		// nodes that are no members of the metadata group, as gateways
+		// without the meta role are none.
+		for _, id := range []string{"node-a", "node-b"} {
+			node := cluster.Node{ID: id, RPCAddr: id + ":9002", Roles: cluster.Roles{cluster.RoleGateway}, MetadataVersion: MetadataVersion}
+			if err := c.store("s4").SetNode(t.Context(), node); err != nil {
+				t.Fatalf("SetNode %s: %v", id, err)
+			}
+		}
 		eventually(t, "the node to see every member's version", func() bool {
 			level, err := c.store("s4").entryVersion()
 			return err == nil && level == MetadataVersion
@@ -688,42 +732,577 @@ func TestRollingUpgrade(t *testing.T) {
 // TestAnOlderNodeStopsRatherThanMisapply: if an entry of a newer format does
 // reach a node that cannot apply it, that node's state machine stops and the
 // node leaves the group; it never guesses. The rest of the cluster goes on.
+// That is so for a release to come, and it is so for this release and the
+// one before it: a node of schema 2 that meets an entry of schema 3.
 func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
+	t.Parallel()
+	definition := tagging.Definition{Key: "too-new", CreatedAt: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)}
+	tests := map[string]struct {
+		// prepare says which binaries run where, before the nodes start.
+		prepare func(c *testCluster)
+		// claimed is the version the old node s4 is wrongly said to have.
+		claimed int
+		// write makes the entry s4 cannot apply; wrote asks for what it
+		// made.
+		write func(ctx context.Context, s *Store) error
+		wrote func(ctx context.Context, s *Store) error
+	}{
+		"a release to come": {
+			prepare: func(c *testCluster) { c.newer["m1"], c.newer["m2"], c.newer["m3"] = true, true, true },
+			claimed: MetadataVersion + 1,
+			write: func(ctx context.Context, s *Store) error {
+				return s.CreateBucket(ctx, bucket.Bucket{Name: "too-new"})
+			},
+			wrote: func(ctx context.Context, s *Store) error {
+				_, err := s.GetBucket(ctx, "too-new")
+				return err
+			},
+		},
+		"schema 3 and the release before": {
+			prepare: func(c *testCluster) { c.older["s4"] = true },
+			claimed: entrySchema3,
+			write: func(ctx context.Context, s *Store) error {
+				return s.PutTagDefinition(ctx, definition, audit.Record{})
+			},
+			wrote: func(ctx context.Context, s *Store) error {
+				_, err := s.GetTagDefinition(ctx, "too-new")
+				return err
+			},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			c := newTestCluster(t)
+			test.prepare(c)
+			c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+			// Only the newer nodes are registered; the old node s4 is a
+			// member the others do not know the version of, and so the
+			// cluster stays below their level until s4 is counted.
+			c.register("m1", "m2", "m3")
+			if err := test.write(ctx, c.store("m1")); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("the write with an unregistered member = %v, want %v", err, domain.ErrUnavailable)
+			}
+
+			// Force the situation the rules exist to prevent: s4 claims
+			// a version it does not have.
+			lying := cluster.Node{ID: "s4", RPCAddr: "s4:9002", Roles: cluster.AllRoles(), MetadataVersion: test.claimed}
+			if err := c.store("m1").SetNode(ctx, lying); err != nil {
+				t.Fatal(err)
+			}
+			// m1 may need a moment to see the registration it just made.
+			eventually(t, "the new format to be used", func() bool {
+				return test.write(ctx, c.store("m1")) == nil
+			})
+			eventually(t, "the old node to stop", func() bool {
+				return errors.Is(c.store("s4").Check(ctx), domain.ErrUnsupportedFormat)
+			})
+			if _, err := c.store("s4").GetBucket(ctx, "too-new"); !errors.Is(err, domain.ErrUnsupportedFormat) {
+				t.Errorf("read on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+			}
+			if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "x"}); !errors.Is(err, domain.ErrUnsupportedFormat) {
+				t.Errorf("write on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+			}
+			// It did not apply the entry in some other way: nothing of
+			// schema 3 is in its state, which still says what it said.
+			if got := rawState(t, c.store("s4").fsm, schema3Buckets()...); len(got) != 0 {
+				t.Errorf("the stopped node holds %v", got)
+			}
+			for _, id := range []string{"m1", "m2", "m3"} {
+				if err := test.wrote(ctx, c.store(id)); err != nil {
+					t.Errorf("node %s: %v", id, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRollingUpgradeToSchema3: a cluster of the release before this one -
+// entry schema 2 - is upgraded node by node. While any member is of that
+// release nothing of schema 3 is logged: what needs it is refused as
+// unavailable, definitely and before anything is written, and a put or a
+// completion goes without who made the version and succeeds. Nothing that
+// worked before is refused, on any node, at any step. The state stays what
+// the release before wrote until schema 3 is first used; then every node
+// holds the same.
+func TestRollingUpgradeToSchema3(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	c := newTestCluster(t)
-	c.newer["m1"], c.newer["m2"], c.newer["m3"] = true, true, true
-	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
-	// Only the newer nodes are registered, so the cluster's level is 2; the
-	// old node s4 is a member the others do not know the version of... and
-	// so the level stays 1 until s4 is taken out of the count.
-	c.register("m1", "m2", "m3")
-	if err := c.store("m1").CreateBucket(ctx, bucket.Bucket{Name: "held-back"}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("CreateBucket with an unregistered member = %v, want %v", err, domain.ErrUnavailable)
+	nodes := []string{"m1", "m2", "m3", "s4"}
+	for _, id := range nodes {
+		c.older[id] = true
 	}
-
-	// Force the situation the rules exist to prevent: s4 claims a version
-	// it does not have.
-	lying := cluster.Node{ID: "s4", RPCAddr: "s4:9002", Roles: cluster.AllRoles(), MetadataVersion: MetadataVersion + 1}
-	if err := c.store("m1").SetNode(ctx, lying); err != nil {
+	c.form(nodes[:3], nodes[3:])
+	c.register(nodes...)
+	created := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	for _, id := range nodes {
+		eventually(t, "node "+id+" to see every member on schema 2", func() bool {
+			level, err := c.store(id).entryVersion()
+			return err == nil && level == entrySchemaTimed
+		})
+	}
+	// The release before at work: what schema 2 has.
+	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {
 		t.Fatal(err)
 	}
-	// m1 may need a moment to see the registration it just made.
-	eventually(t, "the new format to be used", func() bool {
-		return c.store("m1").CreateBucket(ctx, bucket.Bucket{Name: "too-new"}) == nil
-	})
-	eventually(t, "the old node to stop", func() bool {
-		return errors.Is(c.store("s4").Check(ctx), domain.ErrUnsupportedFormat)
-	})
-	if _, err := c.store("s4").GetBucket(ctx, "too-new"); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("read on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+	if err := c.store("m1").SetBucketConfig(ctx, "b", bucket.ConfigPolicy, []byte(`{"from":"schema 2"}`)); err != nil {
+		t.Fatal(err)
 	}
-	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "x"}); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("write on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+	read, err := c.store("m2").PutVersion(ctx, porttest.SampleVersion("b", "reports/read", 1))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, id := range []string{"m1", "m2", "m3"} {
-		if _, err := c.store(id).GetBucket(ctx, "too-new"); err != nil {
-			t.Errorf("node %s: %v", id, err)
+	rules, err := bucket.TagRules{Lowercase: true, Required: []bucket.RequiredTag{{Key: "stage"}}}.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// small is a small number as a byte, without a conversion that could
+	// lose something: the serial numbers below are fill bytes too.
+	small := func(n int) uint8 {
+		return [...]uint8{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63}[n]
+	}
+	// needsSchema3 is one of everything that cannot be written below
+	// schema 3. serial keeps what one call makes apart from the next.
+	needsSchema3 := func(s *Store, serial uint8) map[string]func() error {
+		name := fmt.Sprintf("s%d", serial)
+		tagged := porttest.SampleUpload("b", "tagged-"+name, serial+1)
+		tagged.Tags = map[string]string{"stage": "draft"}
+		return map[string]func() error{
+			"a sub-bucket": func() error {
+				return s.PutSubBucket(ctx, "b", bucket.SubBucket{Name: name, CreatedAt: created}, audit.Record{})
+			},
+			"a tag definition": func() error {
+				return s.PutTagDefinition(ctx, tagging.Definition{Key: name, CreatedAt: created}, audit.Record{})
+			},
+			"tag rules": func() error { return s.SetBucketConfig(ctx, "b", bucket.ConfigTagRules, rules) },
+			"reads": func() error {
+				return s.AddObjectReads(ctx, ports.ReadBatch{Node: s.NodeID(), Boot: 1, Seq: uint64(serial + 1), Items: []ports.ObjectRead{
+					{Bucket: "b", Key: read.Stored.Key, Version: read.Stored.Ref(), VersionID: read.Stored.VersionID, Read: object.Read{Who: "user/" + name, Downloads: 1}},
+				}})
+			},
+			"an upload with tags": func() error { return s.CreateUpload(ctx, tagged) },
+		}
+	}
+	// putAndComplete makes a version each way one is made, saying who
+	// makes it, and returns who the store recorded.
+	putAndComplete := func(s *Store, serial uint8) (string, string) {
+		t.Helper()
+		v := porttest.SampleVersion("b", fmt.Sprintf("put-%d", serial), serial+1)
+		v.CreatedBy = "user/albie"
+		put, err := s.PutVersion(ctx, v)
+		if err != nil {
+			t.Fatalf("step %d: PutVersion that says who: %v", serial, err)
+		}
+		u := porttest.SampleUpload("b", fmt.Sprintf("upload-%d", serial), serial+100)
+		if err := s.CreateUpload(ctx, u); err != nil {
+			t.Fatalf("step %d: CreateUpload: %v", serial, err)
+		}
+		part := porttest.SamplePart(u, 1, 10, 0)
+		if _, err := s.PutPart(ctx, "b", u.Key, u.ID, part); err != nil {
+			t.Fatalf("step %d: PutPart: %v", serial, err)
+		}
+		part.Seal = bytes.Repeat([]byte{1}, 32)
+		completed, err := s.CompleteUpload(ctx, ports.Completion{
+			Bucket: "b", Key: u.Key, ID: u.ID, VersionID: object.ID(bytes.Repeat([]byte{serial + 50}, object.IDSize)),
+			ETag: "etag", At: created, CreatedBy: "key/AKID", Parts: []object.Part{part},
+		})
+		if err != nil {
+			t.Fatalf("step %d: CompleteUpload that says who: %v", serial, err)
+		}
+		// What the answer says is what a read finds.
+		for key, want := range map[string]string{v.Key: put.Stored.CreatedBy, u.Key: completed.Stored.CreatedBy} {
+			if got, err := s.GetObject(ctx, "b", key); err != nil || got.CreatedBy != want {
+				t.Errorf("step %d: %s is stored as made by %q (%v), the answer said %q", serial, key, got.CreatedBy, err, want)
+			}
+		}
+		return put.Stored.CreatedBy, completed.Stored.CreatedBy
+	}
+
+	for i, id := range nodes {
+		// The node is stopped and comes back with this release.
+		c.stop(id)
+		c.mu.Lock()
+		c.older[id] = false
+		c.mu.Unlock()
+		store := c.start(id, id != "s4")
+		c.ready(id)
+
+		// Twice: before the node has registered what it now applies, and
+		// after, while older members remain.
+		for _, registered := range []bool{false, true} {
+			if registered {
+				c.register(id)
+				if i == len(nodes)-1 {
+					break
+				}
+			}
+			for what, write := range needsSchema3(store, small(i)) {
+				if err := write(); !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrOutcomeUnknown) {
+					t.Fatalf("node %s on schema 3 (registered: %v), members on schema 2: %s = %v, want a definite %v",
+						id, registered, what, err, domain.ErrUnavailable)
+				}
+			}
+			// Who makes a version is not recorded yet, and the write
+			// succeeds all the same.
+			if byPut, byUpload := putAndComplete(store, small(2*i+map[bool]int{false: 0, true: 1}[registered])); byPut != "" || byUpload != "" {
+				t.Fatalf("node %s, members on schema 2: versions recorded as made by %q and %q", id, byPut, byUpload)
+			}
+		}
+		// Everything that both releases understand keeps working, on
+		// every node, throughout - and what schema 3 keeps reads as
+		// empty, not as an error.
+		for _, other := range nodes {
+			s := c.store(other)
+			if _, err := s.PutVersion(ctx, porttest.SampleVersion("b", fmt.Sprintf("k-%s-%d", other, i), byte(i+1))); err != nil {
+				t.Fatalf("upgrade step %d: PutVersion on %s: %v", i, other, err)
+			}
+			if err := s.SetBucketConfig(ctx, "b", bucket.ConfigCORS, fmt.Appendf(nil, `{"step":%d}`, i)); err != nil {
+				t.Fatalf("upgrade step %d: SetBucketConfig on %s: %v", i, other, err)
+			}
+			if err := s.Check(ctx); err != nil {
+				t.Fatalf("upgrade step %d: node %s is not healthy: %v", i, other, err)
+			}
+		}
+		if subs, err := store.ListSubBuckets(ctx, "b"); err != nil || len(subs) != 0 {
+			t.Errorf("upgrade step %d: sub-buckets = %v, %v", i, subs, err)
+		}
+		if definitions, err := store.ListTagDefinitions(ctx); err != nil || len(definitions) != 0 {
+			t.Errorf("upgrade step %d: tag definitions = %v, %v", i, definitions, err)
+		}
+		if access, err := store.ObjectAccess(ctx, "b", read.Stored.Key, read.Stored.Ref()); err != nil || !access.Empty() {
+			t.Errorf("upgrade step %d: record of reads = %+v, %v", i, access, err)
+		}
+		if got, err := store.GetBucketConfig(ctx, "b", bucket.ConfigTagRules); err != nil || got != nil {
+			t.Errorf("upgrade step %d: tag rules = %s, %v", i, got, err)
+		}
+	}
+
+	// All four run this release and have said so. Nothing of schema 3 was
+	// written yet: every state is still one the release before opens, and
+	// the upgrade could be undone.
+	for _, id := range nodes {
+		eventually(t, "node "+id+" to see every member on schema 3", func() bool {
+			level, err := c.store(id).entryVersion()
+			return err == nil && level == entrySchema3
+		})
+		if got := stateSchema(t, c.store(id).fsm); got != stateSchemaTimed {
+			t.Errorf("node %s: state schema %d before schema 3 was used, want %d", id, got, stateSchemaTimed)
+		}
+		if got := rawState(t, c.store(id).fsm, schema3Buckets()...); len(got) != 0 {
+			t.Errorf("node %s holds %v before schema 3 was used", id, got)
+		}
+	}
+
+	// Now it is in use, through every node.
+	for i, id := range nodes {
+		store := c.store(id)
+		for what, write := range needsSchema3(store, small(10+i)) {
+			if err := write(); err != nil {
+				t.Fatalf("after the upgrade, on %s: %s: %v", id, what, err)
+			}
+		}
+		if byPut, byUpload := putAndComplete(store, small(20+i)); byPut != "user/albie" || byUpload != "key/AKID" {
+			t.Errorf("after the upgrade, on %s: versions recorded as made by %q and %q", id, byPut, byUpload)
+		}
+	}
+	want := map[string]string{}
+	for _, id := range nodes {
+		store := c.store(id)
+		// A read through the node waits until it has applied everything.
+		subs, err := store.ListSubBuckets(ctx, "b")
+		if err != nil || len(subs) != len(nodes) {
+			t.Errorf("node %s: sub-buckets = %v, %v", id, subs, err)
+		}
+		if definitions, err := store.ListTagDefinitions(ctx); err != nil || len(definitions) != len(nodes) {
+			t.Errorf("node %s: tag definitions = %v, %v", id, definitions, err)
+		}
+		access, err := store.ObjectAccess(ctx, "b", read.Stored.Key, read.Stored.Ref())
+		if err != nil || access.Downloads != int64(len(nodes)) || len(access.Readers) != len(nodes) {
+			t.Errorf("node %s: record of reads = %+v, %v", id, access, err)
+		}
+		if got, err := store.GetBucketConfig(ctx, "b", bucket.ConfigTagRules); err != nil || !bytes.Equal(got, rules) {
+			t.Errorf("node %s: tag rules = %s, %v", id, got, err)
+		}
+		if got, err := store.GetBucketConfig(ctx, "b", bucket.ConfigPolicy); err != nil || string(got) != `{"from":"schema 2"}` {
+			t.Errorf("node %s: the policy written before the upgrade = %s, %v", id, got, err)
+		}
+		if got := stateSchema(t, store.fsm); got != stateSchema3 {
+			t.Errorf("node %s: state schema %d after schema 3 was used", id, got)
+		}
+		// Every replica holds the same bytes: the records of reads, with
+		// the leader's time in them, are computed from the log alone.
+		got := rawState(t, store.fsm, schema3Buckets()...)
+		if len(want) == 0 {
+			want = got
+		}
+		if len(got) < 4*len(nodes) || !reflect.DeepEqual(got, want) {
+			t.Errorf("node %s holds other records than %s:\n%v\n%v", id, nodes[0], got, want)
+		}
+	}
+}
+
+// TestSchema3WhenAMemberHasNotRegistered: once the state holds what only
+// schema 3 expresses, no member of the release before can be in the cluster
+// - it stopped at the first such entry. So a member that has not said which
+// schema it applies - its record was removed, or it was just added - does
+// not take the cluster back to schema 2, where sub-buckets, the catalogue
+// and the records of reads could no longer be written.
+func TestSchema3WhenAMemberHasNotRegistered(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+	c.register("m1", "m2", "m3", "s4")
+	store := c.store("m1")
+	eventually(t, "m1 to see every member on schema 3", func() bool {
+		level, err := store.entryVersion()
+		return err == nil && level == entrySchema3
+	})
+	define := func(s *Store, key string) error {
+		return s.PutTagDefinition(ctx, tagging.Definition{Key: key, CreatedAt: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)}, audit.Record{})
+	}
+	// Before anything of schema 3 is in the state, a member whose record
+	// is gone holds the cluster back - it might be of the release before.
+	if err := store.RemoveNode(ctx, "s4"); err != nil {
+		t.Fatal(err)
+	}
+	// (Whether m1 leads or not, and so whether it knows of the removal
+	// yet: one that does not is told by the leader, and says the same.)
+	if err := define(store, "held-back"); !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrUnsupportedFormat) || errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Fatalf("schema 3 with an unregistered member, never used before = %v, want a definite %v and nothing else", err, domain.ErrUnavailable)
+	}
+	c.register("s4")
+	eventually(t, "schema 3 to be used", func() bool { return define(store, "first") == nil })
+
+	// From now on it cannot be.
+	if err := store.RemoveNode(ctx, "s4"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"m1", "s4"} {
+		if err := define(c.store(id), "through-"+id); err != nil {
+			t.Errorf("schema 3 through %s with an unregistered member, after it was used = %v", id, err)
+		}
+		v := porttest.SampleVersion("b-"+id, "k", 1)
+		v.CreatedBy = "user/albie"
+		if err := c.store(id).CreateBucket(ctx, bucket.Bucket{Name: v.Bucket}); err != nil {
+			t.Fatal(err)
+		}
+		if put, err := c.store(id).PutVersion(ctx, v); err != nil || put.Stored.CreatedBy != "user/albie" {
+			t.Errorf("a put through %s that says who = made by %q, %v", id, put.Stored.CreatedBy, err)
+		}
+	}
+	if definitions, err := c.store("s4").ListTagDefinitions(ctx); err != nil || len(definitions) != 3 {
+		t.Errorf("the catalogue = %+v, %v; want three definitions", definitions, err)
+	}
+}
+
+// behindLeader is the leader client of a node that knows the cluster less
+// well than its leader does: whatever it proposes above level is refused as
+// the leader refuses an entry above the level of the cluster, and arrives as
+// it does from another node - by the domain errors it wraps and its message.
+// Everything else reaches the leader.
+type behindLeader struct {
+	LeaderClient
+	level byte
+
+	mu sync.Mutex
+	// schemas are the schemas of the entries the node proposed, in order.
+	schemas []byte
+}
+
+func (b *behindLeader) Propose(ctx context.Context, leaderID string, data []byte) ([]byte, error) {
+	b.mu.Lock()
+	b.schemas = append(b.schemas, data[0])
+	b.mu.Unlock()
+	if data[0] > b.level {
+		refusal := aboveLevel(data[0], b.level)
+		return nil, domain.FromCodes(domain.Codes(refusal), "node "+leaderID+": "+refusal.Error())
+	}
+	return b.LeaderClient.Propose(ctx, leaderID, data)
+}
+
+// proposed returns the schemas of the entries proposed since the last call.
+func (b *behindLeader) proposed() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := b.schemas
+	b.schemas = nil
+	return out
+}
+
+// TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema: a node that does
+// not lead may know the cluster a moment late, and write an entry in a schema
+// the cluster no longer - or not yet - writes. The leader refuses it, having
+// logged nothing. The node then does what it would have done had it known: a
+// put or a completion goes without saying who made the version and succeeds
+// (ADR-0016: nothing is refused that worked before); what cannot go without
+// schema 3 fails as "unavailable", which a caller may try again - never as a
+// format this binary does not understand, which nobody tries again.
+func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
+	c.register("m1", "m2", "m3", "s4")
+	store := c.store("s4")
+	eventually(t, "s4 to see every member on schema 3", func() bool {
+		level, err := store.entryVersion()
+		return err == nil && level == entrySchema3
+	})
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	// From here on s4 believes the cluster to be at schema 3, and its
+	// leader says 2. (s4 has no vote and never leads: every proposal of
+	// its own goes through this client.)
+	behind := &behindLeader{LeaderClient: store.leader, level: entrySchemaTimed}
+	store.leader = behind
+
+	v := porttest.SampleVersion("b", "by-put", 1)
+	v.CreatedBy = "user/albie"
+	put, err := store.PutVersion(ctx, v)
+	if err != nil || put.Stored.CreatedBy != "" {
+		t.Fatalf("a put that says who, through a node behind its leader = made by %q, %v; want it made, by nobody", put.Stored.CreatedBy, err)
+	}
+	if got := behind.proposed(); len(got) != 2 || got[0] != entrySchema3 || got[1] > entrySchemaTimed {
+		t.Errorf("the put was proposed in the schemas %v, want 3 and then one the leader takes", got)
+	}
+	if got, err := store.GetObject(ctx, "b", "by-put"); err != nil || got.CreatedBy != "" || got.VersionID != v.VersionID {
+		t.Errorf("the version that was put = %+v, %v", got, err)
+	}
+
+	u := porttest.SampleUpload("b", "by-upload", 2)
+	if err := store.CreateUpload(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	part := porttest.SamplePart(u, 1, 10, 0)
+	if _, err := store.PutPart(ctx, "b", u.Key, u.ID, part); err != nil {
+		t.Fatal(err)
+	}
+	behind.proposed()
+	part.Seal = bytes.Repeat([]byte{1}, 32)
+	completed, err := store.CompleteUpload(ctx, ports.Completion{
+		Bucket: "b", Key: u.Key, ID: u.ID, VersionID: object.ID(bytes.Repeat([]byte{9}, object.IDSize)), ETag: "e-1",
+		At: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC), Parts: []object.Part{part}, CreatedBy: "key/AKID",
+	})
+	if err != nil || completed.Stored.CreatedBy != "" {
+		t.Fatalf("a completion that says who, through a node behind its leader = made by %q, %v; want it made, by nobody", completed.Stored.CreatedBy, err)
+	}
+	if got := behind.proposed(); len(got) != 2 || got[0] != entrySchema3 || got[1] != entrySchemaTimed {
+		t.Errorf("the completion was proposed in the schemas %v, want 3 and then 2", got)
+	}
+
+	tagged := porttest.SampleUpload("b", "tagged", 3)
+	tagged.Tags = map[string]string{"stage": "draft"}
+	rules, err := bucket.TagRules{Lowercase: true}.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	for what, write := range map[string]func() error{
+		"a sub-bucket": func() error {
+			return store.PutSubBucket(ctx, "b", bucket.SubBucket{Name: "reports", CreatedAt: created}, audit.Record{})
+		},
+		"a tag definition": func() error {
+			return store.PutTagDefinition(ctx, tagging.Definition{Key: "stage", CreatedAt: created}, audit.Record{})
+		},
+		"tag rules": func() error { return store.SetBucketConfig(ctx, "b", bucket.ConfigTagRules, rules) },
+		"reads": func() error {
+			return store.AddObjectReads(ctx, ports.ReadBatch{Node: "s4", Boot: 1, Seq: 1, Items: []ports.ObjectRead{
+				{Bucket: "b", Key: v.Key, Version: put.Stored.Ref(), VersionID: put.Stored.VersionID, Read: object.Read{Who: "user/albie", Downloads: 1}},
+			}})
+		},
+		"an upload with tags": func() error { return store.CreateUpload(ctx, tagged) },
+	} {
+		behind.proposed()
+		err := write()
+		if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrUnsupportedFormat) || errors.Is(err, domain.ErrOutcomeUnknown) {
+			t.Errorf("%s through a node behind its leader = %v, want a definite %v and nothing else", what, err, domain.ErrUnavailable)
+		}
+		// Sent once: when the leader has said that the cluster is not at
+		// schema 3, the same entry is not sent again.
+		if got := behind.proposed(); len(got) != 1 || got[0] != entrySchema3 {
+			t.Errorf("%s was proposed in the schemas %v, want 3 and no more", what, got)
+		}
+	}
+	// Nothing of schema 3 was logged: every state is still one the release
+	// before opens.
+	for _, id := range []string{"m1", "m2", "m3", "s4"} {
+		c.ready(id)
+		if got := stateSchema(t, c.store(id).fsm); got != stateSchemaTimed {
+			t.Errorf("node %s: state schema %d, want %d", id, got, stateSchemaTimed)
+		}
+	}
+
+	// A leader that refuses whatever it is sent - which none does - is not
+	// asked for ever: the attempts end, and as "unavailable".
+	behind.mu.Lock()
+	behind.level = 0
+	behind.mu.Unlock()
+	behind.proposed()
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "never"}); !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Errorf("a change the leader refuses in every schema = %v, want a definite %v", err, domain.ErrUnavailable)
+	}
+	if got := behind.proposed(); len(got) == 0 || len(got) > int(MetadataVersion) {
+		t.Errorf("that change was proposed %d times, want at most once a schema", len(got))
+	}
+}
+
+// TestTheLeaderRefusesAnEntryAboveTheLevelAsUnavailable: what the leader
+// says to an entry written in a schema the cluster does not write: that it
+// was not logged and can be tried again - in a way its proposer knows from
+// every other refusal, also after the error has crossed to another node.
+func TestTheLeaderRefusesAnEntryAboveTheLevelAsUnavailable(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	nodes := []string{"m1", "m2", "m3", "s4"}
+	c.form(nodes[:3], nodes[3:])
+	c.register(nodes...)
+	// The record of a member goes: the cluster is at schema 2 again, and
+	// the node that committed the removal - the leader - knows at once.
+	if err := c.store("m1").RemoveNode(ctx, "s4"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := encodeEntry(entry{Type: cmdPutTagDefinition, PutTagDefinition: &tagDefinitionCmd{Definition: tagDefinitionRecord{Key: "stage"}}}, entrySchema3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refusal error
+	eventually(t, "the leader to answer", func() bool {
+		_, refusal = c.store(c.leader()).ProposeLocal(ctx, data)
+		return !errors.Is(refusal, domain.ErrNotLeader)
+	})
+	if !errors.Is(refusal, domain.ErrUnavailable) || errors.Is(refusal, domain.ErrOutcomeUnknown) || !isAboveLevel(refusal) {
+		t.Fatalf("an entry of schema 3 in a cluster at schema 2 = %v, want a definite %v that says it is for the schema", refusal, domain.ErrUnavailable)
+	}
+	if arrived := domain.FromCodes(domain.Codes(refusal), refusal.Error()); !isAboveLevel(arrived) || !errors.Is(arrived, domain.ErrUnavailable) {
+		t.Errorf("the refusal as it arrives from another node = %v (codes %v): its proposer does not know it", arrived, domain.Codes(refusal))
+	}
+	// No other failure of a proposal is taken for it.
+	for _, other := range []error{
+		nil, domain.ErrUnavailable, domain.ErrNotLeader, domain.ErrUnsupportedFormat,
+		fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, refusal),
+	} {
+		if isAboveLevel(other) {
+			t.Errorf("%v is taken for a refusal of the schema", other)
+		}
+	}
+	// Through every node, whatever each knows of the removal by now, the
+	// write is refused in the same words.
+	for _, id := range nodes {
+		err := c.store(id).PutTagDefinition(ctx, tagging.Definition{Key: "stage"}, audit.Record{})
+		if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrUnsupportedFormat) || errors.Is(err, domain.ErrOutcomeUnknown) {
+			t.Errorf("schema 3 through %s with an unregistered member = %v, want a definite %v and nothing else", id, err, domain.ErrUnavailable)
+		}
+	}
+	for _, id := range nodes {
+		c.ready(id)
+		if got := stateSchema(t, c.store(id).fsm); got != stateSchemaTimed {
+			t.Errorf("node %s: state schema %d after refusals, want %d", id, got, stateSchemaTimed)
 		}
 	}
 }
@@ -1019,29 +1598,30 @@ func TestANewLeaderAnswersOnlyWhenItHasCaughtUp(t *testing.T) {
 func TestSubject(t *testing.T) {
 	t.Parallel()
 	store := openStore(t, t.TempDir())
-	encode := func(e entry) []byte {
-		data, err := encodeEntry(e, entrySchemaVersion)
+	tests := []struct {
+		entry                     entry
+		registers, remove, counts string
+	}{
+		{entry{Type: cmdSetNode, SetNode: &nodeRecord{ID: "n1"}}, "n1", "", ""},
+		{entry{Type: cmdRemoveNode, RemoveNode: &removeNodeCmd{ID: "n2"}}, "", "n2", ""},
+		{entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "b"}}, "", "", ""},
+		{entry{Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: "b", Key: "k"}}, "", "", ""},
+		// A batch of reads is its node's, whatever is in it.
+		{entry{Type: cmdAddReads, AddReads: &addReadsCmd{Node: "n3", Boot: 1, Seq: 1}}, "", "", "n3"},
+		{entry{Type: cmdAddReads, AddReads: &addReadsCmd{Node: "n4", Items: []readItem{{Bucket: "b", Key: "k", Who: "n1"}}}}, "", "", "n4"},
+		{entry{Type: cmdPutTagDefinition, PutTagDefinition: &tagDefinitionCmd{Definition: tagDefinitionRecord{Key: "n1"}}}, "", "", ""},
+	}
+	for _, tt := range tests {
+		data, err := encodeEntry(tt.entry, versionOf(tt.entry))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return data
-	}
-	tests := []struct {
-		entry             entry
-		registers, remove string
-	}{
-		{entry{Type: cmdSetNode, SetNode: &nodeRecord{ID: "n1"}}, "n1", ""},
-		{entry{Type: cmdRemoveNode, RemoveNode: &removeNodeCmd{ID: "n2"}}, "", "n2"},
-		{entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "b"}}, "", ""},
-		{entry{Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: "b", Key: "k"}}, "", ""},
-	}
-	for _, tt := range tests {
-		registers, removes, err := store.Subject(encode(tt.entry))
-		if err != nil || registers != tt.registers || removes != tt.remove {
-			t.Errorf("Subject(%s) = %q, %q, %v", tt.entry.Type, registers, removes, err)
+		registers, removes, counts, err := store.Subject(data)
+		if err != nil || registers != tt.registers || removes != tt.remove || counts != tt.counts {
+			t.Errorf("Subject(%s) = %q, %q, %q, %v", tt.entry.Type, registers, removes, counts, err)
 		}
 	}
-	if _, _, err := store.Subject([]byte("not an entry")); !errors.Is(err, domain.ErrUnsupportedFormat) {
+	if _, _, _, err := store.Subject([]byte("not an entry")); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		t.Errorf("Subject of garbage = %v", err)
 	}
 }

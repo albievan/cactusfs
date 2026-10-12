@@ -30,6 +30,35 @@ import (
 // the rest is found by the collector, as all unreferenced data is.
 const maxDroppedParts = 1000
 
+// Bounds of the tags an upload carries, as the state machine holds an entry
+// to them (schema 3). They are part of the replicated format: every member
+// must refuse the same entries, so they are numbers of tags and of bytes and
+// nothing else, fixed here, and changing one needs a rise of the entry
+// schema. What a tag may consist of - which characters are letters is a
+// matter of the Unicode tables a binary was built with - is checked by
+// whoever proposes the upload (Store.CreateUpload, object.ValidateTags),
+// never while applying. The bounds admit everything that check admits: ten
+// tags, a key of 128 characters and a value of 256, at four bytes each.
+const (
+	maxUploadTags          = 10
+	maxUploadTagKeyBytes   = 4 * 128
+	maxUploadTagValueBytes = 4 * 256
+)
+
+// uploadTagsFit reports whether the tags of an upload are within the bounds
+// the state machine keeps. Part of the replicated format, like the bounds.
+func uploadTagsFit(tags map[string]string) bool {
+	if len(tags) > maxUploadTags {
+		return false
+	}
+	for key, value := range tags {
+		if key == "" || len(key) > maxUploadTagKeyBytes || len(value) > maxUploadTagValueBytes {
+			return false
+		}
+	}
+	return true
+}
+
 const (
 	cmdCreateUpload   = "upload.create"
 	cmdPutPart        = "upload.part.put"
@@ -56,6 +85,8 @@ type uploadRecord struct {
 	ContentLanguage    string            `json:"content_language,omitempty"`
 	CacheControl       string            `json:"cache_control,omitempty"`
 	UserMetadata       map[string]string `json:"user_metadata,omitempty"`
+	// Tags are the tags the completed version is to have (schema 3).
+	Tags map[string]string `json:"tags,omitempty"`
 
 	Lock       *lockRecord      `json:"lock,omitempty"`
 	Encryption encryptionRecord `json:"encryption"`
@@ -102,6 +133,8 @@ type completeUploadCmd struct {
 	ETag       string       `json:"etag"`
 	ModifiedAt time.Time    `json:"modified_at"`
 	Parts      []listedPart `json:"parts"`
+	// CreatedBy is who completes the upload (schema 3).
+	CreatedBy string `json:"created_by,omitempty"`
 }
 
 // listedPart is a part as a completion names it: the number and the entity
@@ -154,6 +187,7 @@ func uploadToRecord(u object.Upload) *uploadRecord {
 		Bucket: u.Bucket, Key: u.Key, ID: u.ID.String(), InitiatedAt: u.InitiatedAt.UTC(), Initiator: u.Initiator,
 		ContentType: u.ContentType, ContentEncoding: u.ContentEncoding, ContentDisposition: u.ContentDisposition,
 		ContentLanguage: u.ContentLanguage, CacheControl: u.CacheControl, UserMetadata: u.UserMetadata,
+		Tags:       u.Tags,
 		Lock:       lockToRecord(u.Lock),
 		Encryption: encryptionToRecord(u.Encryption),
 	}
@@ -168,6 +202,7 @@ func (r uploadRecord) toDomain() (object.Upload, error) {
 		Bucket: r.Bucket, Key: r.Key, ID: id, InitiatedAt: r.InitiatedAt, Initiator: r.Initiator,
 		ContentType: r.ContentType, ContentEncoding: r.ContentEncoding, ContentDisposition: r.ContentDisposition,
 		ContentLanguage: r.ContentLanguage, CacheControl: r.CacheControl, UserMetadata: r.UserMetadata,
+		Tags:       r.Tags,
 		Lock:       r.Lock.toDomain(),
 		Encryption: r.Encryption.toDomain(),
 	}, nil
@@ -267,6 +302,18 @@ func applyCreateUpload(tx *bbolt.Tx, u uploadRecord) (applyResult, error) {
 	}
 	if u.Encryption.KeyMode != object.KeyModePartHKDF {
 		return refuse(domain.ErrInvalidArgument, "key mode %q of an upload", u.Encryption.KeyMode)
+	}
+	// Tags that the version could not have are refused now, not when the
+	// parts have been uploaded - by their number and their sizes, which
+	// every build counts alike. What they consist of was the proposer's to
+	// check: an entry is never refused here by what one build takes for a
+	// letter and another does not.
+	if !uploadTagsFit(u.Tags) {
+		return refuse(domain.ErrInvalidTag, "the tags of an upload: at most %d, a key of 1 to %d bytes, a value of at most %d",
+			maxUploadTags, maxUploadTagKeyBytes, maxUploadTagValueBytes)
+	}
+	if len(u.Tags) == 0 {
+		u.Tags = nil
 	}
 	data, err := json.Marshal(u)
 	if err != nil {
@@ -491,6 +538,9 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 		ContentType: upload.ContentType, ContentEncoding: upload.ContentEncoding, ContentDisposition: upload.ContentDisposition,
 		ContentLanguage: upload.ContentLanguage, CacheControl: upload.CacheControl, UserMetadata: upload.UserMetadata,
 		Encryption: upload.Encryption,
+		// The tags were the upload's from its creation; who made the
+		// version is whoever completes it.
+		Tags: upload.Tags, CreatedBy: cmd.CreatedBy,
 	}
 	removed, refused, err := commitVersion(tx, b, &v, now)
 	if err != nil {
@@ -617,6 +667,23 @@ func dropUploads(tx *bbolt.Tx, bucketName string) error {
 
 // CreateUpload implements ports.UploadStore.
 func (s *Store) CreateUpload(ctx context.Context, u object.Upload) error {
+	if len(u.Tags) != 0 {
+		// An upload with tags is an entry of schema 3, and the first of
+		// those a state applies is where going back to the release before
+		// ends - whether it took effect or not. So what could be refused
+		// without looking at the state is refused here, before anything is
+		// proposed. The tags above all: what they may consist of is checked
+		// nowhere else on the way into the state (see uploadTagsFit).
+		if err := object.ValidateTags(u.Tags, object.MaxObjectTags); err != nil {
+			return fmt.Errorf("raftmeta.CreateUpload: %w", err)
+		}
+		if err := object.ValidateKey(u.Key); err != nil {
+			return fmt.Errorf("raftmeta.CreateUpload: %w", err)
+		}
+		if u.ID.IsZero() || u.Encryption.KeyMode != object.KeyModePartHKDF {
+			return fmt.Errorf("raftmeta.CreateUpload: %w: the ID or the key mode of the upload", domain.ErrInvalidArgument)
+		}
+	}
 	if _, err := s.propose(ctx, entry{Type: cmdCreateUpload, CreateUpload: uploadToRecord(u)}); err != nil {
 		return fmt.Errorf("raftmeta.CreateUpload: %w", err)
 	}
@@ -723,7 +790,7 @@ func (s *Store) ListParts(ctx context.Context, bucketName, key string, id object
 func (s *Store) CompleteUpload(ctx context.Context, c ports.Completion) (ports.PutResult, error) {
 	cmd := &completeUploadCmd{
 		Bucket: c.Bucket, Key: c.Key, UploadID: c.ID.String(), VersionID: c.VersionID.String(),
-		ETag: c.ETag, ModifiedAt: c.At.UTC(), Parts: make([]listedPart, len(c.Parts)),
+		ETag: c.ETag, ModifiedAt: c.At.UTC(), Parts: make([]listedPart, len(c.Parts)), CreatedBy: c.CreatedBy,
 	}
 	for i, p := range c.Parts {
 		cmd.Parts[i] = listedPart{Number: p.Number, ETag: p.ETag, Checksums: p.Checksums, DataID: p.DataID.String(), Seal: p.Seal}

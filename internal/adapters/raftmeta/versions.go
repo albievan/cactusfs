@@ -399,7 +399,14 @@ func removable(v *versionRecord, now applied, bypass bool) *applyResult {
 // dropData takes back the reference of a removed version to its stored data.
 // For a version made of parts it removes the parts, and notes on v, which
 // goes back to the proposer, the ones whose data is now to be removed.
+//
+// Every path that takes a version out of the state for good ends here, so
+// this is also where the record of who read the version goes, in the same
+// transaction (ADR-0016).
 func dropData(tx *bbolt.Tx, v *versionRecord) error {
+	if err := dropAccess(tx, *v); err != nil {
+		return err
+	}
 	if v.DeleteMarker {
 		return nil
 	}

@@ -236,10 +236,10 @@ func (m metaRPC) Term() (uint64, error) {
 	return store.Term()
 }
 
-func (m metaRPC) Subject(entry []byte) (registers, removes string, err error) {
+func (m metaRPC) Subject(entry []byte) (registers, removes, counts string, err error) {
 	store, err := m.store()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	return store.Subject(entry)
 }

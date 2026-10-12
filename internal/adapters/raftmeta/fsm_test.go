@@ -302,15 +302,27 @@ func FuzzDecodeEntry(f *testing.F) {
 	f.Add(append([]byte{2}, `{}`...))
 	f.Add(append([]byte{2}, `{"type":"upload.abort","abort_upload":{"bucket":"b","key":"k","upload_id":"00"}}`...))
 	f.Add(append([]byte{2}, `{"type":"upload.complete","complete_upload":{"bucket":"b","parts":[{"number":1}]},"put_part":{}}`...))
+	f.Add(append([]byte{2}, `{"type":"object.put","put_object":{"bucket":"b","key":"k","created_by":"user/x"},"add_reads":{"node":"n"}}`...))
+	f.Add(append([]byte{2}, `{"type":"bucket.config.put","set_bucket_config":{"bucket":"b","kind":"tagrules","document":"e30="}}`...))
+	f.Add(append([]byte{2}, `{"type":"subbucket.put","put_sub_bucket":{"bucket":"b","sub_bucket":{"name":"reports"}}}`...))
+	f.Add(append([]byte{3}, `{"type":"object.reads.add","add_reads":{"node":"n","boot":18446744073709551615,"seq":1,"items":[{"bucket":"b","key":"k","version":"null","version_id":"0102030405060708090a0b0c0d0e0f10","who":"root","downloads":1}]}}`...))
+	f.Add(append([]byte{3}, `{"type":"subbucket.put","put_sub_bucket":{"bucket":"b","sub_bucket":{"name":"reports","policy":"e30="},"audit":{"actor":"root"}}}`...))
+	f.Add(append([]byte{3}, `{"type":"subbucket.delete","delete_sub_bucket":{"bucket":"b","name":"reports"},"put_sub_bucket":{}}`...))
+	f.Add(append([]byte{3}, `{"type":"tag.definition.put","put_tag_definition":{"definition":{"key":"stage","values":["a","b"]}}}`...))
+	f.Add(append([]byte{3}, `{"type":"tag.definition.delete","delete_tag_definition":{"key":"stage"}}`...))
+	f.Add(append([]byte{3}, `{"type":"upload.create","create_upload":{"bucket":"b","key":"k","tags":{"a":"b"}}}`...))
+	f.Add(append([]byte{4}, `{"type":"tag.definition.delete","delete_tag_definition":{"key":"stage"}}`...))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// A binary of the newest schema: what it decodes has one payload,
 		// the one its type names.
-		if e, err := decodeEntry(data, entrySchemaTimed); err == nil {
+		if e, err := decodeEntry(data, entrySchema3); err == nil {
 			payloads := 0
 			for _, set := range []bool{
 				e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
 				e.SetNode != nil, e.RemoveNode != nil, e.IAM != nil, e.SetVersioning != nil, e.DeleteVersion != nil, e.SetBucketLock != nil,
 				e.SetRetention != nil, e.SetLegalHold != nil, e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
+				e.SetBucketConfig != nil, e.SetTags != nil,
+				e.AddReads != nil, e.PutSubBucket != nil, e.DeleteSubBucket != nil, e.PutTagDefinition != nil, e.DeleteTagDefinition != nil,
 			} {
 				if set {
 					payloads++
@@ -318,6 +330,29 @@ func FuzzDecodeEntry(f *testing.F) {
 			}
 			if payloads != 1 {
 				t.Fatalf("decoded entry %q has %d payloads", e.Type, payloads)
+			}
+			// What schema 3 added is in entries of schema 3 and in no
+			// other: neither its commands nor their payloads.
+			third := e.AddReads != nil || e.PutSubBucket != nil || e.DeleteSubBucket != nil || e.PutTagDefinition != nil || e.DeleteTagDefinition != nil
+			if third != (versionOf(entry{Type: e.Type}) == entrySchema3) {
+				t.Fatalf("decoded entry %q has a payload of schema 3: %v", e.Type, third)
+			}
+			if third && data[0] < entrySchema3 {
+				t.Fatalf("a command of schema 3, %q, was decoded from an entry of schema %d", e.Type, data[0])
+			}
+			// What decodes can be written again in the schema it came
+			// in, and decodes again as the same command.
+			again, err := encodeEntry(e, data[0])
+			if err != nil {
+				t.Fatalf("a decoded entry cannot be encoded: %v", err)
+			}
+			if twice, err := decodeEntry(again, entrySchema3); err != nil || twice.Type != e.Type {
+				t.Fatalf("a decoded entry does not decode again: %v", err)
+			}
+			// A binary of the schema before never accepts what only this
+			// one can apply.
+			if _, err := decodeEntry(data, entrySchemaTimed); err == nil && (data[0] >= entrySchema3 || third) {
+				t.Fatalf("a binary of schema 2 decoded %q from an entry of schema %d", e.Type, data[0])
 			}
 		} else if !errors.Is(err, domain.ErrUnsupportedFormat) {
 			t.Fatalf("untyped error: %v", err)
@@ -660,7 +695,7 @@ func TestTimedEntries(t *testing.T) {
 	// A state of a schema this binary does not know is refused, as the
 	// previous release refuses this one.
 	if err := f.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaTimed+1))
+		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchema3+1))
 	}); err != nil {
 		t.Fatal(err)
 	}

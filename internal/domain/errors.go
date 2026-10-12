@@ -46,6 +46,10 @@ var (
 	// given twice, or of characters a tag may not have. It is an
 	// ErrInvalidArgument.
 	ErrInvalidTag = fmt.Errorf("%w: invalid tag", ErrInvalidArgument)
+	// ErrTagRule reports tags that a rule of the bucket does not allow: a
+	// required tag is missing, or a tag is not one the bucket takes. It is
+	// an ErrInvalidTag.
+	ErrTagRule = fmt.Errorf("%w: against the bucket's tag rules", ErrInvalidTag)
 	// ErrAccessDenied reports that the authorizer refused the request.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrCredentialNotFound reports an access key ID that does not exist or
@@ -76,6 +80,16 @@ var (
 	// ErrBucketNotEmpty reports an attempt to delete a bucket that still
 	// holds objects.
 	ErrBucketNotEmpty = errors.New("bucket is not empty")
+	// ErrSubBucketNotFound reports that the bucket has no sub-bucket of
+	// that name.
+	ErrSubBucketNotFound = errors.New("sub-bucket not found")
+	// ErrTooManySubBuckets reports an attempt to give a bucket more
+	// sub-buckets than a bucket can have.
+	ErrTooManySubBuckets = errors.New("the bucket has as many sub-buckets as a bucket can have")
+	// ErrSubBucketNotEmpty reports an attempt to delete a sub-bucket that
+	// still holds an object, a version of one, a delete marker or an
+	// upload in progress.
+	ErrSubBucketNotEmpty = errors.New("sub-bucket is not empty")
 )
 
 // Object errors.
@@ -234,6 +248,9 @@ func wireCodes() []struct {
 		{"part_order", ErrPartOrder},
 		{"part_too_small", ErrPartTooSmall},
 		{"lock_not_configured", ErrLockNotConfigured},
+		{"sub_bucket_not_found", ErrSubBucketNotFound},
+		{"too_many_sub_buckets", ErrTooManySubBuckets},
+		{"sub_bucket_not_empty", ErrSubBucketNotEmpty},
 	}
 }
 

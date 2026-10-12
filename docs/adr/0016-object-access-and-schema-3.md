@@ -41,11 +41,17 @@ part. So all three land as ONE rise of the entry schema.
   with "unavailable" (sub-buckets, tag rules, definitions) or is made without it (the
   uploader is not recorded; reads wait in memory). Nothing is refused that worked
   before.
-- A member that meets an entry of a schema it does not know stops, as before. Fields of
-  schema 3 found in an entry that claims an older schema are ignored, as ADR-0008 does
-  for schema 1.
-- The state becomes schema 3 with the first schema-3 entry applied; the binary before
-  this one then refuses it. Until that first entry the state is unchanged and the
+- A member that meets an entry of a schema it does not know stops, as before. What is
+  of schema 3 in an entry that claims an older schema is treated exactly as the schema-2
+  binary treats the same bytes, so that the two never part: `created_by` and the `tags`
+  of an upload are stripped when the entry is applied; a `bucket.config.put` of kind
+  `tagrules` is refused, as a kind there is not; and one of the five new commands stops
+  the member, as a command it does not know.
+- The state becomes schema 3 with the first schema-3 entry in the log - whether it took
+  effect, was refused, or was applied as nothing (a batch of reads from a node that is
+  not registered): the binary before this one would stop at that entry when it replayed
+  the log, whatever became of it, so a state that still called itself schema 2 would
+  promise what it cannot keep. The binary before this one then refuses the state. Until that first entry the state is unchanged and the
   previous binary still opens it: rolling back is possible until first use.
 - **Migration: none.** A schema-2 state opens as it is. Proved by a fixture written by
   the schema-2 binary (`test/integration/testdata/schema-2`, commit 098749f) and
@@ -109,6 +115,23 @@ who read what to a webhook.
   recorded either, as S3 deletes are not audited today.
 - A client that downloads in parallel ranges counts once a range.
 - Metadata is not encrypted at rest; the list of readers sits there, like object keys.
+
+## Known debt
+
+What an entry is refused for must not depend on the build that applies it. The checks
+schema 3 added to the state machine hold to that: they count tags, bytes and items and
+compare bytes (the tags of an upload, a tag definition, a sub-bucket's name, a read),
+and what a tag or a name may consist of is checked by the proposer. Two checks of
+schema 2 do not: `object.put` (`applyPutObject`, `versions.go`) and `object.tags.put`
+(`applySetTags`, `bucketcfg.go`) refuse tags with `object.ValidateTags`, which asks the
+Unicode tables of the Go release the binary was built with whether a character is a
+letter, a digit or a space. Two releases built with different Go versions could
+disagree about an entry whose tags hold a character that only the newer tables know,
+and their replicas would part. The use cases validate tags with the same function
+before they propose, so it takes a proposer of a newer build beside a member of an
+older one, and such a character. They are left as they are here: changing what an
+entry of schema 2 is refused for is itself a change of the replicated format, and needs
+its own rise of the entry schema.
 
 ## Alternatives
 

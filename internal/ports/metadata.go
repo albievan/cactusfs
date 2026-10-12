@@ -35,6 +35,10 @@ type BucketStore interface {
 	SetBucketDefaultRetention(ctx context.Context, name string, d *bucket.DefaultRetention) error
 	// SetBucketConfig replaces one configuration document of a bucket -
 	// its policy, its CORS rules, its tags - or, with nil, removes it.
+	// The kinds are those bucket.ValidConfigKind names, and
+	// bucket.ConfigTagRules: that one is refused with
+	// domain.ErrUnavailable while a member of the cluster does not know
+	// it (entry schema 3, ADR-0016).
 	SetBucketConfig(ctx context.Context, name, kind string, document []byte) error
 	// GetBucketConfig returns one configuration document of a bucket, or
 	// nil when the bucket has none of that kind.
@@ -52,6 +56,11 @@ type ObjectIndex interface {
 	// of the bucket when the change is committed: it is removed, or kept
 	// as a version that is no longer current. The error wraps
 	// domain.ErrBucketNotFound when the bucket does not exist then.
+	//
+	// v.CreatedBy, who commits the version, is recorded where every
+	// member of the cluster knows the field (entry schema 3, ADR-0016).
+	// Until then the version is committed without it and the put still
+	// succeeds: PutResult.Stored says what was recorded.
 	PutVersion(ctx context.Context, v object.Version) (PutResult, error)
 	// DeleteObject deletes an object, or one of its versions. Without a
 	// version named, what happens is decided by the versioning state of
@@ -203,7 +212,10 @@ type TopologyStore interface {
 type UploadStore interface {
 	// CreateUpload records a new upload. The error wraps
 	// domain.ErrBucketNotFound when the bucket does not exist and
-	// domain.ErrConflict when the ID is in use.
+	// domain.ErrConflict when the ID is in use. An upload with tags is
+	// refused with domain.ErrUnavailable while a member of the cluster
+	// does not know them (entry schema 3): they could not be kept, and
+	// the bucket's rules may require them.
 	CreateUpload(ctx context.Context, u object.Upload) error
 	// GetUpload returns an upload in progress. The error wraps
 	// domain.ErrUploadNotFound when there is none with that ID for the key.
@@ -246,6 +258,11 @@ type Completion struct {
 	// ETag is the entity tag of the object the listed parts make.
 	ETag string
 	At   time.Time
+	// CreatedBy is who completes the upload, as the audit trail names
+	// actors: the version's object.Version.CreatedBy. Like that of a put
+	// it is recorded only where every member of the cluster knows it, and
+	// the completion succeeds either way.
+	CreatedBy string
 	// Parts are the listed parts in order: for each its Number, ETag and
 	// Checksums as the client named them, the DataID of the stored part
 	// that was sealed, and the Seal of its place.

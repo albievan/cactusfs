@@ -67,6 +67,10 @@ const (
 // The admin actions implemented so far. Reading actions begin with Get or
 // List, so that a policy can grant "admin:Get*" and "admin:List*".
 const (
+	// ActionGetObjectAccess allows reading who uploaded an object version
+	// and who read it, how often and when. Reading the object does not
+	// imply it.
+	ActionGetObjectAccess Action = "admin:GetObjectAccess"
 	// ActionGetMetrics allows reading the node's metrics.
 	ActionGetMetrics Action = "admin:GetMetrics"
 
@@ -114,6 +118,9 @@ const (
 	ActionJoinNode Action = "cluster:JoinNode"
 	// ActionRemoveNode takes a node out of the cluster.
 	ActionRemoveNode Action = "cluster:RemoveNode"
+	// ActionReportReads hands in what a node counted of the reading of
+	// objects (ADR-0016). A node reports its own counts only.
+	ActionReportReads Action = "cluster:ReportReads"
 )
 
 // cluster reports whether the action is one of the cluster actions.
@@ -275,7 +282,8 @@ func Decide(req Request) error {
 		return refused
 	}
 	if node := req.Principal.NodeID; node != "" || req.Action.cluster() {
-		// A node adds, records and removes itself only.
+		// A node adds, records and removes itself only, and reports no
+		// counts but its own.
 		own := req.Action == ActionNodeRPC || req.Resource.Node == node
 		if node != "" && req.Principal.AccessKeyID == "" && !req.Principal.Root && req.Principal.User == "" && req.Action.cluster() && own {
 			return nil

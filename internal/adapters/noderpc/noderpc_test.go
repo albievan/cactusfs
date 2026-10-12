@@ -70,18 +70,22 @@ type fakeMeta struct {
 }
 
 // Subject reads the test's entries: "register <node>" and "remove <node>"
-// are about a node's record, anything else is not.
-func (m *fakeMeta) Subject(entry []byte) (registers, removes string, err error) {
+// are about a node's record, "reads <node>" is what a node counted of the
+// reading of objects, anything else is about no node.
+func (m *fakeMeta) Subject(entry []byte) (registers, removes, counts string, err error) {
 	if node, ok := strings.CutPrefix(string(entry), "register "); ok {
-		return node, "", nil
+		return node, "", "", nil
 	}
 	if node, ok := strings.CutPrefix(string(entry), "remove "); ok {
-		return "", node, nil
+		return "", node, "", nil
+	}
+	if node, ok := strings.CutPrefix(string(entry), "reads "); ok {
+		return "", "", node, nil
 	}
 	if string(entry) == "garbage" {
-		return "", "", fmt.Errorf("%w: not an entry", domain.ErrUnsupportedFormat)
+		return "", "", "", fmt.Errorf("%w: not an entry", domain.ErrUnsupportedFormat)
 	}
-	return "", "", nil
+	return "", "", "", nil
 }
 
 func (m *fakeMeta) ProposeLocal(ctx context.Context, entry []byte) ([]byte, error) {
@@ -483,8 +487,18 @@ func TestOnlyNodesOfTheClusterAreServed(t *testing.T) {
 	if _, err := member.Propose(ctx, "meta-1", []byte("garbage")); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		t.Errorf("an entry that cannot be read = %v", err)
 	}
-	if got := len(node.meta.proposed); got != 2 {
-		t.Errorf("%d entries reached the metadata store, want the two the node was entitled to", got)
+	// What a node counted of the reading of objects is its own to report:
+	// a batch under another node's name would use up that node's numbers.
+	if _, err := member.Propose(ctx, "meta-1", []byte("reads gateway-1")); err != nil {
+		t.Errorf("a node reporting the reads it counted: %v", err)
+	}
+	for _, entry := range []string{"reads meta-1", "reads gateway-2"} {
+		if _, err := member.Propose(ctx, "meta-1", []byte(entry)); !errors.Is(err, domain.ErrAccessDenied) || errors.Is(err, domain.ErrOutcomeUnknown) {
+			t.Errorf("gateway-1 proposing %q = %v, want a definite %v", entry, err, domain.ErrAccessDenied)
+		}
+	}
+	if got := len(node.meta.proposed); got != 3 {
+		t.Errorf("%d entries reached the metadata store, want the three the node was entitled to", got)
 	}
 	if err := member.Leave(ctx, "meta-1", "meta-1"); !errors.Is(err, domain.ErrAccessDenied) {
 		t.Errorf("Leave for another node = %v, want %v", err, domain.ErrAccessDenied)

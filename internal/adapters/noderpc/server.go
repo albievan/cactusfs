@@ -29,8 +29,9 @@ type Meta interface {
 	// ProposeLocal commits an entry if this node leads the metadata group.
 	ProposeLocal(ctx context.Context, entry []byte) ([]byte, error)
 	// Subject says what an entry is about, for authorization: the node
-	// whose record it sets (registers) or removes, if it is such an entry.
-	Subject(entry []byte) (registers, removes string, err error)
+	// whose record it sets (registers) or removes, or whose count of reads
+	// it reports (counts), if it is such an entry.
+	Subject(entry []byte) (registers, removes, counts string, err error)
 	// ReadIndexLocal returns the read index if this node leads.
 	ReadIndexLocal(ctx context.Context) (uint64, error)
 	// Term returns the node's Raft term.
@@ -211,8 +212,11 @@ func (s *Server) InFlight(_ context.Context, req *nodev1.InFlightRequest) (*node
 func (s *Server) Propose(ctx context.Context, req *nodev1.ProposeRequest) (*nodev1.ProposeResponse, error) {
 	// Any node may propose changes to buckets and objects: that is what a
 	// gateway does. A node's record, though, is its own: the others find the
-	// node by it and ask it about its writes in progress.
-	registers, removes, err := s.cfg.Meta.Subject(req.GetEntry())
+	// node by it and ask it about its writes in progress. So is what a node
+	// counted of the reading of objects: a batch is numbered by its node,
+	// and one sent under another node's name would use up that node's
+	// numbers.
+	registers, removes, counts, err := s.cfg.Meta.Subject(req.GetEntry())
 	if err == nil && registers != "" {
 		err = s.cfg.Authz.Authorize(ctx, iam.Request{
 			Principal: caller(ctx), Action: iam.ActionRegisterNode, Resource: iam.Resource{Node: registers},
@@ -221,6 +225,11 @@ func (s *Server) Propose(ctx context.Context, req *nodev1.ProposeRequest) (*node
 	if err == nil && removes != "" {
 		err = s.cfg.Authz.Authorize(ctx, iam.Request{
 			Principal: caller(ctx), Action: iam.ActionRemoveNode, Resource: iam.Resource{Node: removes},
+		})
+	}
+	if err == nil && counts != "" {
+		err = s.cfg.Authz.Authorize(ctx, iam.Request{
+			Principal: caller(ctx), Action: iam.ActionReportReads, Resource: iam.Resource{Node: counts},
 		})
 	}
 	if err != nil {

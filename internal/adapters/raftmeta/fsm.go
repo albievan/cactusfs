@@ -40,14 +40,26 @@ import (
 //	         missing, and exists so that the garbage collector can ask whether
 //	         stored data is still in use without scanning every object.
 //
+// From state schema 3 on, and each only once something was written to it
+// (access.go, subbuckets.go, tagdefs.go):
+//
+//	access      <bucket name> (nested bucket) -> <enc(key) ‖ version ID> -> accessRecord (JSON)
+//	accessflush <node ID> -> flushRecord (JSON)
+//	subbuckets  <bucket name> (nested bucket) -> <sub-bucket name> -> subBucketRecord (JSON)
+//	tagdefs     <tag key> -> tagDefinitionRecord (JSON)
+//
 // State schema 1 is what entries of schema 1 produce. The first entry of
 // schema 2 that is applied marks the state as schema 2, in its own
 // transaction: until a cluster actually uses the newer entries, its state and
 // its snapshots stay readable by the previous release, and afterwards the
-// previous release refuses them instead of misreading them.
+// previous release refuses them instead of misreading them. The first entry
+// of schema 3 marks it as schema 3 in the same way. Nothing that schema 3
+// adds to the state exists before that: a state of schema 2 that was never
+// written with schema 3 is the state the previous release wrote.
 const (
 	stateSchemaVersion = 1
 	stateSchemaTimed   = 2
+	stateSchema3       = 3
 	stateFileMode      = 0o600
 )
 
@@ -60,6 +72,8 @@ type applied struct {
 	// at is the time of the entry: what the leader stamped, never earlier
 	// than the time of any entry before it. Zero for an entry of schema 1.
 	at time.Time
+	// schema is the schema the entry was written in: what it may say.
+	schema byte
 }
 
 // readTime returns the time of the newest timed entry in the state.
@@ -90,7 +104,25 @@ func stampState(tx *bbolt.Tx, at time.Time) (time.Time, error) {
 	if err := meta.Put(timeKey(), binary.BigEndian.AppendUint64(nil, uint64(nanos))); err != nil {
 		return time.Time{}, err
 	}
-	return at.UTC(), meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaTimed))
+	return at.UTC(), raiseStateSchema(tx, stateSchemaTimed)
+}
+
+// readStateSchema returns the schema the state says it has.
+func readStateSchema(tx *bbolt.Tx) uint64 {
+	raw := tx.Bucket(metaBucket()).Get(schemaKey())
+	if len(raw) != 8 {
+		return stateSchemaVersion
+	}
+	return binary.BigEndian.Uint64(raw)
+}
+
+// raiseStateSchema marks the state as holding what only the given schema
+// can express. The schema of a state never goes down.
+func raiseStateSchema(tx *bbolt.Tx, schema uint64) error {
+	if readStateSchema(tx) >= schema {
+		return nil
+	}
+	return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, schema))
 }
 
 func metaBucket() []byte    { return []byte("meta") }
@@ -214,7 +246,7 @@ func openState(path string) (*bbolt.DB, error) {
 		switch raw := meta.Get(schemaKey()); {
 		case raw == nil:
 			return meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaVersion))
-		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchemaTimed:
+		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchema3:
 			return fmt.Errorf("%w: metadata state schema", domain.ErrUnsupportedFormat)
 		}
 		return nil
@@ -404,9 +436,33 @@ func (f *fsm) Apply(log *raft.Log) any {
 				e.CreateBucket.Config = nil
 			}
 		}
-		now := applied{index: log.Index}
+		if log.Data[0] < entrySchema3 {
+			// Nor does an entry of the second schema say who made a
+			// version, or give an upload tags: a binary of that schema
+			// would store both without. (The commands of the third
+			// schema are not decoded from such an entry at all, and the
+			// tag rules of a bucket are refused where they are applied,
+			// as that binary refuses a kind it does not know.)
+			if e.PutObject != nil {
+				e.PutObject.CreatedBy = ""
+			}
+			if e.CompleteUpload != nil {
+				e.CompleteUpload.CreatedBy = ""
+			}
+			if e.CreateUpload != nil {
+				e.CreateUpload.Tags = nil
+			}
+		}
+		now := applied{index: log.Index, schema: log.Data[0]}
 		if !e.At.IsZero() {
 			if now.at, err = stampState(tx, e.At); err != nil {
+				return err
+			}
+		}
+		if log.Data[0] >= entrySchema3 {
+			// From here on the state may hold what the previous release
+			// cannot express, and that release must refuse it.
+			if err := raiseStateSchema(tx, stateSchema3); err != nil {
 				return err
 			}
 		}
@@ -460,7 +516,7 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 	case cmdSetLegalHold:
 		return applySetLegalHold(tx, *e.SetLegalHold, now)
 	case cmdSetBucketConfig:
-		return applySetBucketConfig(tx, *e.SetBucketConfig)
+		return applySetBucketConfig(tx, *e.SetBucketConfig, now)
 	case cmdSetTags:
 		return applySetTags(tx, *e.SetTags, now)
 	case cmdCreateUpload:
@@ -481,6 +537,16 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return applySetNode(tx, *e.SetNode)
 	case cmdRemoveNode:
 		return applyRemoveNode(tx, e.RemoveNode.ID)
+	case cmdAddReads:
+		return applyAddReads(tx, *e.AddReads, now)
+	case cmdPutSubBucket:
+		return audited(tx, e.PutSubBucket.Audit)(applyPutSubBucket(tx, *e.PutSubBucket))
+	case cmdDeleteSubBucket:
+		return audited(tx, e.DeleteSubBucket.Audit)(applyDeleteSubBucket(tx, *e.DeleteSubBucket))
+	case cmdPutTagDefinition:
+		return audited(tx, e.PutTagDefinition.Audit)(applyPutTagDefinition(tx, *e.PutTagDefinition))
+	case cmdDeleteTagDefinition:
+		return audited(tx, e.DeleteTagDefinition.Audit)(applyDeleteTagDefinition(tx, *e.DeleteTagDefinition))
 	default:
 		if isIAMCommand(e.Type) {
 			return applyIAM(tx, e.Type, *e.IAM)
@@ -539,9 +605,12 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	if err := dropUploads(tx, name); err != nil {
 		return applyResult{}, err
 	}
-	for _, parent := range [][]byte{objectsBucket(), versionsBucket(), versionIDsBucket()} {
+	// Its sub-buckets are parts of it, and the records of who read its
+	// versions are about versions that are gone: both go with it. A state
+	// that never held either has neither of the two to look in.
+	for _, parent := range [][]byte{objectsBucket(), versionsBucket(), versionIDsBucket(), subBucketsBucket(), accessBucket()} {
 		holder := tx.Bucket(parent)
-		if holder.Bucket([]byte(name)) != nil {
+		if holder != nil && holder.Bucket([]byte(name)) != nil {
 			if err := holder.DeleteBucket([]byte(name)); err != nil {
 				return applyResult{}, err
 			}
@@ -633,6 +702,13 @@ func applySetNode(tx *bbolt.Tx, n nodeRecord) (applyResult, error) {
 }
 
 func applyRemoveNode(tx *bbolt.Tx, id string) (applyResult, error) {
+	// What the state remembers of the node's batches of reads goes with
+	// it, whether the node had registered or not.
+	if flushes := tx.Bucket(accessFlushBucket()); flushes != nil {
+		if err := flushes.Delete([]byte(id)); err != nil {
+			return applyResult{}, err
+		}
+	}
 	nodes := tx.Bucket(nodesBucket())
 	if nodes.Get([]byte(id)) == nil {
 		return applyResult{}, nil

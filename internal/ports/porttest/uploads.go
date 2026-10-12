@@ -58,8 +58,15 @@ func (m *MemMetadata) CreateUpload(_ context.Context, u object.Upload) error {
 	case u.Encryption.KeyMode != object.KeyModePartHKDF:
 		return fmt.Errorf("%w: key mode %q of an upload", domain.ErrInvalidArgument, u.Encryption.KeyMode)
 	}
+	if err := object.ValidateTags(u.Tags, object.MaxObjectTags); err != nil {
+		return err
+	}
 	if m.uploads[u.Bucket] == nil {
 		m.uploads[u.Bucket] = map[object.ID]*memUpload{}
+	}
+	u.Tags = maps.Clone(u.Tags)
+	if len(u.Tags) == 0 {
+		u.Tags = nil
 	}
 	u.Encryption.NoncePrefix = nil
 	m.uploads[u.Bucket][u.ID] = &memUpload{upload: u, parts: map[int]object.Part{}}
@@ -182,6 +189,7 @@ func (m *MemMetadata) CompleteUpload(_ context.Context, c ports.Completion) (por
 		ModifiedAt: c.At.UTC(), Parts: len(parts), Lock: up.Lock, Encryption: up.Encryption,
 		ContentType: up.ContentType, ContentEncoding: up.ContentEncoding, ContentDisposition: up.ContentDisposition,
 		ContentLanguage: up.ContentLanguage, CacheControl: up.CacheControl, UserMetadata: up.UserMetadata,
+		Tags: maps.Clone(up.Tags), CreatedBy: c.CreatedBy,
 	})
 	if err != nil {
 		return ports.PutResult{}, err

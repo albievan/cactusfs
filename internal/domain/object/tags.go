@@ -53,3 +53,23 @@ func tagText(s string) bool {
 	}
 	return true
 }
+
+// NormalizeTags returns the tags with every key and value in lower case. Two
+// keys that become the same key are refused rather than one of them chosen:
+// the error wraps domain.ErrInvalidTag. Normalizing what is normalized
+// changes nothing. Whether the result can be kept is for ValidateTags, after:
+// lower-casing can lengthen a string.
+func NormalizeTags(tags map[string]string) (map[string]string, error) {
+	if tags == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(tags))
+	for key, value := range tags {
+		lower := strings.ToLower(key)
+		if _, twice := out[lower]; twice {
+			return nil, fmt.Errorf("%w: tags %q are the same tag in lower case", domain.ErrInvalidTag, lower)
+		}
+		out[lower] = strings.ToLower(value)
+	}
+	return out, nil
+}

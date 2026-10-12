@@ -21,7 +21,13 @@ const (
 // applySetBucketConfig replaces or removes one configuration document of a
 // bucket. What a document means is the business of whoever reads it; the
 // state machine checks that it is of a kind there is and of a size it keeps.
-func applySetBucketConfig(tx *bbolt.Tx, cmd bucketConfigCmd) (applyResult, error) {
+//
+// Which kinds there are depends on the schema of the entry, not on the
+// binary: tag rules exist from schema 3 on. In an entry of an older schema
+// that kind is refused, exactly as the binary of that schema refuses it, so
+// that the two never disagree about an entry; bucket.ValidConfigKind stays
+// the list of schema 2.
+func applySetBucketConfig(tx *bbolt.Tx, cmd bucketConfigCmd, now applied) (applyResult, error) {
 	b, err := readBucket(tx, cmd.Bucket)
 	if err != nil {
 		return applyResult{}, err
@@ -29,7 +35,7 @@ func applySetBucketConfig(tx *bbolt.Tx, cmd bucketConfigCmd) (applyResult, error
 	switch {
 	case b == nil:
 		return refuse(domain.ErrBucketNotFound, "%s", cmd.Bucket)
-	case !bucket.ValidConfigKind(cmd.Kind):
+	case !bucket.ValidConfigKind(cmd.Kind) && (cmd.Kind != bucket.ConfigTagRules || now.schema < entrySchema3):
 		return refuse(domain.ErrInvalidArgument, "bucket configuration %q", cmd.Kind)
 	case len(cmd.Document) > bucket.MaxConfigBytes:
 		return refuse(domain.ErrInvalidArgument, "bucket configuration of %d bytes", len(cmd.Document))
@@ -82,6 +88,13 @@ func applySetTags(tx *bbolt.Tx, cmd tagsCmd, now applied) (applyResult, error) {
 
 // SetBucketConfig implements ports.BucketStore.
 func (s *Store) SetBucketConfig(ctx context.Context, name, kind string, document []byte) error {
+	if kind == bucket.ConfigTagRules && len(document) > bucket.MaxConfigBytes {
+		// Tag rules are an entry of schema 3, and the first of those a
+		// state applies is where going back to the release before ends,
+		// whether the entry took effect or not: what can be refused
+		// without looking at the state is refused before it is proposed.
+		return fmt.Errorf("raftmeta.SetBucketConfig: %w: bucket configuration of %d bytes, at most %d", domain.ErrInvalidArgument, len(document), bucket.MaxConfigBytes)
+	}
 	e := entry{Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: name, Kind: kind, Document: document}}
 	if _, err := s.propose(ctx, e); err != nil {
 		return fmt.Errorf("raftmeta.SetBucketConfig: %w", err)

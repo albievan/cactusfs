@@ -181,6 +181,9 @@ type Upload struct {
 	ContentLanguage    string
 	CacheControl       string
 	UserMetadata       map[string]string
+	// Tags are the tags the completed version is to have (entry schema 3,
+	// ADR-0018).
+	Tags map[string]string
 	// Lock is what the completed version is to be kept by.
 	Lock Lock
 	// Encryption holds the wrapped data key of the upload; it has no nonce
