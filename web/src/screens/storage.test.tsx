@@ -481,6 +481,30 @@ describe('object browser', () => {
     expect(screen.queryByRole('button', { name: 'Retry failed' })).toBeNull();
   });
 
+  it('gives every button a hint, and the buttons of a row their name as one', async () => {
+    fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt')], common_prefixes: ['dir/'], truncated: false }),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+    await screen.findByLabelText('Select a.txt');
+
+    for (const control of [...screen.getAllByRole('button'), ...screen.getAllByRole('link')]) {
+      if (control.className.includes('btn')) {
+        expect(control.getAttribute('title'), control.textContent).toBeTruthy();
+      }
+    }
+    // In a row the icon is the button: its name is still there to be read
+    // out, in the element the stylesheet folds away.
+    const details = screen.getByRole('button', { name: 'Details of a.txt' });
+    expect(details.getAttribute('title')).toBe('Show what is known about this object');
+    expect(details.querySelector('.btn-text')?.textContent).toBe('Details');
+    expect(details.querySelector('i.bi')).not.toBeNull();
+    const remove = screen.getByRole('button', { name: 'Delete' });
+    expect(remove.getAttribute('title')).toContain('Delete a.txt?');
+    expect(remove.querySelector('.btn-text')?.textContent).toBe('Delete');
+  });
+
   it('keeps the objects in a table, whatever the width of the screen', async () => {
     fakeApi({
       'GET /buckets/photos/objects': () => json(200, { objects: [object('a.txt')], common_prefixes: [], truncated: false }),

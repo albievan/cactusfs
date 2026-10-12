@@ -120,8 +120,13 @@ export function ApiKeys({ user }: ApiKeysProps) {
           />
         </label>
         <div className="form-actions d-flex flex-wrap gap-2">
-          <button type="submit" className="btn btn-primary" disabled={action.busy}>
-            Create API key
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={action.busy}
+            title="Create an API key for this user: its secret is shown once"
+          >
+            <i className="bi bi-key" aria-hidden="true" /> Create API key
           </button>
         </div>
       </form>
@@ -206,11 +211,21 @@ function NewKeyNotice({ created, onDone }: { created: APIKeyCreated; onDone: () 
         </dd>
       </dl>
       <div className="d-flex flex-wrap gap-2">
-        <button type="button" className="btn btn-outline-secondary" onClick={copy}>
-          Copy secret key
+        <button
+          type="button"
+          className="btn btn-outline-secondary"
+          onClick={copy}
+          title="Copy the secret key to the clipboard"
+        >
+          <i className="bi bi-clipboard" aria-hidden="true" /> Copy secret key
         </button>
-        <button type="button" className="btn btn-primary" onClick={onDone}>
-          I have copied it
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onDone}
+          title="Hide the secret key: it cannot be shown again"
+        >
+          <i className="bi bi-check-lg" aria-hidden="true" /> I have copied it
         </button>
         <span role="status">{copied ? 'Copied.' : ''}</span>
       </div>

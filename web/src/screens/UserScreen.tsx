@@ -31,8 +31,8 @@ export function UserScreen({ name }: UserScreenProps) {
     <>
       <h1>User {name}</h1>
       <p>
-        <a className="btn btn-outline-secondary btn-sm" href={routeHref(['users'])}>
-          <i className="bi bi-arrow-left" aria-hidden="true" /> All users
+        <a className="btn btn-outline-secondary btn-sm" href={routeHref(['users'])} title="Back to the list of users">
+          <i className="bi bi-arrow-left" aria-hidden="true" /> <span className="btn-text">All users</span>
         </a>
       </p>
       <ProblemNotice error={action.error ?? user.error} />
@@ -153,8 +153,8 @@ function UserForm({ user, action }: { user: User; action: Action }) {
         <dd>{formatTime(saved.created_at)}</dd>
       </dl>
       <div className="form-actions d-flex flex-wrap gap-2">
-        <button type="submit" className="btn btn-primary" disabled={action.busy}>
-          <i className="bi bi-check-lg" aria-hidden="true" /> Save changes
+        <button type="submit" className="btn btn-primary" disabled={action.busy} title="Save the changes">
+          <i className="bi bi-check-lg" aria-hidden="true" /> <span className="btn-text">Save changes</span>
         </button>
         <span role="status">{done ? 'Saved.' : ''}</span>
       </div>

@@ -83,8 +83,8 @@ export function RolesScreen() {
               }}
             />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={action.busy}>
-            <i className="bi bi-plus-lg" aria-hidden="true" /> Create role
+          <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this role">
+            <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create role</span>
           </button>
         </form>
       </section>
@@ -108,7 +108,11 @@ export function RolesScreen() {
               {roles.data.map((role) => (
                 <tr key={role.name}>
                   <td data-label="Name">
-                    <a className="btn btn-link-row" href={routeHref(['roles', role.name])}>
+                    <a
+                      className="btn btn-link-row"
+                      href={routeHref(['roles', role.name])}
+                      title="Open this role: its policies, and what they allow"
+                    >
                       <i className="bi bi-person-badge" aria-hidden="true" />
                       {role.name}
                     </a>
@@ -144,8 +148,9 @@ export function RolesScreen() {
                           onClick={() => {
                             setEditing(role.name);
                           }}
+                          title="Change this"
                         >
-                          Edit
+                          <i className="bi bi-pencil" aria-hidden="true" /> <span className="btn-text">Edit</span>
                         </button>
                         <ConfirmButton
                           label="Delete"

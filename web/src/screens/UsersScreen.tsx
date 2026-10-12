@@ -105,8 +105,8 @@ export function UsersScreen() {
             />
           </label>
           <div className="form-actions d-flex flex-wrap gap-2">
-            <button type="submit" className="btn btn-primary" disabled={action.busy}>
-              <i className="bi bi-plus-lg" aria-hidden="true" /> Create user
+            <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this user">
+              <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create user</span>
             </button>
           </div>
         </form>
@@ -132,7 +132,11 @@ export function UsersScreen() {
               {users.data.map((user) => (
                 <tr key={user.name}>
                   <td data-label="Name">
-                    <a className="btn btn-link-row" href={routeHref(['users', user.name])}>
+                    <a
+                      className="btn btn-link-row"
+                      href={routeHref(['users', user.name])}
+                      title="Open this user: roles, groups, password and API keys"
+                    >
                       <i className="bi bi-person" aria-hidden="true" />
                       {user.name}
                     </a>

@@ -66,8 +66,9 @@ export function AuditScreen({ after }: AuditScreenProps) {
             onClick={() => {
               navigate(auditHref(0));
             }}
+            title="Go to the oldest records"
           >
-            Oldest
+            <i className="bi bi-chevron-double-left" aria-hidden="true" /> <span className="btn-text">Oldest</span>
           </button>
           <button
             type="button"
@@ -76,8 +77,9 @@ export function AuditScreen({ after }: AuditScreenProps) {
             onClick={() => {
               navigate(auditHref(Math.max(0, after - PAGE_SIZE)));
             }}
+            title="Go to older records"
           >
-            Older
+            <i className="bi bi-chevron-left" aria-hidden="true" /> <span className="btn-text">Older</span>
           </button>
           <button
             type="button"
@@ -88,14 +90,15 @@ export function AuditScreen({ after }: AuditScreenProps) {
                 navigate(auditHref(nextAfter));
               }
             }}
+            title="Go to newer records"
           >
-            Newer
+            <i className="bi bi-chevron-right" aria-hidden="true" /> <span className="btn-text">Newer</span>
           </button>
-          <button type="button" className="btn btn-outline-secondary" disabled={action.busy} onClick={newest}>
-            Newest
+          <button type="button" className="btn btn-outline-secondary" disabled={action.busy} onClick={newest} title="Go to the newest records">
+            <i className="bi bi-chevron-double-right" aria-hidden="true" /> <span className="btn-text">Newest</span>
           </button>
-          <button type="button" className="btn btn-outline-secondary" onClick={page.reload}>
-            <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Refresh
+          <button type="button" className="btn btn-outline-secondary" onClick={page.reload} title="Load this again">
+            <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Refresh</span>
           </button>
         </div>
         {page.loading ? <Loading /> : null}

@@ -80,16 +80,16 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
             />
             <span>Show what I type</span>
           </label>
-          <button type="submit" className="btn btn-primary btn-lg signin-submit" disabled={action.busy}>
-            Sign in
+          <button type="submit" className="btn btn-primary btn-lg signin-submit" disabled={action.busy} title="Sign in to the console">
+            <span className="btn-text">Sign in</span>
           </button>
         </form>
         <nav className="signin-links" aria-label="Documentation">
-          <a className="btn btn-outline-secondary btn-sm" href="/docs">
-            <i className="bi bi-book" aria-hidden="true" /> API documentation
+          <a className="btn btn-outline-secondary btn-sm" href="/docs" title="The management API, to read and to try">
+            <i className="bi bi-book" aria-hidden="true" /> <span className="btn-text">API documentation</span>
           </a>
-          <a className="btn btn-outline-secondary btn-sm" href="/api/v1/openapi.yaml">
-            <i className="bi bi-file-earmark-code" aria-hidden="true" /> API contract
+          <a className="btn btn-outline-secondary btn-sm" href="/api/v1/openapi.yaml" title="The OpenAPI description of the management API">
+            <i className="bi bi-file-earmark-code" aria-hidden="true" /> <span className="btn-text">API contract</span>
           </a>
         </nav>
       </main>

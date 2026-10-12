@@ -87,8 +87,8 @@ export function PoliciesScreen() {
             />
           </label>
           <div className="form-actions d-flex flex-wrap gap-2">
-            <button type="submit" className="btn btn-primary" disabled={action.busy}>
-              <i className="bi bi-plus-lg" aria-hidden="true" /> Create policy
+            <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this policy">
+              <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create policy</span>
             </button>
           </div>
         </form>
@@ -133,11 +133,13 @@ export function PoliciesScreen() {
                         type="button"
                         className="btn btn-outline-secondary"
                         aria-label={`${policy.built_in ? 'View' : 'Edit'} policy ${policy.name}`}
+                        title={policy.built_in ? 'Show this policy document' : 'Change this policy document'}
                         onClick={() => {
                           setOpen(policy.name);
                         }}
                       >
-                        {policy.built_in ? 'View' : 'Edit'}
+                        <i className={policy.built_in ? 'bi bi-eye' : 'bi bi-pencil'} aria-hidden="true" />{' '}
+                        <span className="btn-text">{policy.built_in ? 'View' : 'Edit'}</span>
                       </button>
                       {policy.built_in ? null : (
                         <ConfirmButton
@@ -215,13 +217,13 @@ export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorP
         </label>
         <div className="form-actions d-flex flex-wrap gap-2">
           {policy.built_in ? null : (
-            <button type="submit" className="btn btn-primary" disabled={action.busy}>
-              <i className="bi bi-check-lg" aria-hidden="true" /> Save policy
+            <button type="submit" className="btn btn-primary" disabled={action.busy} title="Save this policy document">
+              <i className="bi bi-check-lg" aria-hidden="true" /> <span className="btn-text">Save policy</span>
             </button>
           )}
           {onClose === undefined ? null : (
-            <button type="button" className="btn btn-outline-secondary" onClick={onClose}>
-              Close
+            <button type="button" className="btn btn-outline-secondary" onClick={onClose} title="Close this">
+              <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Close</span>
             </button>
           )}
         </div>

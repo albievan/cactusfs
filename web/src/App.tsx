@@ -98,8 +98,9 @@ export function App() {
               setSession({ status: 'loading' });
               setRound((value) => value + 1);
             }}
+            title="Ask the server again"
           >
-            Try again
+            <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Try again</span>
           </button>
         </main>
       );

@@ -83,7 +83,7 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
             <i className="bi bi-person-circle" aria-hidden="true" />
             <span className="nav-label">Signed in as {identity.user ?? identity.kind}</span>
           </span>
-          <button type="button" className="btn btn-outline-light btn-sm sidebar-button" onClick={onSignOut}>
+          <button type="button" className="btn btn-outline-light btn-sm sidebar-button" onClick={onSignOut} title="End this session">
             <i className="bi bi-box-arrow-right" aria-hidden="true" />
             <span className="nav-label">Sign out</span>
           </button>
@@ -93,6 +93,7 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
             onClick={fold}
             aria-pressed={folded}
             aria-label="Show icons only"
+            title={folded ? 'Show the names of the sections' : 'Fold the navigation to icons'}
           >
             <i className={folded ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left'} aria-hidden="true" />
             <span className="nav-label" aria-hidden="true">

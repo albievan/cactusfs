@@ -24,9 +24,10 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
         onClick={() => {
           setAsking(true);
         }}
+        title={`${question} It asks before it acts.`}
       >
-        {label === 'Delete' ? <i className="bi bi-trash" aria-hidden="true" /> : null}
-        {label}
+        <i className={label.startsWith('Delete') ? 'bi bi-trash' : 'bi bi-exclamation-circle'} aria-hidden="true" />{' '}
+        <span className="btn-text">{label}</span>
       </button>
     );
   }
@@ -41,6 +42,7 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
           setAsking(false);
           onConfirm();
         }}
+        title="Do it: this cannot be undone"
       >
         Yes, {label.toLowerCase()}
       </button>
@@ -50,8 +52,9 @@ export function ConfirmButton({ label, question, onConfirm, disabled = false }: 
         onClick={() => {
           setAsking(false);
         }}
+        title="Leave it as it was"
       >
-        Cancel
+        <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Cancel</span>
       </button>
     </span>
   );

@@ -56,8 +56,8 @@ export function BucketsScreen() {
               }}
             />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={action.busy}>
-            <i className="bi bi-plus-lg" aria-hidden="true" /> Create bucket
+          <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create a bucket with this name">
+            <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create bucket</span>
           </button>
         </form>
       </section>
@@ -84,8 +84,9 @@ export function BucketsScreen() {
                       className="btn btn-primary btn-sm"
                       href={routeHref(['buckets', bucket.name])}
                       aria-label={`Open ${bucket.name}`}
+                      title="Open this bucket"
                     >
-                      <i className="bi bi-folder2-open" aria-hidden="true" /> Open
+                      <i className="bi bi-folder2-open" aria-hidden="true" /> <span className="btn-text">Open</span>
                     </a>
                     <ConfirmButton
                       label="Delete"
@@ -128,8 +129,8 @@ function BucketUsage({ bucket }: { bucket: string }) {
     return (
       <p className="tile-figures">
         Usage unavailable
-        <button type="button" className="btn btn-outline-secondary btn-sm" onClick={usage.reload}>
-          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Count again
+        <button type="button" className="btn btn-outline-secondary btn-sm" onClick={usage.reload} title="Count the objects of this bucket again">
+          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Count again</span>
         </button>
       </p>
     );

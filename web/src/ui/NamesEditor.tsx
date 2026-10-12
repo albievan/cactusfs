@@ -38,11 +38,11 @@ export function NamesEditor({ label, names, busy, onSave, onCancel }: NamesEdito
           }}
         />
       </label>
-      <button type="submit" className="btn btn-primary" disabled={busy}>
-        <i className="bi bi-check-lg" aria-hidden="true" /> Save
+      <button type="submit" className="btn btn-primary" disabled={busy} title="Save the change">
+        <i className="bi bi-check-lg" aria-hidden="true" /> <span className="btn-text">Save</span>
       </button>
-      <button type="button" className="btn btn-outline-secondary" onClick={onCancel}>
-        Cancel
+      <button type="button" className="btn btn-outline-secondary" onClick={onCancel} title="Leave it as it was">
+        <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Cancel</span>
       </button>
     </form>
   );

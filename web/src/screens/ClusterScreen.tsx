@@ -33,8 +33,9 @@ export function ClusterScreen() {
             cluster.reload();
             maintenance.reload();
           }}
+          title="Load this again"
         >
-          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> Refresh
+          <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Refresh</span>
         </button>
       </p>
       <ProblemNotice error={cluster.error} />

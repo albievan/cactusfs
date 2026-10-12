@@ -295,8 +295,8 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               }}
             />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={action.busy}>
-            <i className="bi bi-upload" aria-hidden="true" /> Upload
+          <button type="submit" className="btn btn-primary" disabled={action.busy} title="Upload the chosen files to this bucket">
+            <i className="bi bi-upload" aria-hidden="true" /> <span className="btn-text">Upload</span>
           </button>
         </form>
         {several ? (
@@ -313,8 +313,8 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
               </strong>
               {failedCount > 0 ? <span className="uploads-failed"> · {failedCount} not stored</span> : null}
               {failedCount > 0 && !action.busy ? (
-                <button type="button" className="btn btn-outline-danger btn-sm" onClick={retryFailed}>
-                  <i className="bi bi-arrow-repeat" aria-hidden="true" /> Retry failed
+                <button type="button" className="btn btn-outline-danger btn-sm" onClick={retryFailed} title="Send again the files that were not stored">
+                  <i className="bi bi-arrow-repeat" aria-hidden="true" /> <span className="btn-text">Retry failed</span>
                 </button>
               ) : null}
             </p>
@@ -371,8 +371,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             onClick={() => {
               setMetadata(null);
             }}
+            title="Close the details"
           >
-            Close details
+            <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Close details</span>
           </button>
         </section>
       )}
@@ -426,7 +427,11 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                   <tr key={`prefix ${commonPrefix}`}>
                     <td className="grid-check" />
                     <td data-label="Name">
-                      <a className="btn btn-link-row" href={routeHref(['buckets', bucket], { prefix: commonPrefix })}>
+                      <a
+                        className="btn btn-link-row"
+                        href={routeHref(['buckets', bucket], { prefix: commonPrefix })}
+                        title="Open this folder"
+                      >
                         <i className="bi bi-folder" aria-hidden="true" />
                         {commonPrefix.slice(prefix.length)}
                       </a>
@@ -461,8 +466,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                             href={objectDownloadUrl(bucket, object.key)}
                             download
                             aria-label={`Download ${name}`}
+                            title="Download this object"
                           >
-                            <i className="bi bi-download" aria-hidden="true" /> Download
+                            <i className="bi bi-download" aria-hidden="true" /> <span className="btn-text">Download</span>
                           </a>
                           <button
                             type="button"
@@ -472,8 +478,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                             onClick={() => {
                               showMetadata(object.key);
                             }}
+                            title="Show what is known about this object"
                           >
-                            <i className="bi bi-info-circle" aria-hidden="true" /> Details
+                            <i className="bi bi-info-circle" aria-hidden="true" /> <span className="btn-text">Details</span>
                           </button>
                           <ConfirmButton
                             label="Delete"
@@ -500,8 +507,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             onClick={() => {
               turnTo([]);
             }}
+            title="Go to the first page"
           >
-            First page
+            <i className="bi bi-chevron-double-left" aria-hidden="true" /> <span className="btn-text">First page</span>
           </button>
           <button
             type="button"
@@ -510,8 +518,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             onClick={() => {
               turnTo(tokens.slice(0, -1));
             }}
+            title="Go to the page before"
           >
-            Previous page
+            <i className="bi bi-chevron-left" aria-hidden="true" /> <span className="btn-text">Previous page</span>
           </button>
           <button
             type="button"
@@ -522,8 +531,9 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
                 turnTo([...tokens, nextToken]);
               }
             }}
+            title="Go to the next page"
           >
-            Next page
+            <i className="bi bi-chevron-right" aria-hidden="true" /> <span className="btn-text">Next page</span>
           </button>
           <span>Page {tokens.length + 1}</span>
         </div>
@@ -541,13 +551,17 @@ function Breadcrumbs({ bucket, prefix }: { bucket: string; prefix: string }) {
     <nav aria-label="Prefix">
       <ol className="crumbs">
         <li>
-          <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets'])}>
+          <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets'])} title="Back to all buckets">
             <i className="bi bi-bucket" aria-hidden="true" />
             Buckets
           </a>
         </li>
         <li>
-          <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets', bucket])}>
+          <a
+            className="btn btn-outline-secondary btn-sm"
+            href={routeHref(['buckets', bucket])}
+            title="The top of this bucket"
+          >
             {bucket}
           </a>
         </li>
@@ -555,7 +569,11 @@ function Breadcrumbs({ bucket, prefix }: { bucket: string; prefix: string }) {
           const upTo = parts.slice(0, index + 1).join(DELIMITER) + DELIMITER;
           return (
             <li key={upTo}>
-              <a className="btn btn-outline-secondary btn-sm" href={routeHref(['buckets', bucket], { prefix: upTo })}>
+              <a
+                className="btn btn-outline-secondary btn-sm"
+                href={routeHref(['buckets', bucket], { prefix: upTo })}
+                title="Go to this folder"
+              >
                 {part === '' ? DELIMITER : part}
               </a>
             </li>

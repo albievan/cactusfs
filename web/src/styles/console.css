@@ -128,6 +128,72 @@ code {
     transform 0.05s;
 }
 
+/* Every button is compact. */
+.btn:not(.btn-lg) {
+  --bs-btn-padding-y: 0.3rem;
+  --bs-btn-padding-x: 0.65rem;
+  --bs-btn-font-size: 0.875rem;
+  --bs-btn-border-radius: 0.5rem;
+}
+
+/* Where buttons stand in a row of their kind - the actions of a table row or
+   a tile, the pager - the icon is the button and its name is the hint. The
+   name stays in the page for whoever has it read. */
+.grid td .btn:not(.btn-link-row),
+.tile-actions .btn,
+.pager .btn {
+  --bs-btn-padding-x: 0.5rem;
+
+  min-width: 2.1rem;
+}
+
+.grid td .btn:not(.btn-link-row) .btn-text,
+.tile-actions .btn .btn-text,
+.pager .btn .btn-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Hints: what a control does, shown when the pointer rests on it or the
+   keyboard reaches it. The title carries the words; this shows them at once,
+   and legibly. */
+[title].btn {
+  position: relative;
+}
+
+[title].btn:hover::after,
+[title].btn:focus-visible::after {
+  content: attr(title);
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 50%;
+  z-index: 50;
+  width: max-content;
+  max-width: 16rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 0.4rem;
+  background: var(--night-green);
+  color: var(--sand);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  white-space: normal;
+  transform: translateX(-50%);
+  pointer-events: none;
+  box-shadow: var(--shadow);
+}
+
+/* The navigation scrolls, and would cut such a hint off: there the browser's
+   own, from the same title, is the one that shows. */
+.sidebar [title].btn::after {
+  display: none;
+}
+
 .btn:active:not(:disabled) {
   transform: translateY(1px);
 }
@@ -1233,8 +1299,17 @@ textarea[readonly] {
   }
 
   /* Controls a finger can hit, and a form that is one column. */
-  .btn {
+  .btn:not(.btn-lg) {
+    --bs-btn-padding-y: 0.5rem;
+    --bs-btn-padding-x: 0.8rem;
+
     min-height: 2.75rem;
+  }
+
+  .grid td .btn:not(.btn-link-row),
+  .tile-actions .btn,
+  .pager .btn {
+    min-width: 2.75rem;
   }
 
   .btn-sm,
@@ -1304,6 +1379,10 @@ textarea[readonly] {
   .grid-keep th,
   .grid-keep td {
     padding: 0.6rem 0.55rem;
+  }
+
+  .grid-keep .btn-link-row {
+    white-space: nowrap;
   }
 
   .facts {

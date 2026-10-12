@@ -48,8 +48,8 @@ export function RoleScreen({ name }: RoleScreenProps) {
     <>
       <h1>Role {name}</h1>
       <p>
-        <a className="btn btn-outline-secondary btn-sm" href={routeHref(['roles'])}>
-          <i className="bi bi-arrow-left" aria-hidden="true" /> All roles
+        <a className="btn btn-outline-secondary btn-sm" href={routeHref(['roles'])} title="Back to the list of roles">
+          <i className="bi bi-arrow-left" aria-hidden="true" /> <span className="btn-text">All roles</span>
         </a>
       </p>
       <ProblemNotice error={action.error ?? role.error} />
@@ -95,8 +95,9 @@ export function RoleScreen({ name }: RoleScreenProps) {
                   onClick={() => {
                     setEditing(true);
                   }}
+                  title="Give this role other policies"
                 >
-                  <i className="bi bi-pencil" aria-hidden="true" /> Change policies
+                  <i className="bi bi-pencil" aria-hidden="true" /> <span className="btn-text">Change policies</span>
                 </button>
                 <ConfirmButton
                   label="Delete"

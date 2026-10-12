@@ -82,8 +82,8 @@ export function GroupsScreen() {
               }}
             />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={action.busy}>
-            <i className="bi bi-plus-lg" aria-hidden="true" /> Create group
+          <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this group">
+            <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create group</span>
           </button>
         </form>
       </section>
@@ -133,8 +133,9 @@ export function GroupsScreen() {
                         onClick={() => {
                           setEditing(group.name);
                         }}
+                        title="Change this"
                       >
-                        Edit
+                        <i className="bi bi-pencil" aria-hidden="true" /> <span className="btn-text">Edit</span>
                       </button>
                       <ConfirmButton
                         label="Delete"
