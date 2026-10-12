@@ -1,5 +1,5 @@
 #!/bin/sh
-# Observability gate (PLAN 7.4): the alerting rules, their tests and the
+# Observability gate (PLAN 7.4, 7.8): the alerting rules, their tests and the
 # dashboards of deploy/observability, and the two templates of the Helm chart
 # that hand them to the Prometheus Operator. Run through
 # `make observability-check`.
@@ -9,7 +9,7 @@
 #     its own directory, so there are two, and they may not differ);
 #   - every dashboard is JSON, refers to nothing outside itself and uses only
 #     panels of Grafana itself;
-#   - the chart renders no ServiceMonitor and no PrometheusRule unless told
+#   - the chart renders no PodMonitor and no PrometheusRule unless told
 #     to; told to, it renders what the README promises, and the rules that
 #     come out of the PrometheusRule are the rules that went in;
 #   - a Go test reads the rules, their tests and the dashboards and fails on
@@ -17,7 +17,7 @@
 #
 # The chart's monitoring templates are judged here and not by
 # scripts/helm-lint.sh: that gate gives every render to kubeconform with the
-# schemas of Kubernetes itself and skips no kind, and ServiceMonitor and
+# schemas of Kubernetes itself and skips no kind, and PodMonitor and
 # PrometheusRule are kinds of the Prometheus Operator. So the value set that
 # turns them on is in ci/monitoring/, where helm-lint does not look, and what
 # it renders is asserted with yq.
@@ -72,7 +72,9 @@ q() {
 # want <what, in words> <file> <yq expression> <value>
 want() {
 	checks=$((checks + 1))
-	want_got=$(q "$2" "$3")
+	# A file of many documents may answer with an empty line for a document the
+	# question does not select; they are not part of the answer.
+	want_got=$(q "$2" "$3" | sed '/^$/d')
 	if [ "$want_got" != "$4" ]; then
 		fail "$1: expected '$4', the render has '$want_got'"
 	fi
@@ -166,10 +168,10 @@ fi
 # Off unless asked for: the chart's own values, with those of a cluster.
 helm template cactusfs "$CHART" -n cactusfs -f "$CHART/ci/cluster-values.yaml" >"$tmp/default.yaml"
 want "by default, resources of the Prometheus Operator" "$tmp/default.yaml" \
-	'select(.kind == "ServiceMonitor" or .kind == "PrometheusRule") | .kind' ""
-want "the default values, serviceMonitor.enabled" "$CHART/values.yaml" '.serviceMonitor.enabled' false
+	'select(.kind == "PodMonitor" or .kind == "ServiceMonitor" or .kind == "PrometheusRule") | .kind' ""
+want "the default values, podMonitor.enabled" "$CHART/values.yaml" '.podMonitor.enabled' false
 want "the default values, prometheusRule.enabled" "$CHART/values.yaml" '.prometheusRule.enabled' false
-want "the default values, serviceMonitor.tlsConfig.insecureSkipVerify" "$CHART/values.yaml" '.serviceMonitor.tlsConfig.insecureSkipVerify' false
+want "the default values, podMonitor.tlsConfig.insecureSkipVerify" "$CHART/values.yaml" '.podMonitor.tlsConfig.insecureSkipVerify' false
 
 sets=0
 for values in "$CHART"/ci/monitoring/*.yaml; do
@@ -179,54 +181,76 @@ for values in "$CHART"/ci/monitoring/*.yaml; do
 	helm lint --strict "$CHART" -f "$CHART/ci/cluster-values.yaml" -f "$values" >/dev/null
 	helm template cactusfs "$CHART" -n cactusfs -f "$CHART/ci/cluster-values.yaml" -f "$values" >"$tmp/$name.yaml"
 	echo "observability-check: $name.yaml renders"
-	yq -N 'select(.kind == "ServiceMonitor")' "$tmp/$name.yaml" >"$tmp/$name.monitor.yaml"
+	yq -N 'select(.kind == "PodMonitor")' "$tmp/$name.yaml" >"$tmp/$name.monitor.yaml"
 	yq -N 'select(.kind == "PrometheusRule")' "$tmp/$name.yaml" >"$tmp/$name.rule.yaml"
-	sm=$tmp/$name.monitor.yaml
+	pm=$tmp/$name.monitor.yaml
 	pr=$tmp/$name.rule.yaml
 
 	# One of each, named after the release.
-	want "[$name] the ServiceMonitors" "$tmp/$name.yaml" 'select(.kind == "ServiceMonitor") | .metadata.name' cactusfs
+	want "[$name] the PodMonitors" "$tmp/$name.yaml" 'select(.kind == "PodMonitor") | .metadata.name' cactusfs
+	# The pods are scraped once: nothing selects them through a Service too.
+	want "[$name] the ServiceMonitors" "$tmp/$name.yaml" 'select(.kind == "ServiceMonitor") | .metadata.name' ""
 	want "[$name] the PrometheusRules" "$tmp/$name.yaml" 'select(.kind == "PrometheusRule") | .metadata.name' cactusfs
 
-	want "[$name] ServiceMonitor apiVersion" "$sm" '.apiVersion' monitoring.coreos.com/v1
-	want "[$name] ServiceMonitor label of the value set" "$sm" '.metadata.labels.release' \
-		"$(q "$values" '.serviceMonitor.labels.release')"
-	want "[$name] ServiceMonitor label of the chart" "$sm" '.metadata.labels["app.kubernetes.io/name"]' cactusfs
+	want "[$name] PodMonitor apiVersion" "$pm" '.apiVersion' monitoring.coreos.com/v1
+	want "[$name] PodMonitor label of the value set" "$pm" '.metadata.labels.release' \
+		"$(q "$values" '.podMonitor.labels.release')"
+	want "[$name] PodMonitor label of the chart" "$pm" '.metadata.labels["app.kubernetes.io/name"]' cactusfs
 	# The job is "cactusfs" whatever the release is called: the rules say so.
-	want "[$name] ServiceMonitor jobLabel" "$sm" '.spec.jobLabel' app.kubernetes.io/name
-	want "[$name] ServiceMonitor namespaces" "$sm" '.spec.namespaceSelector.matchNames | join(",")' cactusfs
-	want "[$name] ServiceMonitor selector" "$sm" \
+	# A PodMonitor takes it from a label of the pods, which every pod has.
+	want "[$name] PodMonitor jobLabel" "$pm" '.spec.jobLabel' app.kubernetes.io/name
+	want "[$name] pods without the label the job is named after" "$tmp/$name.yaml" \
+		'select(.kind == "StatefulSet") | select(.spec.template.metadata.labels["app.kubernetes.io/name"] != "cactusfs") | .metadata.name' ""
+	want "[$name] PodMonitor namespaces" "$pm" '.spec.namespaceSelector.matchNames | join(",")' cactusfs
+	want "[$name] PodMonitor selector" "$pm" \
 		'.spec.selector.matchLabels | to_entries | map([.key, .value] | join("=")) | sort | join(",")' \
 		"app.kubernetes.io/instance=cactusfs,app.kubernetes.io/name=cactusfs"
-	# The selector matches every Service of the release; one of them, and
-	# only one, has a port named admin.
+	# Every node is scraped, whatever its roles: the selector is that of the
+	# release and names no role, every pod carries its labels, and every pod
+	# has a container port named admin - the port the endpoint names.
+	want "[$name] pods the PodMonitor does not select" "$tmp/$name.yaml" \
+		'select(.kind == "StatefulSet") | select(.spec.template.metadata.labels["app.kubernetes.io/instance"] != "cactusfs") | .metadata.name' ""
+	want "[$name] pods without a port named admin" "$tmp/$name.yaml" \
+		'select(.kind == "StatefulSet") | select([.spec.template.spec.containers[0].ports[].name] | contains(["admin"]) | not) | .metadata.name' ""
+	# The value set has nodes that are no gateway - the ones no Service
+	# with the admin port is in front of. They are pods like the others.
+	want "[$name] nodes that are no gateway" "$tmp/$name.yaml" \
+		'select(.kind == "StatefulSet") | select(.spec.template.metadata.labels["cactusfs.io/gateway"] != "true") | .metadata.name' \
+		"$(printf 'cactusfs-meta-0\ncactusfs-meta-1\ncactusfs-meta-2')"
+	want "[$name] nodes behind the admin Service" "$tmp/$name.yaml" \
+		'select(.kind == "StatefulSet") | select(.spec.template.metadata.labels["cactusfs.io/gateway"] == "true") | .metadata.name' \
+		cactusfs-data-0
+	want "[$name] PodMonitor endpoints" "$pm" '.spec.podMetricsEndpoints | length' 1
+	want "[$name] PodMonitor port" "$pm" '.spec.podMetricsEndpoints[0].port' admin
+	want "[$name] PodMonitor path" "$pm" '.spec.podMetricsEndpoints[0].path' /metrics
+	want "[$name] PodMonitor scheme" "$pm" '.spec.podMetricsEndpoints[0].scheme' https
+	want "[$name] PodMonitor interval" "$pm" '.spec.podMetricsEndpoints[0].interval' "$(q "$values" '.podMonitor.interval')"
+	want "[$name] PodMonitor scrapeTimeout" "$pm" '.spec.podMetricsEndpoints[0].scrapeTimeout' "$(q "$values" '.podMonitor.scrapeTimeout')"
+	want "[$name] PodMonitor credential type" "$pm" '.spec.podMetricsEndpoints[0].authorization.type' Bearer
+	want "[$name] PodMonitor credential Secret" "$pm" '.spec.podMetricsEndpoints[0].authorization.credentials.name' \
+		"$(q "$values" '.podMonitor.bearerTokenSecret.name')"
+	want "[$name] PodMonitor credential key" "$pm" '.spec.podMetricsEndpoints[0].authorization.credentials.key' \
+		"$(q "$values" '.podMonitor.bearerTokenSecret.key')"
+	want "[$name] PodMonitor serverName" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig.serverName' \
+		"$(q "$values" '.podMonitor.tlsConfig.serverName')"
+	want "[$name] PodMonitor CA Secret" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig.ca.secret.name' \
+		"$(q "$values" '.podMonitor.tlsConfig.caSecret.name')"
+	want "[$name] PodMonitor CA key" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig.ca.secret.key' \
+		"$(q "$values" '.podMonitor.tlsConfig.caSecret.key')"
+	# The certificate is checked unless the values say, in so many words, not to.
+	want "[$name] PodMonitor insecureSkipVerify" "$pm" '.spec.podMetricsEndpoints[0].tlsConfig | has("insecureSkipVerify")' \
+		"$(q "$values" '.podMonitor.tlsConfig.insecureSkipVerify // false')"
+	# No credential is written into the resource: it names a Secret.
+	want "[$name] PodMonitor keys of the endpoint" "$pm" '.spec.podMetricsEndpoints[0] | keys | sort | join(",")' \
+		authorization,interval,path,port,scheme,scrapeTimeout,tlsConfig
+	want "[$name] PodMonitor keys of the credential" "$pm" '.spec.podMetricsEndpoints[0].authorization | keys | sort | join(",")' \
+		credentials,type
+	# The Services are as they were: the admin port is on the admin Service
+	# alone, and the nodes' own Service has the two node ports and no other.
 	want "[$name] Services with a port named admin" "$tmp/$name.yaml" \
 		'select(.kind == "Service") | select([.spec.ports[].name] | contains(["admin"])) | .metadata.name' cactusfs-admin
-	want "[$name] ServiceMonitor endpoints" "$sm" '.spec.endpoints | length' 1
-	want "[$name] ServiceMonitor port" "$sm" '.spec.endpoints[0].port' admin
-	want "[$name] ServiceMonitor path" "$sm" '.spec.endpoints[0].path' /metrics
-	want "[$name] ServiceMonitor scheme" "$sm" '.spec.endpoints[0].scheme' https
-	want "[$name] ServiceMonitor interval" "$sm" '.spec.endpoints[0].interval' "$(q "$values" '.serviceMonitor.interval')"
-	want "[$name] ServiceMonitor scrapeTimeout" "$sm" '.spec.endpoints[0].scrapeTimeout' "$(q "$values" '.serviceMonitor.scrapeTimeout')"
-	want "[$name] ServiceMonitor credential type" "$sm" '.spec.endpoints[0].authorization.type' Bearer
-	want "[$name] ServiceMonitor credential Secret" "$sm" '.spec.endpoints[0].authorization.credentials.name' \
-		"$(q "$values" '.serviceMonitor.bearerTokenSecret.name')"
-	want "[$name] ServiceMonitor credential key" "$sm" '.spec.endpoints[0].authorization.credentials.key' \
-		"$(q "$values" '.serviceMonitor.bearerTokenSecret.key')"
-	want "[$name] ServiceMonitor serverName" "$sm" '.spec.endpoints[0].tlsConfig.serverName' \
-		"$(q "$values" '.serviceMonitor.tlsConfig.serverName')"
-	want "[$name] ServiceMonitor CA Secret" "$sm" '.spec.endpoints[0].tlsConfig.ca.secret.name' \
-		"$(q "$values" '.serviceMonitor.tlsConfig.caSecret.name')"
-	want "[$name] ServiceMonitor CA key" "$sm" '.spec.endpoints[0].tlsConfig.ca.secret.key' \
-		"$(q "$values" '.serviceMonitor.tlsConfig.caSecret.key')"
-	# The certificate is checked unless the values say, in so many words, not to.
-	want "[$name] ServiceMonitor insecureSkipVerify" "$sm" '.spec.endpoints[0].tlsConfig | has("insecureSkipVerify")' \
-		"$(q "$values" '.serviceMonitor.tlsConfig.insecureSkipVerify // false')"
-	# No credential is written into the resource: it names a Secret.
-	want "[$name] ServiceMonitor keys of the endpoint" "$sm" '.spec.endpoints[0] | keys | sort | join(",")' \
-		authorization,interval,path,port,scheme,scrapeTimeout,tlsConfig
-	want "[$name] ServiceMonitor keys of the credential" "$sm" '.spec.endpoints[0].authorization | keys | sort | join(",")' \
-		credentials,type
+	want "[$name] ports of the nodes' Service" "$tmp/$name.yaml" \
+		'select(.kind == "Service" and .metadata.name == "cactusfs-nodes") | [.spec.ports[].name] | join(",")' rpc,raft
 
 	want "[$name] PrometheusRule apiVersion" "$pr" '.apiVersion' monitoring.coreos.com/v1
 	want "[$name] PrometheusRule label of the value set" "$pr" '.metadata.labels.release' \
@@ -265,6 +289,7 @@ echo "observability-check: $checks assertions on the chart hold"
 
 # --- the registry -----------------------------------------------------------------
 # Every metric a rule, a rule test or a dashboard names is one the binary has.
-go test -count=1 -run 'TestObservabilityPack|TestChartCarriesTheSameRules|TestRegisteredSeries' ./internal/adapters/telemetry/
+# And the list of metrics in docs/ARCHITECTURE.md is the registry's.
+go test -count=1 -run 'TestObservabilityPack|TestChartCarriesTheSameRules|TestRegisteredSeries|TestArchitectureListsTheMetrics' ./internal/adapters/telemetry/
 
 echo "observability-check: PASS"

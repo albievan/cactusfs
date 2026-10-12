@@ -1,11 +1,18 @@
-# The ServiceMonitor and the PrometheusRule, turned on. Laid over
+# The PodMonitor and the PrometheusRule, turned on. Laid over
 # ci/cluster-values.yaml by scripts/observability.sh (make observability-check),
 # which asserts what is rendered. This file is in a directory of its own so
 # that scripts/helm-lint.sh does not pick it up: that gate validates every
 # render with kubeconform against the schemas of Kubernetes itself, with no
 # kind skipped, and these two kinds are the Prometheus Operator's.
 # Every name is an example.
-serviceMonitor:
+#
+# Three of the four nodes are no gateway: they vote and store, and no Service
+# with the admin port is in front of them. The gate asserts that they are
+# scraped like the fourth.
+pools:
+  - {name: meta, replicas: 3, roles: "meta,storage"}
+  - {name: data, replicas: 1, roles: "gateway,storage,console"}
+podMonitor:
   enabled: true
   interval: 15s
   scrapeTimeout: 5s

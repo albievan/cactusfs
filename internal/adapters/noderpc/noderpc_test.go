@@ -130,6 +130,12 @@ type served struct {
 
 func serve(t *testing.T, p *pki, nodeID string, drives ...ports.ShardStore) *served {
 	t.Helper()
+	return serveWith(t, p, nodeID, nil, drives...)
+}
+
+// serveWith is serve with a server whose configuration the test completes.
+func serveWith(t *testing.T, p *pki, nodeID string, tune func(*noderpc.ServerConfig), drives ...ports.ShardStore) *served {
+	t.Helper()
 	s := &served{meta: &fakeMeta{}, drives: map[string]ports.ShardStore{}, inFlight: map[object.ID]bool{}}
 	for _, drive := range drives {
 		s.drives[drive.DriveID()] = drive
@@ -139,7 +145,7 @@ func serve(t *testing.T, p *pki, nodeID string, drives ...ports.ShardStore) *ser
 		t.Fatal(err)
 	}
 	s.address = listener.Addr().String()
-	s.server = noderpc.NewServer(noderpc.ServerConfig{
+	config := noderpc.ServerConfig{
 		TLS: p.identity(nodeID).Server(), PeerNodeID: nodetls.PeerNodeID,
 		Authz: app.NewAuthorizer(slog.New(slog.DiscardHandler), porttest.NewClock(testNow), nil),
 		Info: func(context.Context) (noderpc.NodeInfo, error) {
@@ -164,7 +170,11 @@ func serve(t *testing.T, p *pki, nodeID string, drives ...ports.ShardStore) *ser
 		},
 		Clock:  porttest.NewClock(testNow),
 		Logger: slog.New(slog.DiscardHandler),
-	})
+	}
+	if tune != nil {
+		tune(&config)
+	}
+	s.server = noderpc.NewServer(config)
 	go func() { _ = s.server.Serve(listener) }()
 	t.Cleanup(func() { s.server.Stop(time.Second) })
 	return s

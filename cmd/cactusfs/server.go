@@ -114,7 +114,10 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	// is refused; see starting.
 	gate := health.NewGate()
 	metadata := &lateCheck{name: "metadata"}
-	probes := health.NewHandler(app.NewHealthService(gate, metadata), logger, readinessTimeout)
+	readiness := app.NewHealthService(gate, metadata)
+	probes := health.NewHandler(readiness, logger, readinessTimeout)
+	// The gauge says what /readyz says, from the first scrape on.
+	tel.ObserveReadiness(readyGauge{health: readiness})
 	adminHandler, s3Handler := &handlerSwitch{}, &handlerSwitch{}
 	adminHandler.set(startingAdmin(probes))
 	s3Handler.set(s3api.Starting())

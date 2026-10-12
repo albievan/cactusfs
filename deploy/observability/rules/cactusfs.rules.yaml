@@ -4,7 +4,7 @@
 # (internal/adapters/telemetry); a test of that package reads this file and
 # fails on a name the registry does not have. `up` is Prometheus's own.
 #
-# The rules expect the scrape job to be named "cactusfs". The ServiceMonitor of
+# The rules expect the scrape job to be named "cactusfs". The PodMonitor of
 # the Helm chart names it so; a scrape configuration written by hand says
 # job_name: cactusfs.
 #
@@ -216,27 +216,179 @@ groups:
           summary: "Downloads are not being counted"
           description: "{{ $labels.instance }} has been dropping records of who read which object for fifteen minutes: more wait to be recorded than it holds, or the metadata store refuses them. The objects themselves are served."
 
-# TODO(PLAN 7.8): alerts that wait for metrics the binary does not have yet.
-# Step 7.8 adds the gauges; each alert below is to be written, with its test,
-# when the gauge it needs is in the registry - and not before: a rule on a
-# metric that does not exist never fires and says nothing is wrong.
+  # What every node says of the metadata group it is part of. A node that is
+  # no voter follows the group all the same and has the same gauges.
+  - name: cactusfs.metadata
+    rules:
+      # Across the job, not by instance: every node but one says 0. While no
+      # node is scraped at all there is no series, and CactusFSInstanceDown
+      # and CactusFSAbsent speak instead.
+      #
+      # "No node says that it leads" is not yet "nobody leads": the leader's
+      # own series may be missing - Prometheus cannot reach it, or the node
+      # answered its scrape without its Raft gauges because its metadata
+      # state was busy - while the followers go on saying 0. So the nodes are
+      # asked a second question, which the followers can answer: a node is
+      # ready only while it knows of a leader (cactusfs_ready is 0 when it
+      # knows of none, when its metadata state has failed, and while it
+      # drains). The alert fires when no node that reports leads AND no node
+      # that reports is ready:
+      #
+      #   - the leader is there and only its series are missing: the
+      #     followers follow it and are ready, the second maximum is 1. Quiet.
+      #   - the leader is down and the others elect another within seconds:
+      #     one of them says 1. Quiet; CactusFSInstanceDown has the node.
+      #   - a majority of the voters is gone: those left say that they do not
+      #     lead and are not ready. Fires - with the nodes that are down as
+      #     with every node up.
+      #
+      # '==' binds tighter than 'and': (max == 0) and on (job) (max == 0).
+      - alert: CactusFSNoMetadataLeader
+        expr: |-
+          max by (job) (cactusfs_raft_is_leader) == 0
+            and on (job)
+          max by (job) (cactusfs_ready) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The metadata group has no leader"
+          description: "For two minutes no node of the job {{ $labels.job }} has led the metadata group and none has known of a leader. Nothing can be written and nothing listed until a majority of the voters can reach each other again."
+
+      # A rolling restart moves the term once for every leader that is
+      # restarted: with five voters, five times at most. More than that in an
+      # hour is not a restart.
+      - alert: CactusFSMetadataLeaderUnstable
+        expr: max by (job) (changes(cactusfs_raft_term[1h])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The metadata group keeps electing a leader"
+          description: "The Raft term of the job {{ $labels.job }} has changed more than five times in an hour: voters lose sight of each other, or one of them is too slow to keep the lead. (A rolling restart moves the term once for every leader that is restarted, and stays below this.)"
+
+      - alert: CactusFSMetadataMemberBehind
+        expr: |-
+          max by (job) (cactusfs_raft_applied_index)
+            - on (job) group_right
+          cactusfs_raft_applied_index
+            > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A node is behind the metadata group"
+          description: "The metadata state of {{ $labels.instance }} has been more than 1000 entries behind the furthest node for ten minutes: it is slow, or cut off from the leader."
+
+      # A binary that applies a newer schema than the cluster writes: some
+      # member is still of the release before, or has not registered since.
+      - alert: CactusFSMetadataUpgradeUnfinished
+        expr: max by (job) (cactusfs_metadata_schema_supported) > min by (job) (cactusfs_metadata_schema_level)
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The cluster writes an older metadata schema than its nodes support"
+          description: "For six hours a node of the job {{ $labels.job }} has supported a newer metadata schema than the cluster writes: a rolling upgrade was started and not every member has been replaced."
+
+  - name: cactusfs.drives
+    rules:
+      - alert: CactusFSDriveOffline
+        expr: cactusfs_drive_online == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A drive cannot be reached"
+          description: "Drive {{ $labels.drive }} of {{ $labels.instance }} has not answered for five minutes. Its shards are read from parity until it is back or replaced."
+
+      - alert: CactusFSDriveNearlyFull
+        expr: cactusfs_drive_free_bytes / cactusfs_drive_total_bytes < 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A drive is nearly full"
+          description: "Less than 10 % of the file system of drive {{ $labels.drive }} of {{ $labels.instance }} has been free for fifteen minutes. Writes fail when a write quorum of drives has no room."
+
+  - name: cactusfs.nodes
+    rules:
+      - alert: CactusFSNodeCertificateExpiresSoon
+        expr: cactusfs_node_certificate_not_after_seconds - time() < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A node certificate ends within fourteen days"
+          description: "The certificate {{ $labels.instance }} shows the other nodes ends in less than fourteen days. Issue a new one; when it has ended the node can neither call the others nor be called."
+
+      - alert: CactusFSNodeCertificateAboutToExpire
+        expr: cactusfs_node_certificate_not_after_seconds - time() < 3 * 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A node certificate ends within three days"
+          description: "The certificate {{ $labels.instance }} shows the other nodes ends in less than three days. When it has ended the node drops out of the cluster."
+
+      # Certificates that are not accepted and nodes that are not admitted;
+      # not connections that were merely cut short. A few at the start of a
+      # cluster pass: the alert wants them to go on.
+      - alert: CactusFSNodeHandshakesRefused
+        expr: sum by (job, instance) (increase(cactusfs_node_handshakes_refused_total{reason=~"certificate|not_admitted"}[15m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A node keeps refusing the handshakes of others"
+          description: "{{ $labels.instance }} has been refusing connections on its node ports for thirty minutes: a caller without a certificate of the node CA, a certificate that has ended, or a node that is not a member."
+
+      # The calls this node makes. One that its own caller gave up is no
+      # failure of the node that was called.
+      - alert: CactusFSNodeRPCErrors
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_noderpc_requests_total{side="client", code!~"OK|Canceled"}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_noderpc_requests_total{side="client"}[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Calls between nodes are failing"
+          description: "More than 5 % of the calls {{ $labels.instance }} makes to other nodes have failed for ten minutes: a node is down or slow, or the network between them is."
+
+      - alert: CactusFSNotReady
+        expr: cactusfs_ready == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A CactusFS node is running and not ready"
+          description: "{{ $labels.instance }} has answered its scrape and said that it is not ready for fifteen minutes: its metadata group has no leader that it knows of, or its metadata state has failed. (A node that is still starting refuses its scrape and shows as not answering.)"
+
+  - name: cactusfs.audit
+    rules:
+      # Appends only. A listing of the trail that fails - a console that went
+      # away while it was reading - loses nothing and wakes nobody.
+      - alert: CactusFSAuditLogErrors
+        expr: sum by (job, instance) (rate(cactusfs_port_calls_total{port="audit", method="AppendAudit", result="error"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The audit trail cannot be written"
+          description: "{{ $labels.instance }} has failed to append to the audit trail for ten minutes. Refusals and failed sign-ins are kept in memory for a while and are lost if this goes on."
+
+# Not here, because the binary has no metric for it yet - and a rule on a
+# metric that does not exist never fires and says nothing is wrong:
 #
-#   - no leader of the metadata group; the leader changes too often
-#       needs: the Raft gauges (leader, term)
-#   - a voter falls behind
-#       needs: the Raft gauge of the applied index
-#   - a drive is offline; a drive is nearly full
-#       needs: the drive gauges (online, bytes free)
-#   - a node's certificate expires soon
-#       needs: the gauge of the node certificate's expiry
-#   - nodes refuse each other's handshakes; calls between nodes fail
-#       needs: the counter of refused handshakes (node RPC has no metric today)
-#   - a node is alive and not ready; requests refused while a node starts
-#       needs: a readiness gauge and a count of refusals (neither exists)
 #   - the scrubber has stopped
 #       needs: a gauge of the time of the last finished pass; the count of
 #       passes cannot tell a pass that is long from one that is stuck
-#   - failures of IAM, sessions, idempotency records, the audit log, the
-#     event publisher
-#       needs: the decorators of those ports, which then count as the KMS,
-#       shard and metadata ports do today
+#   - requests refused while a node starts
+#       needs: a count of those refusals
+#
+# The ports of identities, sessions and repeated requests are counted like
+# every other port and are in no alert, for the reason the metadata port is
+# in none: a user or a session that does not exist is an error of the port.

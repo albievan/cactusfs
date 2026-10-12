@@ -16,6 +16,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
+	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
@@ -62,6 +63,13 @@ func repository() fs.FS {
 // new metric is added to the list.
 func registeredSeries(t *testing.T) map[string]bool {
 	t.Helper()
+	return seriesOf(t, observedTelemetry(t))
+}
+
+// observedTelemetry is the telemetry of a node on which every observation
+// the binary makes has been made once.
+func observedTelemetry(t *testing.T) *telemetry.Telemetry {
+	t.Helper()
 	ctx := t.Context()
 	tel := newTelemetry(t, nil)
 
@@ -80,7 +88,25 @@ func registeredSeries(t *testing.T) map[string]bool {
 	if _, err := tel.InstrumentKMS(kms).GenerateDataKey(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
+	// A call between nodes, as the node that makes it and as the node that
+	// answers it.
+	rpc := tel.NodeRPC([]string{methodRead})
+	if err := rpc.UnaryClient()(ctx, methodRead, nil, nil, nil, (&answering{}).invoke); err != nil {
+		t.Fatal(err)
+	}
+	tel.ObserveHandshakeRefused(telemetry.HandshakeCertificate)
+	// How the node is: read from its sources when it is scraped.
+	tel.ObserveRaft(fixedRaft{known: true, state: telemetry.RaftState{
+		Leader: true, Term: 1, AppliedIndex: 1, CommitIndex: 1, Voters: 1, SchemaLevel: 1, SchemaSupported: 1, StateSchema: 1,
+	}})
+	tel.ObserveDrives(fixedDrives{{ID: "drive-a", Online: true, FreeBytes: 1, TotalBytes: 2}})
+	tel.ObserveNodeCertificate(fixedCertificate{notAfter: time.Unix(1, 0), present: true})
+	tel.ObserveReadiness(readyWhen(true))
+	return tel
+}
 
+func seriesOf(t *testing.T, tel *telemetry.Telemetry) map[string]bool {
+	t.Helper()
 	families, err := tel.Gatherer().Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -215,8 +241,14 @@ func TestRegisteredSeriesKnowsHistograms(t *testing.T) {
 		// A histogram has no series of its own name.
 		{"cactusfs_s3_request_duration_seconds", false},
 		{"cactusfs_s3_requests", false},
+		{"cactusfs_noderpc_requests_total", true},
+		{"cactusfs_noderpc_request_duration_seconds_bucket", true},
+		{"cactusfs_raft_is_leader", true},
+		{"cactusfs_drive_online", true},
+		{"cactusfs_ready", true},
+		{"cactusfs_noderpc_request_duration_seconds", false},
 		{"cactusfs_raft_leader", false},
-		{"cactusfs_drive_online", false},
+		{"cactusfs_drive_offline", false},
 	}
 	for _, tt := range tests {
 		if series[tt.name] != tt.want {
@@ -363,4 +395,90 @@ func sortedKeys(set map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// The list of metrics in the architecture document, between two markers:
+// one row of a table a metric.
+const (
+	architecture = "docs/ARCHITECTURE.md"
+	metricsBegin = "<!-- metrics:begin -->"
+	metricsEnd   = "<!-- metrics:end -->"
+)
+
+var (
+	documentedRow   = regexp.MustCompile("^\\| `(cactusfs_[a-z0-9_]+)` \\| (gauge|counter|histogram) \\| ([^|]+) \\| [^|]+ \\|$")
+	documentedLabel = regexp.MustCompile("`([a-z_]+)`")
+)
+
+// TestArchitectureListsTheMetrics holds the list of metrics in
+// docs/ARCHITECTURE.md and the registry to each other. A metric that is
+// registered and not listed fails it; so does one that is listed and not
+// registered, or listed with another type or other labels. That is how a
+// new metric gets into the document, and a removed one out of it.
+func TestArchitectureListsTheMetrics(t *testing.T) {
+	t.Parallel()
+	text := readPack(t, architecture)
+	_, rest, found := strings.Cut(text, metricsBegin)
+	table, _, closed := strings.Cut(rest, metricsEnd)
+	if !found || !closed {
+		t.Fatalf("%s has no list of metrics between %s and %s", architecture, metricsBegin, metricsEnd)
+	}
+	documented := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(table), "\n") {
+		if strings.HasPrefix(line, "| Metric ") || strings.HasPrefix(line, "|---") {
+			continue
+		}
+		row := documentedRow.FindStringSubmatch(line)
+		if row == nil {
+			t.Errorf("%s: this row of the list of metrics cannot be read: %s", architecture, line)
+			continue
+		}
+		var labels []string
+		for _, label := range documentedLabel.FindAllStringSubmatch(row[3], -1) {
+			labels = append(labels, label[1])
+		}
+		if len(labels) == 0 && strings.TrimSpace(row[3]) != "-" {
+			t.Errorf("%s: %s: the labels are %q; a metric without labels has a dash", architecture, row[1], row[3])
+		}
+		sort.Strings(labels)
+		if _, twice := documented[row[1]]; twice {
+			t.Errorf("%s lists %s twice", architecture, row[1])
+		}
+		documented[row[1]] = row[2] + " " + strings.Join(labels, ",")
+	}
+
+	families, err := observedTelemetry(t).Gatherer().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	registered := map[string]string{}
+	for _, family := range families {
+		name := family.GetName()
+		if !strings.HasPrefix(name, "cactusfs_") || strings.HasPrefix(name, "cactusfs_process_") {
+			continue
+		}
+		labels := map[string]bool{}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = true
+			}
+		}
+		registered[name] = strings.ToLower(family.GetType().String()) + " " + strings.Join(sortedKeys(labels), ",")
+	}
+	if len(registered) < 30 {
+		t.Fatalf("the registry has %d metrics of the binary; the test does not see them all", len(registered))
+	}
+	for name, want := range registered {
+		switch got, ok := documented[name]; {
+		case !ok:
+			t.Errorf("%s is registered and %s does not list it", name, architecture)
+		case got != want:
+			t.Errorf("%s: %s lists it as %q, the registry has %q", name, architecture, got, want)
+		}
+	}
+	for name := range documented {
+		if _, ok := registered[name]; !ok {
+			t.Errorf("%s lists %s, which the registry does not have", architecture, name)
+		}
+	}
 }

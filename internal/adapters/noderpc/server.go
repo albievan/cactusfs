@@ -60,6 +60,15 @@ type ServerConfig struct {
 	Drive  func(driveID string) (ports.ShardStore, bool)
 	Clock  ports.Clock
 	Logger *slog.Logger
+	// UnaryInterceptor and StreamInterceptor, when not nil, see every call
+	// before it is authenticated: the node's tracing and metrics, which
+	// count a call that is refused as well.
+	UnaryInterceptor  grpc.UnaryServerInterceptor
+	StreamInterceptor grpc.StreamServerInterceptor
+	// OnHandshakeRefused, when not nil, is told of every connection whose
+	// handshake this server did not complete, with one of the Refused
+	// reasons.
+	OnHandshakeRefused func(reason string)
 }
 
 // Server serves node RPC.
@@ -85,10 +94,17 @@ const (
 // NewServer returns a Server. Serve starts it.
 func NewServer(cfg ServerConfig) *Server {
 	s := &Server{cfg: cfg}
+	unary, stream := []grpc.UnaryServerInterceptor{s.unaryAuth}, []grpc.StreamServerInterceptor{s.streamAuth}
+	if cfg.UnaryInterceptor != nil {
+		unary = []grpc.UnaryServerInterceptor{cfg.UnaryInterceptor, s.unaryAuth}
+	}
+	if cfg.StreamInterceptor != nil {
+		stream = []grpc.StreamServerInterceptor{cfg.StreamInterceptor, s.streamAuth}
+	}
 	s.grpc = grpc.NewServer(
-		grpc.Creds(credentials.NewTLS(cfg.TLS)),
-		grpc.ChainUnaryInterceptor(s.unaryAuth),
-		grpc.ChainStreamInterceptor(s.streamAuth),
+		grpc.Creds(observedCredentials{TransportCredentials: credentials.NewTLS(cfg.TLS), refused: cfg.OnHandshakeRefused}),
+		grpc.ChainUnaryInterceptor(unary...),
+		grpc.ChainStreamInterceptor(stream...),
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: keepaliveTime, Timeout: keepaliveTimeout}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: keepaliveTime / 2, PermitWithoutStream: true}),
 	)

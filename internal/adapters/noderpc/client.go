@@ -44,6 +44,9 @@ type Client struct {
 	// resolve returns the address of a node's RPC listener.
 	resolve func(ctx context.Context, nodeID string) (address string, ok bool)
 	clock   ports.Clock
+	// unary and stream, when not nil, see every call this node makes.
+	unary  grpc.UnaryClientInterceptor
+	stream grpc.StreamClientInterceptor
 
 	mu     sync.Mutex
 	closed bool
@@ -67,6 +70,14 @@ func NewClient(
 	tlsFor func(nodeID string) *tls.Config, resolve func(ctx context.Context, nodeID string) (string, bool), clock ports.Clock,
 ) *Client {
 	return &Client{tlsFor: tlsFor, resolve: resolve, clock: clock, conns: map[string]*connection{}}
+}
+
+// WithInterceptors has every call the client makes pass through the given
+// interceptors - the node's tracing and metrics - and returns the client. It
+// is for the composition root, before the first call.
+func (c *Client) WithInterceptors(unary grpc.UnaryClientInterceptor, stream grpc.StreamClientInterceptor) *Client {
+	c.unary, c.stream = unary, stream
+	return c
 }
 
 // Close closes every connection.
@@ -116,7 +127,14 @@ func (c *Client) connAt(nodeID, address string) (*connection, error) {
 	// node that comes back at another address is found. gRPC's own DNS
 	// resolver also asks for TXT records with a service configuration, which
 	// nothing here uses and which can stall a first connection for seconds.
-	conn, err := grpc.NewClient("passthrough:///"+address,
+	var observed []grpc.DialOption
+	if c.unary != nil {
+		observed = append(observed, grpc.WithChainUnaryInterceptor(c.unary))
+	}
+	if c.stream != nil {
+		observed = append(observed, grpc.WithChainStreamInterceptor(c.stream))
+	}
+	conn, err := grpc.NewClient("passthrough:///"+address, append(observed,
 		grpc.WithDisableServiceConfig(),
 		// The certificate must name the node that is meant, whatever the
 		// address is.
@@ -127,7 +145,7 @@ func (c *Client) connAt(nodeID, address string) (*connection, error) {
 			MinConnectTimeout: minConnectTimeout,
 		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxReadLength+(1<<16))),
-	)
+	)...)
 	if err != nil {
 		return nil, unreachable(nodeID, err)
 	}

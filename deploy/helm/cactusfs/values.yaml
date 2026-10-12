@@ -154,11 +154,12 @@ podDisruptionBudget:
   maxUnavailable: 1
 
 # --- monitoring: both off; the chart needs no Prometheus Operator -----------
-# A ServiceMonitor (monitoring.coreos.com/v1) that scrapes /metrics of the
-# pods behind the admin Service. Only for a cluster that has the Prometheus
-# Operator's resource definitions. Prometheus must also be let in:
+# A PodMonitor (monitoring.coreos.com/v1) that scrapes /metrics of every pod
+# of the release on its admin port - the nodes that are no gateway too, which
+# no Service with that port is in front of. Only for a cluster that has the
+# Prometheus Operator's resource definitions. Prometheus must also be let in:
 # networkPolicy.adminFrom names who reaches port 9001.
-serviceMonitor:
+podMonitor:
   enabled: false
   interval: 30s
   scrapeTimeout: 10s
@@ -180,7 +181,7 @@ serviceMonitor:
     # Scrape without checking the certificate: the credential then goes to
     # whoever answers. For a test bench, never for production.
     insecureSkipVerify: false
-  # Labels the Prometheus Operator selects ServiceMonitors by.
+  # Labels the Prometheus Operator selects PodMonitors by.
   labels: {}
 # A PrometheusRule (monitoring.coreos.com/v1) with the alerting rules of
 # deploy/observability/rules, which the chart carries in files/.

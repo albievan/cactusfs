@@ -41,7 +41,7 @@ endif
 
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
-	s3-compat-record test-chaos vuln contracts licences web-install web-lock web-check \
+	s3-compat-record test-chaos test-rolling vuln contracts licences web-install web-lock web-check \
 	web-build build build-all image helm-lint observability-check verify-clone tidy check
 
 .PHONY: help builder shell run up down clean $(BUILDER_TARGETS)
@@ -233,6 +233,20 @@ s3-compat-record:
 test-chaos:
 	go test -count=1 -tags=chaos -timeout 40m ./test/chaos/...
 	@echo "test-chaos: PASS"
+
+# A rolling upgrade with the binaries themselves: three voters of the release
+# before this entry schema - built here from the history of the repository,
+# which is why this is not part of `make check`: a clean export has none -
+# and a fourth node of this tree, upgraded one at a time (ADR-0019). Must pass
+# before a release that raises the entry schema is rolled out.
+# It says `docker`, as the gates' own scripts do: inside the builder image that
+# is the client of whichever engine's socket was passed through.
+SCHEMA3_COMMIT ?= 0b7d825
+test-rolling:
+	git archive $(SCHEMA3_COMMIT) | docker build --quiet -t cactusfs-test:schema3 - >/dev/null
+	CACTUSFS_TEST_IMAGE_SCHEMA3=cactusfs-test:schema3 go test -race -count=1 -timeout 40m \
+		-tags=integration,rollingupgrade -run 'TestRollingUpgradeFromSchema3ToSchema4' ./test/integration/
+	@echo "test-rolling: PASS"
 
 vuln:
 	go tool govulncheck ./...

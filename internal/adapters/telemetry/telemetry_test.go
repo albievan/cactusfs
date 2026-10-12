@@ -653,7 +653,10 @@ func TestMetricsCarryNoTenantData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile)$`)
+	// reason is why a handshake was refused, side is which end of a call
+	// between nodes this node was, drive is the generated ID of a drive:
+	// each a set that the binary fixes, none a name a tenant chose.
+	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile|reason|side|drive)$`)
 	for _, family := range families {
 		if !strings.HasPrefix(family.GetName(), "cactusfs_") {
 			continue

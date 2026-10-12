@@ -53,9 +53,14 @@ type driveInfo struct {
 
 // Drive is a ports.ShardStore on one local directory.
 type Drive struct {
+	// dir is where the drive is, as it was opened; it never changes.
+	dir  string
 	root *os.Root
-	lock *os.File
-	info driveInfo
+	// opened is the handle root was opened as. Close closes it and does not
+	// clear it, so that Usage can be asked while the drive is being closed.
+	opened *os.Root
+	lock   *os.File
+	info   driveInfo
 	// empty reports that the drive held no shard when it was opened.
 	empty bool
 
@@ -83,7 +88,7 @@ func Open(ctx context.Context, dir string, entropy io.Reader, now time.Time) (*D
 	if err != nil {
 		return nil, fmt.Errorf("disk.Open: %w", err)
 	}
-	d := &Drive{root: root}
+	d := &Drive{dir: dir, root: root, opened: root}
 	if err := d.init(entropy, now); err != nil {
 		_ = d.Close()
 		return nil, fmt.Errorf("disk.Open: %s: %w", dir, err)

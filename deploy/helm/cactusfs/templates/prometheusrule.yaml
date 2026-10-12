@@ -8,7 +8,7 @@
 # For the Prometheus Operator; rendered only when prometheusRule.enabled.
 # The groups are those of files/cactusfs.rules.yaml, a copy of
 # deploy/observability/rules/cactusfs.rules.yaml, where their tests are. They
-# expect the job to be named "cactusfs", as the chart's ServiceMonitor names it.
+# expect the job to be named "cactusfs", as the chart's PodMonitor names it.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

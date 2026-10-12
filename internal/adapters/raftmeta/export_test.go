@@ -21,6 +21,14 @@ func StateSchemaForTest(t *testing.T, s *Store) uint64 {
 	return schema
 }
 
+// HoldStateForTest takes the lock of the state machine as an entry that is
+// being applied or a snapshot that is being restored holds it, and returns
+// the function that lets it go.
+func HoldStateForTest(s *Store) (release func()) {
+	s.fsm.mu.Lock()
+	return s.fsm.mu.Unlock
+}
+
 // PolicyPageBuckets is the most buckets one page of
 // LocalConfig.BucketPolicies reads.
 const PolicyPageBuckets = policyPageBuckets

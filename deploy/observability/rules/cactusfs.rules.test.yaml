@@ -582,3 +582,565 @@ tests:
             exp_annotations:
               summary: "Downloads are not being counted"
               description: "a:9001 has been dropping records of who read which object for fifteen minutes: more wait to be recorded than it holds, or the metadata store refuses them. The objects themselves are served."
+
+  # --- CactusFSNoMetadataLeader: for 2m, ----------------------------------
+  #       max by (job) (is_leader) == 0 and on (job) max by (job) (ready) == 0
+  # In these tests 'stale' is what Prometheus writes when a series is gone
+  # from a scrape, or the scrape fails: from then on the series is in no
+  # instant vector, and so in no maximum.
+  #
+  # Every node up, none leads. a leads at 0m-4m and no longer from 5m; b and
+  # c never lead. All three know of a leader, and are ready, at 0m-4m and
+  # not from 5m.
+  #   max(is_leader): 1 at 0m-4m, 0 from 5m.
+  #   max(ready):     1 at 0m-4m, 0 from 5m.
+  #   Both are 0 from 5m. True from 5m, fires at 5m + 2m = 7m.
+  - name: a metadata group without a leader
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="a:9001"}'
+        values: '1x4 0x30'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="b:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="c:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x4 0x30'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x4 0x30'
+      - series: 'cactusfs_ready{job="cactusfs", instance="c:9001"}'
+        values: '1x4 0x30'
+      - series: 'up{job="cactusfs", instance="a:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="b:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+            exp_annotations:
+              summary: "The metadata group has no leader"
+              description: "For two minutes no node of the job cactusfs has led the metadata group and none has known of a leader. Nothing can be written and nothing listed until a majority of the voters can reach each other again."
+
+  # The lead passes from a to b at 10m: at every minute one of them says 1,
+  # so the maximum over the job is always 1 - whatever they say of their
+  # readiness, which is 0 here to show that it alone fires nothing.
+  # Never true.
+  - name: a leader that hands over
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="a:9001"}'
+        values: '1x9 0x30'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="b:9001"}'
+        values: '0x9 1x30'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '0x40'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+
+  # The leader answers its scrape without its gauges: a leads throughout and
+  # is scraped throughout (up is 1), and from 5m its scrape has neither
+  # cactusfs_raft_is_leader nor cactusfs_ready - its metadata state was busy
+  # for longer than a scrape waits. b and c follow it: they do not lead, and
+  # are ready.
+  #   max(is_leader): 1 at 0m-4m (a); from 5m only b and c are left: 0.
+  #   max(ready):     1 throughout (b and c).
+  #   The first is 0 from 5m, the second never. Never true.
+  - name: a leader whose gauges are missing from its scrape
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="b:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="c:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="a:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="b:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+
+  # The leader cannot be scraped: a leads throughout, and from 5m Prometheus
+  # does not reach it - up is 0 and its series are stale. b and c follow it
+  # and are ready.
+  #   max(is_leader): 0 from 5m.  max(ready): 1 throughout.  Never true.
+  # CactusFSInstanceDown has the node: up is 0 from 5m, it fires at 8m.
+  - name: a leader that cannot be scraped
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="b:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="c:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="a:9001"}'
+        values: '1x4 0x31'
+      - series: 'up{job="cactusfs", instance="b:9001"}'
+        values: '1x35'
+      - series: 'up{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CactusFSInstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A CactusFS node does not answer its scrape"
+              description: "Prometheus has not been able to scrape a:9001 for three minutes: the node is down, cannot be reached, or refuses the scrape credential."
+
+  # Two of three voters are gone from 5m: a, which led, and b. Their series
+  # are stale from 5m. c is left, does not lead, and knows of no leader from
+  # 6m on.
+  #   max(is_leader): 1 at 0m-4m, from 5m c's: 0.
+  #   max(ready):     1 at 0m-5m, from 6m c's: 0.
+  #   Both are 0 from 6m. True from 6m, fires at 6m + 2m = 8m.
+  - name: a metadata group that has lost its majority
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="b:9001"}'
+        values: '0x4 stale'
+      - series: 'cactusfs_raft_is_leader{job="cactusfs", instance="c:9001"}'
+        values: '0x35'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x4 stale'
+      - series: 'cactusfs_ready{job="cactusfs", instance="c:9001"}'
+        values: '1x5 0x30'
+      - series: 'up{job="cactusfs", instance="a:9001"}'
+        values: '1x4 0x31'
+      - series: 'up{job="cactusfs", instance="b:9001"}'
+        values: '1x4 0x31'
+      - series: 'up{job="cactusfs", instance="c:9001"}'
+        values: '1x35'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CactusFSNoMetadataLeader
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+            exp_annotations:
+              summary: "The metadata group has no leader"
+              description: "For two minutes no node of the job cactusfs has led the metadata group and none has known of a leader. Nothing can be written and nothing listed until a majority of the voters can reach each other again."
+
+  # --- CactusFSMetadataLeaderUnstable: max(changes(term[1h])) > 5 for 5m -----
+  # a: the term is 1 at 0m-5m, 2 at 6m-11m, 3 at 12m-17m, 4 at 18m-23m, 5 at
+  #    24m-29m, 6 at 30m-35m and 7 from 36m: it changes at 6m, 12m, 18m, 24m,
+  #    30m and 36m.
+  #    At 32m: 5 changes in the window. Not above 5.
+  #    At 36m: 6 changes. True from 36m, fires at 36m + 5m = 41m.
+  #    At 120m: the window begins at 60m, and has no change. Not true.
+  # b: one election, at 6m: at most 1 change. The maximum over the job is a's.
+  - name: elections that do not stop
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_term{job="cactusfs", instance="a:9001"}'
+        values: '1x5 2x5 3x5 4x5 5x5 6x5 7x100'
+      - series: 'cactusfs_raft_term{job="cactusfs", instance="b:9001"}'
+        values: '1x5 2x130'
+    alert_rule_test:
+      - eval_time: 32m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "The metadata group keeps electing a leader"
+              description: "The Raft term of the job cactusfs has changed more than five times in an hour: voters lose sight of each other, or one of them is too slow to keep the lead. (A rolling restart moves the term once for every leader that is restarted, and stays below this.)"
+      - eval_time: 120m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts: []
+
+  # A rolling restart of five voters, each of which led when its turn came:
+  # the term changes five times, at 6m, 12m, 18m, 24m and 30m, on every node
+  # that is scraped. 5 is not above 5. Never true.
+  - name: a rolling restart of five voters
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_term{job="cactusfs", instance="a:9001"}'
+        values: '1x5 2x5 3x5 4x5 5x5 6x100'
+      - series: 'cactusfs_raft_term{job="cactusfs", instance="b:9001"}'
+        values: '1x5 2x5 3x5 4x5 5x5 6x100'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: CactusFSMetadataLeaderUnstable
+        exp_alerts: []
+
+  # --- CactusFSMetadataMemberBehind: max(applied) - applied > 1000 for 10m ---
+  # a and b apply 100 entries a minute: at t minutes they are at 100*t, and
+  # that is the maximum of the job. c applies 100 a minute until 10m and
+  # stays at 1000.
+  #   c is behind by 100*t - 1000: 1000 at 20m (not above 1000), 1100 at 21m.
+  #   True from 21m, fires at 31m. a and b are behind by 0.
+  - name: a node that falls behind the metadata group
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_raft_applied_index{job="cactusfs", instance="a:9001"}'
+        values: '0+100x60'
+      - series: 'cactusfs_raft_applied_index{job="cactusfs", instance="b:9001"}'
+        values: '0+100x60'
+      - series: 'cactusfs_raft_applied_index{job="cactusfs", instance="c:9001"}'
+        values: '0+100x10 1000x50'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CactusFSMetadataMemberBehind
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CactusFSMetadataMemberBehind
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "c:9001"
+            exp_annotations:
+              summary: "A node is behind the metadata group"
+              description: "The metadata state of c:9001 has been more than 1000 entries behind the furthest node for ten minutes: it is slow, or cut off from the leader."
+
+  # --- CactusFSMetadataUpgradeUnfinished: max(supported) > min(level), 6h ----
+  # Both nodes support schema 4 and the cluster writes schema 3, for ever.
+  # 4 > 3 from 0m, fires at 360m.
+  - name: an upgrade of the metadata schema that is not finished
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_metadata_schema_supported{job="cactusfs", instance="a:9001"}'
+        values: '4x500'
+      - series: 'cactusfs_metadata_schema_supported{job="cactusfs", instance="b:9001"}'
+        values: '4x500'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '3x500'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="b:9001"}'
+        values: '3x500'
+    alert_rule_test:
+      - eval_time: 300m
+        alertname: CactusFSMetadataUpgradeUnfinished
+        exp_alerts: []
+      - eval_time: 400m
+        alertname: CactusFSMetadataUpgradeUnfinished
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "The cluster writes an older metadata schema than its nodes support"
+              description: "For six hours a node of the job cactusfs has supported a newer metadata schema than the cluster writes: a rolling upgrade was started and not every member has been replaced."
+
+  # The cluster writes schema 3 at 0m-59m and schema 4 from 60m, when the
+  # last member has been replaced. True for an hour, not for six. Never fires.
+  - name: an upgrade of the metadata schema that finishes
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_metadata_schema_supported{job="cactusfs", instance="a:9001"}'
+        values: '4x500'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '3x59 4x440'
+    alert_rule_test:
+      - eval_time: 400m
+        alertname: CactusFSMetadataUpgradeUnfinished
+        exp_alerts: []
+
+  # --- CactusFSDriveOffline: online == 0 for 5m ------------------------------
+  # a, drive d1: online at 0m-9m, offline from 10m. True from 10m, fires at
+  #    15m. a, drive d2: always online.
+  # b: offline at 0m-2m only: three minutes, not five. Never fires.
+  - name: a drive that cannot be reached
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_drive_online{job="cactusfs", instance="a:9001", drive="d1"}'
+        values: '1x9 0x30'
+      - series: 'cactusfs_drive_online{job="cactusfs", instance="a:9001", drive="d2"}'
+        values: '1x40'
+      - series: 'cactusfs_drive_online{job="cactusfs", instance="b:9001", drive="d3"}'
+        values: '0x2 1x37'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CactusFSDriveOffline
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSDriveOffline
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+              drive: d1
+            exp_annotations:
+              summary: "A drive cannot be reached"
+              description: "Drive d1 of a:9001 has not answered for five minutes. Its shards are read from parity until it is back or replaced."
+
+  # --- CactusFSDriveNearlyFull: free / total < 0.10 for 15m ------------------
+  # a: 50 of 1000 bytes free, 0.05. True from 0m, fires at 15m.
+  # b: 500 of 1000 bytes free, 0.5. Never true.
+  - name: a drive that is nearly full
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_drive_free_bytes{job="cactusfs", instance="a:9001", drive="d1"}'
+        values: '50x40'
+      - series: 'cactusfs_drive_total_bytes{job="cactusfs", instance="a:9001", drive="d1"}'
+        values: '1000x40'
+      - series: 'cactusfs_drive_free_bytes{job="cactusfs", instance="b:9001", drive="d2"}'
+        values: '500x40'
+      - series: 'cactusfs_drive_total_bytes{job="cactusfs", instance="b:9001", drive="d2"}'
+        values: '1000x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSDriveNearlyFull
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSDriveNearlyFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+              drive: d1
+            exp_annotations:
+              summary: "A drive is nearly full"
+              description: "Less than 10 % of the file system of drive d1 of a:9001 has been free for fifteen minutes. Writes fail when a write quorum of drives has no room."
+
+  # --- The node certificate: ends within 14 days (1h), within 3 days (10m) ---
+  # The clock of a test starts at 0, so time() at t minutes is 60*t seconds.
+  # Fourteen days are 1209600 seconds, three days 259200.
+  # a: ends at 1211400 = 14 days + 30 minutes. What is left is 1211400 - 60*t:
+  #    1209600 at 30m (not below), 1209540 at 31m. Within fourteen days from
+  #    31m, fires at 91m. Never within three days here.
+  # b: ends at 261000 = 3 days + 30 minutes. Within fourteen days from 0m,
+  #    fires at 60m. What is left is 261000 - 60*t: 259200 at 30m (not below),
+  #    259140 at 31m. Within three days from 31m, fires at 41m.
+  # c: ends at 34560000 = 400 days. Neither.
+  - name: node certificates that end soon
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_node_certificate_not_after_seconds{job="cactusfs", instance="a:9001"}'
+        values: '1211400x120'
+      - series: 'cactusfs_node_certificate_not_after_seconds{job="cactusfs", instance="b:9001"}'
+        values: '261000x120'
+      - series: 'cactusfs_node_certificate_not_after_seconds{job="cactusfs", instance="c:9001"}'
+        values: '34560000x120'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CactusFSNodeCertificateExpiresSoon
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: CactusFSNodeCertificateExpiresSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A node certificate ends within fourteen days"
+              description: "The certificate a:9001 shows the other nodes ends in less than fourteen days. Issue a new one; when it has ended the node can neither call the others nor be called."
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "b:9001"
+            exp_annotations:
+              summary: "A node certificate ends within fourteen days"
+              description: "The certificate b:9001 shows the other nodes ends in less than fourteen days. Issue a new one; when it has ended the node can neither call the others nor be called."
+      - eval_time: 35m
+        alertname: CactusFSNodeCertificateAboutToExpire
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: CactusFSNodeCertificateAboutToExpire
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "b:9001"
+            exp_annotations:
+              summary: "A node certificate ends within three days"
+              description: "The certificate b:9001 shows the other nodes ends in less than three days. When it has ended the node drops out of the cluster."
+
+  # --- CactusFSNodeHandshakesRefused: increase in 15m > 0 for 30m ------------
+  # a: one handshake a minute is refused for its certificate, for ever. True
+  #    from 1m, fires at 31m.
+  # b: five nodes are not admitted, once, at 10m. True while the step from 0
+  #    to 5 is in the window, from 10m to 23m: fourteen minutes, not thirty.
+  # c: only connections that were cut short ("other"). Not selected.
+  - name: handshakes between nodes that are refused
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_node_handshakes_refused_total{job="cactusfs", instance="a:9001", reason="certificate"}'
+        values: '0+1x90'
+      - series: 'cactusfs_node_handshakes_refused_total{job="cactusfs", instance="b:9001", reason="not_admitted"}'
+        values: '0x9 5x80'
+      - series: 'cactusfs_node_handshakes_refused_total{job="cactusfs", instance="c:9001", reason="other"}'
+        values: '0+10x90'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CactusFSNodeHandshakesRefused
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSNodeHandshakesRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A node keeps refusing the handshakes of others"
+              description: "a:9001 has been refusing connections on its node ports for thirty minutes: a caller without a certificate of the node CA, a certificate that has ended, or a node that is not a member."
+
+  # --- CactusFSNodeRPCErrors: failed / all calls made > 0.05 for 10m ---------
+  # a: 90 calls a minute end OK and 10 Unavailable: 10 / 100 = 0.10. True from
+  #    1m, fires at 11m.
+  # b: 99 OK, 1 Unavailable and 50 Canceled a minute. Canceled is no failure:
+  #    1 / 150 = 0.0067. Never true.
+  # c: only calls it answered (side="server"), all failed. Not selected.
+  - name: calls between nodes that fail
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="a:9001", side="client", method="ReadShard", code="OK"}'
+        values: '0+90x60'
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="a:9001", side="client", method="ReadShard", code="Unavailable"}'
+        values: '0+10x60'
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="b:9001", side="client", method="ReadShard", code="OK"}'
+        values: '0+99x60'
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="b:9001", side="client", method="ReadShard", code="Unavailable"}'
+        values: '0+1x60'
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="b:9001", side="client", method="WriteShard", code="Canceled"}'
+        values: '0+50x60'
+      - series: 'cactusfs_noderpc_requests_total{job="cactusfs", instance="c:9001", side="server", method="ReadShard", code="PermissionDenied"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSNodeRPCErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSNodeRPCErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "Calls between nodes are failing"
+              description: "More than 5 % of the calls a:9001 makes to other nodes have failed for ten minutes: a node is down or slow, or the network between them is."
+
+  # --- CactusFSNotReady: ready == 0 for 15m ----------------------------------
+  # a: ready at 0m-4m, not ready from 5m. True from 5m, fires at 20m.
+  # b: not ready at 0m-9m while it starts, ready from 10m: ten minutes, not
+  #    fifteen. Never fires.
+  - name: a node that is running and not ready
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x4 0x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '0x9 1x55'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CactusFSNotReady
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A CactusFS node is running and not ready"
+              description: "a:9001 has answered its scrape and said that it is not ready for fifteen minutes: its metadata group has no leader that it knows of, or its metadata state has failed. (A node that is still starting refuses its scrape and shows as not answering.)"
+
+  # --- CactusFSAuditLogErrors: rate of failed appends to the trail > 0, 10m --
+  # a: one append a minute fails. True from 1m, fires at 11m.
+  # b: only appends that succeed.
+  # c: failed calls of another port.
+  # d: listings of the trail that fail - five a minute, and no append does.
+  #    The rule selects method="AppendAudit": d has no series in it.
+  - name: an audit trail that cannot be written
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="a:9001", port="audit", method="AppendAudit", result="error"}'
+        values: '0+1x60'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="b:9001", port="audit", method="AppendAudit", result="ok"}'
+        values: '0+5x60'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="c:9001", port="metadata", method="GetBucket", result="error"}'
+        values: '0+5x60'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="d:9001", port="audit", method="ListAudit", result="error"}'
+        values: '0+5x60'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="d:9001", port="audit", method="AppendAudit", result="ok"}'
+        values: '0+5x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSAuditLogErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSAuditLogErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The audit trail cannot be written"
+              description: "a:9001 has failed to append to the audit trail for ten minutes. Refusals and failed sign-ins are kept in memory for a while and are lost if this goes on."

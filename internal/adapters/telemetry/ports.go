@@ -19,6 +19,14 @@ type Metadata interface {
 	ports.TopologyStore
 }
 
+// Instrumented is implemented by every decorator of this package, and by
+// nothing else: its one method cannot be written outside it. The composition
+// root's test tells by it that a port a use case was given is reached
+// through a decorator.
+type Instrumented interface {
+	instrumented()
+}
+
 // InstrumentKMS returns next wrapped so that every call is traced and
 // counted.
 func (t *Telemetry) InstrumentKMS(next ports.KMS) ports.KMS {
@@ -31,6 +39,8 @@ type kms struct {
 }
 
 const portKMS = "kms"
+
+func (*kms) instrumented() {}
 
 // KeyID implements ports.KMS.
 func (k *kms) KeyID() string { return k.next.KeyID() }
@@ -63,6 +73,8 @@ type shardStore struct {
 }
 
 const portShards = "shards"
+
+func (*shardStore) instrumented() {}
 
 // DriveID implements ports.ShardStore.
 func (s *shardStore) DriveID() string { return s.next.DriveID() }
@@ -119,6 +131,8 @@ type shardWriter struct {
 	t *Telemetry
 }
 
+func (*shardWriter) instrumented() {}
+
 // Commit implements ports.ShardWriter.
 func (w *shardWriter) Commit(ctx context.Context) error {
 	ctx, done := w.t.call(ctx, portShards, "Commit")
@@ -139,6 +153,8 @@ type metadata struct {
 }
 
 const portMetadata = "metadata"
+
+func (*metadata) instrumented() {}
 
 // CreateBucket implements ports.BucketStore.
 func (m *metadata) CreateBucket(ctx context.Context, b bucket.Bucket) error {
@@ -397,6 +413,8 @@ type bucketPolicies struct {
 	next ports.BucketPolicies
 }
 
+func (*bucketPolicies) instrumented() {}
+
 // BucketPolicies implements ports.BucketPolicies.
 func (p *bucketPolicies) BucketPolicies(ctx context.Context, from string, visit func(name string, document []byte) error) (string, error) {
 	ctx, done := p.t.call(ctx, portMetadata, "BucketPolicies")
@@ -417,6 +435,8 @@ type objectAccess struct {
 }
 
 const portObjectAccess = "object_access"
+
+func (*objectAccess) instrumented() {}
 
 // AddObjectReads implements ports.ObjectAccessStore.
 func (a *objectAccess) AddObjectReads(ctx context.Context, batch ports.ReadBatch) error {
@@ -455,10 +475,42 @@ type bucketActivity struct {
 
 const portBucketActivity = "bucket_activity"
 
+func (*bucketActivity) instrumented() {}
+
 // BucketActivities implements ports.BucketActivityStore.
 func (a *bucketActivity) BucketActivities(ctx context.Context, names []string) ([]bucket.Activity, error) {
 	ctx, done := a.t.call(ctx, portBucketActivity, "BucketActivities")
 	activities, err := a.next.BucketActivities(ctx, names)
 	done(err)
 	return activities, err
+}
+
+// BucketConfigSource reads the configuration of a bucket from this node's
+// own copy of the state, without asking the metadata leader.
+type BucketConfigSource interface {
+	GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error)
+}
+
+// InstrumentLocalConfig returns next wrapped so that every call is traced
+// and counted, under a port of its own: a read of this node's copy is not a
+// read the leader answered, and the two are not to be added up.
+func (t *Telemetry) InstrumentLocalConfig(next BucketConfigSource) BucketConfigSource {
+	return &localConfig{t: t, next: next}
+}
+
+type localConfig struct {
+	t    *Telemetry
+	next BucketConfigSource
+}
+
+const portLocalConfig = "local_config"
+
+func (*localConfig) instrumented() {}
+
+// GetBucketConfig implements BucketConfigSource.
+func (c *localConfig) GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error) {
+	ctx, done := c.t.call(ctx, portLocalConfig, "GetBucketConfig")
+	document, err := c.next.GetBucketConfig(ctx, name, kind)
+	done(err)
+	return document, err
 }

@@ -1,0 +1,57 @@
+{{- if .Values.podMonitor.enabled }}
+{{- $pm := .Values.podMonitor -}}
+{{- $token := $pm.bearerTokenSecret | default dict -}}
+{{- $tls := $pm.tlsConfig | default dict -}}
+{{- $ca := $tls.caSecret | default dict -}}
+{{- if or (not $token.name) (not $token.key) -}}{{- fail "podMonitor.bearerTokenSecret: /metrics answers no one without a credential: name the Secret, and its key, that holds <access key ID>:<secret> of an API key allowed admin:GetMetrics" -}}{{- end -}}
+{{- if and (not $tls.serverName) (not $tls.insecureSkipVerify) -}}{{- fail "podMonitor.tlsConfig.serverName: pods are scraped by their addresses, which no certificate names: say a name the certificate of secrets.tls carries" -}}{{- end -}}
+{{- if and $ca.name (not $ca.key) -}}{{- fail "podMonitor.tlsConfig.caSecret: name the key of the Secret that holds the CA" -}}{{- end -}}
+# For the Prometheus Operator; rendered only when podMonitor.enabled.
+# Scrapes /metrics of every pod of the release on its admin port, over TLS,
+# with a credential from a Secret. Every pod, whatever its roles: a node that
+# is no gateway is behind no Service with the admin port, and it is such nodes
+# that vote in the metadata group and hold the drives. So the pods are
+# selected, not a Service, and no Service changes for it.
+# The job is named after the pods' label app.kubernetes.io/name: "cactusfs",
+# whatever the release is called, which is the job the alerting rules look for.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "cactusfs.fullname" . }}
+  labels:
+    {{- include "cactusfs.labels" . | nindent 4 }}
+    {{- with $pm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels: {{- include "cactusfs.selector" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: admin
+      path: /metrics
+      scheme: https
+      interval: {{ $pm.interval | quote }}
+      scrapeTimeout: {{ $pm.scrapeTimeout | quote }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ $token.name | quote }}
+          key: {{ $token.key | quote }}
+      tlsConfig:
+        {{- with $tls.serverName }}
+        serverName: {{ . | quote }}
+        {{- end }}
+        {{- if $ca.name }}
+        ca:
+          secret:
+            name: {{ $ca.name | quote }}
+            key: {{ $ca.key | quote }}
+        {{- end }}
+        {{- if $tls.insecureSkipVerify }}
+        insecureSkipVerify: true
+        {{- end }}
+{{- end }}

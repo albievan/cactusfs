@@ -53,6 +53,11 @@ type Config struct {
 	// SpanProcessor, when not nil, receives every span instead of an OTLP
 	// exporter. Tests use it to record spans.
 	SpanProcessor sdktrace.SpanProcessor
+	// StateTimeout is how long a scrape waits for what the node says of
+	// itself - its part of the metadata group, its drives, its certificate,
+	// its readiness - all together. Zero means two seconds; tests shorten
+	// it.
+	StateTimeout time.Duration
 }
 
 // Telemetry owns the node's metrics and traces.
@@ -60,8 +65,12 @@ type Telemetry struct {
 	registry *prometheus.Registry
 	tracer   trace.Tracer
 	shutdown func(context.Context) error
-	// exporting reports whether spans leave the process.
+	// exporting reports whether spans leave the process; tracing, whether
+	// spans are recorded at all.
 	exporting bool
+	tracing   bool
+	// state is the gauges read at scrape time.
+	state *state
 
 	requests       *prometheus.CounterVec
 	requestSeconds *prometheus.HistogramVec
@@ -80,11 +89,18 @@ type Telemetry struct {
 	lifecycle      *prometheus.CounterVec
 	accessDropped  prometheus.Counter
 	events         *prometheus.CounterVec
+	// Node RPC, on the calling and on the answering side.
+	rpcRequests       *prometheus.CounterVec
+	rpcSeconds        *prometheus.HistogramVec
+	handshakesRefused *prometheus.CounterVec
 }
 
 // New returns the node's Telemetry. The caller must call Shutdown.
 func New(ctx context.Context, cfg Config) (*Telemetry, error) {
-	t := &Telemetry{registry: prometheus.NewRegistry(), shutdown: func(context.Context) error { return nil }}
+	t := &Telemetry{
+		registry: prometheus.NewRegistry(), shutdown: func(context.Context) error { return nil },
+		state: newState(cfg.StateTimeout),
+	}
 	if err := t.initTracing(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("telemetry.New: %w", err)
 	}
@@ -152,9 +168,29 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 		Name: "cactusfs_events_total", Help: "Events derived from applied metadata entries on this node, by type.",
 	}, []string{"type"})
 
+	// The method is one of the node's own, the code one of gRPC's.
+	t.rpcRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_noderpc_requests_total",
+		Help: "Calls between nodes by side (client: made by this node, server: answered by it), method and gRPC status code.",
+	}, []string{"side", "method", "code"})
+	t.rpcSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "cactusfs_noderpc_request_duration_seconds", Help: "Duration of calls between nodes by side and method; of a stream, until it ends.",
+		Buckets: prometheus.ExponentialBuckets(0.0005, 4, 9),
+	}, []string{"side", "method"})
+	t.handshakesRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cactusfs_node_handshakes_refused_total",
+		Help: "Handshakes of other nodes this node refused, by reason: certificate, not_admitted, timeout or other.",
+	}, []string{"reason"})
+	// The first refusal is the one that matters: every reason is a series
+	// from the start, so that an increase from nothing is seen.
+	for _, reason := range []string{HandshakeCertificate, HandshakeNotAdmitted, HandshakeTimeout, HandshakeOther} {
+		t.handshakesRefused.WithLabelValues(reason)
+	}
+
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
+		t.rpcRequests, t.rpcSeconds, t.handshakesRefused, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
@@ -195,6 +231,7 @@ func (t *Telemetry) initTracing(ctx context.Context, cfg Config) error {
 		)),
 	)
 	t.tracer = provider.Tracer(tracerName)
+	t.tracing = true
 	t.shutdown = provider.Shutdown
 	return nil
 }
@@ -252,6 +289,20 @@ func (t *Telemetry) call(ctx context.Context, port, method string) (context.Cont
 			span.SetStatus(codes.Error, errorClass(err))
 		}
 		span.End()
+		t.portCalls.WithLabelValues(port, method, result).Inc()
+		t.portSeconds.WithLabelValues(port, method).Observe(time.Since(started).Seconds())
+	}
+}
+
+// count measures one call across an outbound port that takes no context:
+// it is counted and timed as call does, without a span.
+func (t *Telemetry) count(port, method string) func(error) {
+	started := time.Now()
+	return func(err error) {
+		result := resultOK
+		if err != nil {
+			result = resultError
+		}
 		t.portCalls.WithLabelValues(port, method, result).Inc()
 		t.portSeconds.WithLabelValues(port, method).Observe(time.Since(started).Seconds())
 	}

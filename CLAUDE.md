@@ -383,5 +383,7 @@ Milestone order (seed `PLAN.md` with this if it is empty):
   deployment (ADR-0014).
 - 2026-10-11: the project's own licence is a dedication to the public domain, as
   SQLite's is (`LICENSE.md`). Dependencies keep to the list of §3.
-- **Still open — ask before acting on it:** whether `github.com/albievan/cactusfs` is
-  the final module path.
+- 2026-10-12: `github.com/albievan/cactusfs` is the final module path. Releases are
+  published to `ghcr.io/albievan/cactusfs`, signed keyless (Sigstore, the identity of
+  the release workflow). The SBOM and the chart declare the licence as the blessing
+  of `LICENSE.md`.

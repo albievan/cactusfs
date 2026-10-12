@@ -59,6 +59,9 @@ type node struct {
 	rpcServer *noderpc.Server
 	rpcDone   chan error
 	events    *inproc.Bus
+	// publisher is the bus as the metadata store publishes to it: through
+	// the decorator that counts what could not be delivered.
+	publisher ports.EventPublisher
 	// auditOut is where exported audit records are written; nil when they
 	// are not exported.
 	auditOut io.Writer
@@ -115,7 +118,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// The one authorization decision point. Node RPC needs it first.
 	// Refusals are audited from the first request on; the trail they are
 	// written to becomes reachable when the metadata store is open.
-	n.auditor = app.NewAuditor(lateAuditLog{node: n}, n.clock, logger)
+	n.auditor = app.NewAuditor(n.telemetry.InstrumentAuditLog(lateAuditLog{node: n}), n.clock, logger)
 	n.authorizer = app.NewAuthorizer(logger, n.clock, n.auditor)
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
 	attached := make([]app.AttachedDrive, 0, len(cfg.Data))
@@ -141,14 +144,22 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// the process.
 	n.events = inproc.New(logger)
 	n.events.Subscribe("telemetry", inproc.Deduplicate(n.telemetry.ObserveEvent))
+	n.publisher = n.telemetry.InstrumentEventPublisher(n.events)
 
 	if err := n.openMetadata(ctx, cfg, logger); err != nil {
 		return err
 	}
 	n.id = n.meta.NodeID()
 	// Every outbound port is reached through a decorator that traces and
-	// counts the call.
+	// counts the call: a use case is never handed n.meta itself. A test
+	// walks the node and fails on a port that is (see wiring_test.go).
 	meta := n.telemetry.InstrumentMetadata(n.meta)
+	identities := n.telemetry.InstrumentIAM(n.meta)
+	trail := n.telemetry.InstrumentAuditLog(n.meta)
+	view := n.telemetry.InstrumentClusterView(n.meta.Local())
+	// How the node is, read when its metrics are scraped.
+	n.telemetry.ObserveRaft(raftGauges{store: n.meta})
+	n.telemetry.ObserveDrives(driveGauges(n.drives))
 	n.authorizer.WithBucketPolicies(meta)
 
 	if cfg.clustered() {
@@ -178,12 +189,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	}
 
 	n.maintenance = app.NewMaintenance(n.id, n.clock)
-	drives := n.driveSource(stores)
+	drives := n.driveSource(view, stores)
 	// The list of buckets with details decides every bucket from one walk
 	// of the policies in this node's state, as a search does, and reads the
 	// latest use of the buckets in one call (ADR-0019).
 	bucketPolicies := n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig())
-	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.meta.LocalConfig()).
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.telemetry.InstrumentLocalConfig(n.meta.LocalConfig())).
 		WithDetails(bucketPolicies, n.telemetry.InstrumentBucketActivity(n.meta))
 	// Who read what: counted in memory and handed to the metadata store in
 	// the background, by this node under its own name (ADR-0016).
@@ -223,33 +234,35 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	if err != nil {
 		return err
 	}
-	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader).WithIAM(n.meta, n.auditor)
+	n.identities = app.NewIdentityService(meta, kms, n.clock, rand.Reader).WithIAM(identities, n.auditor)
 	cost := cfg.passwordParams
 	if cost == (passwords.Params{}) {
 		cost = passwords.DefaultParams()
 	}
-	hasher, err := passwords.New(cost, rand.Reader)
+	argon, err := passwords.New(cost, rand.Reader)
 	if err != nil {
 		return err
 	}
+	hasher := n.telemetry.InstrumentPasswords(argon)
 	n.iam = app.NewIAMService(app.IAMServiceConfig{
-		Store: n.meta, Trail: n.meta, Authz: n.authorizer, Auditor: n.auditor, KMS: kms, Hasher: hasher,
+		Store: identities, Trail: trail, Authz: n.authorizer, Auditor: n.auditor, KMS: kms, Hasher: hasher,
 		Clock: n.clock, Entropy: rand.Reader,
 	})
-	provider, err := app.NewLocalIdentityProvider(n.meta, hasher, rand.Reader)
+	provider, err := app.NewLocalIdentityProvider(identities, hasher, rand.Reader)
 	if err != nil {
 		return err
 	}
 	n.sessions = app.NewSessionService(app.SessionServiceConfig{
-		Sessions: n.meta, Users: n.meta, Provider: provider, Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
+		Sessions: n.telemetry.InstrumentSessions(n.meta), Users: identities,
+		Provider: n.telemetry.InstrumentIdentityProvider(provider), Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
 	})
-	n.idempotency = app.NewIdempotencyService(n.meta, kms, n.clock, rand.Reader)
+	n.idempotency = app.NewIdempotencyService(n.telemetry.InstrumentIdempotency(n.meta), kms, n.clock, rand.Reader)
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
-		View: n.meta.Local(), Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
+		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
 		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },
 	})
 	if cfg.AuditExport && n.auditOut != nil {
-		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(n.meta, n.auditOut, logger).Handle))
+		n.events.Subscribe("audit-export", inproc.Deduplicate(auditexport.NewExporter(trail, n.auditOut, logger).Handle))
 	}
 	n.scrubber = app.NewScrubber(app.ScrubberConfig{
 		Buckets: meta, Index: meta, Uploads: meta, Healer: n.objects.Healer(), Logger: logger,
@@ -311,7 +324,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 // or, for a member of a cluster, a store that waits to be part of one.
 func (n *node) openMetadata(ctx context.Context, cfg serverConfig, logger *slog.Logger) (err error) {
 	config := raftmeta.Config{
-		Dir: cfg.MetaDir, Logger: logger, Entropy: rand.Reader, Timing: cfg.raftTiming, NodeID: cfg.NodeID, Events: n.events,
+		Dir: cfg.MetaDir, Logger: logger, Entropy: rand.Reader, Timing: cfg.raftTiming, NodeID: cfg.NodeID, Events: n.publisher,
 		Clock: n.clock,
 	}
 	if cfg.clustered() {
@@ -427,8 +440,8 @@ func (n *node) sweepSessions(ctx context.Context) {
 
 // driveSource finds drives for the object service: this node's by their ID,
 // those of other nodes through node RPC.
-func (n *node) driveSource(local []ports.ShardStore) ports.DriveSource {
-	source := &driveSource{node: n, view: n.meta.Local(), local: map[string]ports.ShardStore{}, remote: map[string]ports.ShardStore{}}
+func (n *node) driveSource(view ports.ClusterView, local []ports.ShardStore) ports.DriveSource {
+	source := &driveSource{node: n, view: view, local: map[string]ports.ShardStore{}, remote: map[string]ports.ShardStore{}}
 	for _, drive := range local {
 		source.local[drive.DriveID()] = drive
 	}
@@ -623,6 +636,10 @@ func (n *node) Close() error {
 		n.background.Wait()
 		n.stopBackground = nil
 	}
+	// The gauges stop describing what is about to be closed.
+	n.telemetry.ObserveRaft(nil)
+	n.telemetry.ObserveDrives(nil)
+	n.telemetry.ObserveNodeCertificate(nil)
 	var errs []error
 	if n.meta != nil {
 		// Let the others carry on without waiting for an election timeout.

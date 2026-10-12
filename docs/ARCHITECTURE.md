@@ -79,7 +79,7 @@ Conventions that follow from it:
 | `internal/app` | bucket, object, search and identity use cases; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; health |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
 | `internal/adapters/health` | in: `GET /healthz`, `GET /readyz`; the shutdown gate |
-| `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port |
+| `internal/adapters/telemetry` | metrics, traces, the `/metrics` handler, decorators for every outbound port, interceptors for node RPC, the gauges of the node's state |
 | `internal/adapters/disk` | out: shards on a local drive (ADR-0001) |
 | `internal/adapters/erasurecodec` | out: Reed-Solomon (ADR-0004) |
 | `internal/adapters/fsutil` | durable file creation and directory sync per OS |
@@ -187,16 +187,98 @@ Behaviour:
   rules with their `promtool` unit tests (`rules/`), and three Grafana dashboards
   (`dashboards/`: overview, the two APIs, storage and background work) that use only
   panels of Grafana itself and fetch nothing. The Helm chart can hand both to the
-  Prometheus Operator - a ServiceMonitor that scrapes `/metrics` over TLS with a
+  Prometheus Operator - a PodMonitor that scrapes `/metrics` of every pod over TLS with a
   credential from a Secret, and a PrometheusRule with the same rules - and renders
   neither unless told to. The rules expect the scrape job to be named `cactusfs`.
+  The alerts cover the APIs, the KMS and the shard stores, healing, the metadata group
+  (no leader, elections, a node behind, an unfinished upgrade of the schema), drives
+  (offline, nearly full), node certificates, refused handshakes, calls between nodes,
+  readiness and the audit trail.
   `make observability-check` runs `promtool`, checks the dashboards and the chart's two
   templates, and runs a test of `internal/adapters/telemetry` that fails when a rule, a
-  rule test or a dashboard names a metric the registry does not have. Alerts on the
-  state of the metadata group, the drives and the node certificates wait for the gauges
-  of PLAN 7.8; the rules file lists them.
+  rule test or a dashboard names a metric the registry does not have. The chart's
+  PodMonitor scrapes every node, whatever its roles: the gauges of the metadata group
+  and of the drives are those of nodes that need not be gateways.
+- **Traces.** Spans are recorded only when `--otlp-endpoint` is set; without it they
+  are made against a provider that drops them and nothing leaves the process. An S3 or
+  management request is a server span; every call across an outbound port is a child
+  of it (`<port>.<Method>`); every call between nodes is a span on each side
+  (`cactusfs.noderpc/<Method>`), and the caller's trace travels in the gRPC metadata
+  of the call as a W3C `traceparent`, with the `tracestate` beside it when there is
+  one, so that a PUT through a gateway and the storage nodes it writes to is one trace.
+  No baggage is read or sent, and the protobuf schema carries nothing of it. A node
+  that does not trace neither reads nor passes on either of the two. No span has an
+  attribute, and no metric a label, that holds a bucket, a key, a user, an access key,
+  a node's name, the directory of a drive or the text of an error.
+- **Ports.** Every outbound port a use case is given is a decorator of
+  `internal/adapters/telemetry` (`InstrumentX`): one span and one count per call, the
+  `method` label the name of the Go method, the `result` `error` whenever the port
+  returns an error - also when the error is the port's way of saying that a bucket, an
+  object, a user or a session does not exist, or that a password was not accepted. A
+  test of `cmd/cactusfs` walks a started node by reflection and fails on any port that
+  is held without its decorator; the exceptions (the clock, the authorizer, the erasure
+  codec, the composition of drives, shard readers, readiness checks) are listed in
+  that test with their reasons.
+- **State.** The gauges of the metadata group, the drives, the node certificate and
+  readiness are read when the metrics are scraped, from accessors that ask no other
+  node: what Raft keeps in memory, short reads of the node's own state, one `fstatfs` a
+  drive through the handle the drive was opened with. Every source is asked through a
+  probe: a scrape waits two seconds for all of them together and goes on without those
+  that have not answered - their series are absent from that scrape, not zero, except
+  `cactusfs_drive_online`, which is 0 for every drive the last answer named - and a
+  source that hangs (the metadata state while a snapshot is restored, a drive) is asked
+  once, not once a scrape. A gauge whose source does not exist (a node that is starting,
+  a node without a node certificate) is absent as well.
 - **Logs** are JSON on stdout (`log/slog`). Secrets, keys, tokens and object contents are
   never logged.
+
+The metrics of the binary. A test of `internal/adapters/telemetry` holds this table and
+the registry to each other, in both directions and with types and labels; the process
+metrics (`cactusfs_process_*`) and those of the Go runtime (`go_*`) come from the
+Prometheus client and are not listed.
+
+<!-- metrics:begin -->
+| Metric | Type | Labels | What it says |
+|---|---|---|---|
+| `cactusfs_build_info` | gauge | `version`, `goversion` | always 1; which build this is |
+| `cactusfs_ready` | gauge | - | 1 when `/readyz` answers 200, else 0 |
+| `cactusfs_s3_requests_total` | counter | `operation`, `code` | S3 requests by operation and HTTP status |
+| `cactusfs_s3_request_duration_seconds` | histogram | `operation` | duration of S3 requests |
+| `cactusfs_s3_request_bytes_total` | counter | `operation`, `direction` | bytes received from (`in`) and sent to (`out`) S3 clients |
+| `cactusfs_admin_requests_total` | counter | `operation`, `code` | management API requests by route and HTTP status |
+| `cactusfs_admin_request_duration_seconds` | histogram | `operation` | duration of management API requests |
+| `cactusfs_port_calls_total` | counter | `port`, `method`, `result` | calls across an outbound port; `result` is `ok` or `error` |
+| `cactusfs_port_call_duration_seconds` | histogram | `port`, `method` | duration of calls across an outbound port |
+| `cactusfs_noderpc_requests_total` | counter | `side`, `method`, `code` | calls between nodes: `side` is `client` (made) or `server` (answered), `method` one of node RPC's or `other`, `code` the gRPC status |
+| `cactusfs_noderpc_request_duration_seconds` | histogram | `side`, `method` | duration of calls between nodes; of a stream, until it ends |
+| `cactusfs_node_handshakes_refused_total` | counter | `reason` | handshakes of other nodes this node refused: `certificate`, `not_admitted`, `timeout`, `other` |
+| `cactusfs_node_certificate_not_after_seconds` | gauge | - | when the node's certificate ends, in seconds since 1970; clusters only |
+| `cactusfs_raft_is_leader` | gauge | - | 1 on the node that leads the metadata group |
+| `cactusfs_raft_term` | gauge | - | the Raft term; grows with every election |
+| `cactusfs_raft_applied_index` | gauge | - | last metadata entry the node's state reflects |
+| `cactusfs_raft_commit_index` | gauge | - | last metadata entry the node knows to be committed |
+| `cactusfs_raft_peers` | gauge | - | voters of the metadata group, as the node knows it |
+| `cactusfs_metadata_schema_level` | gauge | - | newest entry schema the cluster writes now |
+| `cactusfs_metadata_schema_supported` | gauge | - | newest entry schema this binary applies |
+| `cactusfs_metadata_state_schema` | gauge | - | schema of the node's metadata state |
+| `cactusfs_drive_online` | gauge | `drive` | 1 when a drive of this node can be reached; `drive` is its generated ID |
+| `cactusfs_drive_free_bytes` | gauge | `drive` | bytes the node may still write to the drive's file system |
+| `cactusfs_drive_total_bytes` | gauge | `drive` | size of the drive's file system |
+| `cactusfs_heal_objects_total` | counter | `result` | objects checked by healing: `healthy`, `healed`, `unrecoverable` |
+| `cactusfs_heal_shards_rebuilt_total` | counter | - | shards rebuilt from the rest of their object |
+| `cactusfs_scrub_passes_total` | counter | - | finished passes of the scrubber |
+| `cactusfs_scrub_objects_total` | counter | - | objects the scrubber verified |
+| `cactusfs_scrub_bytes_total` | counter | - | stored bytes the scrubber verified |
+| `cactusfs_gc_passes_total` | counter | - | finished passes of the garbage collector |
+| `cactusfs_gc_shards_removed_total` | counter | - | unreferenced shards removed |
+| `cactusfs_lifecycle_actions_total` | counter | `action` | what lifecycle rules did, by kind |
+| `cactusfs_object_access_dropped_total` | counter | - | reads not counted towards who read what |
+| `cactusfs_events_total` | counter | `type` | events derived from applied metadata entries |
+<!-- metrics:end -->
+
+The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
+`bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
+`identity_provider`, `passwords`, `cluster_view`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.

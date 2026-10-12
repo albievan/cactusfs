@@ -62,7 +62,14 @@ gone = set(open(sys.argv[1], "rb").read().split(b"\0"))
 sys.stdout.buffer.write(b"\0".join(p for p in sys.stdin.buffer.read().split(b"\0") if p and p not in gone) + b"\0")
 ' "$work/deleted" >"$work/present"
 COPYFILE_DISABLE=1 tar --null -T "$work/present" -cf "$work/tree.tar"
-tr '\0' '\n' <"$work/deleted" >"$work/deleted.txt"
+# What the other machine must not keep: every file of the commit that is not
+# in the tree as it is sent. A deletion that was added to the index is no
+# longer "tracked and gone" to git, and is still gone.
+git ls-tree -r --name-only -z HEAD | python3 -c '
+import sys
+present = set(open(sys.argv[1], "rb").read().split(b"\0"))
+sys.stdout.buffer.write(b"".join(p + b"\n" for p in sys.stdin.buffer.read().split(b"\0") if p and p not in present))
+' "$work/present" >"$work/deleted.txt"
 
 # The directory is this script's own: made by it, marked by it, and used by
 # one run at a time.

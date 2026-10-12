@@ -85,19 +85,19 @@ operator, and with them off renders nothing of its kinds.
 
 | Value | Renders |
 |---|---|
-| `serviceMonitor.enabled` | A ServiceMonitor that scrapes `/metrics` of the pods behind `<release>-admin`, over HTTPS on the admin port. The scrape job is named `cactusfs`, whatever the release is called |
+| `podMonitor.enabled` | A PodMonitor that scrapes `/metrics` of every pod of the release, over HTTPS on the admin port. The scrape job is named `cactusfs`, whatever the release is called |
 | `prometheusRule.enabled` | A PrometheusRule with the alerting and recording rules of `deploy/observability/rules/`, which the chart carries in `files/`. They look for the job `cactusfs` |
 
-`labels` on each is for the labels your Prometheus selects by. What a ServiceMonitor
+`labels` on each is for the labels your Prometheus selects by. What the PodMonitor
 needs, and the chart refuses to render it without:
 
 - **A credential.** `/metrics` answers nobody without one. Make an API key for a user
   who is allowed `admin:GetMetrics` and nothing else, and a Secret in the release's
   namespace with one key whose value is `<access key ID>:<secret>`; name them in
-  `serviceMonitor.bearerTokenSecret.name` and `.key`. The chart writes the name of the
-  Secret into the ServiceMonitor, never the credential.
+  `podMonitor.bearerTokenSecret.name` and `.key`. The chart writes the name of the
+  Secret into the PodMonitor, never the credential.
 - **A name to check the certificate against.** Prometheus scrapes pods by their
-  addresses, which no certificate names: `serviceMonitor.tlsConfig.serverName` is a
+  addresses, which no certificate names: `podMonitor.tlsConfig.serverName` is a
   name the certificate of `secrets.tls` carries. `tlsConfig.caSecret` (`name`, `key`)
   is the CA that signed it, when Prometheus does not trust it already.
   `tlsConfig.insecureSkipVerify: true` scrapes without checking the certificate, and
@@ -117,13 +117,21 @@ needs, and the chart refuses to render it without:
   That opens the whole admin port to Prometheus's pods, the console included; there is
   no rule for `/metrics` alone, since a NetworkPolicy knows ports and not paths.
 
-Every node serves `/metrics`, but the admin Service is in front of the nodes with the
-gateway role only: a pool whose `roles` leave out `gateway` is not scraped by this
-ServiceMonitor.
+Every node serves `/metrics` on its admin port, and every node is scraped: the pods are
+selected, not a Service. The admin Service is in front of the nodes with the gateway
+role only, and the nodes that vote in the metadata group and hold the drives need not
+be gateways - their gauges (the Raft leader and term, the drives, the node
+certificate) are what most of the alerts read. No Service changes for it, and the
+NetworkPolicy does not either: `adminFrom` already governs port 9001 of every pod.
+
+A pod is scraped from the moment it runs. Until a node has started - a member waits
+for the others of its cluster - it refuses everything but its probes, `/metrics`
+included, since nobody can be authenticated yet: Prometheus shows it as not answering
+(`up == 0`), which is what it is.
 
 Dashboards for Grafana are in `deploy/observability/dashboards/`; the chart does not
-install them. `make observability-check` renders `ci/monitoring/` and asserts what this
-section says; `make helm-lint` does not see that directory, because it validates every
+install them. `make observability-check` renders `ci/monitoring/` - a cluster whose
+voters are no gateways - and asserts what this section says; `make helm-lint` does not see that directory, because it validates every
 kind against the schemas of Kubernetes itself and these two are the operator's.
 
 ## How nodes roll

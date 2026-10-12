@@ -14,6 +14,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/noderpc"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -85,11 +86,28 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 			domain.ErrInvalidArgument, identity.NodeID(), cfg.NodeID)
 	}
 	n.identity = identity
-	n.rpc = noderpc.NewClient(identity.Client, n.resolver(cfg), n.clock)
+	n.telemetry.ObserveNodeCertificate(certificateGauge{identity: identity})
+	// Every call between nodes is a span and is counted, on both sides;
+	// the caller's trace travels with the call.
+	observed := n.telemetry.NodeRPC(noderpc.Methods())
+	n.rpc = noderpc.NewClient(identity.Client, n.resolver(cfg), n.clock).
+		WithInterceptors(observed.UnaryClient(), observed.StreamClient())
 
 	// Raft trusts what its messages say about who sent them, so the
 	// listener admits only the nodes that may send any: the voters.
-	raftListener, err := identity.Listen(ctx, cfg.RaftAddr, func(nodeID string) bool { return n.mayReplicate(cfg, nodeID) })
+	//
+	// TODO(PLAN 7.5): a handshake the Raft listener itself fails - no
+	// certificate, not one of the node CA, too slow - is not counted:
+	// nodetls.Listen closes such a connection without telling anybody. When
+	// it reports them, count them here with telemetry.HandshakeCertificate
+	// and telemetry.HandshakeTimeout. Node RPC counts its own, below.
+	raftListener, err := identity.Listen(ctx, cfg.RaftAddr, func(nodeID string) bool {
+		admitted := n.mayReplicate(cfg, nodeID)
+		if !admitted {
+			n.telemetry.ObserveHandshakeRefused(telemetry.HandshakeNotAdmitted)
+		}
+		return admitted
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +129,9 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		Drive:  n.localDrive,
 		Clock:  n.clock,
 		Logger: logger,
+
+		UnaryInterceptor: observed.UnaryServer(), StreamInterceptor: observed.StreamServer(),
+		OnHandshakeRefused: n.telemetry.ObserveHandshakeRefused,
 	})
 	n.rpcDone = make(chan error, 1)
 	go func() { n.rpcDone <- n.rpcServer.Serve(rpcListener) }()
