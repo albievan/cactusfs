@@ -57,3 +57,4 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0019](0019-bucket-activity-and-schema-4.md) | Who created a bucket, its latest uploads and downloads, and entry schema 4 | accepted |
 | [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted |
 | [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; releases are signed keyless by the release workflow (PLAN 7.9) |
+| [0022](0022-settings.md) | Settings: declared once, shown for every node | accepted |
