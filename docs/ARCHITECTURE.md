@@ -183,6 +183,18 @@ Behaviour:
 - **Metrics.** `GET /metrics` on the admin listener requires
   `Authorization: Bearer <access key ID>:<secret>` and passes the authorizer
   (`admin:GetMetrics`). Metrics carry no bucket, key or access-key labels.
+- **Observability pack** (`deploy/observability/`). Prometheus alerting and recording
+  rules with their `promtool` unit tests (`rules/`), and three Grafana dashboards
+  (`dashboards/`: overview, the two APIs, storage and background work) that use only
+  panels of Grafana itself and fetch nothing. The Helm chart can hand both to the
+  Prometheus Operator - a ServiceMonitor that scrapes `/metrics` over TLS with a
+  credential from a Secret, and a PrometheusRule with the same rules - and renders
+  neither unless told to. The rules expect the scrape job to be named `cactusfs`.
+  `make observability-check` runs `promtool`, checks the dashboards and the chart's two
+  templates, and runs a test of `internal/adapters/telemetry` that fails when a rule, a
+  rule test or a dashboard names a metric the registry does not have. Alerts on the
+  state of the metadata group, the drives and the node certificates wait for the gauges
+  of PLAN 7.8; the rules file lists them.
 - **Logs** are JSON on stdout (`log/slog`). Secrets, keys, tokens and object contents are
   never logged.
 

@@ -1,0 +1,584 @@
+# Unit tests of cactusfs.rules.yaml, for `promtool test rules`
+# (make observability-check). For every alert: one series that fires it and
+# at least one that does not.
+#
+# How to read the series. One sample a minute. 'a+bxn' is a, a+b, ... a+n*b
+# (n+1 samples) and 'axn' is a, n+1 times. A counter that grows by b a minute
+# has rate() = b/60 a second whatever the window, so a ratio of two rates is
+# the ratio of the two b. No expectation depends on the exact value of a
+# rate: every threshold is far from both the series that fires and the one
+# that does not, and recorded values are tested as "between two bounds".
+#
+# An alert with `for: d` whose expression is first true at t fires at t + d.
+# Expected alerts are the firing ones: a pending alert is not listed.
+
+rule_files:
+  - cactusfs.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # --- CactusFSInstanceDown: up == 0 for 3m ---------------------------------
+  # a: up is 1 at 0m-2m and 0 from 3m. True from 3m, fires at 3m + 3m = 6m.
+  # b: always 1. Never true.
+  - name: instance down
+    interval: 1m
+    input_series:
+      - series: 'up{job="cactusfs", instance="a:9001"}'
+        values: '1x2 0x30'
+      - series: 'up{job="cactusfs", instance="b:9001"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: CactusFSInstanceDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CactusFSInstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A CactusFS node does not answer its scrape"
+              description: "Prometheus has not been able to scrape a:9001 for three minutes: the node is down, cannot be reached, or refuses the scrape credential."
+      # While a node is scraped the job is not absent.
+      - eval_time: 15m
+        alertname: CactusFSAbsent
+        exp_alerts: []
+
+  # --- CactusFSAbsent: absent(up{job="cactusfs"}) for 10m -------------------
+  # Only another job is scraped. True from 0m, fires at 10m. absent() gives
+  # the labels of its selector: job="cactusfs".
+  - name: no target at all
+    interval: 1m
+    input_series:
+      - series: 'up{job="other", instance="x:9100"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSAbsent
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+            exp_annotations:
+              summary: "No CactusFS node is being scraped"
+              description: "Prometheus has had no target of the job cactusfs for ten minutes: nothing would be known of a failure."
+      - eval_time: 15m
+        alertname: CactusFSInstanceDown
+        exp_alerts: []
+
+  # --- CactusFSRestartingOften: changes(start time[30m]) > 2 for 5m ---------
+  # a: the start time is 1000 at 0m-5m, 2000 at 6m-11m, 3000 at 12m-17m and
+  #    4000 from 18m: it changes at 6m, 12m and 18m.
+  #    At 15m: 2 changes in the window. Not above 2.
+  #    At 18m: 3 changes. True from 18m, fires at 18m + 5m = 23m.
+  #    At 45m: the window is (15m, 45m], with the one change at 18m. Not true.
+  # b: never changes.
+  - name: a node that keeps restarting
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_process_start_time_seconds{job="cactusfs", instance="a:9001"}'
+        values: '1000x5 2000x5 3000x5 4000x40'
+      - series: 'cactusfs_process_start_time_seconds{job="cactusfs", instance="b:9001"}'
+        values: '1000x60'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CactusFSRestartingOften
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSRestartingOften
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "A CactusFS node keeps restarting"
+              description: "The process on a:9001 has started more than twice in thirty minutes."
+      - eval_time: 45m
+        alertname: CactusFSRestartingOften
+        exp_alerts: []
+
+  # --- CactusFSMixedVersions: more than one version for 6h -------------------
+  # Two nodes, two versions: the count of versions is 2 from 0m, so the alert
+  # fires at 6h = 360m. At 300m it is pending.
+  - name: an upgrade left half done
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_build_info{job="cactusfs", instance="a:9001", version="0.7.0", goversion="go1.27.2"}'
+        values: '1x400'
+      - series: 'cactusfs_build_info{job="cactusfs", instance="b:9001", version="0.8.0", goversion="go1.27.2"}'
+        values: '1x400'
+    alert_rule_test:
+      - eval_time: 300m
+        alertname: CactusFSMixedVersions
+        exp_alerts: []
+      - eval_time: 370m
+        alertname: CactusFSMixedVersions
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "CactusFS nodes run different versions"
+              description: "More than one version of CactusFS has been running for six hours: a rolling upgrade was started and not finished."
+
+  # Two nodes, one version: the count of versions is 1. Never true.
+  - name: one version everywhere
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_build_info{job="cactusfs", instance="a:9001", version="0.7.0", goversion="go1.27.2"}'
+        values: '1x400'
+      - series: 'cactusfs_build_info{job="cactusfs", instance="b:9001", version="0.7.0", goversion="go1.27.2"}'
+        values: '1x400'
+    alert_rule_test:
+      - eval_time: 370m
+        alertname: CactusFSMixedVersions
+        exp_alerts: []
+
+  # --- CactusFSS3ServerErrors: 5xx / all > 0.05 for 10m ----------------------
+  # a: 30 a minute end in 200 and 30 in 500: 30 / (30 + 30) = 0.5. Above 0.05
+  #    from 1m (the first evaluation with two samples), fires at 11m.
+  # b: 99 a minute end in 200 and 1 in 503: 1 / 100 = 0.01. Below 0.05.
+  # c: 60 a minute, all 200: there is no 5xx series, so no ratio at all.
+  - name: S3 server errors
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_s3_requests_total{job="cactusfs", instance="a:9001", operation="GetObject", code="200"}'
+        values: '0+30x30'
+      - series: 'cactusfs_s3_requests_total{job="cactusfs", instance="a:9001", operation="GetObject", code="500"}'
+        values: '0+30x30'
+      - series: 'cactusfs_s3_requests_total{job="cactusfs", instance="b:9001", operation="GetObject", code="200"}'
+        values: '0+99x30'
+      - series: 'cactusfs_s3_requests_total{job="cactusfs", instance="b:9001", operation="GetObject", code="503"}'
+        values: '0+1x30'
+      - series: 'cactusfs_s3_requests_total{job="cactusfs", instance="c:9001", operation="GetObject", code="200"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSS3ServerErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSS3ServerErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The S3 API is failing requests"
+              description: "More than 5 % of the S3 requests answered by a:9001 have ended in a server error (5xx) for ten minutes."
+    # The recorded ratio: 0.5 for a, 0.01 for b, nothing for c. And the
+    # recorded rate of a's 500s: 30 a minute = 0.5 a second.
+    promql_expr_test:
+      - expr: count by (instance) (cactusfs:s3_request_errors:ratio_rate5m > 0.4 < 0.6)
+        eval_time: 20m
+        exp_samples:
+          - labels: '{instance="a:9001"}'
+            value: 1
+      - expr: count by (instance) (cactusfs:s3_request_errors:ratio_rate5m > 0.005 < 0.02)
+        eval_time: 20m
+        exp_samples:
+          - labels: '{instance="b:9001"}'
+            value: 1
+      - expr: count by (instance) (cactusfs:s3_request_errors:ratio_rate5m)
+        eval_time: 20m
+        exp_samples:
+          - labels: '{instance="a:9001"}'
+            value: 1
+          - labels: '{instance="b:9001"}'
+            value: 1
+      - expr: count by (instance, code) (cactusfs:s3_requests:rate5m{instance="a:9001"} > 0.4 < 0.6)
+        eval_time: 20m
+        exp_samples:
+          - labels: '{instance="a:9001", code="200"}'
+            value: 1
+          - labels: '{instance="a:9001", code="500"}'
+            value: 1
+
+  # --- CactusFSAdminServerErrors: 5xx / all > 0.05 for 10m -------------------
+  # The same arithmetic as for S3: a is 0.5, b is 0.01.
+  - name: management API server errors
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_admin_requests_total{job="cactusfs", instance="a:9001", operation="GET /api/v1/buckets", code="200"}'
+        values: '0+30x30'
+      - series: 'cactusfs_admin_requests_total{job="cactusfs", instance="a:9001", operation="GET /api/v1/buckets", code="500"}'
+        values: '0+30x30'
+      - series: 'cactusfs_admin_requests_total{job="cactusfs", instance="b:9001", operation="GET /api/v1/buckets", code="200"}'
+        values: '0+99x30'
+      - series: 'cactusfs_admin_requests_total{job="cactusfs", instance="b:9001", operation="GET /api/v1/buckets", code="500"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSAdminServerErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSAdminServerErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The management API is failing requests"
+              description: "More than 5 % of the management API requests answered by a:9001 have ended in a server error (5xx) for ten minutes."
+    promql_expr_test:
+      - expr: count by (instance) (cactusfs:admin_request_errors:ratio_rate5m > 0.4 < 0.6)
+        eval_time: 20m
+        exp_samples:
+          - labels: '{instance="a:9001"}'
+            value: 1
+
+  # --- CactusFSS3Slow: p99 of HEAD and list requests > 1.024 s for 15m -------
+  # a: every HeadObject takes between 4.096 s and 16.384 s. The 99th
+  #    percentile is 99 % of the way through that bucket:
+  #    4.096 + 0.99 * (16.384 - 4.096) = 16.26 s. Above 1.024 from 1m, fires
+  #    at 16m.
+  # b: every HeadObject takes between 0.001 s and 0.004 s:
+  #    0.001 + 0.99 * 0.003 = 0.00397 s. Below.
+  # c: only GetObject is slow, which the rule does not look at.
+  - name: slow S3 requests
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="HeadObject", le="1.024"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="HeadObject", le="4.096"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="HeadObject", le="16.384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="HeadObject", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="HeadObject", le="0.001"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="HeadObject", le="0.004"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="HeadObject", le="1.024"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="HeadObject", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="c:9001", operation="GetObject", le="4.096"}'
+        values: '0x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="c:9001", operation="GetObject", le="16.384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_s3_request_duration_seconds_bucket{job="cactusfs", instance="c:9001", operation="GetObject", le="+Inf"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSS3Slow
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSS3Slow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "S3 requests that carry no object data are slow"
+              description: "The slowest 1 % of HEAD and list requests answered by a:9001 have taken longer than a second for fifteen minutes."
+
+  # --- CactusFSAdminSlow: p99 > 4.096 s for 15m ------------------------------
+  # a: every request takes between 4.096 s and 16.384 s: 16.26 s, as above.
+  # b: every request takes between 0.001 s and 0.004 s: 0.00397 s.
+  - name: slow management API
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="GET /api/v1/buckets", le="4.096"}'
+        values: '0x30'
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="GET /api/v1/buckets", le="16.384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="a:9001", operation="GET /api/v1/buckets", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="GET /api/v1/buckets", le="0.001"}'
+        values: '0x30'
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="GET /api/v1/buckets", le="0.004"}'
+        values: '0+60x30'
+      - series: 'cactusfs_admin_request_duration_seconds_bucket{job="cactusfs", instance="b:9001", operation="GET /api/v1/buckets", le="+Inf"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSAdminSlow
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSAdminSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The management API is slow"
+              description: "The slowest 1 % of management API requests answered by a:9001 have taken longer than four seconds for fifteen minutes."
+
+  # --- CactusFSKMSErrors: rate of failed KMS calls > 0 for 5m ----------------
+  # a: 6 calls a minute fail: 6 / 60 = 0.1 a second. Above 0 from 1m, fires
+  #    at 6m.
+  # b: the series of errors exists and does not grow: 0 a second. Not above.
+  - name: KMS errors
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="a:9001", port="kms", method="GenerateDataKey", result="ok"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="a:9001", port="kms", method="GenerateDataKey", result="error"}'
+        values: '0+6x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="b:9001", port="kms", method="GenerateDataKey", result="ok"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="b:9001", port="kms", method="GenerateDataKey", result="error"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CactusFSKMSErrors
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSKMSErrors
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "Calls to the KMS are failing"
+              description: "a:9001 has had calls to the KMS fail for five minutes. Without the KMS no object can be written and none can be read."
+
+  # --- CactusFSKMSSlow: p99 of KMS calls > 0.4096 s for 15m ------------------
+  # a: every call takes between 0.4096 s and 1.6384 s:
+  #    0.4096 + 0.99 * (1.6384 - 0.4096) = 1.626 s. Above from 1m, fires at 16m.
+  # b: every call takes between 0.0016 s and 0.0064 s:
+  #    0.0016 + 0.99 * 0.0048 = 0.006352 s. Below.
+  # c: only the metadata port is slow, which the rule does not look at.
+  - name: slow KMS
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="a:9001", port="kms", method="UnwrapDataKey", le="0.4096"}'
+        values: '0x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="a:9001", port="kms", method="UnwrapDataKey", le="1.6384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="a:9001", port="kms", method="UnwrapDataKey", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="b:9001", port="kms", method="UnwrapDataKey", le="0.0016"}'
+        values: '0x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="b:9001", port="kms", method="UnwrapDataKey", le="0.0064"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="b:9001", port="kms", method="UnwrapDataKey", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="c:9001", port="metadata", method="ScanObjects", le="0.4096"}'
+        values: '0x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="c:9001", port="metadata", method="ScanObjects", le="1.6384"}'
+        values: '0+60x30'
+      - series: 'cactusfs_port_call_duration_seconds_bucket{job="cactusfs", instance="c:9001", port="metadata", method="ScanObjects", le="+Inf"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSKMSSlow
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSKMSSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The KMS is slow"
+              description: "The slowest 1 % of the calls a:9001 makes to the KMS have taken longer than 0.4 seconds for fifteen minutes; every read and every write waits for one."
+
+  # --- CactusFSShardErrors: failed / all shard operations > 0.05 for 15m ----
+  # a: 50 a minute succeed and 50 fail: 50 / 100 = 0.5. Above from 1m, fires
+  #    at 16m.
+  # b: 99 succeed and 1 fails: 0.01. Below.
+  # c: half of the calls to the metadata port fail, which the rule does not
+  #    look at (an object that is not there is such a failure).
+  - name: shard errors
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="a:9001", port="shards", method="Open", result="ok"}'
+        values: '0+50x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="a:9001", port="shards", method="Open", result="error"}'
+        values: '0+50x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="b:9001", port="shards", method="Open", result="ok"}'
+        values: '0+99x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="b:9001", port="shards", method="Open", result="error"}'
+        values: '0+1x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="c:9001", port="metadata", method="GetObject", result="ok"}'
+        values: '0+50x30'
+      - series: 'cactusfs_port_calls_total{job="cactusfs", instance="c:9001", port="metadata", method="GetObject", result="error"}'
+        values: '0+50x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSShardErrors
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSShardErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "Reads and writes of shards are failing"
+              description: "More than 5 % of the shard operations of a:9001 have failed for fifteen minutes: look at its drives and at the nodes it reaches them on."
+      # No failed call to the KMS anywhere in this test.
+      - eval_time: 25m
+        alertname: CactusFSKMSErrors
+        exp_alerts: []
+    # The recorded ratio by port: 0.5 for a's shards and for c's metadata.
+    promql_expr_test:
+      - expr: count by (instance, port) (cactusfs:port_call_errors:ratio_rate5m > 0.4 < 0.6)
+        eval_time: 25m
+        exp_samples:
+          - labels: '{instance="a:9001", port="shards"}'
+            value: 1
+          - labels: '{instance="c:9001", port="metadata"}'
+            value: 1
+
+  # --- CactusFSObjectsUnrecoverable: fires at once --------------------------
+  # The counter has no series until the first such object, and increase()
+  # sees nothing in a first sample; the second half of the rule is for that.
+  # a: no series for the first ten minutes or so, then 1 and never more.
+  #    At 13m: increase is 0 (every sample is 1); the series is above 0 and
+  #    did not exist an hour ago, so the rule is true and fires (for: 0m).
+  #    At 90m: increase is 0, and the series did exist an hour ago (at 30m).
+  #    Not true.
+  - name: the first object that cannot be rebuilt
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_heal_objects_total{job="cactusfs", instance="a:9001", result="unrecoverable"}'
+        values: '_x10 1x110'
+      - series: 'cactusfs_heal_objects_total{job="cactusfs", instance="a:9001", result="healthy"}'
+        values: '0+100x120'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSObjectsUnrecoverable
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: CactusFSObjectsUnrecoverable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "a:9001"
+              result: unrecoverable
+            exp_annotations:
+              summary: "Objects were found that cannot be rebuilt"
+              description: "Healing on a:9001 met objects with more shards lost or damaged than their parity can replace. Their data is lost unless a missing drive or node comes back; the node's log names them."
+      - eval_time: 90m
+        alertname: CactusFSObjectsUnrecoverable
+        exp_alerts: []
+
+  # b: the series exists at 0 and goes to 3 at 11m. At 15m the increase in
+  #    the last hour is 3 - 0 = 3 (or more, as increase() extrapolates): above
+  #    0, fires. At 100m the window is (40m, 100m], where every sample is 3:
+  #    the increase is 0, and the series existed an hour ago. Not true.
+  # c: stays at 0. Never true: neither an increase nor a value above 0.
+  - name: more objects that cannot be rebuilt
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_heal_objects_total{job="cactusfs", instance="b:9001", result="unrecoverable"}'
+        values: '0x10 3x110'
+      - series: 'cactusfs_heal_objects_total{job="cactusfs", instance="c:9001", result="unrecoverable"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CactusFSObjectsUnrecoverable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+              instance: "b:9001"
+              result: unrecoverable
+            exp_annotations:
+              summary: "Objects were found that cannot be rebuilt"
+              description: "Healing on b:9001 met objects with more shards lost or damaged than their parity can replace. Their data is lost unless a missing drive or node comes back; the node's log names them."
+      - eval_time: 100m
+        alertname: CactusFSObjectsUnrecoverable
+        exp_alerts: []
+
+  # --- CactusFSShardsRebuilt: increase in 1h > 0, fires at once -------------
+  # a: 0 until 10m, 4 from 11m. At 15m the increase is 4 - 0 = 4: fires. At
+  #    100m the window is (40m, 100m] and every sample in it is 4: 0, not true.
+  # b: stays at 0.
+  - name: shards rebuilt
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_heal_shards_rebuilt_total{job="cactusfs", instance="a:9001"}'
+        values: '0x10 4x110'
+      - series: 'cactusfs_heal_shards_rebuilt_total{job="cactusfs", instance="b:9001"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSShardsRebuilt
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSShardsRebuilt
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "Damaged or missing shards were rebuilt"
+              description: "a:9001 has rebuilt shards from parity in the last hour. Nothing is lost; unless a drive was just replaced, look for the drive that is failing."
+      - eval_time: 100m
+        alertname: CactusFSShardsRebuilt
+        exp_alerts: []
+
+  # --- CactusFSLifecycleFailing: increase of failures in 1h > 0 for 2h ------
+  # a: one failure a minute, for ever. True from 1m, fires at 121m.
+  # b: one failure, at 11m. True while the step from 0 to 1 is in the window,
+  #    from 11m to 69m: an hour, not two. Never fires.
+  # c: only actions that are not failures.
+  - name: lifecycle rules that keep failing
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_lifecycle_actions_total{job="cactusfs", instance="a:9001", action="failed"}'
+        values: '0+1x200'
+      - series: 'cactusfs_lifecycle_actions_total{job="cactusfs", instance="b:9001", action="failed"}'
+        values: '0x10 1x190'
+      - series: 'cactusfs_lifecycle_actions_total{job="cactusfs", instance="c:9001", action="expired"}'
+        values: '0+5x200'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CactusFSLifecycleFailing
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: CactusFSLifecycleFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+              action: failed
+            exp_annotations:
+              summary: "Lifecycle rules cannot be carried out"
+              description: "Actions of lifecycle rules have kept failing on a:9001 for two hours: versions that should have expired are still stored."
+
+  # --- CactusFSObjectAccessDropped: increase in 15m > 0 for 15m -------------
+  # a: 5 reads a minute are dropped. True from 1m, fires at 16m.
+  # b: stays at 0.
+  - name: reads that are not counted
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_object_access_dropped_total{job="cactusfs", instance="a:9001"}'
+        values: '0+5x60'
+      - series: 'cactusfs_object_access_dropped_total{job="cactusfs", instance="b:9001"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CactusFSObjectAccessDropped
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSObjectAccessDropped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "Downloads are not being counted"
+              description: "a:9001 has been dropping records of who read which object for fifteen minutes: more wait to be recorded than it holds, or the metadata store refuses them. The objects themselves are served."

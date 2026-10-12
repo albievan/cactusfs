@@ -57,6 +57,18 @@ ARG YQ_SHA256_AMD64=e68a456f90c577af3fe4960184b3a3cf5c461e0348407c10f107da3a5fec
 ARG YQ_SHA256_ARM64=8c27f6e7476fb5acefb9352e3d30f6bc2dc93f1956eb92e8da727173fb7ec6d3
 ARG K8S_SCHEMAS_VERSION=1.36.0
 ARG K8S_SCHEMAS_COMMIT=817113f21a2643311cbc3e992bb44ffe1c416c54
+# What `make observability-check` judges the alerting rules with: promtool, of
+# the Prometheus release (Apache-2.0). A tool of the builder image only;
+# nothing of it is in the product. Only promtool is unpacked from the release
+# archive, which is pinned by its checksum for each architecture; to move the
+# pin, change the version AND both checksums. The checksums are those of
+#   https://github.com/prometheus/prometheus/releases/download/v<version>/prometheus-<version>.linux-<arch>.tar.gz
+# as the release's own sha256sums.txt lists them.
+# TODO(PLAN 7.4): the two checksums below are placeholders - the builder image
+# does not build until they are replaced with the real ones.
+ARG PROMETHEUS_VERSION=3.15.0
+ARG PROMTOOL_SHA256_AMD64=2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0
+ARG PROMTOOL_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
 
 # --- node: Node.js and pnpm, on the build host's architecture -----------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS node
@@ -169,6 +181,26 @@ RUN schema() { python /usr/local/bin/fetch.py --file \
  && schema persistentvolume-v1           ddff73572bf0965cecf9c160949a1c416f4f9e8ade7f46a649767589a1e2783c \
  && ls -l "/opt/kubernetes-schemas/v${K8S_SCHEMAS_VERSION}-standalone-strict"
 
+# --- promtools: promtool, for the gate of the alerting rules ---------------------
+FROM ${PYTHON_IMAGE} AS promtools
+ARG TARGETARCH
+ARG PROMETHEUS_VERSION
+ARG PROMTOOL_SHA256_AMD64
+ARG PROMTOOL_SHA256_ARM64
+COPY scripts/fetch.py /usr/local/bin/fetch.py
+# The archive of the release, by its checksum; of it, promtool and no more.
+RUN case "${TARGETARCH}" in \
+      amd64) sum="${PROMTOOL_SHA256_AMD64}" ;; \
+      arm64) sum="${PROMTOOL_SHA256_ARM64}" ;; \
+      *) echo "no promtool for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && release="prometheus-${PROMETHEUS_VERSION}.linux-${TARGETARCH}" \
+ && python /usr/local/bin/fetch.py "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${release}.tar.gz" "$sum" /tmp/prometheus "${release}/promtool" \
+ && mkdir -p /opt/promtools/bin \
+ && install -m 0755 "/tmp/prometheus/${release}/promtool" /opt/promtools/bin/promtool \
+ && rm -rf /tmp/prometheus \
+ && /opt/promtools/bin/promtool --version
+
 # --- builder: the image every `make` target runs in ----------------------------
 # Go tools (gofumpt, goimports, govulncheck, go-licenses) are NOT installed
 # here: they are pinned by `tool` directives in go.mod and run with `go tool`.
@@ -199,6 +231,9 @@ RUN git config --system --add safe.directory '*' \
  && golangci-lint version && helm version --short && docker --version && buf --version && oasdiff --version \
  && aws --version && /opt/s3tests/venv/bin/python -c "import ssl, boto3, pytest; print('s3-tests', ssl.OPENSSL_VERSION)"
 RUN kubeconform -v && yq --version && ls -d /opt/kubernetes-schemas/v*-standalone-strict
+# promtool, for the alerting rules (scripts/observability.sh).
+COPY --from=promtools /opt/promtools/bin/ /usr/local/bin/
+RUN promtool --version
 ENV CACTUSFS_IN_BUILDER=1 \
     GOTOOLCHAIN=local \
     GOCACHE=/cache/go-build \

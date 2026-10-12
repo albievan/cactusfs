@@ -153,6 +153,42 @@ podDisruptionBudget:
   # One node at a time: a cluster reads and writes with one node away.
   maxUnavailable: 1
 
+# --- monitoring: both off; the chart needs no Prometheus Operator -----------
+# A ServiceMonitor (monitoring.coreos.com/v1) that scrapes /metrics of the
+# pods behind the admin Service. Only for a cluster that has the Prometheus
+# Operator's resource definitions. Prometheus must also be let in:
+# networkPolicy.adminFrom names who reaches port 9001.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # /metrics requires a credential. A Secret, in the release's namespace,
+  # with one key whose value is <access key ID>:<secret> of an API key whose
+  # owner is allowed admin:GetMetrics and nothing else. Required when enabled.
+  bearerTokenSecret:
+    name: ""
+    key: token
+  tlsConfig:
+    # Pods are scraped by their addresses, which no certificate names: a
+    # name that the certificate of secrets.tls carries. Required when enabled.
+    serverName: ""
+    # The CA that signed that certificate, when it is not one Prometheus
+    # trusts already: a Secret in the release's namespace.
+    caSecret:
+      name: ""
+      key: ca.crt
+    # Scrape without checking the certificate: the credential then goes to
+    # whoever answers. For a test bench, never for production.
+    insecureSkipVerify: false
+  # Labels the Prometheus Operator selects ServiceMonitors by.
+  labels: {}
+# A PrometheusRule (monitoring.coreos.com/v1) with the alerting rules of
+# deploy/observability/rules, which the chart carries in files/.
+prometheusRule:
+  enabled: false
+  # Labels the Prometheus Operator selects PrometheusRules by.
+  labels: {}
+
 logLevel: info
 otlpEndpoint: ""
 extraEnv: []

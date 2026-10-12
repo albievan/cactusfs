@@ -1,0 +1,242 @@
+# CactusFS - Prometheus recording and alerting rules.
+#
+# Every metric named here is one the binary registers today
+# (internal/adapters/telemetry); a test of that package reads this file and
+# fails on a name the registry does not have. `up` is Prometheus's own.
+#
+# The rules expect the scrape job to be named "cactusfs". The ServiceMonitor of
+# the Helm chart names it so; a scrape configuration written by hand says
+# job_name: cactusfs.
+#
+# deploy/helm/cactusfs/files/cactusfs.rules.yaml is a copy of this file, for
+# the chart's PrometheusRule: `make observability-check` fails when the two
+# differ. Change both.
+#
+# No annotation carries a value, a bucket, a key or a credential: metrics have
+# no such label, and the text of an alert names the instance and nothing else.
+#
+# Counters with labels do not exist before their first event, and rate() and
+# increase() see nothing in a series' first sample. Where the first event is
+# the one that matters (an object that cannot be rebuilt) the rule also fires
+# on a series that is new and above zero.
+
+groups:
+  - name: cactusfs.recording
+    rules:
+      - record: cactusfs:s3_requests:rate5m
+        expr: sum by (job, instance, code) (rate(cactusfs_s3_requests_total[5m]))
+      - record: cactusfs:s3_request_errors:ratio_rate5m
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_s3_requests_total{code=~"5.."}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_s3_requests_total[5m]))
+      - record: cactusfs:admin_request_errors:ratio_rate5m
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_admin_requests_total{code=~"5.."}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_admin_requests_total[5m]))
+      - record: cactusfs:port_call_errors:ratio_rate5m
+        expr: |-
+          sum by (job, instance, port) (rate(cactusfs_port_calls_total{result="error"}[5m]))
+            /
+          sum by (job, instance, port) (rate(cactusfs_port_calls_total[5m]))
+
+  - name: cactusfs.availability
+    rules:
+      - alert: CactusFSInstanceDown
+        expr: up{job="cactusfs"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A CactusFS node does not answer its scrape"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for three minutes: the node is down, cannot be reached, or refuses the scrape credential."
+
+      - alert: CactusFSAbsent
+        expr: absent(up{job="cactusfs"})
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No CactusFS node is being scraped"
+          description: "Prometheus has had no target of the job cactusfs for ten minutes: nothing would be known of a failure."
+
+      - alert: CactusFSRestartingOften
+        expr: changes(cactusfs_process_start_time_seconds[30m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A CactusFS node keeps restarting"
+          description: "The process on {{ $labels.instance }} has started more than twice in thirty minutes."
+
+      - alert: CactusFSMixedVersions
+        expr: count by (job) (count by (job, version) (cactusfs_build_info)) > 1
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "CactusFS nodes run different versions"
+          description: "More than one version of CactusFS has been running for six hours: a rolling upgrade was started and not finished."
+
+  - name: cactusfs.api
+    rules:
+      - alert: CactusFSS3ServerErrors
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_s3_requests_total{code=~"5.."}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_s3_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The S3 API is failing requests"
+          description: "More than 5 % of the S3 requests answered by {{ $labels.instance }} have ended in a server error (5xx) for ten minutes."
+
+      - alert: CactusFSAdminServerErrors
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_admin_requests_total{code=~"5.."}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_admin_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The management API is failing requests"
+          description: "More than 5 % of the management API requests answered by {{ $labels.instance }} have ended in a server error (5xx) for ten minutes."
+
+      # Only operations that move no object data: how long a GetObject or a
+      # PutObject takes is the size of the object and the speed of the client.
+      - alert: CactusFSS3Slow
+        expr: |-
+          histogram_quantile(0.99, sum by (job, instance, le) (
+            rate(cactusfs_s3_request_duration_seconds_bucket{operation=~"HeadBucket|HeadObject|ListBuckets|ListObjects|GetBucketLocation"}[5m])
+          )) > 1.024
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "S3 requests that carry no object data are slow"
+          description: "The slowest 1 % of HEAD and list requests answered by {{ $labels.instance }} have taken longer than a second for fifteen minutes."
+
+      - alert: CactusFSAdminSlow
+        expr: |-
+          histogram_quantile(0.99, sum by (job, instance, le) (
+            rate(cactusfs_admin_request_duration_seconds_bucket[5m])
+          )) > 4.096
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The management API is slow"
+          description: "The slowest 1 % of management API requests answered by {{ $labels.instance }} have taken longer than four seconds for fifteen minutes."
+
+  # The ports of the KMS and of the shard stores only. The metadata port
+  # counts an object or a bucket that does not exist as an error, as the port
+  # returns it, so its share of errors is what clients ask for and no sign of
+  # a fault; it is on the dashboard and in no alert.
+  - name: cactusfs.storage
+    rules:
+      - alert: CactusFSKMSErrors
+        expr: sum by (job, instance) (rate(cactusfs_port_calls_total{port="kms", result="error"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Calls to the KMS are failing"
+          description: "{{ $labels.instance }} has had calls to the KMS fail for five minutes. Without the KMS no object can be written and none can be read."
+
+      - alert: CactusFSKMSSlow
+        expr: |-
+          histogram_quantile(0.99, sum by (job, instance, le) (
+            rate(cactusfs_port_call_duration_seconds_bucket{port="kms"}[5m])
+          )) > 0.4096
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The KMS is slow"
+          description: "The slowest 1 % of the calls {{ $labels.instance }} makes to the KMS have taken longer than 0.4 seconds for fifteen minutes; every read and every write waits for one."
+
+      - alert: CactusFSShardErrors
+        expr: |-
+          sum by (job, instance) (rate(cactusfs_port_calls_total{port="shards", result="error"}[5m]))
+            /
+          sum by (job, instance) (rate(cactusfs_port_calls_total{port="shards"}[5m]))
+            > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reads and writes of shards are failing"
+          description: "More than 5 % of the shard operations of {{ $labels.instance }} have failed for fifteen minutes: look at its drives and at the nodes it reaches them on."
+
+      - alert: CactusFSObjectsUnrecoverable
+        expr: |-
+          increase(cactusfs_heal_objects_total{result="unrecoverable"}[1h]) > 0
+            or
+          (
+            cactusfs_heal_objects_total{result="unrecoverable"} > 0
+              unless
+            cactusfs_heal_objects_total{result="unrecoverable"} offset 1h
+          )
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Objects were found that cannot be rebuilt"
+          description: "Healing on {{ $labels.instance }} met objects with more shards lost or damaged than their parity can replace. Their data is lost unless a missing drive or node comes back; the node's log names them."
+
+      - alert: CactusFSShardsRebuilt
+        expr: increase(cactusfs_heal_shards_rebuilt_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Damaged or missing shards were rebuilt"
+          description: "{{ $labels.instance }} has rebuilt shards from parity in the last hour. Nothing is lost; unless a drive was just replaced, look for the drive that is failing."
+
+      - alert: CactusFSLifecycleFailing
+        expr: increase(cactusfs_lifecycle_actions_total{action="failed"}[1h]) > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lifecycle rules cannot be carried out"
+          description: "Actions of lifecycle rules have kept failing on {{ $labels.instance }} for two hours: versions that should have expired are still stored."
+
+      - alert: CactusFSObjectAccessDropped
+        expr: increase(cactusfs_object_access_dropped_total[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Downloads are not being counted"
+          description: "{{ $labels.instance }} has been dropping records of who read which object for fifteen minutes: more wait to be recorded than it holds, or the metadata store refuses them. The objects themselves are served."
+
+# TODO(PLAN 7.8): alerts that wait for metrics the binary does not have yet.
+# Step 7.8 adds the gauges; each alert below is to be written, with its test,
+# when the gauge it needs is in the registry - and not before: a rule on a
+# metric that does not exist never fires and says nothing is wrong.
+#
+#   - no leader of the metadata group; the leader changes too often
+#       needs: the Raft gauges (leader, term)
+#   - a voter falls behind
+#       needs: the Raft gauge of the applied index
+#   - a drive is offline; a drive is nearly full
+#       needs: the drive gauges (online, bytes free)
+#   - a node's certificate expires soon
+#       needs: the gauge of the node certificate's expiry
+#   - nodes refuse each other's handshakes; calls between nodes fail
+#       needs: the counter of refused handshakes (node RPC has no metric today)
+#   - a node is alive and not ready; requests refused while a node starts
+#       needs: a readiness gauge and a count of refusals (neither exists)
+#   - the scrubber has stopped
+#       needs: a gauge of the time of the last finished pass; the count of
+#       passes cannot tell a pass that is long from one that is stuck
+#   - failures of IAM, sessions, idempotency records, the audit log, the
+#     event publisher
+#       needs: the decorators of those ports, which then count as the KMS,
+#       shard and metadata ports do today

@@ -42,7 +42,7 @@ endif
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos vuln contracts licences web-install web-lock web-check \
-	web-build build build-all image helm-lint verify-clone tidy check
+	web-build build build-all image helm-lint observability-check verify-clone tidy check
 
 .PHONY: help builder shell run up down clean $(BUILDER_TARGETS)
 
@@ -60,6 +60,7 @@ help:
 	@echo "  build-all      six OS/arch targets -> dist/"
 	@echo "  image          container images for linux/amd64 and linux/arm64 (< 60 MB)"
 	@echo "  helm-lint      lint and render the Helm chart"
+	@echo "  observability-check  alerting rules and their tests, dashboards, the chart's monitoring templates"
 	@echo "  verify-clone   prove a clean export builds with Go alone and with a container engine alone"
 	@echo "  gen            regenerate code from API contracts"
 	@echo "  tidy           go mod tidy                web-lock    rewrite web/pnpm-lock.yaml"
@@ -178,7 +179,7 @@ builder:
 	@true
 
 check: fmt-check lint vet cover test-int s3-compat vuln contracts licences \
-	web-check build-all image helm-lint verify-clone
+	web-check build-all image helm-lint observability-check verify-clone
 	@echo "make check: PASS"
 
 # The web client is generated with a package of web/, so those are installed.
@@ -279,6 +280,12 @@ helm-lint:
 	@scripts/helm-lint.sh
 	@CACTUSFS_KMS_PASSPHRASE=only-to-render-the-file docker compose -f deploy/compose/compose.yaml config --quiet
 	@echo "compose: deploy/compose/compose.yaml is valid"
+
+# The observability pack of deploy/observability and the chart's templates for
+# the Prometheus Operator: promtool on the rules and their tests, the
+# dashboards, and a Go test that holds every metric they name to the registry.
+observability-check:
+	@scripts/observability.sh
 
 verify-clone:
 	@scripts/verify-clone.sh

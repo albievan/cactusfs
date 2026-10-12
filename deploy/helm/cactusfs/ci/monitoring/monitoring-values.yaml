@@ -1,0 +1,25 @@
+# The ServiceMonitor and the PrometheusRule, turned on. Laid over
+# ci/cluster-values.yaml by scripts/observability.sh (make observability-check),
+# which asserts what is rendered. This file is in a directory of its own so
+# that scripts/helm-lint.sh does not pick it up: that gate validates every
+# render with kubeconform against the schemas of Kubernetes itself, with no
+# kind skipped, and these two kinds are the Prometheus Operator's.
+# Every name is an example.
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 5s
+  bearerTokenSecret: {name: cactusfs-metrics-token, key: credential}
+  tlsConfig:
+    serverName: cactusfs.example.test
+    caSecret: {name: cactusfs-tls-ca, key: ca.crt}
+  labels: {release: prometheus}
+prometheusRule:
+  enabled: true
+  labels: {release: prometheus}
+networkPolicy:
+  adminFrom:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: monitoring}
+      podSelector:
+        matchLabels: {app.kubernetes.io/name: prometheus}

@@ -1,0 +1,23 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- /* The rules are a file of the chart, read as data: what it holds is never
+       passed through tpl, so the templates in the text of an alert - the
+       instance label in double braces - reach Prometheus as they are
+       written, for Prometheus to fill in. */ -}}
+{{- $rules := .Files.Get "files/cactusfs.rules.yaml" | fromYaml -}}
+{{- if or (hasKey $rules "Error") (not $rules.groups) -}}{{- fail "files/cactusfs.rules.yaml: the chart's copy of the alerting rules is missing or is not YAML with groups" -}}{{- end -}}
+# For the Prometheus Operator; rendered only when prometheusRule.enabled.
+# The groups are those of files/cactusfs.rules.yaml, a copy of
+# deploy/observability/rules/cactusfs.rules.yaml, where their tests are. They
+# expect the job to be named "cactusfs", as the chart's ServiceMonitor names it.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "cactusfs.fullname" . }}
+  labels:
+    {{- include "cactusfs.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups: {{- toYaml $rules.groups | nindent 4 }}
+{{- end }}
