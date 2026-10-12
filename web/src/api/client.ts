@@ -20,6 +20,8 @@ export type Bucket = Schemas['Bucket'];
 export type ObjectList = Schemas['ObjectList'];
 /** What is known about one object. */
 export type ObjectMetadata = Schemas['ObjectMetadata'];
+/** Who uploaded an object and who downloaded it: best-effort counts. */
+export type ObjectAccess = Schemas['ObjectAccess'];
 /** A user. */
 export type User = Schemas['User'];
 /** A group. */

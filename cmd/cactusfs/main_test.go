@@ -160,8 +160,8 @@ func TestParseServerConfig(t *testing.T) {
 			MetaDir: filepath.Join(dataDir, "meta"), KMS: "local", KMSKeyFile: filepath.Join(dataDir, "meta", "kms-local.json"),
 			DevPlaintext: true, LogLevel: slog.LevelInfo, ShutdownTimeout: 30 * time.Second,
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
-			LifecycleInterval: time.Hour,
-			Roles:             cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
+			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second,
+			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
 		if change != nil {
@@ -255,6 +255,18 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "negative scrub interval", args: dev("--scrub-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
 		{name: "negative lifecycle interval", args: dev("--lifecycle-interval", "-1s"), env: passphrase, wantErr: "must not be negative"},
 		{name: "bad lifecycle interval variable", env: withPassphrase(map[string]string{envLifecycle: "daily"}), wantErr: envLifecycle},
+		{
+			name: "reads recorded more often, by flag over variable", args: dev("--access-flush-interval", "5s"),
+			env:  withPassphrase(map[string]string{envAccessFlush: "1m"}),
+			want: base(func(c *serverConfig) { c.AccessFlushInterval = 5 * time.Second }),
+		},
+		{
+			name: "reads recorded less often, by variable", args: dev(), env: withPassphrase(map[string]string{envAccessFlush: "2m"}),
+			want: base(func(c *serverConfig) { c.AccessFlushInterval = 2 * time.Minute }),
+		},
+		{name: "reads recorded too often", args: dev("--access-flush-interval", "4s"), env: passphrase, wantErr: "access flush interval"},
+		{name: "reads never recorded", args: dev("--access-flush-interval", "0"), env: passphrase, wantErr: "access flush interval"},
+		{name: "bad access flush interval variable", env: withPassphrase(map[string]string{envAccessFlush: "often"}), wantErr: envAccessFlush},
 		{name: "negative scrub rate", args: dev("--scrub-rate-mib", "-1"), env: passphrase, wantErr: "must not be negative"},
 		{name: "grace period too short to be safe", args: dev("--gc-grace", "59m"), env: passphrase, wantErr: "grace period"},
 		{

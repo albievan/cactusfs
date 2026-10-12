@@ -141,6 +141,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/buckets/{bucket}/object/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get who uploaded an object and who downloaded it
+         * @description Who uploaded the object and when, how often it was downloaded and used as the source of a copy, and
+         *     by whom. The figures are best-effort counts, not an audit trail: every node counts in memory and hands
+         *     its counts over every half a minute or so, a node that crashes loses what it had not handed over, and
+         *     a transfer that was cut short counts like a whole one. They are counts of one version - in a bucket
+         *     that keeps no versions an overwrite starts again at zero. Reading the object does not give the
+         *     permission to see them.
+         */
+        get: operations["getObjectAccess"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -513,6 +538,57 @@ export interface components {
             content_type: string;
             /** @description How the object is encrypted at rest. */
             encryption: string;
+        };
+        ObjectReader: {
+            /** @description The reader, as the audit trail names actors - `root`, `user/<name>`, `key/<access key ID>` or `anonymous`. */
+            who: string;
+            /**
+             * @description True for reads made with URLs this reader signed: whoever held the URL read, not necessarily the
+             *     signer.
+             */
+            presigned: boolean;
+            /** Format: int64 */
+            downloads: number;
+            /** Format: int64 */
+            copies: number;
+            /**
+             * Format: date-time
+             * @description When the last of this reader's reads was recorded.
+             */
+            last_at: string;
+        };
+        /** @description Who uploaded a version of an object and who read it. Best-effort counts, not an audit trail. */
+        ObjectAccess: {
+            /** @description Who uploaded the version, as the audit trail names actors. Absent when it was not recorded. */
+            uploaded_by?: string;
+            /** Format: date-time */
+            uploaded_at: string;
+            /**
+             * Format: int64
+             * @description Downloads of the version, every ranged request counted by itself.
+             */
+            download_count: number;
+            /**
+             * Format: int64
+             * @description How often the version was the source of a copy.
+             */
+            copy_count: number;
+            /**
+             * Format: date-time
+             * @description When the last download or copy was recorded. Absent when there was none.
+             */
+            last_downloaded_at?: string;
+            /** @description The readers kept by name. Beyond 32, whoever read longest ago is counted among the others. */
+            readers: components["schemas"]["ObjectReader"][];
+            /**
+             * Format: int64
+             * @description Readers who are no longer kept by name.
+             */
+            other_readers: number;
+            /** Format: int64 */
+            other_downloads: number;
+            /** Format: int64 */
+            other_copies: number;
         };
         User: {
             name: components["schemas"]["Name"];
@@ -1102,6 +1178,34 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ObjectMetadata"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getObjectAccess: {
+        parameters: {
+            query: {
+                /** @description The key of the object. */
+                key: components["parameters"]["ObjectKey"];
+                /** @description The version to ask about - `null`, or the ID of a version. Without it, the current version. */
+                version_id?: string;
+            };
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What is known of the uploading and the reading of the object. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObjectAccess"];
                 };
             };
             default: components["responses"]["Problem"];

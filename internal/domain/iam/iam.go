@@ -213,6 +213,10 @@ type Session struct {
 	SecureTransport bool
 	// RequestID identifies the request in logs and in the audit trail.
 	RequestID string
+	// Presigned says that the request was authenticated by a signature in
+	// its URL: the principal is whoever signed the URL, and the caller is
+	// whoever holds it.
+	Presigned bool
 }
 
 // Name returns what the principal is called in logs.

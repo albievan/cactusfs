@@ -200,6 +200,40 @@ func (o *operations) GetObjectMetadata(ctx context.Context, request api.GetObjec
 	return api.GetObjectMetadata200JSONResponse(metadataOf(v)), nil
 }
 
+// accessOf maps what is known of the reading of a version to the contract.
+func accessOf(a app.ObjectAccess) api.ObjectAccess {
+	out := api.ObjectAccess{
+		UploadedAt: a.Version.ModifiedAt, DownloadCount: a.Access.Downloads, CopyCount: a.Access.Copies,
+		Readers:      make([]api.ObjectReader, len(a.Access.Readers)),
+		OtherReaders: a.Access.OtherReaders, OtherDownloads: a.Access.OtherDownloads, OtherCopies: a.Access.OtherCopies,
+	}
+	if a.Version.CreatedBy != "" {
+		out.UploadedBy = &a.Version.CreatedBy
+	}
+	if !a.Access.LastAt.IsZero() {
+		out.LastDownloadedAt = &a.Access.LastAt
+	}
+	for i, r := range a.Access.Readers {
+		out.Readers[i] = api.ObjectReader{Who: r.Who, Presigned: r.Presigned, Downloads: r.Downloads, Copies: r.Copies, LastAt: r.LastAt}
+	}
+	return out
+}
+
+// GetObjectAccess implements api.StrictServerInterface.
+func (o *operations) GetObjectAccess(ctx context.Context, request api.GetObjectAccessRequestObject) (api.GetObjectAccessResponseObject, error) {
+	// Which version is named is read by the use case, after it has asked
+	// whether the caller may know anything of the object at all.
+	version := ""
+	if id := request.Params.VersionId; id != nil {
+		version = *id
+	}
+	access, err := o.h.cfg.Objects.Access(ctx, who(ctx), request.Bucket, request.Params.Key, version)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetObjectAccess200JSONResponse(accessOf(access)), nil
+}
+
 // GetObject implements api.StrictServerInterface. The content is always
 // sent as an attachment of an opaque type: whatever was uploaded, a browser
 // saves it and never renders it on the console's origin.

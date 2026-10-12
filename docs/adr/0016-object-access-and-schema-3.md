@@ -52,7 +52,11 @@ part. So all three land as ONE rise of the entry schema.
   not registered): the binary before this one would stop at that entry when it replayed
   the log, whatever became of it, so a state that still called itself schema 2 would
   promise what it cannot keep. The binary before this one then refuses the state. Until that first entry the state is unchanged and the
-  previous binary still opens it: rolling back is possible until first use.
+  previous binary still opens it: rolling back is possible until first use. **First use
+  is, in practice, the first upload:** every put, copy and completion carries
+  `created_by` once the cluster is at level 3, so a fully upgraded cluster that takes
+  writes cannot be rolled back. To keep a way back, hold one member at the previous
+  release.
 - **Migration: none.** A schema-2 state opens as it is. Proved by a fixture written by
   the schema-2 binary (`test/integration/testdata/schema-2`, commit 098749f) and
   `TestUpgradeFromSchema2`, and by a rolling upgrade of a cluster in a test.
@@ -84,6 +88,11 @@ and say so. The time of upload is the version's `ModifiedAt`, as always.
   (`object.Access`). The time is the leader's, of the entry (ADR-0008): coarse by up to
   the flush interval, and the same on every member.
 
+A copy made in parts (UploadPartCopy) counts its source once a part that is committed,
+as a download in ranges counts once a range - and those counts stay if the upload is
+then aborted. A copy of an object onto itself, where versions are not kept, is counted
+for nobody: the version it read is gone with the commit.
+
 **What counts as a download:** a GET answered 200 or 206 through S3, presigned or not,
 and a download through the management API - each ranged GET by itself, and a transfer
 that was cut short, because bytes left the store. **A copy's source** is counted apart,
@@ -104,6 +113,14 @@ alike. Reading the object does not imply it. Of the built-in roles `cluster-admi
 object list and the object's metadata are unchanged, and so is the S3 API. No request
 resets or edits a record. No event is published for a flush: an event must not carry
 who read what to a webhook.
+
+The action is one of the `admin:Get...` family. A policy written before this release
+that grants `admin:Get*` or `admin:*` therefore grants it too: whoever keeps such a
+policy for a "read-only administrator" should know that it now shows who read what.
+
+What a node counted is discarded, without a trace in the metric of dropped reads, when
+the node is no longer registered in the cluster and still serves: the cluster takes
+counts only from nodes it knows.
 
 ## Consequences
 

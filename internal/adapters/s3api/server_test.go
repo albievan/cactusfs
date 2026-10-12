@@ -42,6 +42,8 @@ type testServer struct {
 	logs    *lockedBuffer
 	seen    *observations
 	objects *app.ObjectService
+	// access counts the reads on their way to meta.
+	access *app.AccessRecorder
 }
 
 type lockedBuffer struct {
@@ -133,9 +135,14 @@ func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
 	if err != nil {
 		t.Fatalf("FixedDrives: %v", err)
 	}
+	s.access, err = app.NewAccessRecorder(app.AccessRecorderConfig{Store: s.meta, Node: "node-a", Entropy: rand.Reader, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewAccessRecorder: %v", err)
+	}
 	s.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: s.meta, Buckets: s.meta, Uploads: s.meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: clock, Entropy: rand.Reader, Logger: logger,
+		Access: s.access, AccessStore: s.meta,
 	})
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)

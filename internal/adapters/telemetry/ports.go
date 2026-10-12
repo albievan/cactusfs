@@ -385,3 +385,32 @@ func (m *metadata) SetTags(ctx context.Context, bucketName, key string, ref obje
 	done(err)
 	return version, err
 }
+
+// InstrumentObjectAccess returns next wrapped so that every call is traced
+// and counted.
+func (t *Telemetry) InstrumentObjectAccess(next ports.ObjectAccessStore) ports.ObjectAccessStore {
+	return &objectAccess{t: t, next: next}
+}
+
+type objectAccess struct {
+	t    *Telemetry
+	next ports.ObjectAccessStore
+}
+
+const portObjectAccess = "object_access"
+
+// AddObjectReads implements ports.ObjectAccessStore.
+func (a *objectAccess) AddObjectReads(ctx context.Context, batch ports.ReadBatch) error {
+	ctx, done := a.t.call(ctx, portObjectAccess, "AddObjectReads")
+	err := a.next.AddObjectReads(ctx, batch)
+	done(err)
+	return err
+}
+
+// ObjectAccess implements ports.ObjectAccessStore.
+func (a *objectAccess) ObjectAccess(ctx context.Context, bucketName, key string, ref object.VersionRef) (object.Access, error) {
+	ctx, done := a.t.call(ctx, portObjectAccess, "ObjectAccess")
+	access, err := a.next.ObjectAccess(ctx, bucketName, key, ref)
+	done(err)
+	return access, err
+}

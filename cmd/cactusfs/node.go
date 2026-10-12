@@ -82,6 +82,9 @@ type node struct {
 	clock       ports.Clock
 	telemetry   *telemetry.Telemetry
 
+	// access counts who reads which object, on its way to the metadata
+	// store.
+	access    *app.AccessRecorder
 	scrubber  *app.Scrubber
 	lifecycle *app.LifecycleWorker
 	collector *app.Collector
@@ -176,6 +179,18 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.maintenance = app.NewMaintenance(n.id, n.clock)
 	drives := n.driveSource(stores)
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.meta.LocalConfig())
+	// Who read what: counted in memory and handed to the metadata store in
+	// the background, by this node under its own name (ADR-0016).
+	accessStore := n.telemetry.InstrumentObjectAccess(n.meta)
+	n.access, err = app.NewAccessRecorder(app.AccessRecorderConfig{
+		Store: accessStore, Node: n.id, Entropy: rand.Reader, Logger: logger,
+		OnDrop: n.telemetry.ObserveAccessDropped,
+		// Nothing is handed over while the metadata group has no leader.
+		Ready: n.meta.Check,
+	})
+	if err != nil {
+		return err
+	}
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
 		OnHeal: func(r app.HealResult) {
@@ -183,7 +198,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 			n.maintenance.ObserveHeal(r)
 		},
 		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
-		Auditor: n.auditor,
+		Auditor: n.auditor, Access: n.access, AccessStore: accessStore,
 	})
 	if err != nil {
 		return err
@@ -559,8 +574,8 @@ func readPassphrase(cfg serverConfig) ([]byte, error) {
 	return passphrase, nil
 }
 
-// startBackground starts healing, scrubbing and garbage collection. They run
-// until Close.
+// startBackground starts healing, scrubbing, garbage collection and the
+// recording of reads. They run until Close.
 func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	ctx, n.stopBackground = context.WithCancel(context.WithoutCancel(ctx))
 	n.background.Go(func() { n.objects.Healer().Run(ctx) })
@@ -573,6 +588,8 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	if cfg.GCInterval > 0 && len(n.drives) > 0 {
 		n.background.Go(func() { n.collector.Run(ctx, cfg.GCInterval) })
 	}
+	// Runs on every node that serves reads, and once more when it stops.
+	n.background.Go(func() { n.access.Run(ctx, cfg.AccessFlushInterval) })
 	n.background.Go(func() { n.events.Run(ctx) })
 	n.background.Go(func() { n.auditor.Run(ctx) })
 	n.background.Go(func() { n.identities.Run(ctx) })

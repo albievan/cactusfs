@@ -381,6 +381,7 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 	// Where and how the request arrived is part of who is asking:
 	// conditions in policies test it.
 	principal.Session = sessionOf(req)
+	principal.Session.Presigned = viaQuery
 	h.cfg.Identities.Authenticated(principal)
 	req.principal, req.payloadHash = principal, payloadHash
 	return nil

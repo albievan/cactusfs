@@ -561,6 +561,49 @@
         }
       }
     },
+    "/buckets/{bucket}/object/access": {
+      "get": {
+        "operationId": "getObjectAccess",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Get who uploaded an object and who downloaded it",
+        "description": "Who uploaded the object and when, how often it was downloaded and used as the source of a copy, and\nby whom. The figures are best-effort counts, not an audit trail: every node counts in memory and hands\nits counts over every half a minute or so, a node that crashes loses what it had not handed over, and\na transfer that was cut short counts like a whole one. They are counts of one version - in a bucket\nthat keeps no versions an overwrite starts again at zero. Reading the object does not give the\npermission to see them.\n",
+        "x-cactusfs-action": "admin:GetObjectAccess",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "name": "version_id",
+            "in": "query",
+            "description": "The version to ask about - `null`, or the ID of a version. Without it, the current version.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(null|[0-9a-f]{32})$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What is known of the uploading and the reading of the object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectAccess"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/users": {
       "get": {
         "operationId": "listUsers",
@@ -1842,6 +1885,105 @@
           "encryption": {
             "type": "string",
             "description": "How the object is encrypted at rest."
+          }
+        }
+      },
+      "ObjectReader": {
+        "type": "object",
+        "required": [
+          "who",
+          "presigned",
+          "downloads",
+          "copies",
+          "last_at"
+        ],
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "The reader, as the audit trail names actors - `root`, `user/<name>`, `key/<access key ID>` or `anonymous`."
+          },
+          "presigned": {
+            "type": "boolean",
+            "description": "True for reads made with URLs this reader signed: whoever held the URL read, not necessarily the\nsigner.\n"
+          },
+          "downloads": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "copies": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the last of this reader's reads was recorded."
+          }
+        }
+      },
+      "ObjectAccess": {
+        "type": "object",
+        "description": "Who uploaded a version of an object and who read it. Best-effort counts, not an audit trail.\n",
+        "required": [
+          "uploaded_at",
+          "download_count",
+          "copy_count",
+          "readers",
+          "other_readers",
+          "other_downloads",
+          "other_copies"
+        ],
+        "properties": {
+          "uploaded_by": {
+            "type": "string",
+            "description": "Who uploaded the version, as the audit trail names actors. Absent when it was not recorded."
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "download_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Downloads of the version, every ranged request counted by itself."
+          },
+          "copy_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How often the version was the source of a copy."
+          },
+          "last_downloaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the last download or copy was recorded. Absent when there was none."
+          },
+          "readers": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "The readers kept by name. Beyond 32, whoever read longest ago is counted among the others.",
+            "items": {
+              "$ref": "#/components/schemas/ObjectReader"
+            }
+          },
+          "other_readers": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Readers who are no longer kept by name."
+          },
+          "other_downloads": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "other_copies": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

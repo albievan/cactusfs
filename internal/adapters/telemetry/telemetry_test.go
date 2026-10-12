@@ -83,6 +83,60 @@ func TestDecoratorsPassBehaviourThrough(t *testing.T) {
 	})
 }
 
+// TestObjectAccessIsCountedAndTraced: the record of who read what is reached
+// through a decorator like every other port, and a call that fails is
+// counted as one.
+func TestObjectAccessIsCountedAndTraced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	recorder := tracetest.NewSpanRecorder()
+	tel := newTelemetry(t, recorder)
+	mem := porttest.NewMemMetadata()
+	store := tel.InstrumentObjectAccess(mem)
+
+	if err := mem.CreateBucket(ctx, bucket.Bucket{Name: "bkt"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := mem.PutVersion(ctx, porttest.SampleVersion("bkt", "k", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := stored.Stored
+	batch := ports.ReadBatch{Node: "node-a", Boot: 7, Seq: 1, Items: []ports.ObjectRead{{
+		Bucket: "bkt", Key: "k", Version: v.Ref(), VersionID: v.VersionID, Read: object.Read{Who: "user/alice", Downloads: 2},
+	}}}
+	if err := store.AddObjectReads(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	access, err := store.ObjectAccess(ctx, "bkt", "k", v.Ref())
+	if err != nil || access.Downloads != 2 {
+		t.Fatalf("behaviour not passed through: %+v, %v", access, err)
+	}
+	if _, err := store.ObjectAccess(ctx, "nope", "k", v.Ref()); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+
+	metrics := scrape(t, tel)
+	for _, want := range []string{
+		"cactusfs_port_calls_total method=AddObjectReads port=object_access result=ok",
+		"cactusfs_port_calls_total method=ObjectAccess port=object_access result=ok",
+		"cactusfs_port_calls_total method=ObjectAccess port=object_access result=error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	// Who read what is in no metric and no span.
+	if strings.Contains(metrics, "alice") {
+		t.Error("a reader is named in the metrics")
+	}
+	for _, want := range []string{"object_access.AddObjectReads", "object_access.ObjectAccess"} {
+		if !contains(spanNames(recorder), want) {
+			t.Errorf("no span named %q among %v", want, spanNames(recorder))
+		}
+	}
+}
+
 func TestEveryPortCallIsCountedAndTraced(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -283,6 +337,8 @@ func TestBackgroundWorkIsCounted(t *testing.T) {
 	tel.ObserveHeal(app.HealResult{Shards: 6, Damaged: 4, Unrecoverable: true})
 	tel.ObserveScrub(app.ScrubStats{Objects: 10, Bytes: 4096})
 	tel.ObserveGC(app.GCStats{Shards: 30, Removed: 3})
+	tel.ObserveAccessDropped(2)
+	tel.ObserveAccessDropped(5)
 
 	families, err := tel.Gatherer().Gather()
 	if err != nil {
@@ -304,6 +360,7 @@ func TestBackgroundWorkIsCounted(t *testing.T) {
 		"cactusfs_heal_objects_total{healthy}": 1, "cactusfs_heal_objects_total{healed}": 1, "cactusfs_heal_objects_total{unrecoverable}": 1,
 		"cactusfs_heal_shards_rebuilt_total": 2, "cactusfs_scrub_passes_total": 1, "cactusfs_scrub_objects_total": 10,
 		"cactusfs_scrub_bytes_total": 4096, "cactusfs_gc_passes_total": 1, "cactusfs_gc_shards_removed_total": 3,
+		"cactusfs_object_access_dropped_total": 7,
 	}
 	for name, value := range want {
 		if got[name] != value {

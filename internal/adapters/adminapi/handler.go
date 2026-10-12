@@ -455,8 +455,12 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusNotFound, code: "NoSuchBucket", title: "No such bucket"}
 	case is(domain.ErrObjectNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchObject", title: "No such object"}
+	case is(domain.ErrVersionNotFound):
+		return problem{status: http.StatusNotFound, code: "NoSuchVersion", title: "No such version"}
 	case is(domain.ErrEntityNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchEntity", title: "No such entity"}
+	case is(domain.ErrMethodNotAllowed):
+		return problem{status: http.StatusMethodNotAllowed, code: "MethodNotAllowed", title: "Not possible for this resource"}
 	case is(domain.ErrBucketAlreadyExists):
 		return problem{status: http.StatusConflict, code: "BucketAlreadyExists", title: "Bucket already exists"}
 	case is(domain.ErrBucketNotEmpty):

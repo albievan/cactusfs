@@ -31,6 +31,10 @@ type ObjectService struct {
 	logger  *slog.Logger
 	auditor *Auditor
 	healer  *Healer
+	// access counts who reads what; accessStore answers who did. Either
+	// may be nil: then nothing is counted, or nothing can be asked.
+	access      *AccessRecorder
+	accessStore ports.ObjectAccessStore
 
 	// entropy is the source of identifiers and nonce prefixes. It is read
 	// under entropyMu because a source need not be safe for concurrent use.
@@ -63,6 +67,11 @@ type ObjectServiceConfig struct {
 	// Auditor, when not nil, records every lock that is lifted: a
 	// governance retention bypassed, a legal hold taken off.
 	Auditor *Auditor
+	// Access, when not nil, counts every download and every copy of a
+	// version. AccessStore, when not nil, answers who uploaded and who read
+	// a version (ADR-0016).
+	Access      *AccessRecorder
+	AccessStore ports.ObjectAccessStore
 }
 
 // NewObjectService returns an ObjectService.
@@ -74,6 +83,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
+		access: cfg.Access, accessStore: cfg.AccessStore,
 		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
@@ -158,6 +168,9 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	}
 	version := object.Version{
 		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock, Tags: in.Tags,
+		// Who commits the version, in the words of the audit trail. What
+		// the store kept of it is what the answer says (ADR-0016).
+		CreatedBy:   actorOf(principal),
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata,
 	}
@@ -515,13 +528,20 @@ type GetOutput struct {
 	Body io.ReadCloser
 }
 
-// Get opens an object for reading.
+// Get opens an object for reading: a download. It is counted, for whoever
+// asked, when the body is closed - not here, and not for a read that could
+// not be opened or that a condition answered (ADR-0016). Nothing the store
+// reads for itself comes this way.
 func (s *ObjectService) Get(ctx context.Context, principal iam.Principal, in GetInput) (GetOutput, error) {
 	out, err := s.get(ctx, principal, in)
 	if err != nil {
 		// With a verdict on a condition comes the version it was about,
 		// and nothing to read.
 		return GetOutput{Version: out.Version}, fmt.Errorf("object.Get: %w", err)
+	}
+	if s.access != nil {
+		version := out.Version
+		out.Body = &countedBody{ReadCloser: out.Body, count: func() { s.access.Download(principal, version) }}
 	}
 	return out, nil
 }
@@ -1308,6 +1328,8 @@ func (s *ObjectService) Copy(ctx context.Context, principal iam.Principal, in Co
 	if err != nil {
 		return CopyOutput{}, fmt.Errorf("object.Copy: %w", err)
 	}
+	// The destination is committed: the source was read, as a copy.
+	s.access.Copy(principal, source)
 	return CopyOutput{Source: source, Version: version}, nil
 }
 
@@ -1369,5 +1391,7 @@ func (s *ObjectService) CopyPart(ctx context.Context, principal iam.Principal, i
 	if err != nil {
 		return object.Part{}, fmt.Errorf("object.CopyPart: %w", err)
 	}
+	// The part is committed: the source was read, as a copy.
+	s.access.Copy(principal, out.Version)
 	return stored, nil
 }

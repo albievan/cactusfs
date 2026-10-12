@@ -78,6 +78,7 @@ type Telemetry struct {
 	gcPasses       prometheus.Counter
 	gcRemoved      prometheus.Counter
 	lifecycle      *prometheus.CounterVec
+	accessDropped  prometheus.Counter
 	events         *prometheus.CounterVec
 }
 
@@ -142,6 +143,10 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	t.lifecycle = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_lifecycle_actions_total", Help: "What lifecycle rules did, by kind: versions expired and removed, uploads aborted, removals a lock refused.",
 	}, []string{"action"})
+	t.accessDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_object_access_dropped_total",
+		Help: "Reads of objects that were not counted towards who read what: more waited to be recorded than this node holds, or the store refused them.",
+	})
 
 	t.events = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_events_total", Help: "Events derived from applied metadata entries on this node, by type.",
@@ -149,7 +154,7 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 
 	for _, collector := range []prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
-		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.events,
+		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	} {
@@ -296,6 +301,12 @@ func (t *Telemetry) ObserveLifecycle(s app.LifecycleStats) {
 	} {
 		t.lifecycle.WithLabelValues(action).Add(float64(n))
 	}
+}
+
+// ObserveAccessDropped counts reads that were not counted towards the record
+// of who read an object.
+func (t *Telemetry) ObserveAccessDropped(reads int64) {
+	t.accessDropped.Add(float64(reads))
 }
 
 // ObserveGC records a completed pass of the garbage collector.

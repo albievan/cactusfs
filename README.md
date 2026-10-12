@@ -231,7 +231,13 @@ The admin listener (`--admin-addr`, port 9001) serves:
   policies, API keys, cluster status and the audit trail. Authenticate with an API key,
   `Authorization: Bearer <access key ID>:<secret key>`; the root credentials work the
   same way. Errors are `application/problem+json`, and every request that changes
-  something can be made safe to repeat with `Idempotency-Key`;
+  something can be made safe to repeat with `Idempotency-Key`. For every object it
+  tells who uploaded it and when, how often it was downloaded and by whom
+  (`GET /api/v1/buckets/{bucket}/object/access?key=`, shown in the console under an
+  object's details) - to users with the `cluster-admin` or `auditor` role, or a policy
+  that allows `admin:GetObjectAccess`; being allowed to read the object is not enough.
+  These are counts kept as well as can be, recorded every `--access-flush-interval`
+  (30 s), not an audit trail;
 - its **contract** at `/api/v1/openapi.yaml` and `.json`, and **Swagger UI** at `/docs`,
   served from the binary - nothing is fetched from the internet;
 - the **console** at `/`, when the binary was built with it (`make build`, or the

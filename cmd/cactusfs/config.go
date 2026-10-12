@@ -15,6 +15,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
@@ -48,6 +49,7 @@ const (
 	envGCInterval      = "CACTUSFS_GC_INTERVAL"
 	envLifecycle       = "CACTUSFS_LIFECYCLE_INTERVAL"
 	envGCGrace         = "CACTUSFS_GC_GRACE"
+	envAccessFlush     = "CACTUSFS_ACCESS_FLUSH_INTERVAL"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envNodeID          = "CACTUSFS_NODE_ID"
 	envRoles           = "CACTUSFS_ROLES"
@@ -154,6 +156,9 @@ type serverConfig struct {
 	// before it is removed.
 	GCInterval time.Duration
 	GCGrace    time.Duration
+	// AccessFlushInterval is how often the reads of objects this node
+	// counted are handed to the metadata store.
+	AccessFlushInterval time.Duration
 	// AllowDriveReplacement confirms that one empty drive may take the place
 	// of one missing drive at this start.
 	AllowDriveReplacement bool
@@ -267,6 +272,10 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 	if err != nil {
 		return cfg, err
 	}
+	accessFlush, err := envDuration(getenv, envAccessFlush, app.DefaultAccessFlushInterval)
+	if err != nil {
+		return cfg, err
+	}
 	scrubRate, err := envInt(getenv, envScrubRate, defaultScrubRateMiB)
 	if err != nil {
 		return cfg, err
@@ -338,6 +347,9 @@ func parseServerConfig(args []string, getenv func(string) string, stderr io.Writ
 		"pause between two passes of the garbage collector for unreferenced shards; 0 disables it ($"+envGCInterval+")")
 	fs.DurationVar(&cfg.GCGrace, "gc-grace", gcGrace,
 		"minimum age of an unreferenced shard before it is removed ($"+envGCGrace+")")
+	fs.DurationVar(&cfg.AccessFlushInterval, "access-flush-interval", accessFlush,
+		"how often the downloads this node counted are recorded with the objects, at least "+app.MinAccessFlushInterval.String()+
+			"; a node that crashes loses up to this much of the count ($"+envAccessFlush+")")
 	fs.BoolVar(&cfg.AllowDriveReplacement, "allow-drive-replacement", allowReplace,
 		"confirm that one empty drive replaces one missing drive at this start; permanent: the missing drive is "+
 			"refused afterwards ($"+envAllowReplace+")")
@@ -419,6 +431,9 @@ func (c *serverConfig) validate() error {
 	}
 	if c.ScrubInterval < 0 || c.GCInterval < 0 || c.ScrubRateMiB < 0 || c.LifecycleInterval < 0 {
 		return errors.New("scrub interval, scrub rate, lifecycle interval and garbage collection interval must not be negative")
+	}
+	if c.AccessFlushInterval < app.MinAccessFlushInterval {
+		return fmt.Errorf("access flush interval %s: must be at least %s", c.AccessFlushInterval, app.MinAccessFlushInterval)
 	}
 	if c.GCGrace < minGCGrace {
 		return fmt.Errorf("garbage collection grace period %s: must be at least %s", c.GCGrace, minGCGrace)

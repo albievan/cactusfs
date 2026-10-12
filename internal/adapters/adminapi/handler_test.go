@@ -71,10 +71,14 @@ type fixture struct {
 	iam         *app.IAMService
 	identities  *app.IdentityService
 	maintenance *app.Maintenance
-	logs        *lockedBuffer
-	root        string // bearer credential of root
-	seen        []adminapi.Observation
-	seenMu      sync.Mutex
+	// meta is the metadata store, and access what counts the reads on
+	// their way to it.
+	meta   *porttest.MemMetadata
+	access *app.AccessRecorder
+	logs   *lockedBuffer
+	root   string // bearer credential of root
+	seen   []adminapi.Observation
+	seenMu sync.Mutex
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -120,9 +124,15 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.meta = meta
+	f.access, err = app.NewAccessRecorder(app.AccessRecorderConfig{Store: meta, Node: "node-a", Entropy: rand.Reader, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
 	objects, err := app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: f.clock, Entropy: rand.Reader, Logger: logger,
+		Access: f.access, AccessStore: meta,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1150,5 +1160,120 @@ func TestBearerAndCookieTogether(t *testing.T) {
 	}
 	if strings.Contains(f.logs.String(), csrf) || strings.Contains(fmt.Sprint(f.trail()), csrf) {
 		t.Fatal("a CSRF token is in the log or the audit trail")
+	}
+}
+
+// TestObjectAccess: who uploaded an object and who downloaded it is served
+// to those who hold the permission of its own - reading the object does not
+// give it - and nothing is said of the object to anybody else, not even
+// whether it exists.
+func TestObjectAccess(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.meta.Now = f.clock.Now
+	alice := f.userKey("alice", iam.RoleBucketAdmin)
+	bob := f.userKey("bob", iam.RoleReadWrite)
+	auditor := f.userKey("carol", iam.RoleAuditor)
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "photos"}})
+	f.must(http.StatusOK, call{method: "PUT", path: "/buckets/photos/object?key=a.txt", raw: []byte("hello"), bearer: alice})
+
+	type access struct {
+		UploadedBy       *string    `json:"uploaded_by"`
+		UploadedAt       time.Time  `json:"uploaded_at"`
+		DownloadCount    int64      `json:"download_count"`
+		CopyCount        int64      `json:"copy_count"`
+		LastDownloadedAt *time.Time `json:"last_downloaded_at"`
+		Readers          []struct {
+			Who       string    `json:"who"`
+			Presigned bool      `json:"presigned"`
+			Downloads int64     `json:"downloads"`
+			Copies    int64     `json:"copies"`
+			LastAt    time.Time `json:"last_at"`
+		} `json:"readers"`
+		OtherReaders   int64 `json:"other_readers"`
+		OtherDownloads int64 `json:"other_downloads"`
+		OtherCopies    int64 `json:"other_copies"`
+	}
+	const path = "/buckets/photos/object/access?key=a.txt"
+
+	// Uploaded, never read: the uploader and the time, and nothing else.
+	var fresh access
+	r := f.must(http.StatusOK, call{method: "GET", path: path})
+	r.decode(t, &fresh)
+	if fresh.UploadedBy == nil || *fresh.UploadedBy != "user/alice" || !fresh.UploadedAt.Equal(testNow) || fresh.DownloadCount != 0 ||
+		fresh.LastDownloadedAt != nil || fresh.Readers == nil || len(fresh.Readers) != 0 {
+		t.Errorf("access of an object nobody read = %s", r.body)
+	}
+	if strings.Contains(string(r.body), "last_downloaded_at") || !strings.Contains(string(r.body), `"readers":[]`) {
+		t.Errorf("an object nobody read: %s", r.body)
+	}
+
+	// Two downloads by root, one by bob; a look at the metadata is none.
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt"})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt"})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt", bearer: bob})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object/metadata?key=a.txt", bearer: bob})
+	f.clock.Advance(time.Minute)
+	if err := f.access.Flush(t.Context()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	var got access
+	r = f.must(http.StatusOK, call{method: "GET", path: path})
+	r.decode(t, &got)
+	if got.DownloadCount != 3 || got.CopyCount != 0 || got.LastDownloadedAt == nil || !got.LastDownloadedAt.Equal(testNow.Add(time.Minute)) ||
+		got.OtherReaders != 0 || got.OtherDownloads != 0 || got.OtherCopies != 0 {
+		t.Errorf("access = %s", r.body)
+	}
+	if len(got.Readers) != 2 || got.Readers[0].Who != "root" || got.Readers[0].Downloads != 2 || got.Readers[0].Presigned ||
+		got.Readers[1].Who != "user/bob" || got.Readers[1].Downloads != 1 || !got.Readers[1].LastAt.Equal(testNow.Add(time.Minute)) {
+		t.Errorf("readers = %s", r.body)
+	}
+	// The version can be named.
+	f.must(http.StatusOK, call{method: "GET", path: path + "&version_id=null"}).decode(t, &got)
+	if got.DownloadCount != 3 {
+		t.Errorf("access of the null version = %+v", got)
+	}
+
+	for name, tt := range map[string]struct {
+		bearer string
+		path   string
+		status int
+		code   string
+	}{
+		"an auditor": {auditor, path, http.StatusOK, ""},
+		"a bucket admin, who can read the object": {alice, path, http.StatusForbidden, "AccessDenied"},
+		"a read-write user, who can read it too":  {bob, path, http.StatusForbidden, "AccessDenied"},
+		"who may not see it, of a missing object": {bob, "/buckets/photos/object/access?key=nope", http.StatusForbidden, "AccessDenied"},
+		"who may not see it, of a missing bucket": {bob, "/buckets/no-such-bucket/object/access?key=a.txt", http.StatusForbidden, "AccessDenied"},
+		"who may not see it, with a bad version":  {bob, path + "&version_id=latest", http.StatusForbidden, "AccessDenied"},
+		"a missing object":                        {f.root, "/buckets/photos/object/access?key=nope", http.StatusNotFound, "NoSuchObject"},
+		"a missing bucket":                        {f.root, "/buckets/no-such-bucket/object/access?key=a.txt", http.StatusNotFound, "NoSuchBucket"},
+		"a missing version":                       {f.root, path + "&version_id=" + strings.Repeat("0a", 16), http.StatusNotFound, "NoSuchVersion"},
+		"a version that is no version":            {f.root, path + "&version_id=latest", http.StatusBadRequest, "InvalidArgument"},
+		"no key":                                  {f.root, "/buckets/photos/object/access", http.StatusBadRequest, "InvalidArgument"},
+		"nobody":                                  {"", path, http.StatusUnauthorized, "Unauthenticated"},
+	} {
+		r := f.do(call{method: "GET", path: tt.path, bearer: tt.bearer})
+		if r.status != tt.status {
+			t.Errorf("%s: GET %s = %d, want %d: %s", name, tt.path, r.status, tt.status, r.body)
+			continue
+		}
+		if tt.code != "" && r.problem(t)["code"] != tt.code {
+			t.Errorf("%s: problem = %s, want code %s", name, r.body, tt.code)
+		}
+	}
+	// Reading the object is what both were allowed.
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt", bearer: alice})
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object?key=a.txt", bearer: bob})
+
+	// A version written before uploaders were recorded says nothing of one.
+	old := porttest.SampleVersion("photos", "old.txt", 1)
+	old.CreatedBy = ""
+	if _, err := f.meta.PutVersion(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	r = f.must(http.StatusOK, call{method: "GET", path: "/buckets/photos/object/access?key=old.txt"})
+	if strings.Contains(string(r.body), "uploaded_by") {
+		t.Errorf("an uploader that was not recorded: %s", r.body)
 	}
 }

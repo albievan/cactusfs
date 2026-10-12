@@ -127,6 +127,7 @@ matching flag, and the flag wins.
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | development only: HTTP without TLS, loopback IP only |
 | `--scrub-interval` | `CACTUSFS_SCRUB_INTERVAL` | `24h` | pause between scrub passes; `0` disables scrubbing |
 | `--lifecycle-interval` | `CACTUSFS_LIFECYCLE_INTERVAL` | `1h` | pause between passes of the worker that carries out lifecycle rules; `0` disables it |
+| `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads a node counted are recorded with the objects (at least `5s`); a node that crashes loses up to this much of the count |
 | `--scrub-rate-mib` | `CACTUSFS_SCRUB_RATE_MIB` | `64` | scrub read limit in MiB/s; `0` is no limit |
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between garbage collection passes; `0` disables it |
 | `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`) |
@@ -301,10 +302,32 @@ cluster understands, so version N runs alongside N+1 during a rolling upgrade.
   console session with a CSRF token. Errors are `application/problem+json`; every
   mutation accepts `Idempotency-Key`, whose records are replicated and whose stored
   answers are sealed through the KMS. Operations: session, buckets, objects (list,
-  upload, download, delete), users, groups, roles, policies, API keys, cluster and
-  maintenance status, audit log. The contract is served at `/api/v1/openapi.json` and
+  upload, download, delete, who uploaded and who downloaded), users, groups, roles,
+  policies, API keys, cluster and maintenance status, audit log. The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
+- **Who uploaded and who downloaded (implemented, ADR-0016).** Every version records who
+  committed it (`created_by` on a put, a copy's destination and the completion of a
+  multipart upload), in the words of the audit trail. Downloads are counted by the node
+  that serves them, in memory, when the body it handed out is closed: a GET answered 200
+  or 206 through S3 - signed, presigned or anonymous - and a download through the
+  management API; each ranged request by itself. The source of a CopyObject or
+  UploadPartCopy is counted apart, as a copy, once its destination is committed. HEAD,
+  304, 412, a read that could not be opened and everything the store reads for itself
+  (healing, scrubbing, collection, lifecycle) are not counted: they do not pass through
+  the one use case that counts (`ObjectService.Get`). `app.AccessRecorder` hands the
+  counts to the metadata store through `ports.ObjectAccessStore` every
+  `--access-flush-interval` and once more on a graceful stop, at most 256 aggregates an
+  entry, each batch named by the node, a number it chose at its start and a sequence
+  number; a batch that failed or whose outcome is unknown is sent again under the same
+  number and is applied once. Nothing on the path of a GET proposes, waits or can fail
+  for it. At most 10 000 aggregates wait on a node; beyond that reads are not counted
+  and `cactusfs_object_access_dropped_total` says how many. Until every member knows
+  entry schema 3 the uploader is not recorded and the counts wait in memory.
+  `GET /api/v1/buckets/{bucket}/object/access?key=` serves the record to holders of
+  `admin:GetObjectAccess` (`cluster-admin`, `auditor`); `s3:GetObject` does not imply
+  it. The figures are counts kept as well as can be, **not an audit trail**: a crash
+  loses up to an interval of them.
 - **Console (implemented, ADR-0007).** `web/`, embedded with `-tags console` and served
   at `/` by nodes with the console role. It calls only the admin API, through the client
   generated from the contract.

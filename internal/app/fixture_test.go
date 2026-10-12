@@ -186,23 +186,32 @@ func newFixtureWithDrives(t *testing.T, n int) *fixture {
 // given KMS, as another node of the same deployment would.
 func (f *fixture) objectService(t *testing.T, kms ports.KMS) *app.ObjectService {
 	t.Helper()
+	return f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) { cfg.KMS = kms })
+}
+
+// objectServiceWith builds an ObjectService over the fixture's stores, with
+// what change makes different.
+func (f *fixture) objectServiceWith(t *testing.T, change func(cfg *app.ObjectServiceConfig)) *app.ObjectService {
+	t.Helper()
 	drives := make([]ports.ShardStore, len(f.drives))
 	for i, d := range f.drives {
 		drives[i] = recordingDrive{ShardStore: d, events: f.events}
 	}
-	svc, err := app.NewObjectService(app.ObjectServiceConfig{
+	cfg := app.ObjectServiceConfig{
 		Index:   recordingIndex{ObjectIndex: f.meta, events: f.events},
 		Buckets: f.meta,
 		Uploads: f.meta,
 		Drives:  fixed(t, f.topology, drives),
 		Codec:   porttest.NewCodec(),
 		OnHeal:  f.heals.add,
-		KMS:     kms,
+		KMS:     f.kms,
 		Authz:   f.authz,
 		Clock:   f.clock,
 		Entropy: rand.Reader,
 		Logger:  slog.New(slog.NewJSONHandler(f.logs, nil)),
-	})
+	}
+	change(&cfg)
+	svc, err := app.NewObjectService(cfg)
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)
 	}

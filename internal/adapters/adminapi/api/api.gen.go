@@ -270,6 +270,30 @@ type NodeLabels struct {
 	Zone   *string `json:"zone,omitempty"`
 }
 
+// ObjectAccess Who uploaded a version of an object and who read it. Best-effort counts, not an audit trail.
+type ObjectAccess struct {
+	// CopyCount How often the version was the source of a copy.
+	CopyCount int64 `json:"copy_count"`
+
+	// DownloadCount Downloads of the version, every ranged request counted by itself.
+	DownloadCount int64 `json:"download_count"`
+
+	// LastDownloadedAt When the last download or copy was recorded. Absent when there was none.
+	LastDownloadedAt *time.Time `json:"last_downloaded_at,omitempty"`
+	OtherCopies      int64      `json:"other_copies"`
+	OtherDownloads   int64      `json:"other_downloads"`
+
+	// OtherReaders Readers who are no longer kept by name.
+	OtherReaders int64 `json:"other_readers"`
+
+	// Readers The readers kept by name. Beyond 32, whoever read longest ago is counted among the others.
+	Readers    []ObjectReader `json:"readers"`
+	UploadedAt time.Time      `json:"uploaded_at"`
+
+	// UploadedBy Who uploaded the version, as the audit trail names actors. Absent when it was not recorded.
+	UploadedBy *string `json:"uploaded_by,omitempty"`
+}
+
 // ObjectList defines model for ObjectList.
 type ObjectList struct {
 	CommonPrefixes        []string        `json:"common_prefixes"`
@@ -289,6 +313,22 @@ type ObjectMetadata struct {
 	Key          string    `json:"key"`
 	LastModified time.Time `json:"last_modified"`
 	Size         int64     `json:"size"`
+}
+
+// ObjectReader defines model for ObjectReader.
+type ObjectReader struct {
+	Copies    int64 `json:"copies"`
+	Downloads int64 `json:"downloads"`
+
+	// LastAt When the last of this reader's reads was recorded.
+	LastAt time.Time `json:"last_at"`
+
+	// Presigned True for reads made with URLs this reader signed: whoever held the URL read, not necessarily the
+	// signer.
+	Presigned bool `json:"presigned"`
+
+	// Who The reader, as the audit trail names actors - `root`, `user/<name>`, `key/<access key ID>` or `anonymous`.
+	Who string `json:"who"`
 }
 
 // ObjectSummary defines model for ObjectSummary.
@@ -504,6 +544,15 @@ type PutObjectParams struct {
 
 	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
 	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// GetObjectAccessParams defines parameters for GetObjectAccess.
+type GetObjectAccessParams struct {
+	// Key The key of the object.
+	Key ObjectKey `form:"key" json:"key"`
+
+	// VersionId The version to ask about - `null`, or the ID of a version. Without it, the current version.
+	VersionId *string `form:"version_id,omitempty" json:"version_id,omitempty"`
 }
 
 // GetObjectMetadataParams defines parameters for GetObjectMetadata.
@@ -725,6 +774,9 @@ type ServerInterface interface {
 	// PutObject Upload an object
 	// (PUT /buckets/{bucket}/object)
 	PutObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutObjectParams)
+	// GetObjectAccess Get who uploaded an object and who downloaded it
+	// (GET /buckets/{bucket}/object/access)
+	GetObjectAccess(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectAccessParams)
 	// GetObjectMetadata Get what is known about an object
 	// (GET /buckets/{bucket}/object/metadata)
 	GetObjectMetadata(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectMetadataParams)
@@ -1316,6 +1368,68 @@ func (siw *ServerInterfaceWrapper) PutObject(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutObject(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetObjectAccess operation middleware
+func (siw *ServerInterfaceWrapper) GetObjectAccess(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetObjectAccessParams
+
+	// ------------- Required query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "version_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "version_id", r.URL.Query(), &params.VersionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetObjectAccess(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3075,6 +3189,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.GetObject)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.PutObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/metadata", wrapper.GetObjectMetadata)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/access", wrapper.GetObjectAccess)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/users", wrapper.ListUsers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/users", wrapper.CreateUser)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/users/{name}", wrapper.DeleteUser)
@@ -3411,6 +3526,44 @@ type PutObjectdefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response PutObjectdefaultApplicationProblemPlusJSONResponse) VisitPutObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectAccessRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params GetObjectAccessParams
+}
+
+type GetObjectAccessResponseObject interface {
+	VisitGetObjectAccessResponse(w http.ResponseWriter) error
+}
+
+type GetObjectAccess200JSONResponse ObjectAccess
+
+func (response GetObjectAccess200JSONResponse) VisitGetObjectAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectAccessdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetObjectAccessdefaultApplicationProblemPlusJSONResponse) VisitGetObjectAccessResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -4585,6 +4738,9 @@ type StrictServerInterface interface {
 	// PutObject Upload an object
 	// (PUT /buckets/{bucket}/object)
 	PutObject(ctx context.Context, request PutObjectRequestObject) (PutObjectResponseObject, error)
+	// GetObjectAccess Get who uploaded an object and who downloaded it
+	// (GET /buckets/{bucket}/object/access)
+	GetObjectAccess(ctx context.Context, request GetObjectAccessRequestObject) (GetObjectAccessResponseObject, error)
 	// GetObjectMetadata Get what is known about an object
 	// (GET /buckets/{bucket}/object/metadata)
 	GetObjectMetadata(ctx context.Context, request GetObjectMetadataRequestObject) (GetObjectMetadataResponseObject, error)
@@ -4933,6 +5089,33 @@ func (sh *strictHandler) PutObject(w http.ResponseWriter, r *http.Request, bucke
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PutObjectResponseObject); ok {
 		if err := validResponse.VisitPutObjectResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetObjectAccess operation middleware
+func (sh *strictHandler) GetObjectAccess(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectAccessParams) {
+	var request GetObjectAccessRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetObjectAccess(ctx, request.(GetObjectAccessRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetObjectAccess")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetObjectAccessResponseObject); ok {
+		if err := validResponse.VisitGetObjectAccessResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

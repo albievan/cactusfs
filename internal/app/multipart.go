@@ -356,6 +356,8 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 	for attempt := 1; ; attempt++ {
 		completion := ports.Completion{
 			Bucket: in.Bucket, Key: in.Key, ID: in.UploadID, VersionID: object.ID(random), ETag: in.ETag, At: s.clock.Now().UTC(),
+			// Whoever completes the upload is who made the version.
+			CreatedBy: actorOf(principal),
 		}
 		if completion.Parts, err = s.sealParts(ctx, in, manifest); err != nil {
 			return object.Version{}, err

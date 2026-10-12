@@ -14,6 +14,37 @@ function object(key: string, size = 10) {
   return { key, size, etag: '"e"', last_modified: CREATED };
 }
 
+/** What the API says of an object nobody has read and whose uploader was not recorded, with what a test adds. */
+function access(more: Record<string, unknown> = {}) {
+  return {
+    uploaded_at: CREATED,
+    download_count: 0,
+    copy_count: 0,
+    readers: [],
+    other_readers: 0,
+    other_downloads: 0,
+    other_copies: 0,
+    ...more,
+  };
+}
+
+/** The answers behind the details of one object of the bucket "photos". */
+function detailsOf(key: string) {
+  return {
+    'GET /buckets/photos/objects': () => json(200, { objects: [object(key)], common_prefixes: [], truncated: false }),
+    'GET /buckets/photos/object/metadata': () =>
+      json(200, {
+        bucket: 'photos',
+        key,
+        size: 10,
+        etag: '"0123abcd"',
+        last_modified: CREATED,
+        content_type: 'text/plain',
+        encryption: 'SSE-S3',
+      }),
+  };
+}
+
 describe('buckets', () => {
   it('lists the buckets with links to their objects', async () => {
     fakeApi({ 'GET /buckets': () => json(200, [{ name: 'photos', created_at: CREATED }]) });
@@ -273,6 +304,7 @@ describe('object browser', () => {
           content_type: 'text/plain',
           encryption: 'SSE-S3',
         }),
+      'GET /buckets/photos/object/access': () => json(200, access()),
     });
     render(<ObjectsScreen bucket="photos" prefix="" />);
 
@@ -286,6 +318,155 @@ describe('object browser', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
     expect(screen.queryByRole('heading', { name: 'Object details' })).toBeNull();
+  });
+
+  it('shows who uploaded an object and who downloaded it', async () => {
+    const api = fakeApi({
+      ...detailsOf('a.txt'),
+      'GET /buckets/photos/object/access': () =>
+        json(
+          200,
+          access({
+            uploaded_by: 'user/alice',
+            download_count: 9,
+            copy_count: 2,
+            last_downloaded_at: '2026-10-05T10:00:00Z',
+            readers: [
+              { who: 'anonymous', presigned: false, downloads: 1, copies: 0, last_at: '2026-10-02T10:00:00Z' },
+              { who: 'user/bob', presigned: false, downloads: 3, copies: 2, last_at: '2026-10-05T10:00:00Z' },
+              { who: 'user/bob', presigned: true, downloads: 2, copies: 0, last_at: '2026-10-04T10:00:00Z' },
+            ],
+            other_readers: 4,
+            other_downloads: 3,
+            other_copies: 1,
+          }),
+        ),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+
+    const panel = (await screen.findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
+    expect(panel).not.toBeNull();
+    const facts = within(panel as HTMLElement);
+    const fact = (name: string) => facts.getByText(name, { selector: 'dt' }).nextElementSibling?.textContent;
+    expect(fact('Uploaded by')).toBe('user/alice');
+    expect(fact('Uploaded')).toBe(new Date(CREATED).toLocaleString());
+    expect(fact('Downloads')).toBe('9');
+    expect(fact('Copies')).toBe('2');
+    expect(fact('Last downloaded')).toBe(new Date('2026-10-05T10:00:00Z').toLocaleString());
+
+    const table = facts.getByRole('table', { name: 'Downloaded by' });
+    expect(within(table).getAllByRole('columnheader').map((th) => th.textContent)).toEqual([
+      'Who',
+      'Downloads',
+      'Copies',
+      'Last time',
+    ]);
+    const rows = within(table)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) =>
+        within(row)
+          .getAllByRole('cell')
+          .map((cell) => cell.textContent.trim()),
+      );
+    expect(rows).toEqual([
+      ['anonymous', '1', '0', new Date('2026-10-02T10:00:00Z').toLocaleString()],
+      ['user/bob', '3', '2', new Date('2026-10-05T10:00:00Z').toLocaleString()],
+      ['user/bob presigned link', '2', '0', new Date('2026-10-04T10:00:00Z').toLocaleString()],
+    ]);
+    // What a presigned link means is said where it is shown.
+    expect(within(table).getByText('presigned link').getAttribute('title')).toContain('whoever held the link');
+    expect(facts.getByText('and 4 others, with 3 downloads and 1 copy between them')).toBeDefined();
+    // The figures are called what they are.
+    expect(facts.getByText(/counts kept as well as can be, not an audit trail/)).toBeDefined();
+
+    const asked = api.callsTo('GET', '/buckets/photos/object/access');
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.query.get('key')).toBe('a.txt');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('says so when the uploader was not recorded and nobody downloaded the object', async () => {
+    fakeApi({ ...detailsOf('a.txt'), 'GET /buckets/photos/object/access': () => json(200, access()) });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+
+    const panel = (await screen.findByRole('heading', { name: 'Uploads and downloads' })).closest('section');
+    const facts = within(panel as HTMLElement);
+    const fact = (name: string) => facts.getByText(name, { selector: 'dt' }).nextElementSibling?.textContent;
+    expect(fact('Uploaded by')).toBe('not recorded');
+    expect(fact('Downloads')).toBe('0');
+    expect(fact('Last downloaded')).toBe('never');
+    expect(facts.queryByRole('table')).toBeNull();
+    expect(facts.queryByText(/others/)).toBeNull();
+  });
+
+  it('says in one line, and without an alert, that who accessed an object may not be seen', async () => {
+    fakeApi({
+      ...detailsOf('a.txt'),
+      'GET /buckets/photos/object/access': () => problem(403, 'Access denied'),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+
+    expect(await screen.findByText('You may not see who accessed this object.')).toBeDefined();
+    // The details themselves are shown, and nothing is reported as failed.
+    expect(screen.getByRole('heading', { name: 'Object details' })).toBeDefined();
+    expect(screen.getByText('text/plain')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Uploads and downloads' })).toBeNull();
+    expect(screen.queryByText('Uploaded by')).toBeNull();
+    expect(screen.queryByText(/Access denied/)).toBeNull();
+  });
+
+  it('says why when who accessed an object cannot be loaded, and still shows the details', async () => {
+    fakeApi({
+      ...detailsOf('a.txt'),
+      'GET /buckets/photos/object/access': () => problem(503, 'Temporarily unavailable'),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+
+    expect(
+      await screen.findByText('Who accessed this object could not be loaded: Temporarily unavailable'),
+    ).toBeDefined();
+    expect(screen.getByText('text/plain')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('asks again who accessed when the details of another object are opened', async () => {
+    const api = fakeApi({
+      'GET /buckets/photos/objects': () =>
+        json(200, { objects: [object('a.txt'), object('b.txt')], common_prefixes: [], truncated: false }),
+      'GET /buckets/photos/object/metadata': (call) =>
+        json(200, {
+          bucket: 'photos',
+          key: call.query.get('key'),
+          size: 10,
+          etag: '"e"',
+          last_modified: CREATED,
+          content_type: 'text/plain',
+          encryption: 'SSE-S3',
+        }),
+      'GET /buckets/photos/object/access': (call) =>
+        json(200, access({ uploaded_by: call.query.get('key') === 'a.txt' ? 'user/alice' : 'user/bob' })),
+    });
+    render(<ObjectsScreen bucket="photos" prefix="" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Details of a.txt' }));
+    expect(await screen.findByText('user/alice')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Details of b.txt' }));
+    expect(await screen.findByText('user/bob')).toBeDefined();
+    expect(screen.queryByText('user/alice')).toBeNull();
+    expect(api.callsTo('GET', '/buckets/photos/object/access').map((call) => call.query.get('key'))).toEqual([
+      'a.txt',
+      'b.txt',
+    ]);
   });
 
   it('deletes an object and lists again', async () => {

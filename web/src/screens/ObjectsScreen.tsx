@@ -50,13 +50,13 @@ function mayPass(error: unknown): boolean {
   return status === 0 || status === 502 || status === 503 || status === 504;
 }
 
-function reasonOf(error: unknown): string {
+function reasonOf(error: unknown, otherwise = 'The upload failed'): string {
   if (error instanceof ApiError) {
     return error.problem.detail === undefined || error.problem.detail === ''
       ? error.problem.title
       : `${error.problem.title}: ${error.problem.detail}`;
   }
-  return error instanceof Error ? error.message : 'The upload failed';
+  return error instanceof Error ? error.message : otherwise;
 }
 
 const UPLOAD_ICON = {
@@ -365,6 +365,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
             <dt>Encryption</dt>
             <dd>{metadata.encryption}</dd>
           </dl>
+          <ObjectAccessFacts key={metadata.key} bucket={metadata.bucket} objectKey={metadata.key} />
           <button
             type="button"
             className="btn btn-outline-secondary"
@@ -539,6 +540,102 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
         </div>
       </section>
     </>
+  );
+}
+
+/**
+ * Who uploaded an object and who downloaded it, as the API tells it. Seeing
+ * it takes a permission of its own: a refusal is said in one line, and is no
+ * failure of the details above it.
+ */
+function ObjectAccessFacts({ bucket, objectKey }: { bucket: string; objectKey: string }) {
+  const load = useCallback(
+    () =>
+      unwrap(
+        api.GET('/buckets/{bucket}/object/access', {
+          params: { path: { bucket }, query: { key: objectKey } },
+        }),
+      ),
+    [bucket, objectKey],
+  );
+  const access = useLoad(load);
+
+  if (access.loading) {
+    return <Loading />;
+  }
+  const record = access.data;
+  if (access.error !== null || record === undefined) {
+    const refused = access.error instanceof ApiError && access.error.problem.status === 403;
+    return (
+      <p className="form-hint object-access-note">
+        {refused
+          ? 'You may not see who accessed this object.'
+          : `Who accessed this object could not be loaded: ${reasonOf(access.error, 'the request failed')}`}
+      </p>
+    );
+  }
+  return (
+    <section className="object-access" aria-labelledby="object-access">
+      <h3 id="object-access">Uploads and downloads</h3>
+      <dl className="facts">
+        <dt>Uploaded by</dt>
+        <dd>{record.uploaded_by ?? 'not recorded'}</dd>
+        <dt>Uploaded</dt>
+        <dd>{formatTime(record.uploaded_at)}</dd>
+        <dt>Downloads</dt>
+        <dd>{record.download_count}</dd>
+        <dt>Copies</dt>
+        <dd>{record.copy_count}</dd>
+        <dt>Last downloaded</dt>
+        <dd>{record.last_downloaded_at === undefined ? 'never' : formatTime(record.last_downloaded_at)}</dd>
+      </dl>
+      {record.readers.length > 0 ? (
+        <div className="table-responsive">
+          <table className="table table-hover align-middle grid">
+            <caption className="object-access-caption">Downloaded by</caption>
+            <thead>
+              <tr>
+                <th scope="col">Who</th>
+                <th scope="col">Downloads</th>
+                <th scope="col">Copies</th>
+                <th scope="col">Last time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {record.readers.map((reader) => (
+                <tr key={`${reader.who} ${String(reader.presigned)}`}>
+                  <td data-label="Who">
+                    {reader.who}{' '}
+                    {reader.presigned ? (
+                      <span
+                        className="badge text-bg-light"
+                        title="Downloaded with a link this reader signed: whoever held the link, not necessarily the signer"
+                      >
+                        presigned link
+                      </span>
+                    ) : null}
+                  </td>
+                  <td data-label="Downloads">{reader.downloads}</td>
+                  <td data-label="Copies">{reader.copies}</td>
+                  <td data-label="Last time">{formatTime(reader.last_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {record.other_readers > 0 ? (
+        <p className="form-hint">
+          and {record.other_readers} {record.other_readers === 1 ? 'other' : 'others'}, with {record.other_downloads}{' '}
+          {record.other_downloads === 1 ? 'download' : 'downloads'} and {record.other_copies}{' '}
+          {record.other_copies === 1 ? 'copy' : 'copies'} between them
+        </p>
+      ) : null}
+      <p className="form-hint">
+        These figures are counts kept as well as can be, not an audit trail: a download may be recorded up to half a
+        minute or so after it was made, and a node that fails loses what it had counted and not yet recorded.
+      </p>
+    </section>
   );
 }
 

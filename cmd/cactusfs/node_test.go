@@ -334,3 +334,85 @@ func TestDefaultConsoleUser(t *testing.T) {
 		t.Errorf("a second start speaks of the default password:\n%s", again.logs)
 	}
 }
+
+// TestANodeRecordsWhoReadWhat: a node as it is wired counts a download
+// under its own name, hands the count to its metadata store when it stops,
+// and has it again when it starts (ADR-0016).
+func TestANodeRecordsWhoReadWhat(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	cfg := nodeConfig(t.TempDir())
+	first := mustStart(t, cfg)
+	n := first.node
+	n.startBackground(ctx, cfg)
+	root := iam.Principal{AccessKeyID: "ROOT", Root: true}
+	if err := n.buckets.Create(ctx, root, "photos"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	content := []byte("a picture")
+	stored, err := n.objects.Put(ctx, root, app.PutInput{Bucket: "photos", Key: "cat.jpg", Body: bytes.NewReader(content), Size: int64(len(content))})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if stored.CreatedBy != "root" {
+		t.Errorf("the version was made by %q, want root", stored.CreatedBy)
+	}
+	for range 2 {
+		out, err := n.objects.Get(ctx, root, app.GetInput{Bucket: "photos", Key: "cat.jpg"})
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if err := out.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Counted, and not handed over yet: the interval has not passed.
+	if got, err := n.objects.Access(ctx, root, "photos", "cat.jpg", ""); err != nil || got.Access.Downloads != 0 || n.access.Buffered() != 1 {
+		t.Fatalf("Access before a flush = %+v, %v; %d aggregates wait", got.Access, err, n.access.Buffered())
+	}
+	// Stopping in good order hands it over.
+	if err := n.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	again := mustStart(t, cfg).node
+	got, err := again.objects.Access(ctx, root, "photos", "cat.jpg", "")
+	if err != nil {
+		t.Fatalf("Access: %v", err)
+	}
+	if got.Version.CreatedBy != "root" || got.Access.Downloads != 2 || len(got.Access.Readers) != 1 || got.Access.Readers[0].Who != "root" {
+		t.Errorf("after a restart: uploaded by %q, access %+v", got.Version.CreatedBy, got.Access)
+	}
+	// The node counts again from one, under another number of its start:
+	// the batch is not taken for one that was seen.
+	out, err := again.objects.Get(ctx, root, app.GetInput{Bucket: "photos", Key: "cat.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out.Body.Close()
+	if err := again.access.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got, err := again.objects.Access(ctx, root, "photos", "cat.jpg", ""); err != nil || got.Access.Downloads != 3 {
+		t.Errorf("after another download: %+v, %v", got.Access, err)
+	}
+	if scraped := scrapeCounter(t, again.telemetry, "cactusfs_object_access_dropped_total"); scraped != 0 {
+		t.Errorf("%v reads were dropped", scraped)
+	}
+}
+
+// scrapeCounter returns the value of a counter without labels.
+func scrapeCounter(t *testing.T, tel *telemetry.Telemetry, name string) float64 {
+	t.Helper()
+	families, err := tel.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == name {
+			return family.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	t.Fatalf("no metric %s", name)
+	return 0
+}

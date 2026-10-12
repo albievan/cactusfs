@@ -413,6 +413,19 @@ func (c *Cluster) S3(id string) *s3.Client {
 	})
 }
 
+// HTTP returns an HTTP client for the S3 listener of a node - for a request
+// that is no call of the SDK, such as a presigned URL - and Admin one for
+// its admin listener, where the management API is. Requests are addressed to
+// the node by its name: https://<id>:9000 and https://<id>:9001.
+func (c *Cluster) HTTP(id string) *http.Client {
+	return &http.Client{Transport: c.transport(id, s3Port), Timeout: 2 * time.Minute}
+}
+
+// Admin returns an HTTP client for the admin listener of a node.
+func (c *Cluster) Admin(id string) *http.Client {
+	return &http.Client{Transport: c.transport(id, adminPort), Timeout: 2 * time.Minute}
+}
+
 // Ready reports whether a node answers its readiness probe with 200.
 func (c *Cluster) Ready(id string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

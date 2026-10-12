@@ -107,6 +107,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | Probe endpoints reveal internals | `/healthz` and `/readyz` return only `ok` or `unavailable`; the reason is logged, not returned | **implemented** |
 | Eavesdropping | See TLS above | **implemented** (admin listener) |
 | Data leaves an air-gapped site | No runtime call to the internet, no telemetry, no CDN asset | **implemented** |
+| Who read an object is learned by somebody who should not know (ADR-0016) | The uploader, the counts and the readers are behind an action of their own, `admin:GetObjectAccess`, which reading the object does not give and only `cluster-admin` and `auditor` hold among the built-in roles; the single authorizer is asked before anything is said of the object, whether it exists included; the object list, the object's metadata and the S3 API say nothing of it; no address of a reader is kept; no event carries a flush, no metric or span names a reader, and nothing the recorder logs names one | **implemented**; **accepted risk**: metadata is not encrypted at rest, so the list of readers sits in the metadata store as object keys do |
 
 ### Denial of service
 

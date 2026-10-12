@@ -954,6 +954,29 @@ textarea[readonly] {
   font-size: 0.9rem;
 }
 
+/* Who uploaded an object and who downloaded it, under its details */
+
+.object-access {
+  margin: 0 0 1rem;
+}
+
+.object-access-note {
+  margin: 0 0 1rem;
+}
+
+.object-access-caption {
+  caption-side: top;
+  padding: 0 0 0.35rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.object-access .badge {
+  border: 1px solid var(--line);
+  color: var(--night-green);
+  font-weight: 600;
+}
+
 .uploads-summary {
   display: flex;
   flex-wrap: wrap;
