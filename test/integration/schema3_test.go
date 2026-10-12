@@ -59,7 +59,9 @@ func stateOf(t *testing.T, metaDir string) (schema uint64, buckets []string) {
 // schema 4 (ADR-0019), so from then on the state says 4. All of it is there
 // after a restart, beside everything the fixture held.
 func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
-	t.Parallel()
+	// Not beside the others: this test starts one node as a process and is
+	// done in seconds when it has the machine, and it ran out of its three
+	// minutes when four-node clusters of containers were starting around it.
 	dir := t.TempDir()
 	copyTree(t, filepath.Join("testdata", "schema-2", "meta"), dir)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)

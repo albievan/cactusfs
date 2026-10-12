@@ -113,7 +113,9 @@ func schema4StateOf(t *testing.T, metaDir string) schema4State {
 // created from then on has its creator; those of the fixture have none. All
 // of it is there after a restart, beside everything the fixture held.
 func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
-	t.Parallel()
+	// Not beside the others: this test starts one node as a process and is
+	// done in seconds when it has the machine, and it ran out of its three
+	// minutes when four-node clusters of containers were starting around it.
 	// Built before the clock of the test starts, as in TestUpgradeFromSchema3.
 	bin, dir := buildBinary(t), t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)

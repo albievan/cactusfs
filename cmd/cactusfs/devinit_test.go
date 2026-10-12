@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -50,8 +51,12 @@ func TestDevInit(t *testing.T) {
 			t.Errorf("node %s: %v", id, err)
 		}
 		info, err := os.Stat(filepath.Join(dir, "nodes", id+".key"))
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("key of %s: mode %v, %v", id, info.Mode().Perm(), err)
+		// Windows keeps no such bits: there a file's mode says only whether
+		// it can be written, and who may read it is not in it.
+		if err != nil {
+			t.Errorf("key of %s: %v", id, err)
+		} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Errorf("key of %s: mode %v", id, info.Mode().Perm())
 		}
 	}
 	// The key file opens with the passphrase, and only with it.

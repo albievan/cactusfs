@@ -762,10 +762,12 @@ func TestSettingsOfFourNodes(t *testing.T) {
 			t.Fatal(err)
 		}
 		wantNoneOf(t, "what "+id+" sends another node", string(encoded), map[string]string{
-			"the KMS passphrase": nodePassphrase, "the path of its key": cfg.NodeTLSKey, "the path of the KMS key file": cfg.KMSKeyFile,
+			"the KMS passphrase": nodePassphrase, "the path of its key": asJSONWrites(t, cfg.NodeTLSKey), "the path of the KMS key file": asJSONWrites(t, cfg.KMSKeyFile),
 			"what stands for a secret inside the node": secretPlaceholder,
 		})
-		if !strings.Contains(string(encoded), cfg.Data[0]) || !strings.Contains(string(encoded), cfg.NodeTLSCert) {
+		// A path is looked for as JSON writes it: on Windows its separators
+		// are escaped.
+		if !strings.Contains(string(encoded), asJSONWrites(t, cfg.Data[0])) || !strings.Contains(string(encoded), asJSONWrites(t, cfg.NodeTLSCert)) {
 			t.Errorf("what %s sends another node lacks its drive or its certificate file:\n%s", id, encoded)
 		}
 	}
@@ -1001,4 +1003,15 @@ func TestTheMetadataLevelOfTheSettingsIsTheStores(t *testing.T) {
 	if got, err := level(t.Context()); !errors.Is(err, domain.ErrUnavailable) || got != 0 {
 		t.Errorf("the level of a closed store = %d, %v; want none, and %v", got, err, domain.ErrUnavailable)
 	}
+}
+
+// asJSONWrites returns a string as it stands inside a JSON document, without
+// the quotes around it.
+func asJSONWrites(t *testing.T, s string) string {
+	t.Helper()
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Trim(string(encoded), `"`)
 }

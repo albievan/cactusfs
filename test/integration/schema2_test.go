@@ -82,7 +82,9 @@ func tagsOf(set []types.Tag) map[string]string {
 // were written in - and an upload that was in progress, which can be
 // finished.
 func TestUpgradeFromSchema2(t *testing.T) {
-	t.Parallel()
+	// Not beside the others: this test starts one node as a process and is
+	// done in seconds when it has the machine, and it ran out of its three
+	// minutes when four-node clusters of containers were starting around it.
 	bin, dir := buildBinary(t), t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()

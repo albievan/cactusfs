@@ -250,7 +250,9 @@ func schema3Recorded(ctx context.Context, t *testing.T, node *schema3Node, conte
 // and finished; the user's API key still signs; and what is read and written
 // afterwards is added to the record, not put in its place.
 func TestUpgradeFromSchema3(t *testing.T) {
-	t.Parallel()
+	// Not beside the others: this test starts one node as a process and is
+	// done in seconds when it has the machine, and it ran out of its three
+	// minutes when four-node clusters of containers were starting around it.
 	// Built before the clock of the test starts: on a cold cache the build
 	// alone can take longer than the test may.
 	bin, dir := buildBinary(t), t.TempDir()
