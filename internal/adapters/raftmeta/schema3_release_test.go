@@ -240,6 +240,10 @@ func schema3ReleaseState(t *testing.T, log [][]byte, supported byte) []byte {
 	if supported != 0 {
 		f.supported = supported
 	}
+	// The drive is not waited for: what the state holds does not depend on
+	// when it reached the drive, and a log of some thousand entries would
+	// wait for it as often.
+	f.db.NoSync = true
 	evidence := schema3ReleaseEvidence{State: map[string]string{}}
 	var index uint64
 	for _, data := range log {

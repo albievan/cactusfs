@@ -15,7 +15,8 @@ import (
 // Raft entry schema. Version 1 is docs/adr/0003-metadata.md; version 2 is
 // docs/adr/0008-object-versions.md; version 3 is
 // docs/adr/0016-object-access-and-schema-3.md; version 4 is
-// docs/adr/0019-bucket-activity-and-schema-4.md. Any change that an older
+// docs/adr/0019-bucket-activity-and-schema-4.md; version 5 is
+// docs/adr/0023-schema-5-usage-outbox-targets.md. Any change that an older
 // binary could not apply needs a new version, an ADR, a migration and an
 // upgrade test.
 //
@@ -43,6 +44,14 @@ import (
 // record of the bucket's latest uploads and downloads (bucketactivity.go).
 // What is derived from the log must follow from the log alone, and the
 // version byte is in the log.
+//
+// Version 5 adds the commands of bucket usage and quotas, of targets and the
+// outbox, and of replication between sites (schema5.go); that a version, a
+// delete marker or an upload is the copy of one of another deployment; and
+// who deleted. An entry is of version 5 only when it carries one of them -
+// and a bucket.create is written as version 5 once every member knows it,
+// though it says nothing new: that is what gives a new bucket its usage
+// record from the start (bucketusage.go).
 const (
 	// entrySchemaVersion is the oldest entry schema, which every binary
 	// applies.
@@ -56,10 +65,20 @@ const (
 	entrySchema3 = 3
 	// entrySchema4 is the schema of ADR-0019.
 	entrySchema4 = 4
+	// entrySchema5 is the schema of ADR-0023 to ADR-0026 together: one rise
+	// for quotas, notifications and replication, so that no binary knows a
+	// part of it.
+	entrySchema5 = 5
 )
 
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
+//
+// It is still 4: the codec reads and writes entries of schema 5, and the
+// state machine applies them when it is told that it may (fsm.supported,
+// which only tests raise), but this binary neither announces schema 5 nor
+// proposes an entry of it until all of its state machine is written (PLAN
+// 8.0.10).
 const MetadataVersion = entrySchema4
 
 // Command types.
@@ -116,10 +135,20 @@ type entry struct {
 	DeleteSubBucket     *subBucketRefCmd     `json:"delete_sub_bucket,omitempty"`
 	PutTagDefinition    *tagDefinitionCmd    `json:"put_tag_definition,omitempty"`
 	DeleteTagDefinition *tagDefinitionRefCmd `json:"delete_tag_definition,omitempty"`
+	// Bucket usage and quotas, targets and the outbox, replication between
+	// sites (schema 5; schema5.go).
+	SetBucketQuota   *bucketQuotaCmd   `json:"set_bucket_quota,omitempty"`
+	WalkBucketUsage  *usageWalkCmd     `json:"walk_bucket_usage,omitempty"`
+	PutTarget        *targetCmd        `json:"put_target,omitempty"`
+	DeleteTarget     *targetRefCmd     `json:"delete_target,omitempty"`
+	AckOutbox        *ackOutboxCmd     `json:"ack_outbox,omitempty"`
+	SetBucketReplica *bucketReplicaCmd `json:"set_bucket_replica,omitempty"`
+	PutResync        *resyncCmd        `json:"put_resync,omitempty"`
 }
 
 // bucketConfigCmd replaces one configuration document of a bucket; without
-// a document it removes it. The kind "tagrules" is of schema 3.
+// a document it removes it. The kind "tagrules" is of schema 3; the kinds
+// "notification" and "replication" are of schema 5.
 type bucketConfigCmd struct {
 	Bucket   string `json:"bucket"`
 	Kind     string `json:"kind"`
@@ -222,6 +251,12 @@ type deleteVersionCmd struct {
 	// Expect, when set, is the version ID the version this delete is
 	// about must have; otherwise the delete is refused.
 	Expect string `json:"expect,omitempty"`
+	// Replica says that the delete marker this delete makes is the copy
+	// of one of another deployment (schema 5).
+	Replica *replicaRecord `json:"replica,omitempty"`
+	// By is who deleted, in the words the audit trail uses for actors
+	// (schema 5). A delete without it was written before that was said.
+	By string `json:"by,omitempty"`
 }
 
 type removeNodeCmd struct {
@@ -289,6 +324,12 @@ type bucketRecord struct {
 	// CreatedBy is who created the bucket (schema 4). A record without it
 	// was written before that was recorded.
 	CreatedBy string `json:"created_by,omitempty"`
+	// QuotaBytes is the quota of the bucket, and ReplicaFrom the deployment
+	// it is a replica of (schema 5). Neither is said when a bucket is
+	// created: each is given by a command of its own, and a record that has
+	// neither is the record of schema 4.
+	QuotaBytes  int64  `json:"quota_bytes,omitempty"`
+	ReplicaFrom string `json:"replica_from,omitempty"`
 }
 
 // versionRecord is an object version as it is stored and replicated.
@@ -315,6 +356,14 @@ type versionRecord struct {
 	// CreatedBy is who committed the version (schema 3). A record without
 	// it was written before that was recorded.
 	CreatedBy string `json:"created_by,omitempty"`
+	// Replication is where the version stands in replication between
+	// sites (schema 5): PENDING, COMPLETED, FAILED or REPLICA. It is the
+	// state's to say and is never taken from an entry.
+	Replication string `json:"replication,omitempty"`
+	// Replica is set only in an entry that puts the copy of a version of
+	// another deployment (schema 5), never in the state: what is kept of
+	// it is Seq and Replication.
+	Replica *replicaRecord `json:"replica,omitempty"`
 	// Dropped is set only in the answer to an entry that removed this
 	// version, never in the state: the parts that went with it, whose
 	// data the proposer may now remove.
@@ -434,6 +483,21 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
+	// The commands of the fifth schema, and a command of an older schema
+	// that carries what only the fifth knows: a binary of the fourth would
+	// stop at the one and drop the other.
+	switch e.Type {
+	case cmdSetBucketQuota, cmdWalkBucketUsage, cmdPutTarget, cmdDeleteTarget, cmdAckOutbox, cmdSetBucketReplica, cmdPutResync:
+		return entrySchema5
+	}
+	switch {
+	case e.PutObject != nil && e.PutObject.Replica != nil,
+		e.CompleteUpload != nil && e.CompleteUpload.Replica != nil,
+		e.CreateUpload != nil && e.CreateUpload.ReplicaFrom != "",
+		e.DeleteVersion != nil && (e.DeleteVersion.Replica != nil || e.DeleteVersion.By != ""),
+		e.SetBucketConfig != nil && (e.SetBucketConfig.Kind == bucket.ConfigNotification || e.SetBucketConfig.Kind == bucket.ConfigReplication):
+		return entrySchema5
+	}
 	// A bucket created with what only the fourth schema knows: a binary of
 	// the third would drop the field, and store another bucket record than
 	// the others.
@@ -479,6 +543,12 @@ func versionOf(e entry) byte {
 // byte is what tells every member, alike, to keep the record (ADR-0019); and
 // below level 4 the same entries are written as they always were, so that no
 // member of the release before meets one it would stop at.
+//
+// And so for a bucket.create and schema 5 (ADR-0023): once every member
+// knows schema 5 it is written as schema 5, with the fields it always had,
+// and that byte is what makes every member give the new bucket a usage
+// record, exact and empty. Below level 5 it is written as before, and no
+// record is made.
 func writtenAt(e entry, needs, level byte) byte {
 	if level < entrySchema4 {
 		return needs
@@ -486,6 +556,10 @@ func writtenAt(e entry, needs, level byte) byte {
 	switch e.Type {
 	case cmdPutObject, cmdCompleteUpload, cmdAddReads:
 		return max(needs, entrySchema4)
+	case cmdCreateBucket:
+		if level >= entrySchema5 {
+			return entrySchema5
+		}
 	}
 	return needs
 }
@@ -509,6 +583,11 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		// in an entry of its schema they say nothing here either.
 		e.AddReads, e.PutSubBucket, e.DeleteSubBucket, e.PutTagDefinition, e.DeleteTagDefinition = nil, nil, nil, nil, nil
 	}
+	if data[0] < entrySchema5 {
+		// Nor does a binary of the fourth schema see these.
+		e.SetBucketQuota, e.WalkBucketUsage, e.PutTarget, e.DeleteTarget = nil, nil, nil, nil
+		e.AckOutbox, e.SetBucketReplica, e.PutResync = nil, nil, nil
+	}
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
@@ -517,6 +596,8 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.CreateUpload != nil, e.PutPart != nil, e.CompleteUpload != nil, e.AbortUpload != nil,
 		e.SetBucketConfig != nil, e.SetTags != nil,
 		e.AddReads != nil, e.PutSubBucket != nil, e.DeleteSubBucket != nil, e.PutTagDefinition != nil, e.DeleteTagDefinition != nil,
+		e.SetBucketQuota != nil, e.WalkBucketUsage != nil, e.PutTarget != nil, e.DeleteTarget != nil,
+		e.AckOutbox != nil, e.SetBucketReplica != nil, e.PutResync != nil,
 	} {
 		if present {
 			set++
@@ -572,6 +653,20 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.PutTagDefinition != nil && data[0] >= entrySchema3
 	case cmdDeleteTagDefinition:
 		ok = ok && e.DeleteTagDefinition != nil && data[0] >= entrySchema3
+	case cmdSetBucketQuota:
+		ok = ok && e.SetBucketQuota != nil && data[0] >= entrySchema5
+	case cmdWalkBucketUsage:
+		ok = ok && e.WalkBucketUsage != nil && data[0] >= entrySchema5
+	case cmdPutTarget:
+		ok = ok && e.PutTarget != nil && data[0] >= entrySchema5
+	case cmdDeleteTarget:
+		ok = ok && e.DeleteTarget != nil && data[0] >= entrySchema5
+	case cmdAckOutbox:
+		ok = ok && e.AckOutbox != nil && data[0] >= entrySchema5
+	case cmdSetBucketReplica:
+		ok = ok && e.SetBucketReplica != nil && data[0] >= entrySchema5
+	case cmdPutResync:
+		ok = ok && e.PutResync != nil && data[0] >= entrySchema5
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)
@@ -597,6 +692,7 @@ func bucketToRecord(b bucket.Bucket) *bucketRecord {
 func (r bucketRecord) toDomain() bucket.Bucket {
 	b := bucket.Bucket{
 		Name: r.Name, CreatedAt: r.CreatedAt, Versioning: bucket.Versioning(r.Versioning), ObjectLock: r.ObjectLock, CreatedBy: r.CreatedBy,
+		QuotaBytes: r.QuotaBytes, ReplicaFrom: r.ReplicaFrom,
 	}
 	if d := r.DefaultRetention; d != nil {
 		b.DefaultRetention = &bucket.DefaultRetention{Mode: object.RetentionMode(d.Mode), Days: d.Days, Years: d.Years}
@@ -624,6 +720,7 @@ func versionToRecord(v object.Version) *versionRecord {
 		Parts:              v.Parts,
 		Tags:               v.Tags,
 		CreatedBy:          v.CreatedBy,
+		Replica:            replicaToRecord(v.Replica),
 		ContentType:        v.ContentType,
 		ContentEncoding:    v.ContentEncoding,
 		ContentDisposition: v.ContentDisposition,
@@ -665,6 +762,7 @@ func (r versionRecord) toDomain() (object.Version, error) {
 		Parts:              r.Parts,
 		Tags:               r.Tags,
 		CreatedBy:          r.CreatedBy,
+		Replication:        object.ReplicationStatus(r.Replication),
 		DataID:             dataID,
 		Size:               r.Size,
 		ETag:               r.ETag,
@@ -721,10 +819,15 @@ type wireResult struct {
 	Marker *versionRecord `json:"marker,omitempty"`
 	// Parts are parts of an upload that the entry removed.
 	Parts []partRecord `json:"parts,omitempty"`
+	// Usage is the usage record of a bucket after an entry of the walk
+	// through it, as it is stored, and Drift that the entry ended a
+	// recount which found other totals than were kept (schema 5).
+	Usage []byte `json:"usage,omitempty"`
+	Drift bool   `json:"drift,omitempty"`
 }
 
 func encodeResult(r applyResult) ([]byte, error) {
-	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker, Parts: r.parts}
+	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker, Parts: r.parts, Usage: r.usage, Drift: r.drift}
 	if r.err != nil {
 		w.Codes, w.Message = domain.Codes(r.err), r.err.Error()
 		if len(w.Codes) == 0 {
@@ -740,7 +843,7 @@ func decodeResult(data []byte) (applyResult, error) {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return applyResult{}, fmt.Errorf("malformed answer from the metadata leader: %w", err)
 	}
-	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker, parts: w.Parts}
+	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker, parts: w.Parts, usage: w.Usage, drift: w.Drift}
 	if len(w.Codes) > 0 {
 		r.err = domain.FromCodes(w.Codes, w.Message)
 	}

@@ -9,7 +9,9 @@
   to the findings of the review of 8.0.2 to 8.0.5: the bound of a replica's sequence, the
   canonical form written by hand, certificates judged by their framing in apply, the path
   of an endpoint shown to nobody, the addresses never connected to, and a clamp that
-  begins a recount
+  begins a recount; and on 2026-10-13, to the state machine of PLAN 8.0.7: how the walk
+  goes through the uploads, and what a put costs; and to its review: what a size below
+  nothing counts for, and a walk that no stored key can stop
 - **Builds on:** ADR-0003 (metadata), ADR-0005 (cluster, levels), ADR-0008 (the leader's
   time, versions and their sequence), ADR-0016 (entry schema 3, the level rule as it
   stands), ADR-0019 (entry schema 4, the schema byte as a switch)
@@ -232,6 +234,17 @@ several keys calls `Add` once for each. The changes of one key may be summed int
 delta - the property tests hold that grouping, with and without a walk under way - and
 those of two keys may not.
 
+**A size below nothing counts as nothing.** No proposer writes one, but an `object.put`
+is not refused for a negative `size` - the release of schema 4 applies it, and a member
+that refused it would hold another state while the cluster is at level 4 - so a version
+of -600 bytes can be stored. In the usage of its bucket every size is `max(size, 0)`: in
+what a change adds and takes away, and in what the walk finds - one function in the
+state machine (`countedSize`), through which every size that reaches a record goes. Were
+the changes to count it as it is and the walk as nothing, the record would not be a
+recount, and such a version would make room under a quota for bytes nobody freed. The
+stored version keeps the size its entry gave it. The rule is part of the replicated
+format.
+
 **`high` and the sequence of a version.** `high` is the greatest sequence (`Seq`,
 ADR-0008) committed in the bucket. A version made here is given
 `Seq = max(index of the entry, high + 1)` (`bucket.Usage.NextSeq`, which does not wrap:
@@ -257,9 +270,13 @@ be read from them. The count is online and inside apply:
   key order - until it has visited `limit` records, and ends at a key boundary
   (phase 1, `UsagePhaseKeys`). `limit` is from 1 to 100 000 (`ports.MaxUsageWalk`); the
   leader proposes entries of `limit` 10 000, one every 100 ms;
-- when the keys are done, the walk goes through `parts/<bucket>` upload by upload, in
-  the order of the upload IDs as text (phase 2, `UsagePhaseUploads`). A phase that ends
-  leaves the cursor empty: before everything of the next;
+- when the keys are done, the walk goes through the uploads in progress
+  (`uploads/<bucket>`) in the order of the upload IDs as text, and counts the parts of
+  each in `parts/<bucket>` (phase 2, `UsagePhaseUploads`). An upload is as many records
+  of `limit` as it has parts, and one when it has none - so the cursor may stand at an
+  upload without parts, as the model of the port has it. A phase that ends leaves the
+  cursor empty: before everything of the next; and an entry that ends the keys with
+  something left of its `limit` goes on into the uploads;
 - **phase 3** (`UsagePhaseDone`) is a walk that has been through everything and waits for
   `Finish`. It has no cursor. `Finish` is refused in any other phase, and `Step` in this
   one; the entry that ends the last phase finishes the walk, as the model of the port
@@ -267,6 +284,16 @@ be read from them. The count is online and inside apply:
 - a step moves the cursor forward or not at all, counts versions in phase 1 and nothing
   but `upload_bytes` in phase 2, and raises `high` to the greatest sequence it visited
   (`Usage.Step`; a step the walk cannot have made is `ErrInvalidArgument`);
+- **no stored key stops the walk.** A cursor is valid UTF-8 of at most 1 024 bytes, as a
+  key is that apply accepts. A state may still hold a key that is neither, stored by a
+  release from before keys were validated in apply. A step never ends on such a key: it
+  counts it and goes on - past `limit` if it must - to the next key that can be a
+  cursor, counts that too and ends there; when none follows, the step ends the phase.
+  So the walk has been to exactly the keys that are, byte for byte, at or before its
+  cursor, and a change of any key - of one that can be no cursor too - is added to
+  `count` by the same comparison. A step that ends its phase may therefore have counted
+  and name no cursor (the keys behind the last cursor were all such keys); any other
+  step that counts names one;
 - while a bucket is being counted, a change is added to `count` if it is one the walk has
   been past, and is left to the walk otherwise: in phase 1 a change of a key at or
   before the cursor, compared byte for byte, and no change of an upload; in phase 2
@@ -542,8 +569,14 @@ somebody asks would make a quota wait for an operator.
 
 - **Cost on the write path.** One usage record read and written in the transaction of
   every put, completion, part, abort and delete; and one row appended for a bucket
-  with a rule that matches. Not measured yet: PLAN 8.0.7 adds a benchmark against
-  84334a7.
+  with a rule that matches. Measured for the record (PLAN 8.0.7,
+  `BenchmarkApplyPutAtLevel4` and `BenchmarkApplyPutWithAUsageRecord`, Apple M3, the
+  same benchmark run in an export of ddbfe43): applying a put allocates 237 times and
+  107 kB there; here 239 times into a bucket without a record and 271 times and 2.7 kB
+  more into one with a record, with a quota or without. In time that is below what the
+  runs differ by among themselves - 50 to 90 microseconds an entry when the drive is not
+  waited for, in both trees - and nothing beside the 5 to 6 milliseconds the drive takes
+  to make an entry durable. The row of the outbox is not written yet (PLAN 8.0.8).
 - **A key with very many versions makes one long step of the walk**: a walk entry ends
   at a key boundary, so a key of a million versions is one apply of about four seconds,
   with every other change waiting. Accepted; it happens once a bucket, and at a

@@ -23,6 +23,14 @@ type Observation struct {
 	// StateSchema is the schema the node's state says it has, and zero when
 	// it could not be read.
 	StateSchema uint64
+	// UsageClamped is how many changes this node has applied, since it
+	// started, that held a count of a bucket's usage record at one of its
+	// bounds - each began a recount (ADR-0023); it is what the counter
+	// cactusfs_bucket_usage_clamped_total shows. UsageDrift is how many
+	// recounts it has finished that found other totals than were kept:
+	// cactusfs_bucket_usage_drift_total. Every member counts for itself,
+	// and neither is in the replicated state.
+	UsageClamped, UsageDrift uint64
 }
 
 // Observe returns the state of this node's part of the metadata group, for
@@ -49,7 +57,8 @@ func (s *Store) Observe() (Observation, bool) {
 	o := Observation{
 		Leader: s.raft.State() == raft.Leader, Term: s.raft.CurrentTerm(),
 		AppliedIndex: s.raft.AppliedIndex(), CommitIndex: s.raft.CommitIndex(),
-		Supported: int(s.supported),
+		Supported:    int(s.supported),
+		UsageClamped: s.fsm.usageClamped.Load(), UsageDrift: s.fsm.usageDrift.Load(),
 	}
 	if future := s.raft.GetConfiguration(); future.Error() == nil {
 		for _, server := range future.Configuration().Servers {

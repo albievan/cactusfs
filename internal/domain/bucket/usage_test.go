@@ -330,6 +330,24 @@ func TestUsageWalk(t *testing.T) {
 		}
 	}
 
+	// A step that ends its phase may have counted and name no cursor: keys
+	// that can be none (a state written before keys were validated) are
+	// behind the end of the phase like every other.
+	for name, begun := range map[string]bucket.Usage{
+		"from the start":  bucket.Usage{}.Counting(),
+		"behind a cursor": step(bucket.Usage{}.Counting(), bucket.UsageStep{Cursor: "b", Counted: bucket.UsageTotals{Versions: 1, StoredBytes: 2}}),
+	} {
+		ended := step(begun, bucket.UsageStep{Counted: bucket.UsageTotals{Objects: 1, CurrentBytes: 5, Versions: 1, StoredBytes: 5}, High: 9, End: true})
+		wantCount := begun.Count.UsageTotals
+		wantCount.Objects, wantCount.CurrentBytes, wantCount.Versions, wantCount.StoredBytes = wantCount.Objects+1, wantCount.CurrentBytes+5, wantCount.Versions+1, wantCount.StoredBytes+5
+		if ended.Count.Phase != bucket.UsagePhaseUploads || ended.Count.Cursor != "" || ended.Count.UsageTotals != wantCount || ended.High != 9 {
+			t.Errorf("%s: a step that counts, names no cursor and ends the keys = %+v, count %+v", name, ended, ended.Count)
+		}
+		if err := ended.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
 	// Beginning again throws away what a walk had counted.
 	if again := u.Counting(); again.Count.Phase != bucket.UsagePhaseKeys || again.Count.UsageTotals != (bucket.UsageTotals{}) || again.High != 40 {
 		t.Errorf("Counting during a count = %+v", again.Count)

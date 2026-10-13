@@ -298,9 +298,9 @@ func (m *MemMetadata) commit(b bucket.Bucket, v object.Version, event delivery.E
 	// What the change adds, less what the same change frees: the version it
 	// replaces where versions are not kept, and the parts of the upload it
 	// completes.
-	net := stored.Size - uploadBytes
+	net := countedSize(stored.Size) - uploadBytes
 	if removed != nil {
-		net -= removed.Size
+		net -= countedSize(removed.Size)
 	}
 	if !m.admits(b, net) {
 		return ports.PutResult{}, fmt.Errorf("%w: bucket %s", domain.ErrQuotaExceeded, v.Bucket)

@@ -319,7 +319,10 @@ func (u Usage) Counting() Usage {
 // UsageStep is what one entry of the walk found.
 type UsageStep struct {
 	// Cursor is the last key the step visited - or, in
-	// UsagePhaseUploads, the last upload. Empty when it visited none.
+	// UsagePhaseUploads, the last upload. Empty when it visited none, and
+	// when it visited none that can be a cursor: a step that ends its
+	// phase may have counted such keys only, and needs no cursor to have
+	// been past everything.
 	Cursor string
 	// Counted is what it counted: of keys in UsagePhaseKeys, of the parts
 	// of uploads in UsagePhaseUploads.
@@ -343,7 +346,9 @@ func invalidUsage(format string, args ...any) error {
 // The error wraps domain.ErrInvalidArgument for a step that the walk cannot
 // have made: none is under way or it has ended, the cursor goes back, the
 // step counts what its phase does not, or counts without having been
-// anywhere.
+// anywhere and without ending its phase - only a step with End may count and
+// name no cursor: what it counted lies behind the end of the phase, which
+// every later change is compared with.
 func (u Usage) Step(s UsageStep) (Usage, error) {
 	if u.Count == nil || u.Count.Phase == UsagePhaseDone {
 		return Usage{}, invalidUsage("a step of a walk that is not under way")
@@ -354,7 +359,7 @@ func (u Usage) Step(s UsageStep) (Usage, error) {
 	switch {
 	case s.Counted.negative():
 		return Usage{}, invalidUsage("a step counts nothing below nothing")
-	case s.Cursor == "" && s.Counted != (UsageTotals{}):
+	case s.Cursor == "" && !s.End && s.Counted != (UsageTotals{}):
 		return Usage{}, invalidUsage("a step that counted has been somewhere")
 	case s.Cursor != "" && s.Cursor <= c.Cursor:
 		return Usage{}, invalidUsage("the walk does not go back")

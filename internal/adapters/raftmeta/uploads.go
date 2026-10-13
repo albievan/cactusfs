@@ -12,6 +12,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -90,6 +91,9 @@ type uploadRecord struct {
 
 	Lock       *lockRecord      `json:"lock,omitempty"`
 	Encryption encryptionRecord `json:"encryption"`
+	// ReplicaFrom is the deployment whose version the upload is the copy
+	// of (schema 5). An upload without it is one of this deployment.
+	ReplicaFrom string `json:"replica_from,omitempty"`
 }
 
 // partRecord is a part: of an upload in progress, or, with its place and its
@@ -135,6 +139,9 @@ type completeUploadCmd struct {
 	Parts      []listedPart `json:"parts"`
 	// CreatedBy is who completes the upload (schema 3).
 	CreatedBy string `json:"created_by,omitempty"`
+	// Replica says that the version the completion makes is the copy of
+	// one of another deployment (schema 5).
+	Replica *replicaRecord `json:"replica,omitempty"`
 }
 
 // listedPart is a part as a completion names it: the number and the entity
@@ -187,9 +194,10 @@ func uploadToRecord(u object.Upload) *uploadRecord {
 		Bucket: u.Bucket, Key: u.Key, ID: u.ID.String(), InitiatedAt: u.InitiatedAt.UTC(), Initiator: u.Initiator,
 		ContentType: u.ContentType, ContentEncoding: u.ContentEncoding, ContentDisposition: u.ContentDisposition,
 		ContentLanguage: u.ContentLanguage, CacheControl: u.CacheControl, UserMetadata: u.UserMetadata,
-		Tags:       u.Tags,
-		Lock:       lockToRecord(u.Lock),
-		Encryption: encryptionToRecord(u.Encryption),
+		Tags:        u.Tags,
+		Lock:        lockToRecord(u.Lock),
+		Encryption:  encryptionToRecord(u.Encryption),
+		ReplicaFrom: u.ReplicaFrom,
 	}
 }
 
@@ -202,9 +210,10 @@ func (r uploadRecord) toDomain() (object.Upload, error) {
 		Bucket: r.Bucket, Key: r.Key, ID: id, InitiatedAt: r.InitiatedAt, Initiator: r.Initiator,
 		ContentType: r.ContentType, ContentEncoding: r.ContentEncoding, ContentDisposition: r.ContentDisposition,
 		ContentLanguage: r.ContentLanguage, CacheControl: r.CacheControl, UserMetadata: r.UserMetadata,
-		Tags:       r.Tags,
-		Lock:       r.Lock.toDomain(),
-		Encryption: r.Encryption.toDomain(),
+		Tags:        r.Tags,
+		Lock:        r.Lock.toDomain(),
+		Encryption:  r.Encryption.toDomain(),
+		ReplicaFrom: r.ReplicaFrom,
 	}, nil
 }
 
@@ -336,7 +345,7 @@ func applyCreateUpload(tx *bbolt.Tx, u uploadRecord) (applyResult, error) {
 	return applyResult{}, addDataReference(tx.Bucket(dataBucket()), u.ID, 1)
 }
 
-func applyPutPart(tx *bbolt.Tx, cmd putPartCmd) (applyResult, error) {
+func applyPutPart(tx *bbolt.Tx, cmd putPartCmd, now applied) (applyResult, error) {
 	uploadID, err := object.ParseID(cmd.UploadID)
 	if err != nil {
 		return refuse(domain.ErrUploadNotFound, "%s", cmd.UploadID)
@@ -360,17 +369,51 @@ func applyPutPart(tx *bbolt.Tx, cmd putPartCmd) (applyResult, error) {
 	}
 	// A stored part has no place yet.
 	p.Index, p.Offset, p.Seal = 0, 0, nil
-	parts, err := nested(tx, partsBucket(), cmd.Bucket, true)
+	// The parts of the bucket are given their place when the first of them
+	// is stored, and not before: a part that is refused leaves nothing.
+	parts, err := nested(tx, partsBucket(), cmd.Bucket, false)
 	if err != nil {
 		return applyResult{}, err
 	}
 	key := partKey(uploadID, p.Number)
-	var replaced []partRecord
-	if raw := parts.Get(key); raw != nil {
-		old, err := decodePart(raw)
+	var old *partRecord
+	if parts != nil {
+		if raw := parts.Get(key); raw != nil {
+			if old, err = decodePart(raw); err != nil {
+				return applyResult{}, err
+			}
+		}
+	}
+	// What the part adds to the bucket, less the part of the same number
+	// it replaces: a change of the upload and of no key. One that would
+	// take the bucket past its quota is refused here, before anything is
+	// changed (ADR-0024).
+	usage, err := keepUsage(tx, cmd.Bucket)
+	if err != nil {
+		return applyResult{}, err
+	}
+	delta := bucket.UsageDelta{Upload: uploadID.String(), UploadBytes: countedSize(p.Size)}
+	if old != nil {
+		delta.UploadBytes -= countedSize(old.Size)
+	}
+	if usage.kept && delta.Net() > 0 {
+		// A part that adds nothing is admitted however full the bucket
+		// is, and the record of the bucket is not read for it.
+		b, err := readBucket(tx, cmd.Bucket)
 		if err != nil {
 			return applyResult{}, err
 		}
+		if b != nil && !usage.admits(b.QuotaBytes, delta) {
+			return *refusedByQuota(cmd.Bucket), nil
+		}
+	}
+	if parts == nil {
+		if parts, err = nested(tx, partsBucket(), cmd.Bucket, true); err != nil {
+			return applyResult{}, err
+		}
+	}
+	var replaced []partRecord
+	if old != nil {
 		if err := addDataReference(tx.Bucket(dataBucket()), old.DataID, -1); err != nil {
 			return applyResult{}, err
 		}
@@ -383,38 +426,42 @@ func applyPutPart(tx *bbolt.Tx, cmd putPartCmd) (applyResult, error) {
 	if err := parts.Put(key, data); err != nil {
 		return applyResult{}, err
 	}
+	if err := usage.add(tx, delta, now); err != nil {
+		return applyResult{}, err
+	}
 	return applyResult{parts: replaced}, addDataReference(tx.Bucket(dataBucket()), p.DataID, 1)
 }
 
 // dropParts removes the parts of an upload from the state. keep names the
 // data that something else has taken over; the reference of every other part
 // to its data is taken back, and those parts are returned, up to
-// maxDroppedParts of them.
-func dropParts(tx *bbolt.Tx, bucketName string, uploadID object.ID, keep map[string]bool) ([]partRecord, error) {
+// maxDroppedParts of them. size is what all the parts it removed came to,
+// kept or not: what the upload no longer adds to the usage of its bucket.
+func dropParts(tx *bbolt.Tx, bucketName string, uploadID object.ID, keep map[string]bool) (dropped []partRecord, size int64, err error) {
 	parts, err := nested(tx, partsBucket(), bucketName, false)
 	if err != nil || parts == nil {
-		return nil, err
+		return nil, 0, err
 	}
-	var dropped []partRecord
 	c := parts.Cursor()
 	for k, raw := c.Seek(uploadID[:]); k != nil && bytes.HasPrefix(k, uploadID[:]); k, raw = c.Next() {
 		p, err := decodePart(raw)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		size = held(size, p.Size)
 		if !keep[p.DataID] {
 			if err := addDataReference(tx.Bucket(dataBucket()), p.DataID, -1); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			if len(dropped) < maxDroppedParts {
 				dropped = append(dropped, *p)
 			}
 		}
 		if err := c.Delete(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
-	return dropped, nil
+	return dropped, size, nil
 }
 
 // dropUpload removes the record of an upload, not its parts and not the
@@ -438,7 +485,7 @@ func dropUpload(tx *bbolt.Tx, u uploadRecord, id object.ID) error {
 	return nil
 }
 
-func applyAbortUpload(tx *bbolt.Tx, cmd uploadRefCmd) (applyResult, error) {
+func applyAbortUpload(tx *bbolt.Tx, cmd uploadRefCmd, now applied) (applyResult, error) {
 	id, err := object.ParseID(cmd.UploadID)
 	if err != nil {
 		return refuse(domain.ErrUploadNotFound, "%s", cmd.UploadID)
@@ -450,11 +497,20 @@ func applyAbortUpload(tx *bbolt.Tx, cmd uploadRefCmd) (applyResult, error) {
 	if upload == nil {
 		return refuse(domain.ErrUploadNotFound, "%s", cmd.UploadID)
 	}
-	dropped, err := dropParts(tx, cmd.Bucket, id, nil)
+	dropped, size, err := dropParts(tx, cmd.Bucket, id, nil)
 	if err != nil {
 		return applyResult{}, err
 	}
 	if err := dropUpload(tx, *upload, id); err != nil {
+		return applyResult{}, err
+	}
+	// The parts of the upload no longer count: a change of the upload and
+	// of no key.
+	usage, err := keepUsage(tx, cmd.Bucket)
+	if err != nil {
+		return applyResult{}, err
+	}
+	if err := usage.add(tx, bucket.UsageDelta{Upload: id.String(), UploadBytes: -size}, now); err != nil {
 		return applyResult{}, err
 	}
 	return applyResult{parts: dropped}, addDataReference(tx.Bucket(dataBucket()), upload.ID, -1)
@@ -542,7 +598,13 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 		// version is whoever completes it.
 		Tags: upload.Tags, CreatedBy: cmd.CreatedBy,
 	}
-	removed, refused, err := commitVersion(tx, b, &v, now)
+	usage, err := keepUsage(tx, cmd.Bucket)
+	if err != nil {
+		return applyResult{}, err
+	}
+	// A completion is never refused by a quota: the bytes of the version
+	// were counted as parts of the upload, and it adds none (ADR-0024).
+	removed, delta, refused, err := commitVersion(tx, b, &v, now, usage, false)
 	if err != nil {
 		return applyResult{}, err
 	}
@@ -569,11 +631,18 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 		}
 		offset += part.Size
 	}
-	unlisted, err := dropParts(tx, cmd.Bucket, id, keep)
+	unlisted, size, err := dropParts(tx, cmd.Bucket, id, keep)
 	if err != nil {
 		return applyResult{}, err
 	}
 	if err := dropUpload(tx, *upload, id); err != nil {
+		return applyResult{}, err
+	}
+	// One change of the key and of the upload: the version in, all the
+	// parts of the upload out of what uploads hold - those that became
+	// the version and those that were not listed.
+	delta.Upload, delta.UploadBytes = id.String(), -size
+	if err := usage.add(tx, delta, now); err != nil {
 		return applyResult{}, err
 	}
 	if removed != nil {
@@ -796,6 +865,7 @@ func (s *Store) CompleteUpload(ctx context.Context, c ports.Completion) (ports.P
 	cmd := &completeUploadCmd{
 		Bucket: c.Bucket, Key: c.Key, UploadID: c.ID.String(), VersionID: c.VersionID.String(),
 		ETag: c.ETag, ModifiedAt: c.At.UTC(), Parts: make([]listedPart, len(c.Parts)), CreatedBy: c.CreatedBy,
+		Replica: replicaToRecord(c.Replica),
 	}
 	for i, p := range c.Parts {
 		cmd.Parts[i] = listedPart{Number: p.Number, ETag: p.ETag, Checksums: p.Checksums, DataID: p.DataID.String(), Seal: p.Seal}

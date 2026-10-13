@@ -96,6 +96,14 @@ func (m *MemMetadata) raise(bucketName string, seq uint64) {
 	}
 }
 
+// countedSize is what a size counts for in the usage of a bucket: the size,
+// and nothing when it is below nothing. A version may be stored with such a
+// size - nothing refuses the put - and counts for no bytes: in what a bucket
+// holds, and in what a change adds or frees under a quota.
+func countedSize(size int64) int64 {
+	return max(size, 0)
+}
+
 // totals counts a bucket by looking at it: all of it, or - with a walk under
 // way - what the walk has been to.
 func (m *MemMetadata) totals(bucketName string, count *bucket.UsageCount) bucket.UsageTotals {
@@ -106,10 +114,10 @@ func (m *MemMetadata) totals(bucketName string, count *bucket.UsageCount) bucket
 		}
 		for i, v := range versions {
 			totals.Versions++
-			totals.StoredBytes += v.Size
+			totals.StoredBytes += countedSize(v.Size)
 			if i == 0 && !v.DeleteMarker {
 				totals.Objects++
-				totals.CurrentBytes += v.Size
+				totals.CurrentBytes += countedSize(v.Size)
 			}
 			switch v.Replication {
 			case object.ReplicationPending:
@@ -124,7 +132,7 @@ func (m *MemMetadata) totals(bucketName string, count *bucket.UsageCount) bucket
 			continue
 		}
 		for _, part := range upload.parts {
-			totals.UploadBytes += part.Size
+			totals.UploadBytes += countedSize(part.Size)
 		}
 	}
 	return totals

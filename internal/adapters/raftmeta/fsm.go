@@ -53,6 +53,11 @@ import (
 //
 //	bucketactivity <bucket name> -> activityRecord (JSON)
 //
+// From state schema 5 on, and only once something was written to it
+// (bucketusage.go):
+//
+//	bucketusage <bucket name> -> the record bucket.Usage.Record writes
+//
 // State schema 1 is what entries of schema 1 produce. The first entry of
 // schema 2 that is applied marks the state as schema 2, in its own
 // transaction: until a cluster actually uses the newer entries, its state and
@@ -62,12 +67,21 @@ import (
 // adds to the state exists before that: a state of schema 2 that was never
 // written with schema 3 is the state the previous release wrote. And so for
 // schema 4 (ADR-0019): its first entry marks the state, and until then a
-// state of schema 3 is the state the release of schema 3 wrote.
+// state of schema 3 is the state the release of schema 3 wrote. And for
+// schema 5 (ADR-0023): its first entry marks the state - whether it took
+// effect, was refused or was applied as nothing - and until then a state of
+// schema 4 is the state the release of schema 4 wrote.
+//
+// A state machine opens the states it can go on from: those up to the schema
+// of the newest entry it applies (fsm.supported). This binary announces
+// schema 4 (MetadataVersion), so it refuses a state of schema 5, and a
+// snapshot of one, as the release of schema 4 does.
 const (
 	stateSchemaVersion = 1
 	stateSchemaTimed   = 2
 	stateSchema3       = 3
 	stateSchema4       = 4
+	stateSchema5       = 5
 	stateFileMode      = 0o600
 )
 
@@ -82,6 +96,9 @@ type applied struct {
 	at time.Time
 	// schema is the schema the entry was written in: what it may say.
 	schema byte
+	// clamped counts the changes of the entry that held a count of a usage
+	// record at one of its bounds (bucketusage.go); nil when nobody counts.
+	clamped *uint64
 }
 
 // readTime returns the time of the newest timed entry in the state.
@@ -159,6 +176,11 @@ type applyResult struct {
 	// uploaded again, those a completion did not list, those of an upload
 	// that was aborted. The proposer may remove their data.
 	parts []partRecord
+	// usage is the usage record of a bucket after an entry of the walk
+	// through it, as it is stored; drift says that the entry ended a
+	// recount whose result is not what the record held.
+	usage []byte
+	drift bool
 	// events describe what the entry changed; none when it was refused.
 	events []ports.Event
 	// fatal marks err as a failure to apply, as opposed to a refusal: the
@@ -190,6 +212,13 @@ type fsm struct {
 	// seen is the index of the last command entry whose effect is in the
 	// state. Reads on any node wait for it to reach the leader's.
 	seen atomic.Uint64
+	// usageClamped counts the changes this state machine applied since it
+	// was opened that held a count of a usage record at a bound, and
+	// usageDrift the recounts it finished that found other totals than
+	// were kept (ADR-0023). Both are for a counter and are not in the
+	// state.
+	usageClamped atomic.Uint64
+	usageDrift   atomic.Uint64
 
 	mu     sync.RWMutex
 	db     *bbolt.DB
@@ -217,12 +246,18 @@ func (f *fsm) loadSeen() error {
 var _ raft.FSM = (*fsm)(nil)
 
 func openFSM(root *os.Root) (*fsm, error) {
+	return openFSMOf(root, MetadataVersion)
+}
+
+// openFSMOf opens the state machine of a binary whose newest entry schema is
+// supported: it applies entries up to that schema and opens states up to it.
+func openFSMOf(root *os.Root, supported byte) (*fsm, error) {
 	path := filepath.Join(root.Name(), stateFile)
-	db, err := openState(path)
+	db, err := openState(path, uint64(supported))
 	if err != nil {
 		return nil, err
 	}
-	f := &fsm{root: root, path: path, db: db, supported: MetadataVersion}
+	f := &fsm{root: root, path: path, db: db, supported: supported}
 	if err := f.loadSeen(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -230,7 +265,9 @@ func openFSM(root *os.Root) (*fsm, error) {
 	return f, nil
 }
 
-func openState(path string) (*bbolt.DB, error) {
+// openState opens a state database of a schema up to newest, and refuses
+// one of a newer schema: what it holds is not known here.
+func openState(path string, newest uint64) (*bbolt.DB, error) {
 	db, err := bbolt.Open(path, stateFileMode, &bbolt.Options{Timeout: lockTimeout})
 	if err != nil {
 		return nil, fmt.Errorf("open state database: %w", err)
@@ -254,7 +291,7 @@ func openState(path string) (*bbolt.DB, error) {
 		switch raw := meta.Get(schemaKey()); {
 		case raw == nil:
 			return meta.Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchemaVersion))
-		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > stateSchema4:
+		case len(raw) != 8 || binary.BigEndian.Uint64(raw) < stateSchemaVersion || binary.BigEndian.Uint64(raw) > newest:
 			return fmt.Errorf("%w: metadata state schema", domain.ErrUnsupportedFormat)
 		}
 		return nil
@@ -417,6 +454,9 @@ func (f *fsm) Apply(log *raft.Log) any {
 	}
 
 	var result applyResult
+	// clamped is counted inside the transaction and told once it has
+	// committed.
+	var clamped uint64
 	err := f.db.Update(func(tx *bbolt.Tx) error {
 		if log.Index <= readApplied(tx) {
 			// Replayed after a restart: its effect is already in the state.
@@ -466,13 +506,39 @@ func (f *fsm) Apply(log *raft.Log) any {
 			// bucket: a binary of that schema would store it without.
 			e.CreateBucket.CreatedBy = ""
 		}
-		now := applied{index: log.Index, schema: log.Data[0]}
+		if log.Data[0] < entrySchema5 {
+			// Nor does an entry of the fourth schema say that a version,
+			// a delete marker or an upload is the copy of one of another
+			// deployment, or who deleted: a binary of that schema reads
+			// the entry without. (The commands of the fifth schema are
+			// not decoded from such an entry at all, and the two kinds of
+			// bucket configuration it brought are refused where they are
+			// applied, as that binary refuses a kind it does not know.)
+			if e.PutObject != nil {
+				e.PutObject.Replica = nil
+			}
+			if e.CompleteUpload != nil {
+				e.CompleteUpload.Replica = nil
+			}
+			if e.CreateUpload != nil {
+				e.CreateUpload.ReplicaFrom = ""
+			}
+			if e.DeleteVersion != nil {
+				e.DeleteVersion.Replica, e.DeleteVersion.By = nil, ""
+			}
+		}
+		now := applied{index: log.Index, schema: log.Data[0], clamped: &clamped}
 		if !e.At.IsZero() {
 			if now.at, err = stampState(tx, e.At); err != nil {
 				return err
 			}
 		}
 		switch {
+		case log.Data[0] >= entrySchema5:
+			// And for the release of schema 4 (ADR-0023).
+			if err := raiseStateSchema(tx, stateSchema5); err != nil {
+				return err
+			}
 		case log.Data[0] >= entrySchema4:
 			// The same for the release of schema 3, which would stop at
 			// this entry whatever becomes of it (ADR-0019).
@@ -502,6 +568,12 @@ func (f *fsm) Apply(log *raft.Log) any {
 		return applyResult{err: f.failed, fatal: true}
 	}
 	f.advance(log.Index)
+	if clamped > 0 {
+		f.usageClamped.Add(clamped)
+	}
+	if result.drift {
+		f.usageDrift.Add(1)
+	}
 	// The change is durable in the state; now it is a fact that can be told.
 	// An entry replayed after a restart produces no events: it changed
 	// nothing this time.
@@ -518,9 +590,14 @@ func (f *fsm) Apply(log *raft.Log) any {
 // applyEntry performs one command inside tx. A returned error is fatal and
 // rolls the transaction back; a refusal is reported in the result.
 func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
+	if now.schema >= entrySchema5 {
+		if refused := notYet(e); refused != nil {
+			return *refused, nil
+		}
+	}
 	switch e.Type {
 	case cmdCreateBucket:
-		return applyCreateBucket(tx, *e.CreateBucket)
+		return applyCreateBucket(tx, *e.CreateBucket, now)
 	case cmdDeleteBucket:
 		return applyDeleteBucket(tx, e.DeleteBucket.Name)
 	case cmdPutObject:
@@ -542,13 +619,13 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 	case cmdCreateUpload:
 		return applyCreateUpload(tx, *e.CreateUpload)
 	case cmdPutPart:
-		return applyPutPart(tx, *e.PutPart)
+		return applyPutPart(tx, *e.PutPart, now)
 	case cmdCompleteUpload:
 		return applyCompleteUpload(tx, *e.CompleteUpload, now)
 	case cmdAbortUpload:
-		return applyAbortUpload(tx, *e.AbortUpload)
+		return applyAbortUpload(tx, *e.AbortUpload, now)
 	case cmdDeleteObject:
-		return applyDeleteObject(tx, *e.DeleteObject)
+		return applyDeleteObject(tx, *e.DeleteObject, now)
 	case cmdSetRoot:
 		return applySetRoot(tx, *e.SetRoot)
 	case cmdSetTopology:
@@ -567,6 +644,10 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return audited(tx, e.PutTagDefinition.Audit)(applyPutTagDefinition(tx, *e.PutTagDefinition))
 	case cmdDeleteTagDefinition:
 		return audited(tx, e.DeleteTagDefinition.Audit)(applyDeleteTagDefinition(tx, *e.DeleteTagDefinition))
+	case cmdSetBucketQuota:
+		return audited(tx, e.SetBucketQuota.Audit)(applySetBucketQuota(tx, *e.SetBucketQuota))
+	case cmdWalkBucketUsage:
+		return applyWalkBucketUsage(tx, *e.WalkBucketUsage)
 	default:
 		if isIAMCommand(e.Type) {
 			return applyIAM(tx, e.Type, *e.IAM)
@@ -579,14 +660,16 @@ func refuse(err error, format string, args ...any) (applyResult, error) {
 	return applyResult{err: fmt.Errorf("%w: %s", err, fmt.Sprintf(format, args...))}, nil
 }
 
-func applyCreateBucket(tx *bbolt.Tx, b bucketRecord) (applyResult, error) {
+func applyCreateBucket(tx *bbolt.Tx, b bucketRecord, now applied) (applyResult, error) {
 	buckets := tx.Bucket(bucketsBucket())
 	if buckets.Get([]byte(b.Name)) != nil {
 		return refuse(domain.ErrBucketAlreadyExists, "%s", b.Name)
 	}
 	// A bucket begins without versions, or - created with Object Lock -
-	// keeping them, for good. Nothing else is said at creation.
+	// keeping them, for good. Nothing else is said at creation: a quota
+	// and a source are given by commands of their own.
 	b.Versioning, b.DefaultRetention = "", nil
+	b.QuotaBytes, b.ReplicaFrom = 0, ""
 	// Who created it is kept as it was said, when it can be: a name is
 	// judged by its bytes alone, as every build judges it (and only an entry
 	// of schema 4 still has one here).
@@ -605,6 +688,15 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord) (applyResult, error) {
 	}
 	if _, err := tx.Bucket(objectsBucket()).CreateBucketIfNotExists([]byte(b.Name)); err != nil {
 		return applyResult{}, err
+	}
+	if now.schema >= entrySchema5 {
+		// A bucket made where every member knows schema 5 is counted from
+		// the start: its record is exact, and empty (ADR-0023). The schema
+		// byte says so, to every member alike; below it the bucket is the
+		// one the release of schema 4 makes, and has no record.
+		if _, err := writeUsage(tx, b.Name, bucket.Usage{Exact: true}); err != nil {
+			return applyResult{}, err
+		}
 	}
 	return applyResult{events: []ports.Event{
 		{Type: ports.EventBucketCreated, Time: b.CreatedAt, Data: ports.BucketEvent{Bucket: b.Name}},
@@ -645,6 +737,11 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	// And what was known of its latest uploads and downloads: a bucket
 	// created under the name later begins with nothing (ADR-0019).
 	if err := dropBucketActivity(tx, name); err != nil {
+		return applyResult{}, err
+	}
+	// And what it held: the usage record goes with the bucket, and its
+	// quota is in the record of the bucket itself (ADR-0023).
+	if err := dropUsage(tx, name); err != nil {
 		return applyResult{}, err
 	}
 	if err := buckets.Delete([]byte(name)); err != nil {
@@ -843,7 +940,7 @@ func (f *fsm) Restore(source io.ReadCloser) error {
 	}
 	// Open it first: a snapshot this binary cannot read must not replace a
 	// state it can.
-	candidate, err := openState(filepath.Join(f.root.Name(), restoreFile))
+	candidate, err := openState(filepath.Join(f.root.Name(), restoreFile), uint64(f.supported))
 	if err != nil {
 		_ = f.root.Remove(restoreFile)
 		return fmt.Errorf("raftmeta.Restore: %w", err)
@@ -861,7 +958,7 @@ func (f *fsm) Restore(source io.ReadCloser) error {
 	if err := f.root.Rename(restoreFile, stateFile); err != nil {
 		return fmt.Errorf("raftmeta.Restore: %w", err)
 	}
-	db, err := openState(f.path)
+	db, err := openState(f.path, uint64(f.supported))
 	if err != nil {
 		f.failed = fmt.Errorf("metadata state machine stopped: %w", err)
 		return fmt.Errorf("raftmeta.Restore: %w", err)

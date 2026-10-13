@@ -619,10 +619,16 @@ func (s *Store) propose(ctx context.Context, e entry) (applyResult, error) {
 // level. Who made a version is something a write can go without: below
 // schema 3 a put and a completion are proposed without it and succeed, as
 // they did before it was recorded (ADR-0016: nothing is refused that worked
-// before). So is who created a bucket, below schema 4 (ADR-0019). Everything
-// else that needs a newer schema is refused instead. The caller's entry is
-// not changed.
+// before). So is who created a bucket, below schema 4 (ADR-0019), and who
+// deleted, below schema 5 (ADR-0023) - and nothing else of schema 5.
+// Everything else that needs a newer schema is refused instead. The caller's
+// entry is not changed.
 func heldTo(e entry, level byte) entry {
+	if level < entrySchema5 && e.DeleteVersion != nil && e.DeleteVersion.By != "" {
+		d := *e.DeleteVersion
+		d.By = ""
+		e.DeleteVersion = &d
+	}
 	if level < entrySchema4 && e.CreateBucket != nil && e.CreateBucket.CreatedBy != "" {
 		b := *e.CreateBucket
 		b.CreatedBy = ""
@@ -813,6 +819,9 @@ func (s *Store) PutVersion(ctx context.Context, v object.Version) (ports.PutResu
 func (s *Store) DeleteObject(ctx context.Context, bucketName, key string, o ports.DeleteOptions) (ports.DeleteResult, error) {
 	e := entry{Type: cmdDeleteVersion, DeleteVersion: &deleteVersionCmd{
 		Bucket: bucketName, Key: key, MarkerID: o.MarkerID.String(), At: o.At.UTC(), Bypass: o.BypassGovernance,
+		// Who deletes is left out while a member does not know schema 5
+		// (heldTo); a replica is refused as unavailable until all do.
+		By: o.By, Replica: replicaToRecord(o.Replica),
 	}}
 	if o.Version != nil {
 		e.DeleteVersion.VersionRef = o.Version.String()

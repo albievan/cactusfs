@@ -140,6 +140,21 @@ func rawState(t *testing.T, f *fsm, names ...[]byte) map[string]string {
 	return out
 }
 
+// wholeState is rawState of every bucket of a state, and with it every
+// bucket nested directly in one of them, as "<bucket>/<nested>/", whether it
+// holds anything or not: an entry that left an empty bucket behind has
+// changed the state, and two states of which one has it are not the same
+// bytes. (rawState itself stays as it is: tests count what it returns.)
+func wholeState(t *testing.T, f *fsm) map[string]string {
+	t.Helper()
+	names := everyBucket(t, f)
+	out := rawState(t, f, names...)
+	for _, nested := range nestedBuckets(t, f, names...) {
+		out[nested+"/"] = ""
+	}
+	return out
+}
+
 // nestedBuckets names the buckets nested directly in the named top-level
 // buckets of a state, "<bucket>/<nested>", in order - whether they hold
 // anything or not, which rawState does not show.
