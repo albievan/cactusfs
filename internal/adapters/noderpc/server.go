@@ -247,6 +247,13 @@ func (s *Server) Settings(ctx context.Context, _ *nodev1.SettingsRequest) (*node
 	}
 	settings, err := s.cfg.Settings(ctx)
 	if err != nil {
+		// The time the caller gave is over, or it went away: that is not an
+		// answer of this node about its settings. Said as an answer it would
+		// race the caller's own clock, and a node that was only slow would
+		// now and then be told of as one that could not read its settings.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, status.FromContextError(ctxErr).Err()
+		}
 		// Why is this node's business, and is in its log: an error of
 		// reading a configuration can name the file it was read from.
 		if s.cfg.Logger != nil {
