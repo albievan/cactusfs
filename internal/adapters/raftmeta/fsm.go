@@ -53,10 +53,17 @@ import (
 //
 //	bucketactivity <bucket name> -> activityRecord (JSON)
 //
-// From state schema 5 on, and only once something was written to it
-// (bucketusage.go):
+// From state schema 5 on, and each only once something was written to it
+// (bucketusage.go, targets.go, outbox.go, replica.go):
 //
-//	bucketusage <bucket name> -> the record bucket.Usage.Record writes
+//	bucketusage  <bucket name> -> the record bucket.Usage.Record writes
+//	targets      <target name> -> targetRecord (JSON)
+//	targetrefs   <target name>/<bucket name> -> the kinds of document of the
+//	             bucket that name the target: "n", "r" or "nr"
+//	outbox       <index of the entry ‖ number of the row> -> outboxRecord (JSON)
+//	outboxcursor <target name> -> cursorRecord (JSON)
+//	resync       <bucket name> -> resyncRecord (JSON)
+//	meta         "outboxcount", "outboxdropped" -> uint64, big endian
 //
 // State schema 1 is what entries of schema 1 produce. The first entry of
 // schema 2 that is applied marks the state as schema 2, in its own
@@ -99,6 +106,12 @@ type applied struct {
 	// clamped counts the changes of the entry that held a count of a usage
 	// record at one of its bounds (bucketusage.go); nil when nobody counts.
 	clamped *uint64
+	// rows numbers the rows the entry appends to the outbox (outbox.go);
+	// nil for an entry that appends at most one.
+	rows *uint16
+	// outboxRows is how many rows the outbox holds; nothing for
+	// delivery.MaxOutboxRows, which is what it is outside a test.
+	outboxRows uint64
 }
 
 // readTime returns the time of the newest timed entry in the state.
@@ -181,6 +194,9 @@ type applyResult struct {
 	// recount whose result is not what the record held.
 	usage []byte
 	drift bool
+	// unrelated counts the results of an acknowledgement that were not its
+	// target's to give, and changed nothing (outbox.go).
+	unrelated int
 	// events describe what the entry changed; none when it was refused.
 	events []ports.Event
 	// fatal marks err as a failure to apply, as opposed to a refusal: the
@@ -219,6 +235,10 @@ type fsm struct {
 	// state.
 	usageClamped atomic.Uint64
 	usageDrift   atomic.Uint64
+	// outboxRows, when a test sets it (under mu), is the bound of the
+	// outbox in place of delivery.MaxOutboxRows. The bound is part of the
+	// replicated format: members that cut by different bounds part.
+	outboxRows uint64
 
 	mu     sync.RWMutex
 	db     *bbolt.DB
@@ -527,7 +547,8 @@ func (f *fsm) Apply(log *raft.Log) any {
 				e.DeleteVersion.Replica, e.DeleteVersion.By = nil, ""
 			}
 		}
-		now := applied{index: log.Index, schema: log.Data[0], clamped: &clamped}
+		var rows uint16
+		now := applied{index: log.Index, schema: log.Data[0], clamped: &clamped, rows: &rows, outboxRows: f.outboxRows}
 		if !e.At.IsZero() {
 			if now.at, err = stampState(tx, e.At); err != nil {
 				return err
@@ -535,8 +556,10 @@ func (f *fsm) Apply(log *raft.Log) any {
 		}
 		switch {
 		case log.Data[0] >= entrySchema5:
-			// And for the release of schema 4 (ADR-0023).
-			if err := raiseStateSchema(tx, stateSchema5); err != nil {
+			// And for the release of schema 4 (ADR-0023). What a bucket
+			// record may hold under the name of a kind of configuration
+			// that only now means something goes first (targets.go).
+			if err := enterSchema5(tx); err != nil {
 				return err
 			}
 		case log.Data[0] >= entrySchema4:
@@ -590,11 +613,6 @@ func (f *fsm) Apply(log *raft.Log) any {
 // applyEntry performs one command inside tx. A returned error is fatal and
 // rolls the transaction back; a refusal is reported in the result.
 func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
-	if now.schema >= entrySchema5 {
-		if refused := notYet(e); refused != nil {
-			return *refused, nil
-		}
-	}
 	switch e.Type {
 	case cmdCreateBucket:
 		return applyCreateBucket(tx, *e.CreateBucket, now)
@@ -648,6 +666,16 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return audited(tx, e.SetBucketQuota.Audit)(applySetBucketQuota(tx, *e.SetBucketQuota))
 	case cmdWalkBucketUsage:
 		return applyWalkBucketUsage(tx, *e.WalkBucketUsage)
+	case cmdPutTarget:
+		return audited(tx, e.PutTarget.Audit)(applyPutTarget(tx, *e.PutTarget, now))
+	case cmdDeleteTarget:
+		return audited(tx, e.DeleteTarget.Audit)(applyDeleteTarget(tx, *e.DeleteTarget, now))
+	case cmdAckOutbox:
+		return applyAckOutbox(tx, *e.AckOutbox, now)
+	case cmdSetBucketReplica:
+		return audited(tx, e.SetBucketReplica.Audit)(applySetBucketReplica(tx, *e.SetBucketReplica, now))
+	case cmdPutResync:
+		return applyPutResync(tx, *e.PutResync)
 	default:
 		if isIAMCommand(e.Type) {
 			return applyIAM(tx, e.Type, *e.IAM)
@@ -670,6 +698,17 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord, now applied) (applyResult, 
 	// and a source are given by commands of their own.
 	b.Versioning, b.DefaultRetention = "", nil
 	b.QuotaBytes, b.ReplicaFrom = 0, ""
+	// Nor the notification rules or the replication configuration: each is
+	// a document that is judged against the targets it names and counted by
+	// them, by a bucket.config.put of schema 5 and by nothing else. No
+	// proposer writes a configuration into a bucket.create; an entry that
+	// carries one of these kinds is stored without it once the state is of
+	// schema 5 - and before that as the release of schema 4 stores it, byte
+	// for byte, to be removed when the state becomes schema 5
+	// (enterSchema5).
+	if readStateSchema(tx) >= stateSchema5 {
+		stripDelivered(&b)
+	}
 	// Who created it is kept as it was said, when it can be: a name is
 	// judged by its bytes alone, as every build judges it (and only an entry
 	// of schema 4 still has one here).
@@ -705,7 +744,11 @@ func applyCreateBucket(tx *bbolt.Tx, b bucketRecord, now applied) (applyResult, 
 
 func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	buckets := tx.Bucket(bucketsBucket())
-	if buckets.Get([]byte(name)) == nil {
+	b, err := readBucket(tx, name)
+	if err != nil {
+		return applyResult{}, err
+	}
+	if b == nil {
 		return refuse(domain.ErrBucketNotFound, "%s", name)
 	}
 	// A bucket is empty when it has no object and no version of one:
@@ -742,6 +785,16 @@ func applyDeleteBucket(tx *bbolt.Tx, name string) (applyResult, error) {
 	// And what it held: the usage record goes with the bucket, and its
 	// quota is in the record of the bucket itself (ADR-0023).
 	if err := dropUsage(tx, name); err != nil {
+		return applyResult{}, err
+	}
+	// The targets its rules named are named by one document fewer, and the
+	// record of its resync goes with it. The rows it left in the outbox
+	// stay for their targets: a bucket of a million rows costs its deletion
+	// nothing.
+	if err := forgetDelivered(tx, b); err != nil {
+		return applyResult{}, err
+	}
+	if err := dropResync(tx, name); err != nil {
 		return applyResult{}, err
 	}
 	if err := buckets.Delete([]byte(name)); err != nil {

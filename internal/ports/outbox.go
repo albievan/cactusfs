@@ -60,18 +60,26 @@ type Outbox interface {
 	//     that is sent the audit trail, and of no other.
 	//   - A result sets the replication status of the version it names -
 	//     by the row that told of it, when that row is still there and
-	//     was for the target, or by itself - when the version still
-	//     exists and is no replica. A result that names what is gone
-	//     changes nothing and is no error. Results are for a target that
-	//     is another deployment: domain.ErrInvalidArgument for any other.
+	//     was for the target as replication, or by itself, when its
+	//     bucket is there and the replication configuration of that
+	//     bucket names the target - when the version still exists and is
+	//     no replica. A result that names what is gone changes nothing
+	//     and is no error. Results are for a target that is another
+	//     deployment: domain.ErrInvalidArgument for any other.
+	//   - A result that is well formed and is not the target's to give -
+	//     a row that was for another target or was no replication, a
+	//     version of a bucket that is not sent to the target - changes
+	//     nothing and does not refuse the acknowledgement: the cursor
+	//     moves and the other results are taken. unrelated counts them,
+	//     for the caller to log; a row that is gone is not counted.
 	//   - The store then removes rows every target has passed, at most
 	//     delivery.MaxOutboxTrim of them for one acknowledgement.
 	//
 	// More than delivery.MaxAckResults results, and a result that
-	// delivery.Result.Validate refuses, wrap domain.ErrInvalidArgument.
-	// The error wraps domain.ErrEntityNotFound when there is no such
-	// target.
-	AckOutbox(ctx context.Context, target string, upto delivery.Seq, auditUpto uint64, results []delivery.Result) error
+	// delivery.Result.Validate refuses, refuse the acknowledgement whole
+	// and wrap domain.ErrInvalidArgument. The error wraps
+	// domain.ErrEntityNotFound when there is no such target.
+	AckOutbox(ctx context.Context, target string, upto delivery.Seq, auditUpto uint64, results []delivery.Result) (unrelated int, err error)
 	// OutboxCursors returns the cursor of every target, and the counts of
 	// the outbox.
 	OutboxCursors(ctx context.Context) (OutboxState, error)

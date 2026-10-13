@@ -5,7 +5,8 @@
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found", point 6) and to the domain of PLAN 8.0.4
-  (`internal/domain/delivery`, `internal/domain/bucket/notification.go`)
+  (`internal/domain/delivery`, `internal/domain/bucket/notification.go`); 2026-10-13,
+  to the review of PLAN 8.0.8: a document names at most 16 targets
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections),
   ADR-0006 (the audit trail), ADR-0011 (bucket configurations), ADR-0016 (who uploaded)
 
@@ -137,8 +138,10 @@ why `s3:ObjectCreated:Copy` cannot be asked for by itself.
 
 with `on` among `put`, `complete`, `marker`, `delete`, in that order, each once and at
 least one; `targets` the names the rules use, sorted, once each; `prefix` and `suffix`
-left out when empty. A document has 1 to 100 rules (`bucket.MaxNotificationRules`) and
-at most 64 KiB; an `id` is 1 to 255 bytes and unique in the bucket, a prefix and a
+left out when empty. A document has 1 to 100 rules (`bucket.MaxNotificationRules`),
+**names at most 16 targets** (`bucket.MaxDocumentTargets`: every change all rules match
+appends a row that lists them, and that bound is what keeps a row of a known size -
+ADR-0023, "The bound") and is at most 64 KiB; an `id` is 1 to 255 bytes and unique in the bucket, a prefix and a
 suffix at most 1 024 bytes, all valid UTF-8. Its bytes are pinned by the golden file
 `internal/domain/bucket/testdata/notification.golden.json`. Encoding it twice is encoding
 it once, and `bucket.ParseNotificationConfig` takes the bytes `Document` writes and no

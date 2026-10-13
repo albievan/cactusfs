@@ -13,6 +13,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -312,6 +313,15 @@ func applyCreateUpload(tx *bbolt.Tx, u uploadRecord) (applyResult, error) {
 	if u.Encryption.KeyMode != object.KeyModePartHKDF {
 		return refuse(domain.ErrInvalidArgument, "key mode %q of an upload", u.Encryption.KeyMode)
 	}
+	// A replica bucket takes the uploads of its source and no others, and
+	// no other bucket takes the upload of a source (ADR-0026): the state
+	// decides, whoever asks.
+	switch {
+	case u.ReplicaFrom != "" && object.ValidateReplicaSource(u.ReplicaFrom) != nil:
+		return refuse(domain.ErrInvalidArgument, "the source of a replica upload")
+	case u.ReplicaFrom != b.ReplicaFrom:
+		return refuse(domain.ErrInvalidBucketState, "bucket %s and an upload from %q", u.Bucket, u.ReplicaFrom)
+	}
 	// Tags that the version could not have are refused now, not when the
 	// parts have been uploaded - by their number and their sizes, which
 	// every build counts alike. What they consist of was the proposer's to
@@ -588,6 +598,14 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 		keep[p.DataID] = true
 	}
 
+	// An upload of a source is completed as a replica of it, and no other
+	// upload is: what was begun as a copy does not become a version of this
+	// deployment's own, nor the other way round.
+	replica := cmd.Replica.toDomain()
+	if (replica == nil) != (upload.ReplicaFrom == "") || (replica != nil && replica.From != upload.ReplicaFrom) {
+		return refuse(domain.ErrInvalidBucketState, "an upload of a source is completed as a replica of it, and no other upload is")
+	}
+
 	v := versionRecord{
 		Bucket: upload.Bucket, Key: upload.Key, VersionID: cmd.VersionID, DataID: upload.ID,
 		Size: total, ETag: cmd.ETag, ModifiedAt: cmd.ModifiedAt, Parts: len(cmd.Parts), Lock: upload.Lock,
@@ -604,7 +622,7 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 	}
 	// A completion is never refused by a quota: the bytes of the version
 	// were counted as parts of the upload, and it adds none (ADR-0024).
-	removed, delta, refused, err := commitVersion(tx, b, &v, now, usage, false)
+	removed, delta, to, refused, err := commitVersion(tx, b, &v, now, usage, commit{event: delivery.EventComplete, replica: replica})
 	if err != nil {
 		return applyResult{}, err
 	}
@@ -653,6 +671,9 @@ func applyCompleteUpload(tx *bbolt.Tx, cmd completeUploadCmd, now applied) (appl
 	// One answer, one bound: it travels to the node that proposed.
 	if removed != nil {
 		unlisted = unlisted[:min(len(unlisted), maxDroppedParts-len(removed.Dropped))]
+	}
+	if err := tell(tx, now, delivery.EventComplete, v, v.CreatedBy, to); err != nil {
+		return applyResult{}, err
 	}
 	// The upload is one upload into its bucket, now that it is a version:
 	// neither its creation nor its parts were (ADR-0019).

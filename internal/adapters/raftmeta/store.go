@@ -731,6 +731,17 @@ func (s *Store) CreateBucket(ctx context.Context, b bucket.Bucket) error {
 	if err := bucket.ValidateCreator(b.CreatedBy); err != nil {
 		return fmt.Errorf("raftmeta.CreateBucket: %w", err)
 	}
+	// And a name that cannot be stored: the state machine does not hold a
+	// bucket.create to a name - the release of schema 4 does not, and a
+	// member that refused where that one applies would part from it - and a
+	// name of no bytes, or of more than a key of the state can have, cannot
+	// be written at all, which stops every member that meets the entry.
+	// Nothing that reaches this store sends one. What a name may consist of
+	// is the use case's to judge (bucket.ValidateName); here it is held to
+	// its length, where that costs no entry.
+	if b.Name == "" || len(b.Name) > bucket.MaxNameLength {
+		return fmt.Errorf("raftmeta.CreateBucket: %w: a name of 1 to %d bytes", domain.ErrInvalidBucketName, bucket.MaxNameLength)
+	}
 	if _, err := s.propose(ctx, entry{Type: cmdCreateBucket, CreateBucket: bucketToRecord(b)}); err != nil {
 		return fmt.Errorf("raftmeta.CreateBucket: %w", err)
 	}

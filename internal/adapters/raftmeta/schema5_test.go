@@ -69,7 +69,7 @@ func (m *machine) ok5(e entry) applyResult {
 	return r
 }
 
-func domainGolden(t *testing.T, name string) []byte {
+func domainGolden(t testing.TB, name string) []byte {
 	t.Helper()
 	raw, err := fs.ReadFile(os.DirFS("../../domain/bucket/testdata"), name)
 	if err != nil {
@@ -81,7 +81,7 @@ func domainGolden(t *testing.T, name string) []byte {
 // schema5Commands is one entry of every command schema 5 brought, in each
 // of its forms, and of every old command that carries something of schema 5,
 // by name. Each needs schema 5 and is written in it.
-func schema5Commands(t *testing.T) map[string]entry {
+func schema5Commands(t testing.TB) map[string]entry {
 	t.Helper()
 	at := time.Date(2026, 10, 12, 9, 0, 0, 123456789, time.UTC)
 	record := auditToRecord(audit.Record{
@@ -239,6 +239,180 @@ func TestTheEntriesOfSchema5ArePinned(t *testing.T) {
 	} {
 		if !bytes.Contains(want, []byte(text)) {
 			t.Errorf("no pinned entry says %s", text)
+		}
+	}
+}
+
+// schema5RecordsFile pins the bytes of every record schema 5 added to the
+// state, and of every older record with what schema 5 added to it.
+const schema5RecordsFile = "schema5-records.golden.txt"
+
+// schema5RecordBytes writes what a small history of schema 5 leaves in the
+// state, a line each: the place - the buckets of bbolt, and the key in
+// hexadecimal - and the stored value; the two counts of the outbox in
+// hexadecimal. The history has every kind of record: targets of the three
+// kinds, one with a sealed path; rows of every kind of change, for
+// notification and for replication; cursors that have moved, lost rows and
+// need a resync; the record of a resync; a bucket with a quota and both
+// documents, and a replica bucket; versions that wait, were sent, failed and
+// are copies; and an upload of a source.
+func schema5RecordBytes(t *testing.T) []byte {
+	t.Helper()
+	m := quick5(t)
+	setOutboxBound(m.f, 5)
+	m.bucket5("photos", bucket.VersioningEnabled)
+	m.bucket5("copy", bucket.VersioningEnabled)
+	for _, name := range []string{"hook", "bus", "site-b"} {
+		kind := map[string]delivery.Kind{"hook": delivery.KindWebhook, "bus": delivery.KindNATS, "site-b": delivery.KindS3}[name]
+		target := porttest.SampleTarget(name, kind)
+		if kind == delivery.KindNATS {
+			target.Audit, target.Buckets = true, []string{"photos", "logs-*"}
+			target.CAPEM = []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+			target.Auth, target.Secret = delivery.Auth{Mode: delivery.AuthBasic, ID: "cactus"}, porttest.SampleTarget(name, delivery.KindS3).Secret
+		}
+		m.index += 10
+		m.ok5(entry{Type: cmdPutTarget, PutTarget: &targetCmd{Target: targetToRecord(target)}})
+	}
+	m.ok5(configEntry("photos", bucket.ConfigNotification, domainGolden(t, "notification.golden.json")))
+	m.ok5(configEntry("photos", bucket.ConfigReplication, domainGolden(t, "replication.golden.json")))
+	m.ok5(entry{Type: cmdSetBucketQuota, SetBucketQuota: &bucketQuotaCmd{Bucket: "photos", Bytes: 1 << 30}})
+	by := func(e entry, who string) entry {
+		if e.PutObject != nil {
+			e.PutObject.CreatedBy = who
+		} else {
+			e.DeleteVersion.By = who
+		}
+		return e
+	}
+	first := *m.ok5(by(putEntry("photos", "logs/a.gz", 1024, 1), "user/albie")).stored
+	firstRow := delivery.Seq{Index: m.index}
+	second := *m.ok5(putEntry("photos", "zoë <&> \"π\".jpg", 7, 2)).stored
+	secondRow := delivery.Seq{Index: m.index}
+	m.ok5(by(deleteEntry("photos", "logs/a.gz", "", 3), "user/albie"))
+	upload, parts, entries := uploadEntries("photos", "logs/big.gz", 4, object.MinPartSize, 9)
+	for _, e := range entries {
+		m.ok5(e)
+	}
+	m.ok5(completeEntry(upload, 5, parts...))
+	m.ok5(entry{Type: cmdSetTags, SetTags: &tagsCmd{Bucket: "photos", Key: "logs/a.gz", VersionRef: first.VersionID, Tags: map[string]string{"a": "b"}}})
+	m.ok5(ackEntry("site-b", secondRow, delivery.Result{Seq: firstRow, Status: object.ReplicationCompleted}))
+	ref, err := object.ParseVersionRef(second.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ok5(entry{Type: cmdAckOutbox, AckOutbox: &ackOutboxCmd{
+		Target: "bus", Upto: firstRow.String(), AuditUpto: 77,
+	}})
+	m.ok5(ackEntry("site-b", secondRow, delivery.Result{Bucket: "photos", Key: second.Key, Version: ref, Status: object.ReplicationFailed}))
+	// Past the bound: the oldest rows go, and are lost to who had not passed
+	// them.
+	m.ok5(by(deleteEntry("photos", "logs/a.gz", serialID(3).String(), 6), bucket.LifecycleActor))
+	m.ok5(putEntry("photos", "logs/b.gz", 5, 7))
+	m.ok5(putEntry("photos", "logs/c.gz", 5, 8))
+	m.ok5(entry{Type: cmdPutResync, PutResync: resyncToRecord(bucket.Resync{
+		Bucket: "photos", Target: "site-b", State: bucket.ResyncRunning, Key: "logs/a.gz", Version: first.VersionID, Scanned: 1200, Sent: 7,
+	})})
+	// A replica bucket, with a copy of each kind and an upload of its
+	// source.
+	m.ok5(entry{Type: cmdSetBucketReplica, SetBucketReplica: &bucketReplicaCmd{Bucket: "copy", Source: siteA}})
+	m.ok5(replicaPut("copy", "k", 300, 10, 4100))
+	m.ok5(replicaMarker("copy", "k", 11, 4200))
+	m.ok5(copied(putEntry("copy", "k", 30, 12), siteA, 50, true))
+	begun, _, _ := uploadEntries("copy", "big", 13)
+	begun.ReplicaFrom = siteA
+	m.ok5(entry{Type: cmdCreateUpload, CreateUpload: uploadToRecord(begun)})
+
+	state := rawState(t, m.f, targetsBucket(), targetRefsBucket(), outboxBucket(), outboxCursorBucket(), resyncBucket(), bucketsBucket(), objectsBucket(),
+		versionsBucket(), uploadsBucket(), bucketUsageBucket())
+	places := make([]string, 0, len(state))
+	for place, value := range state {
+		if value != "" {
+			places = append(places, place)
+		}
+	}
+	slices.Sort(places)
+	var out []byte
+	for _, place := range places {
+		out = fmt.Appendf(out, "%s\t%s\n", place, state[place])
+	}
+	rows, dropped := outboxCounts(t, m.f)
+	if rows != 5 || dropped == 0 || uint64(len(storedRows(t, m.f))) != rows {
+		t.Fatalf("the history leaves %d rows and %d dropped", rows, dropped)
+	}
+	meta := rawState(t, m.f, metaBucket())
+	for _, key := range [][]byte{outboxCountKey(), outboxDroppedKey()} {
+		out = fmt.Appendf(out, "meta/%s\t%x\n", key, meta[fmt.Sprintf("meta/%x", key)])
+	}
+	return out
+}
+
+// TestTheRecordsOfSchema5ArePinned: what schema 5 keeps in the state is the
+// bytes of the golden file - the record of a target, with its endpoint as an
+// origin and its path sealed; which buckets name each target, and by which
+// kind of document; a row of the outbox; a cursor; the record of a
+// resync, which says its version; the two counts; and the records that were
+// there before, with what schema 5 added to them. A change that makes this
+// test fail makes two releases store other bytes: it needs a rise of the
+// entry schema once schema 5 is announced, not a new file.
+func TestTheRecordsOfSchema5ArePinned(t *testing.T) {
+	t.Parallel()
+	want, err := fs.ReadFile(os.DirFS("testdata"), schema5RecordsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := schema5RecordBytes(t)
+	if again := schema5RecordBytes(t); !bytes.Equal(again, got) {
+		t.Fatal("the same history does not leave the same bytes twice")
+	}
+	gotLines, wantLines := strings.Split(string(got), "\n"), strings.Split(string(want), "\n")
+	for i := range min(len(gotLines), len(wantLines)) {
+		if gotLines[i] != wantLines[i] {
+			t.Errorf("a record of schema 5 is not stored as it is pinned:\n got %s\nwant %s", gotLines[i], wantLines[i])
+		}
+	}
+	if len(gotLines) != len(wantLines) {
+		t.Errorf("%d records, %d are pinned", len(gotLines)-1, len(wantLines)-1)
+	}
+	// Every record that schema 5 brought says its version, and every kind
+	// of record is there.
+	kinds := map[string]int{}
+	for _, line := range wantLines {
+		place, value, _ := strings.Cut(line, "\t")
+		kind, _, _ := strings.Cut(place, "/")
+		kinds[kind]++
+		switch kind {
+		case "targets", "outbox", "outboxcursor", "resync", "bucketusage":
+			if !strings.HasPrefix(value, `{"v":1,`) {
+				t.Errorf("a record of %s does not begin with its version: %s", kind, value)
+			}
+		}
+	}
+	for kind, count := range map[string]int{
+		"targets": 3, "targetrefs": 3, "outbox": 5, "outboxcursor": 3, "resync": 1, "buckets": 2, "bucketusage": 2, "uploads": 1, "meta": 2,
+	} {
+		if kinds[kind] != count {
+			t.Errorf("%d records of %s are pinned, want %d", kinds[kind], kind, count)
+		}
+	}
+	for _, text := range []string{
+		`"endpoint":"https://hooks.example.com","endpoint_path":{"kms_key_id":"local:test",`, `"endpoint":"tls://nats.example.com:4222","subject":`,
+		`"endpoint":"https://s3.site-b.example","region":"site-b"`, `"refs":1,`,
+		"targetrefs/bus/70686f746f73\tn\n", "targetrefs/hook/70686f746f73\tn\n", "targetrefs/site-b/70686f746f73\tr\n",
+		`"e":"put","b":"photos"`, `"e":"complete"`, `"e":"delete"`, `"to":["n:hook","r:site-b"]`, `"by":"service/lifecycle"`,
+		`"audit_acked":77,"lost":`, `"resync_needed":true}`, `"resync_needed":false}`,
+		`{"v":1,"bucket":"photos","target":"site-b","state":"running","key":"logs/a.gz","version":"`,
+		`"quota_bytes":1073741824}`, `"replica_from":"5d3c1f0a-site-a"}`, `"replication":"PENDING"`, `"replication":"COMPLETED"`, `"replication":"FAILED"`,
+		`"replication":"REPLICA"`, `"replication_pending":3,"replication_failed":1,`,
+		"meta/outboxcount\t0000000000000005", "meta/outboxdropped\t000000000000000",
+	} {
+		if !bytes.Contains(want, []byte(text)) {
+			t.Errorf("no pinned record says %s", text)
+		}
+	}
+	// No record holds the path of an endpoint, or a secret, in the clear.
+	for _, text := range []string{"/in/", "hooks.example.com/", `"path":"`, `"secret":"`} {
+		if bytes.Contains(want, []byte(text)) {
+			t.Errorf("a pinned record holds %s", text)
 		}
 	}
 }
@@ -694,42 +868,61 @@ func TestThisBinaryStopsAtAnEntryOfSchema5(t *testing.T) {
 	}
 }
 
-// TestWhatSchema5DoesNotApplyYet: the entries of schema 5 whose state
-// machine is not written yet are refused as unavailable by one that applies
-// schema 5, and change nothing but the mark of the state. PLAN 8.0.8 takes
-// targets, the outbox and the two kinds of bucket configuration out of this
-// list, PLAN 8.0.9 replica buckets, replicas and resyncs; when it is empty
-// the test goes, with notYet.
-func TestWhatSchema5DoesNotApplyYet(t *testing.T) {
+// TestEverythingOfSchema5IsApplied: every command of schema 5, and every old
+// command with what schema 5 lets it carry, is applied by a state machine of
+// schema 5 - none is answered as unavailable, and none stops it. Each is tried
+// on a state where it can take effect or is refused for what it asks, and the
+// outcome of each is pinned: the list that PLAN 8.0.6 kept of what was not
+// applied yet (notYet) is empty, and gone.
+func TestEverythingOfSchema5IsApplied(t *testing.T) {
 	t.Parallel()
-	applied := map[string]bool{
-		"bucket.quota.put": true, "bucket.quota.put that removes": true, "bucket.usage.walk": true, "bucket.usage.walk that restarts": true,
-		"object.version.delete that says who": true,
-		// A document that is removed names nothing, but it is of a kind
-		// whose rules are not written.
-		"bucket.config.put that removes notification rules": false,
+	want := map[string]error{
+		"bucket.quota.put": nil, "bucket.quota.put that removes": nil, "bucket.usage.walk": nil, "bucket.usage.walk that restarts": nil,
+		"target.put of a webhook": domain.ErrEntityInUse, "target.put of a NATS server": domain.ErrEntityInUse, "target.put of a deployment": nil,
+		"target.delete": domain.ErrEntityInUse, "outbox.ack with nothing to say": nil, "outbox.ack of rows": nil, "outbox.ack of versions": nil,
+		"bucket.replica.put": domain.ErrInvalidBucketState, "bucket.replica.put that ends": nil,
+		"replication.resync.put": nil, "replication.resync.put before the first version": nil,
+		"object.put of a replica": domain.ErrInvalidBucketState, "object.put of a replica of a null version": domain.ErrInvalidBucketState,
+		"upload.create of a replica": domain.ErrInvalidBucketState, "upload.complete of a replica": domain.ErrUploadNotFound,
+		"object.version.delete of a replica": domain.ErrInvalidBucketState, "object.version.delete that says who": nil,
+		"bucket.config.put of notification rules": nil, "bucket.config.put of a replication configuration": nil,
+		"bucket.config.put that removes notification rules": nil,
 	}
-	for name, e := range schema5Commands(t) {
+	// The same commands in a bucket that is the replica of the deployment
+	// they name: the copies are taken.
+	replica := map[string]error{
+		"object.put of a replica": nil, "object.put of a replica of a null version": nil, "upload.create of a replica": nil,
+		"object.version.delete of a replica": nil, "bucket.replica.put": nil, "bucket.replica.put that ends": nil,
+	}
+	commands := schema5Commands(t)
+	if len(commands) != len(want) {
+		t.Fatalf("%d commands of schema 5 and %d outcomes", len(commands), len(want))
+	}
+	for name, e := range commands {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			m := newMachine5(t)
-			m.ok5(entry{Type: cmdCreateBucket, CreateBucket: &bucketRecord{Name: "photos", CreatedAt: m.at}})
-			m.ok5(entry{Type: cmdSetVersioning, SetVersioning: &versioningCmd{Bucket: "photos", Status: string(bucket.VersioningEnabled)}})
-			before := rawState(t, m.f, everyBucket(t, m.f)...)
-			r := m.as(entrySchema5, e)
-			if got := errors.Is(r.err, domain.ErrUnavailable); got == applied[name] {
-				t.Fatalf("%s = %v; applied by this release: %t", name, r.err, applied[name])
-			}
-			if applied[name] {
-				return
-			}
-			after := rawState(t, m.f, everyBucket(t, m.f)...)
-			for _, key := range [][]byte{appliedKey(), timeKey()} {
-				delete(before, fmt.Sprintf("meta/%x", key))
-				delete(after, fmt.Sprintf("meta/%x", key))
-			}
-			if !reflect.DeepEqual(after, before) {
-				t.Errorf("an entry that is not applied yet changed the state")
+			for scene, outcomes := range map[string]map[string]error{"a bucket that sends its versions on": want, "a replica bucket": replica} {
+				expect, tried := outcomes[name]
+				if !tried {
+					continue
+				}
+				m := quick5(t)
+				m.bucket5("photos", bucket.VersioningEnabled)
+				for target, kind := range map[string]delivery.Kind{"site-b": delivery.KindS3, "hook": delivery.KindWebhook, "bus": delivery.KindNATS} {
+					m.ok5(targetEntry(target, kind))
+				}
+				if scene == "a replica bucket" {
+					m.ok5(entry{Type: cmdSetBucketReplica, SetBucketReplica: &bucketReplicaCmd{Bucket: "photos", Source: "5d3c1f0a-site-a"}})
+				} else {
+					m.ok5(configEntry("photos", bucket.ConfigReplication, domainGolden(t, "replication.golden.json")))
+				}
+				r := m.as(entrySchema5, e)
+				if errors.Is(r.err, domain.ErrUnavailable) {
+					t.Fatalf("%s in %s is not applied by this release: %v", name, scene, r.err)
+				}
+				if !errors.Is(r.err, expect) || (expect == nil && r.err != nil) {
+					t.Errorf("%s in %s = %v, want %v", name, scene, r.err, expect)
+				}
 			}
 		})
 	}
@@ -888,6 +1081,7 @@ func FuzzDecodeEntryOfSchema5(f *testing.F) {
 	f.Add(append([]byte{5}, `{"type":"bucket.usage.walk","walk_bucket_usage":{"bucket":"b","limit":10000,"restart":true}}`...))
 	f.Add(append([]byte{4}, `{"type":"bucket.usage.walk","walk_bucket_usage":{"bucket":"b","limit":1}}`...))
 	f.Add(append([]byte{5}, `{"type":"target.put","put_target":{"target":{"v":1,"name":"hook","kind":"webhook","endpoint":"https://h.example/in","buckets":["*"],"auth":{"mode":"bearer"},"secret":{"kms_key_id":"k","wrapped_key":"AA==","nonce":"AA==","ciphertext":"AA=="},"created_at":"2026-10-12T09:00:00Z","updated_at":"2026-10-12T09:00:00Z"}}}`...))
+	f.Add(append([]byte{5}, `{"type":"target.put","put_target":{"target":{"v":1,"name":"hook","kind":"webhook","endpoint":"https://h.example","endpoint_path":{"kms_key_id":"k","wrapped_key":"AA==","nonce":"AA==","ciphertext":"AA=="},"buckets":["*"],"auth":{"mode":"none"},"created_at":"2026-10-12T09:00:00Z","updated_at":"2026-10-12T09:00:00Z"}}}`...))
 	f.Add(append([]byte{5}, `{"type":"target.delete","delete_target":{"name":"hook"}}`...))
 	f.Add(append([]byte{5}, `{"type":"outbox.ack","ack_outbox":{"target":"site-b","upto":"000000000000000e0000","audit_upto":7,"results":[{"seq":"000000000000000c0003","status":"COMPLETED"},{"b":"b","k":"k","vid":"null","status":"FAILED"}]}}`...))
 	f.Add(append([]byte{5}, `{"type":"outbox.ack","ack_outbox":{"target":"site-b","upto":"zz","results":[{"seq":"1","b":"b","vid":"x"}]},"put_resync":{}}`...))

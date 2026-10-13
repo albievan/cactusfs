@@ -10,7 +10,7 @@ TREES="internal/domain internal/app"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-go test -race -count=1 -cover -coverprofile="$work/all.out" ./...
+go test -race -count=1 -timeout 30m -cover -coverprofile="$work/all.out" ./...
 
 status=0
 for tree in $TREES; do

@@ -88,9 +88,19 @@ func TestNotificationRefused(t *testing.T) {
 	if err := long.Validate(); err != nil {
 		t.Errorf("a prefix and a suffix as long as they can be: %v", err)
 	}
+	// As many targets as a document can name, and one more.
+	named := make([]bucket.NotificationRule, bucket.MaxDocumentTargets+1)
+	for i := range named {
+		named[i] = rule
+		named[i].ID, named[i].Target = fmt.Sprintf("r%d", i), fmt.Sprintf("hook-%d", i)
+	}
+	if err := (bucket.NotificationConfig{Rules: named[:bucket.MaxDocumentTargets]}).Validate(); err != nil {
+		t.Errorf("as many targets as a document can name: %v", err)
+	}
 	for name, config := range map[string]bucket.NotificationConfig{
 		"no rules":                       {},
 		"too many rules":                 {Rules: many},
+		"too many targets":               {Rules: named},
 		"a rule without an ID":           with(func(r *bucket.NotificationRule) { r.ID = "" }),
 		"an ID that is too long":         with(func(r *bucket.NotificationRule) { r.ID = strings.Repeat("i", 256) }),
 		"an ID that is not UTF-8":        with(func(r *bucket.NotificationRule) { r.ID = "r\xff" }),

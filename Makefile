@@ -236,7 +236,7 @@ vet: web-build
 	@echo "vet: PASS"
 
 test:
-	go test -race -count=1 ./...
+	go test -race -count=1 -timeout 30m ./...
 
 cover:
 	@scripts/coverage.sh

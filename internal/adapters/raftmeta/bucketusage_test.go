@@ -1314,8 +1314,16 @@ func TestADamagedUsageRecordStopsTheStateMachine(t *testing.T) {
 // (porttest.MemMetadata) through the same history. The model does not add up
 // changes: it counts a bucket by looking, every time it is asked - so what it
 // says is, by definition, what a recount finds, and it decides a quota by
-// that. The first state machine is held to it after every entry; the others
-// are replicas, fed the same log.
+// that. The others are replicas, fed the same log.
+//
+// The outcome of every entry is held to the model's - taken or refused, and
+// refused by a quota or not - and so is the answer of every entry of the
+// walk. The whole of what the first state machine keeps is held to the model,
+// and recounted from the state itself, where it can have parted: at once
+// after every entry that was refused (which must have changed nothing), and
+// otherwise every lookEvery entries and at the end. A record is the sum of
+// every change before it, so one that has parted stays parted until it is
+// looked at, and what parted it is among the few entries since the last look.
 type usagePair struct {
 	t     *testing.T
 	rng   *dice
@@ -1335,6 +1343,26 @@ type usagePair struct {
 	refusals, walks, drifts int
 	// negative counts the puts of a size below nothing.
 	negative int
+	// look says that the entry just applied is one after which the whole is
+	// held to the model at once (due), and looks counts how often it was.
+	look  bool
+	looks int
+}
+
+// lookEvery is how many entries pass, at most, between two times the whole of
+// what a state machine keeps is held to the model.
+const lookEvery = 25
+
+// due reports whether the whole is to be held to the model after entry i of
+// a history: after an entry that was refused or marked otherwise, and every
+// lookEvery entries.
+func (p *usagePair) due(i int) bool {
+	due := p.look || i%lookEvery == lookEvery-1
+	p.look = false
+	if due {
+		p.looks++
+	}
+	return due
 }
 
 type pairUpload struct {
@@ -1415,6 +1443,10 @@ func (p *usagePair) agree(what string, r applyResult, modelErr error) bool {
 	if (r.err != nil) != (modelErr != nil) {
 		p.t.Fatalf("entry %d, %s: the state machine says %v, the model %v", p.index, what, r.err, modelErr)
 	}
+	if r.err != nil {
+		// What was refused changed nothing: looked at at once.
+		p.look = true
+	}
 	if got, want := errors.Is(r.err, domain.ErrQuotaExceeded), errors.Is(modelErr, domain.ErrQuotaExceeded); got != want {
 		p.t.Fatalf("entry %d, %s: refused by the quota in the state machine: %t (%v); in the model: %t (%v)", p.index, what, got, r.err, want, modelErr)
 	} else if got {
@@ -1494,6 +1526,17 @@ func (p *usagePair) same(name string, got, want bucket.Usage) {
 // and to the state itself.
 func (p *usagePair) check(names []string) {
 	p.t.Helper()
+	p.counts(names)
+	for _, name := range names {
+		checkUsage(p.t, p.fsms[0], name)
+	}
+}
+
+// counts holds every bucket's record in the first state machine, and its
+// quota, to the model: to what the model counts by looking at the bucket -
+// all of it, or what lies behind a walk that is under way.
+func (p *usagePair) counts(names []string) {
+	p.t.Helper()
 	want, err := p.model.BucketUsages(p.t.Context(), names)
 	if err != nil {
 		p.t.Fatal(err)
@@ -1507,7 +1550,6 @@ func (p *usagePair) check(names []string) {
 		if quota != want[i].QuotaBytes {
 			p.t.Fatalf("entry %d: the quota of %s is %d, the model says %d", p.index, name, quota, want[i].QuotaBytes)
 		}
-		checkUsage(p.t, p.fsms[0], name)
 	}
 }
 
@@ -1706,10 +1748,12 @@ func (p *usagePair) step(names, keys []string) {
 // and of it, one that is deleted and made again, quotas set and removed,
 // entries written by proposers of level 5, 4 and 2, and entries of the walk
 // with small limits anywhere among them, beginning again while under way -
-// the record of every bucket is, after every entry, what the model of the
-// ports says: a recount when it is exact, a recount of what lies behind the
-// walk while it is counted, and nothing while it is counted for the first
-// time. Some puts are of a size below nothing, which counts as nothing
+// the record of every bucket is what the model of the ports says: a recount
+// when it is exact, a recount of what lies behind the walk while it is
+// counted, and nothing while it is counted for the first time. It is held to
+// that after every entry that was refused, every lookEvery entries and at the
+// end (usagePair); the answer of every entry of the walk is held to it at
+// once. Some puts are of a size below nothing, which counts as nothing
 // everywhere. A quota refuses in the state machine exactly when it refuses in
 // the model. No recount finds drift and no change is held at a bound. A replica
 // fed the same log holds the same bytes, and so does one that begins from a
@@ -1735,7 +1779,9 @@ func TestUsageIsARecountThroughAnyHistory(t *testing.T) {
 			snapshots := 0
 			for i := range entries {
 				p.step(names, keys)
-				p.check(names)
+				if p.due(i) {
+					p.check(names)
+				}
 				// A replica from a snapshot taken in the middle of a walk:
 				// twice, where the history has one under way.
 				if i > entries/3 && snapshots < 2 && i%97 == 0 {
@@ -1792,8 +1838,9 @@ func TestUsageIsARecountThroughAnyHistory(t *testing.T) {
 			if p.drifts != 0 {
 				t.Errorf("%d entries of the walk reported drift", p.drifts)
 			}
-			if p.refusals < 5 || p.walks < 100 || p.negative < 20 {
-				t.Errorf("the history had %d refusals by a quota, %d entries of the walk and %d puts of a size below nothing: it tried too little", p.refusals, p.walks, p.negative)
+			if p.refusals < 5 || p.walks < 100 || p.negative < 20 || p.looks < entries/lookEvery+p.refusals {
+				t.Errorf("the history had %d refusals by a quota, %d entries of the walk and %d puts of a size below nothing, and was held to the model %d times: it tried too little",
+					p.refusals, p.walks, p.negative, p.looks)
 			}
 			if got := stateSchema(t, p.fsms[0]); got != stateSchema5 {
 				t.Errorf("state schema %d", got)

@@ -93,6 +93,13 @@ func ParseSeq(text string) (Seq, error) {
 // does.
 const maxActor = 256
 
+// MaxItemETag bounds the entity tag a row carries, in bytes. An entity tag as
+// this deployment makes one is 32 hexadecimal characters, and a hyphen and
+// the number of its parts for a version of parts; nothing holds an entry to
+// that, so a row is: one that would be longer is appended without it
+// (ADR-0023, "The bound"). The bound is part of the replicated format.
+const MaxItemETag = 128
+
 // Item is one row of the outbox: a change of one version of one object, and
 // the consumers it is for. It holds what a receiver is told and what the
 // replicator needs to find the version - never anything of the object's
@@ -159,6 +166,8 @@ func (i Item) Validate() error {
 		return invalid("a version")
 	case i.Size < 0:
 		return invalid("a size below nothing")
+	case len(i.ETag) > MaxItemETag:
+		return invalid("an entity tag is too long")
 	case len(i.By) > maxActor:
 		return invalid("the name of an actor is too long")
 	case len(i.To) == 0:

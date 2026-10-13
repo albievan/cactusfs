@@ -71,15 +71,28 @@ type Auth struct {
 
 // Limits of a target.
 const (
+	// MaxTargets is how many targets a deployment can have. Every
+	// acknowledgement reads the cursor of each to find the lowest, so the
+	// number is bounded; the state machine refuses a new target beyond it,
+	// and the bound is part of the replicated format.
+	MaxTargets = 256
 	// MaxTargetBuckets is how many names and patterns of buckets a target
 	// can list.
 	MaxTargetBuckets = 1000
 	// MaxCAPEMBytes bounds the certificates a target is verified against.
 	MaxCAPEMBytes = 64 << 10
-	maxAuthID     = 128
-	maxRegion     = 64
-	maxSubject    = 255
-	maxPattern    = 63
+	// MaxSealedBytes bounds the ciphertext of a sealed field of a target -
+	// the secret, the signing key, the path of the endpoint - and
+	// MaxSealedKeyBytes its wrapped data key and the name of the KMS key
+	// that wraps it. They are far above what the use case seals, and are
+	// there so that a target record is of a size the state keeps.
+	MaxSealedBytes    = 8 << 10
+	MaxSealedKeyBytes = 1 << 10
+	maxSealedNonce    = 64
+	maxAuthID         = 128
+	maxRegion         = 64
+	maxSubject        = 255
+	maxPattern        = 63
 )
 
 // Target is a place outside the deployment that it sends to (ADR-0023). It
@@ -88,8 +101,9 @@ const (
 //
 // Every printed form of a target - with any verb of fmt, in a log, and as
 // JSON - is its name and its kind. The endpoint is not part of it, and
-// neither is anything of the two secrets, sealed as they are. What may be
-// shown of a target to who may read targets is Shown, and nothing else.
+// neither is anything of the sealed path or of the two secrets, sealed as
+// they are. What may be shown of a target to who may read targets is Shown,
+// and nothing else.
 //
 // One case is not covered, and cannot be: fmt does not call the methods of a
 // value it reaches through a field that is not exported, so "%+v" of a
@@ -100,10 +114,19 @@ type Target struct {
 	// Name names the target (ValidateTargetName).
 	Name string
 	Kind Kind
-	// Endpoint is where it is (CheckEndpoint): the whole URL. The path of
-	// a webhook may be a credential - the URL of an incoming webhook is
-	// one - so no answer, log or status holds it: Origin is what is shown.
+	// Endpoint is where it is, without a path: the origin of the URL the
+	// administrator gave - the scheme, the host, and the port when one was
+	// named (SplitEndpoint). It is what placing an egress rule and a
+	// status need, and it is no secret.
 	Endpoint string
+	// SealedPath is the path of that URL, sealed through the KMS with
+	// PathAAD by the use case before the target is proposed; the zero
+	// value is an endpoint without a path. The path of a webhook may be a
+	// credential - the URL of an incoming webhook is one - so it is never
+	// stored or replicated in the clear, and no answer, log or status
+	// holds it: what connects opens it when it dials. Kind KindWebhook
+	// only.
+	SealedPath iam.SealedSecret
 	// Region is what requests to another deployment are signed for. Kind
 	// KindS3 only.
 	Region string
@@ -147,8 +170,23 @@ func SignKeyAAD(name string) []byte {
 	return []byte("target/" + name + "/sign_key")
 }
 
+// PathAAD returns the additional data the path of the endpoint of the target
+// of that name is sealed with.
+func PathAAD(name string) []byte {
+	return []byte("target/" + name + "/path")
+}
+
+// sealed reports whether a sealed field is set: whether it has a ciphertext.
+// A wrapped key, a nonce or the name of a KMS key without one is nothing that
+// could be opened, and is no secret (sealedWhole refuses it).
 func sealed(s iam.SealedSecret) bool {
-	return len(s.Ciphertext) > 0 || len(s.WrappedKey) > 0 || len(s.Nonce) > 0 || s.KMSKeyID != ""
+	return len(s.Ciphertext) > 0
+}
+
+// sealedWhole reports whether a sealed field is there altogether or not at
+// all: a field without a ciphertext has nothing else either.
+func sealedWhole(s iam.SealedSecret) bool {
+	return len(s.Ciphertext) > 0 || (len(s.WrappedKey) == 0 && len(s.Nonce) == 0 && s.KMSKeyID == "")
 }
 
 // SecretSet reports whether the target has a secret. It is all that is ever
@@ -158,6 +196,14 @@ func (t Target) SecretSet() bool { return sealed(t.Secret) }
 // SignKeySet reports whether the target has a key that requests to it are
 // signed with.
 func (t Target) SignKeySet() bool { return sealed(t.SignKey) }
+
+// sealedFits reports whether a sealed field is of a size a target record
+// keeps. It looks at lengths and at nothing else: what the bytes are is the
+// KMS's to say, when the field is opened.
+func sealedFits(s iam.SealedSecret) bool {
+	return len(s.KMSKeyID) <= MaxSealedKeyBytes && len(s.WrappedKey) <= MaxSealedKeyBytes &&
+		len(s.Nonce) <= maxSealedNonce && len(s.Ciphertext) <= MaxSealedBytes
+}
 
 // String returns the name and the kind of the target, and nothing else.
 func (t Target) String() string {
@@ -213,35 +259,37 @@ func appendJSONString(dst []byte, s string) []byte {
 func (t Target) Clone() Target {
 	t.CAPEM = slices.Clone(t.CAPEM)
 	t.Buckets = slices.Clone(t.Buckets)
-	for _, s := range []*iam.SealedSecret{&t.Secret, &t.SignKey} {
+	for _, s := range []*iam.SealedSecret{&t.Secret, &t.SignKey, &t.SealedPath} {
 		s.WrappedKey, s.Nonce, s.Ciphertext = slices.Clone(s.WrappedKey), slices.Clone(s.Nonce), slices.Clone(s.Ciphertext)
 	}
 	return t
 }
 
 // Origin returns the scheme, the host and the port of the endpoint, as they
-// were given: everything before the path. It is what is shown of where a
-// target is.
+// were given. It is what is shown of where a target is.
 //
-// It cuts by bytes and trusts no parser: whatever follows the first slash
-// after "://" is left out, so that nothing of a path is ever returned,
-// whatever the endpoint holds.
+// A target that can be kept has nothing else in its Endpoint (Validate). The
+// cut is made all the same, by bytes and trusting no parser: whatever
+// follows the first slash after "://" is left out, so that nothing of a path
+// is ever returned, whatever a target that nobody validated holds.
 func (t Target) Origin() string {
-	origin, _ := cutEndpoint(t.Endpoint)
+	origin, _ := SplitEndpoint(t.Endpoint)
 	return origin
 }
 
-// PathSet reports whether the endpoint has a path - anything after the host
-// and the port but a single slash. It is all that is ever told of the path.
-func (t Target) PathSet() bool {
-	_, path := cutEndpoint(t.Endpoint)
-	return path != "" && path != "/"
-}
+// PathSet reports whether the endpoint of the target has a path: whether a
+// sealed one is kept with it. It is all that is ever told of the path.
+func (t Target) PathSet() bool { return sealed(t.SealedPath) }
 
-// cutEndpoint cuts an endpoint into what is before its path and the path.
-// An endpoint without "://" has no origin that can be shown: all of it is
-// taken for path.
-func cutEndpoint(endpoint string) (origin, path string) {
+// SplitEndpoint cuts the URL an administrator gave for a target into what a
+// target keeps in the clear - its origin: the scheme, the host and the port,
+// as they were given - and its path, which the use case seals before it
+// proposes the target (Target.SealedPath). A path of a single slash is no
+// path: it is returned as it is, and whoever seals leaves it out.
+//
+// It cuts by bytes at the first slash after "://". An endpoint without
+// "://" has no origin that can be shown: all of it is taken for path.
+func SplitEndpoint(endpoint string) (origin, path string) {
 	scheme := strings.Index(endpoint, "://")
 	if scheme < 0 {
 		return "", endpoint
@@ -334,8 +382,10 @@ func validPattern(p string) bool {
 // lengths, sets of characters, prefixes - and calls no clock, no resolver,
 // and no parser of the standard library whose answer a release may change:
 // not net/url, not encoding/pem, not encoding/base64, not crypto/x509. Of
-// the endpoint it asks the scheme of the kind and what no endpoint may hold;
-// of the certificates their length and their framing (checkCAFraming).
+// the endpoint it asks the scheme of the kind, what no endpoint may hold, and
+// that it has no path - the path is sealed, and of a sealed field Validate
+// asks only whether it is there and how long it is; of the certificates
+// their length and their framing (checkCAFraming).
 // Whether the endpoint is one that can be connected to is CheckEndpoint's to
 // say, and whether the certificates are certificates is CheckCA's: both are
 // asked by the use case before a target is proposed, and the address is
@@ -353,6 +403,27 @@ func (t Target) Validate() error {
 	if t.Endpoint == "" || len(t.Endpoint) > MaxEndpointLength || !printable(t.Endpoint) ||
 		!strings.HasPrefix(t.Endpoint, t.Kind.scheme()+"://") || strings.ContainsAny(t.Endpoint, "@?#\\") {
 		return invalidTarget("the endpoint of a %s target begins with %s:// and has no user, query or fragment", t.Kind, t.Kind.scheme())
+	}
+	// The endpoint is an origin: where the path would begin it ends. The
+	// refusal does not say what followed.
+	authority := t.Endpoint[len(t.Kind.scheme())+3:]
+	if strings.IndexByte(authority, '/') >= 0 {
+		return invalidTarget("the endpoint is kept without its path, which is sealed")
+	}
+	// And an origin names a host: nothing behind the scheme, or a port and
+	// nothing before it, is no place. Whether what stands there is a host
+	// is CheckEndpoint's to say.
+	if authority == "" || authority[0] == ':' {
+		return invalidTarget("the endpoint names no host")
+	}
+	if !sealedFits(t.Secret) || !sealedFits(t.SignKey) || !sealedFits(t.SealedPath) {
+		return invalidTarget("a sealed field of more than %d bytes, or with a key of more than %d", MaxSealedBytes, MaxSealedKeyBytes)
+	}
+	if !sealedWhole(t.Secret) || !sealedWhole(t.SignKey) || !sealedWhole(t.SealedPath) {
+		return invalidTarget("a sealed field without its ciphertext")
+	}
+	if t.Kind != KindWebhook && t.PathSet() {
+		return invalidTarget("only the endpoint of a webhook has a path")
 	}
 	if t.Refs < 0 {
 		return invalidTarget("a number of references below none")

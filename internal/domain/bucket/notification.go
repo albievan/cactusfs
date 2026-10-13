@@ -29,8 +29,14 @@ const (
 	MaxNotificationRules = 100
 	// MaxReplicationRules is how many replication rules a bucket can have.
 	MaxReplicationRules = 100
-	maxRuleID           = 255
-	maxRuleAffix        = 1024
+	// MaxDocumentTargets is how many targets one document of a bucket can
+	// name, each once. Every change of an object that all the rules match
+	// appends a row that lists them, and a row that is dropped at the bound
+	// of the outbox reads the cursor of each: the bound is what keeps a row
+	// of a size, and a drop of a cost, that is known (ADR-0023).
+	MaxDocumentTargets = 16
+	maxRuleID          = 255
+	maxRuleAffix       = 1024
 )
 
 // How the S3 API shows a notification rule. It changes nothing of what is
@@ -115,6 +121,9 @@ func (c NotificationConfig) Validate() error {
 				return invalidNotification("rule %d: a kind of change that cannot be told, or that is there twice", i)
 			}
 		}
+	}
+	if len(c.Targets()) > MaxDocumentTargets {
+		return invalidNotification("the rules name more than %d targets", MaxDocumentTargets)
 	}
 	return nil
 }

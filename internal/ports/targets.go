@@ -15,9 +15,11 @@ import (
 // consistent. Until every member of the cluster knows entry schema 5 a
 // change wraps domain.ErrUnavailable, and there are no targets to read.
 //
-// A target as the store returns it carries its sealed secrets: the node that
-// leads opens them when it connects. Whoever shows a target shows
-// delivery.Target.Shown.
+// A target as the store returns it carries its sealed secrets and the sealed
+// path of its endpoint: the node that leads opens them when it connects. The
+// store never holds a path in the clear - delivery.Target.Endpoint is the
+// origin, and the use case seals the path before it proposes the target.
+// Whoever shows a target shows delivery.Target.Shown.
 type TargetStore interface {
 	// PutTarget defines a target, or replaces one of that name whole. Of
 	// what it is given the store keeps everything but three things that
@@ -27,10 +29,14 @@ type TargetStore interface {
 	// with one that is replaced.
 	//
 	// The error wraps domain.ErrInvalidArgument for a target that
-	// delivery.Target.Validate refuses, and domain.ErrEntityInUse for a
-	// change of the kind of a target that bucket configurations name:
-	// what was matched for a webhook is not to be handed to another
-	// deployment.
+	// delivery.Target.Validate refuses, and for a new target where there
+	// are delivery.MaxTargets already; and domain.ErrEntityInUse for a
+	// target that bucket configurations name when the change is of its
+	// kind - what was matched for a webhook is not to be handed to
+	// another deployment - or leaves it admitting no longer a bucket
+	// whose configuration names it. A list of buckets that is widened,
+	// and one that is narrowed once the configurations that needed it are
+	// gone, is taken.
 	PutTarget(ctx context.Context, t delivery.Target, record audit.Record) error
 	// DeleteTarget removes a target and its cursor. The error wraps
 	// domain.ErrEntityNotFound, and domain.ErrEntityInUse while a bucket

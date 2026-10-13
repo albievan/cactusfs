@@ -126,7 +126,9 @@ func TestItem(t *testing.T) {
 	null.Version = object.VersionRef{Null: true}
 	marker := item.Clone()
 	marker.Event, marker.Size, marker.ETag, marker.By = delivery.EventMarker, 0, "", ""
-	for name, valid := range map[string]delivery.Item{"the null version": null, "a marker by nobody": marker} {
+	longest := item.Clone()
+	longest.ETag = strings.Repeat("e", delivery.MaxItemETag)
+	for name, valid := range map[string]delivery.Item{"the null version": null, "a marker by nobody": marker, "the longest entity tag": longest} {
 		if err := valid.Validate(); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -144,6 +146,7 @@ func TestItem(t *testing.T) {
 		"a key that is none":      change(func(i *delivery.Item) { i.Key = "\xff" }),
 		"no version":              change(func(i *delivery.Item) { i.Version = object.VersionRef{} }),
 		"a size below nothing":    change(func(i *delivery.Item) { i.Size = -1 }),
+		"an entity tag too long":  change(func(i *delivery.Item) { i.ETag = strings.Repeat("e", delivery.MaxItemETag+1) }),
 		"an actor without end":    change(func(i *delivery.Item) { i.By = strings.Repeat("a", 257) }),
 		"for nobody":              change(func(i *delivery.Item) { i.To = nil }),
 		"a consumer of no kind":   change(func(i *delivery.Item) { i.To[0].Kind = "x" }),

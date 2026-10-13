@@ -1,6 +1,7 @@
 package porttest
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -46,13 +47,32 @@ func has(versions []object.Version, ref object.VersionRef) bool {
 	return slices.ContainsFunc(versions, func(v object.Version) bool { return v.Is(ref) })
 }
 
+// outranks reports whether a is a newer version of their key than b: the one
+// of the greater sequence, and of two at one sequence - which only a source
+// at fault sends - the one whose ID is the lesser, the null version before
+// every other. The order is total, so that it is the same in whatever order
+// the versions arrived.
+func outranks(a, b object.Version) bool {
+	if a.Seq != b.Seq {
+		return a.Seq > b.Seq
+	}
+	var idA, idB object.ID
+	if a.Versioned {
+		idA = a.VersionID
+	}
+	if b.Versioned {
+		idB = b.VersionID
+	}
+	return bytes.Compare(idA[:], idB[:]) < 0
+}
+
 // placedBySeq returns the versions of a key, newest first, with v among
 // them. A version made here is the newest; the copy of a version of another
 // deployment has its place by the sequence of its source, wherever that is.
 func placedBySeq(versions []object.Version, v object.Version, replica bool) []object.Version {
 	at := 0
 	if replica {
-		for at < len(versions) && versions[at].Seq >= v.Seq {
+		for at < len(versions) && outranks(versions[at], v) {
 			at++
 		}
 	}
@@ -291,9 +311,19 @@ func (m *MemMetadata) PutTarget(ctx context.Context, t delivery.Target, record a
 		stored := t.Clone()
 		stored.Refs, stored.CreatedAt, stored.UpdatedAt = 0, t.CreatedAt.UTC(), t.UpdatedAt.UTC()
 		existing, replaces := m.targets[t.Name]
+		if !replaces && len(m.targets) >= delivery.MaxTargets {
+			return fmt.Errorf("%w: there are %d targets, and a deployment has no more", domain.ErrInvalidArgument, delivery.MaxTargets)
+		}
 		if replaces {
 			if existing.Refs > 0 && existing.Kind != t.Kind {
 				return fmt.Errorf("%w: target %s is named by bucket configurations as a %s target", domain.ErrEntityInUse, t.Name, existing.Kind)
+			}
+			// A target goes on admitting every bucket whose document
+			// names it: found by looking at the documents there are.
+			for _, name := range m.namers(t.Name) {
+				if !t.Admits(name) {
+					return fmt.Errorf("%w: target %s is named by the configuration of bucket %s, which it would no longer admit", domain.ErrEntityInUse, t.Name, name)
+				}
 			}
 			stored.Refs, stored.CreatedAt = existing.Refs, existing.CreatedAt
 		}
@@ -324,6 +354,9 @@ func (m *MemMetadata) DeleteTarget(ctx context.Context, name string, record audi
 		m.seq++
 		delete(m.targets, name)
 		delete(m.cursors, name)
+		// The rows that only this target had not passed are behind every
+		// target now: they go, so many for one change.
+		m.trim()
 		return nil
 	})
 }
@@ -367,6 +400,31 @@ func (m *MemMetadata) namedBy(kind string, document []byte) []string {
 	return config.Targets()
 }
 
+// namers returns the buckets that have a document which names the target,
+// in the order of their names.
+func (m *MemMetadata) namers(target string) []string {
+	var names []string
+	for _, name := range slices.Sorted(maps.Keys(m.config)) {
+		for _, kind := range []string{bucket.ConfigNotification, bucket.ConfigReplication} {
+			if slices.Contains(m.namedBy(kind, m.config[name][kind]), target) {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	return names
+}
+
+// sentTo reports whether the versions of a bucket are sent on to a target:
+// whether the bucket is there and its replication configuration names the
+// target.
+func (m *MemMetadata) sentTo(bucketName, target string) bool {
+	if _, ok := m.buckets[bucketName]; !ok {
+		return false
+	}
+	return slices.Contains(m.namedBy(bucket.ConfigReplication, m.config[bucketName][bucket.ConfigReplication]), target)
+}
+
 // refer adds by to the count of the documents that name each target.
 func (m *MemMetadata) refer(names []string, by int) {
 	for _, name := range names {
@@ -385,6 +443,9 @@ func (m *MemMetadata) refer(names []string, by int) {
 func (m *MemMetadata) checkDelivered(b bucket.Bucket, kind string, document []byte) error {
 	if len(document) == 0 {
 		return nil
+	}
+	if len(b.Name) > bucket.MaxNameLength {
+		return fmt.Errorf("%w: a bucket of a name of more than %d bytes has no %s document", domain.ErrInvalidArgument, bucket.MaxNameLength, kind)
 	}
 	consumer := delivery.ConsumerNotification
 	var names []string
@@ -456,7 +517,12 @@ func (m *MemMetadata) tell(event delivery.Event, v object.Version, by string, to
 		At: m.now(), By: by, To: slices.Clone(to),
 	}
 	if !v.DeleteMarker {
-		item.Size, item.ETag = v.Size, v.ETag
+		// A size below nothing is told as nothing, as it is counted; and an
+		// entity tag longer than a row keeps is left out of it.
+		item.Size = countedSize(v.Size)
+		if len(v.ETag) <= delivery.MaxItemETag {
+			item.ETag = v.ETag
+		}
 	}
 	m.row.Row++
 	m.outbox = append(m.outbox, item)
@@ -480,6 +546,19 @@ func (m *MemMetadata) gone(removed *object.Version, by string) {
 		return
 	}
 	m.tell(delivery.EventDelete, *removed, by, m.consumers(delivery.EventDelete, *removed, by, false, removed.Replication))
+}
+
+// OutboxRows returns every row the outbox holds, oldest first, whoever it is
+// for: what a store that keeps the outbox row for row is held against.
+// Nothing reads the outbox this way through a port.
+func (m *MemMetadata) OutboxRows() []delivery.Item {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := make([]delivery.Item, len(m.outbox))
+	for i, item := range m.outbox {
+		rows[i] = item.Clone()
+	}
+	return rows
 }
 
 // ReadOutbox implements ports.Outbox.
@@ -512,48 +591,53 @@ func (m *MemMetadata) ReadOutbox(_ context.Context, target string, after deliver
 	return items, upto, nil
 }
 
-// find returns the version a result names: by a row that is still there and
-// was for the target, or by itself.
-func (m *MemMetadata) find(target string, r delivery.Result) *object.Version {
+// find returns the version a result names, and whether the result was the
+// target's to give: by a row, when the row is gone or was for the target as
+// replication; by itself, when the bucket is there and its replication
+// configuration names the target. A result that is not the target's names
+// nothing.
+func (m *MemMetadata) find(target string, r delivery.Result) (found *object.Version, mine bool) {
 	bucketName, key, ref := r.Bucket, r.Key, r.Version
 	if r.ByRow() {
 		at := slices.IndexFunc(m.outbox, func(item delivery.Item) bool { return item.Seq == r.Seq })
 		if at < 0 {
-			return nil
+			return nil, true
 		}
-		if kind, mine := m.outbox[at].For(target); !mine || kind != delivery.ConsumerReplication {
-			return nil
+		if kind, consumer := m.outbox[at].For(target); !consumer || kind != delivery.ConsumerReplication {
+			return nil, false
 		}
 		bucketName, key, ref = m.outbox[at].Bucket, m.outbox[at].Key, m.outbox[at].Version
+	} else if !m.sentTo(bucketName, target) {
+		return nil, false
 	}
 	versions := m.objects[bucketName][key]
 	for i := range versions {
 		if versions[i].Is(ref) {
-			return &versions[i]
+			return &versions[i], true
 		}
 	}
-	return nil
+	return nil, true
 }
 
 // AckOutbox implements ports.Outbox.
-func (m *MemMetadata) AckOutbox(_ context.Context, target string, upto delivery.Seq, auditUpto uint64, results []delivery.Result) error {
+func (m *MemMetadata) AckOutbox(_ context.Context, target string, upto delivery.Seq, auditUpto uint64, results []delivery.Result) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
-		return m.FailWrites
+		return 0, m.FailWrites
 	}
 	cursor, ok := m.cursors[target]
 	switch {
 	case !ok:
-		return fmt.Errorf("%w: target %s", domain.ErrEntityNotFound, target)
+		return 0, fmt.Errorf("%w: target %s", domain.ErrEntityNotFound, target)
 	case len(results) > delivery.MaxAckResults:
-		return fmt.Errorf("%w: %d results, at most %d", domain.ErrInvalidArgument, len(results), delivery.MaxAckResults)
+		return 0, fmt.Errorf("%w: %d results, at most %d", domain.ErrInvalidArgument, len(results), delivery.MaxAckResults)
 	case len(results) > 0 && m.targets[target].Kind != delivery.KindS3:
-		return fmt.Errorf("%w: results are of replication, and target %s is not another deployment", domain.ErrInvalidArgument, target)
+		return 0, fmt.Errorf("%w: results are of replication, and target %s is not another deployment", domain.ErrInvalidArgument, target)
 	}
 	for _, result := range results {
 		if err := result.Validate(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	m.seq++
@@ -569,27 +653,40 @@ func (m *MemMetadata) AckOutbox(_ context.Context, target string, upto delivery.
 		auditUpto = 0
 	}
 	m.cursors[target] = cursor.Advanced(upto, auditUpto)
+	unrelated := 0
 	for _, result := range results {
 		// Only a version that still exists, and never one that arrived as
-		// a replica.
-		if v := m.find(target, result); v != nil && v.Replication != object.ReplicationReplica {
+		// a replica; and what was not the target's to say changes nothing,
+		// and is counted.
+		v, mine := m.find(target, result)
+		if !mine {
+			unrelated++
+		}
+		if v != nil && v.Replication != object.ReplicationReplica {
 			v.Replication = result.Status
 		}
 	}
 	// Rows that every target has passed go, so many for one
 	// acknowledgement.
-	lowest, first := delivery.Seq{}, true
+	m.trim()
+	return unrelated, nil
+}
+
+// trim removes the rows every target has passed, oldest first, at most
+// delivery.MaxOutboxTrim of them. With no target left, every row is one that
+// every target has passed.
+func (m *MemMetadata) trim() {
+	lowest, none := delivery.Seq{}, true
 	for _, c := range m.cursors {
-		if first || lowest.After(c.Acked) {
-			lowest, first = c.Acked, false
+		if none || lowest.After(c.Acked) {
+			lowest, none = c.Acked, false
 		}
 	}
 	trimmed := 0
-	for trimmed < len(m.outbox) && trimmed < delivery.MaxOutboxTrim && !m.outbox[trimmed].Seq.After(lowest) {
+	for trimmed < len(m.outbox) && trimmed < delivery.MaxOutboxTrim && (none || !m.outbox[trimmed].Seq.After(lowest)) {
 		trimmed++
 	}
 	m.outbox = m.outbox[trimmed:]
-	return nil
 }
 
 // OutboxCursors implements ports.Outbox.
@@ -664,7 +761,9 @@ func (m *MemMetadata) PutResync(_ context.Context, r bucket.Resync) error {
 	}
 	m.seq++
 	m.resyncs[r.Bucket] = r
-	if r.State == bucket.ResyncDone {
+	// The mark is cleared by a bucket that is sent to the target, and by no
+	// other.
+	if r.State == bucket.ResyncDone && m.sentTo(r.Bucket, r.Target) {
 		cursor.ResyncNeeded = false
 		m.cursors[r.Target] = cursor
 	}

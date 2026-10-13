@@ -34,8 +34,8 @@ type Schema5 interface {
 }
 
 // SampleTarget returns a target of the kind given that a store keeps, open
-// to every bucket. Its secret is sealed bytes made for the test, which open
-// with nothing.
+// to every bucket. Its secret, and the path of a webhook, are sealed bytes
+// made for the test, which open with nothing.
 func SampleTarget(name string, kind delivery.Kind) delivery.Target {
 	t := delivery.Target{Name: name, Kind: kind, Buckets: []string{"*"}, CreatedAt: contractTime, UpdatedAt: contractTime}
 	sealed := iam.SealedSecret{KMSKeyID: "local:test", WrappedKey: []byte("wrapped-" + name), Nonce: []byte("nonce-of-12b"), Ciphertext: []byte("sealed-" + name)}
@@ -46,7 +46,9 @@ func SampleTarget(name string, kind delivery.Kind) delivery.Target {
 		t.Endpoint, t.Region = "https://s3.site-b.example", "site-b"
 		t.Auth, t.Secret = delivery.Auth{Mode: delivery.AuthSigV4, ID: "AKIDSITEB"}, sealed
 	default:
-		t.Endpoint = "https://hooks.example.com/in/" + name
+		// The path of the URL is kept sealed, beside its origin.
+		t.Endpoint, t.SealedPath = "https://hooks.example.com", sealed
+		t.SealedPath.Ciphertext = []byte("sealed-path-" + name)
 		t.Auth, t.Secret, t.SignKey = delivery.Auth{Mode: delivery.AuthBearer}, sealed, sealed
 	}
 	return t
@@ -654,10 +656,12 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		if err != nil {
 			t.Fatalf("GetTarget: %v", err)
 		}
-		// Everything is kept as it was given - the sealed secrets too, for
-		// the node that leads opens them - but the count of references,
-		// which is the store's.
+		// Everything is kept as it was given - the sealed secrets and the
+		// sealed path too, for the node that leads opens them - but the
+		// count of references, which is the store's.
 		if got.Kind != hook.Kind || got.Endpoint != hook.Endpoint || !slices.Equal(got.Buckets, hook.Buckets) || got.Auth != hook.Auth ||
+			!got.PathSet() || string(got.SealedPath.Ciphertext) != "sealed-path-hook" || string(got.SealedPath.WrappedKey) != string(hook.SealedPath.WrappedKey) ||
+			got.SealedPath.KMSKeyID != hook.SealedPath.KMSKeyID || string(got.SealedPath.Nonce) != string(hook.SealedPath.Nonce) ||
 			string(got.Secret.Ciphertext) != string(hook.Secret.Ciphertext) || string(got.SignKey.WrappedKey) != string(hook.SignKey.WrappedKey) ||
 			got.Secret.KMSKeyID != hook.Secret.KMSKeyID || string(got.Secret.Nonce) != string(hook.Secret.Nonce) ||
 			!got.CreatedAt.Equal(contractTime) || !got.UpdatedAt.Equal(contractTime) || got.Refs != 0 {
@@ -671,22 +675,23 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			t.Errorf("ListTargets = %v", listed)
 		}
 		// What is returned is the caller's: changing it changes nothing.
-		got.Buckets[0], got.Secret.Ciphertext[0] = "changed", 'X'
-		if again, _ := s.GetTarget(ctx, "hook"); again.Buckets[0] != "photos" || again.Secret.Ciphertext[0] != hook.Secret.Ciphertext[0] {
+		got.Buckets[0], got.Secret.Ciphertext[0], got.SealedPath.Ciphertext[0] = "changed", 'X', 'X'
+		if again, _ := s.GetTarget(ctx, "hook"); again.Buckets[0] != "photos" || again.Secret.Ciphertext[0] != hook.Secret.Ciphertext[0] ||
+			again.SealedPath.Ciphertext[0] != hook.SealedPath.Ciphertext[0] {
 			t.Error("a target that was read shares with the one that is stored")
 		}
 
 		// A target is replaced whole, and keeps when it was made.
 		replaced := SampleTarget("hook", delivery.KindWebhook)
-		replaced.Endpoint, replaced.Audit, replaced.Buckets = "https://other.example.com/in", true, nil
+		replaced.Endpoint, replaced.Audit, replaced.Buckets = "https://other.example.com:8443", true, nil
 		replaced.CreatedAt, replaced.UpdatedAt = contractTime.Add(time.Hour), contractTime.Add(time.Hour)
-		replaced.Auth, replaced.Secret = delivery.Auth{}, iam.SealedSecret{}
+		replaced.Auth, replaced.Secret, replaced.SealedPath = delivery.Auth{}, iam.SealedSecret{}, iam.SealedSecret{}
 		before := cursor(t, s, "hook")
 		if err := s.PutTarget(ctx, replaced, noAudit); err != nil {
 			t.Fatalf("replacing a target: %v", err)
 		}
 		got, err = s.GetTarget(ctx, "hook")
-		if err != nil || got.Endpoint != replaced.Endpoint || !got.Audit || len(got.Buckets) != 0 || got.SecretSet() || !got.SignKeySet() ||
+		if err != nil || got.Endpoint != replaced.Endpoint || !got.Audit || len(got.Buckets) != 0 || got.SecretSet() || !got.SignKeySet() || got.PathSet() ||
 			!got.CreatedAt.Equal(contractTime) || !got.UpdatedAt.Equal(contractTime.Add(time.Hour)) {
 			t.Errorf("a target that was replaced = %#v created %s updated %s, %v", got.Endpoint, got.CreatedAt, got.UpdatedAt, err)
 		}
@@ -699,10 +704,13 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		for name, edit := range map[string]func(*delivery.Target){
 			"no name":                  func(x *delivery.Target) { x.Name = "" },
 			"a name that is an ARN":    func(x *delivery.Target) { x.Name = "arn:cactusfs:notify:::x" },
-			"an endpoint in the clear": func(x *delivery.Target) { x.Endpoint = "http://hooks.example.com/in" },
-			"an endpoint with a user":  func(x *delivery.Target) { x.Endpoint = "https://user@hooks.example.com/in" },
-			"a kind there is not":      func(x *delivery.Target) { x.Kind = "kafka" },
-			"a secret without a use":   func(x *delivery.Target) { x.Auth = delivery.Auth{} },
+			"an endpoint in the clear": func(x *delivery.Target) { x.Endpoint = "http://hooks.example.com" },
+			"an endpoint with a user":  func(x *delivery.Target) { x.Endpoint = "https://user@hooks.example.com" },
+			// The path of an endpoint is never kept in the clear.
+			"an endpoint with its path": func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/in/token" },
+			"a sealed path too long":    func(x *delivery.Target) { x.SealedPath.Ciphertext = make([]byte, delivery.MaxSealedBytes+1) },
+			"a kind there is not":       func(x *delivery.Target) { x.Kind = "kafka" },
+			"a secret without a use":    func(x *delivery.Target) { x.Auth = delivery.Auth{} },
 		} {
 			bad := SampleTarget("bad", delivery.KindWebhook)
 			edit(&bad)
@@ -852,7 +860,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			t.Errorf("a webhook that is named, made another deployment = %v, want %v", err, domain.ErrEntityInUse)
 		}
 		changed := SampleTarget("hook", delivery.KindWebhook)
-		changed.Endpoint = "https://moved.example.com/in"
+		changed.Endpoint = "https://moved.example.com"
 		if err := s.PutTarget(ctx, changed, noAudit); err != nil {
 			t.Fatalf("changing a target that is named: %v", err)
 		}
@@ -1050,7 +1058,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			t.Fatalf("OutboxCursors = %+v, %v", state, err)
 		}
 
-		if err := s.AckOutbox(ctx, "fast", rows[3].Seq, 0, nil); err != nil {
+		if _, err := s.AckOutbox(ctx, "fast", rows[3].Seq, 0, nil); err != nil {
 			t.Fatalf("AckOutbox: %v", err)
 		}
 		if got := cursor(t, s, "fast"); got.Acked != rows[3].Seq || got.From != start.From {
@@ -1059,7 +1067,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		// An acknowledgement of a node that led before, arriving late:
 		// nothing goes back, and it is no error.
 		for _, behind := range []delivery.Seq{rows[1].Seq, {}, start.From} {
-			if err := s.AckOutbox(ctx, "fast", behind, 0, nil); err != nil {
+			if _, err := s.AckOutbox(ctx, "fast", behind, 0, nil); err != nil {
 				t.Fatalf("an acknowledgement behind the cursor: %v", err)
 			}
 			if got := cursor(t, s, "fast"); got.Acked != rows[3].Seq {
@@ -1074,7 +1082,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			t.Errorf("the slow target is left %d rows", len(waiting))
 		}
 		// What the slow one passes, both have passed.
-		if err := s.AckOutbox(ctx, "slow", rows[2].Seq, 0, nil); err != nil {
+		if _, err := s.AckOutbox(ctx, "slow", rows[2].Seq, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		if state, _ := s.OutboxCursors(ctx); state.Rows != 3 || state.Dropped != 0 {
@@ -1087,7 +1095,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 
 		// An acknowledgement beyond the last row counts as the last row:
 		// what is written afterwards is still the target's.
-		if err := s.AckOutbox(ctx, "fast", delivery.Seq{Index: ^uint64(0), Row: 65535}, 0, nil); err != nil {
+		if _, err := s.AckOutbox(ctx, "fast", delivery.Seq{Index: ^uint64(0), Row: 65535}, 0, nil); err != nil {
 			t.Fatalf("an acknowledgement beyond the end: %v", err)
 		}
 		put(t, s, sized("photos", "after", 50, 1))
@@ -1103,26 +1111,26 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			t.Fatal(err)
 		}
 		for _, upto := range []uint64{7, 3, 7, 9} {
-			if err := s.AckOutbox(ctx, "trail", delivery.Seq{}, upto, nil); err != nil {
+			if _, err := s.AckOutbox(ctx, "trail", delivery.Seq{}, upto, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
 		if got := cursor(t, s, "trail"); got.AuditAcked != 9 {
 			t.Errorf("the cursor of the audit trail = %d, want 9", got.AuditAcked)
 		}
-		if err := s.AckOutbox(ctx, "slow", delivery.Seq{}, 5, nil); err != nil {
+		if _, err := s.AckOutbox(ctx, "slow", delivery.Seq{}, 5, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := cursor(t, s, "slow"); got.AuditAcked != 0 {
 			t.Errorf("a target that is not sent the trail has passed %d of it", got.AuditAcked)
 		}
 
-		if err := s.AckOutbox(ctx, "missing", rows[0].Seq, 0, nil); !errors.Is(err, domain.ErrEntityNotFound) {
+		if _, err := s.AckOutbox(ctx, "missing", rows[0].Seq, 0, nil); !errors.Is(err, domain.ErrEntityNotFound) {
 			t.Errorf("an acknowledgement for a target that is not there = %v", err)
 		}
 		// Results are of replication: a webhook has none to give.
 		result := delivery.Result{Seq: rows[5].Seq, Status: object.ReplicationCompleted}
-		if err := s.AckOutbox(ctx, "slow", delivery.Seq{}, 0, []delivery.Result{result}); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := s.AckOutbox(ctx, "slow", delivery.Seq{}, 0, []delivery.Result{result}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("a result from a webhook = %v", err)
 		}
 	})
@@ -1260,7 +1268,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 			{Bucket: "missing", Key: "k", Version: object.VersionRef{Null: true}, Status: object.ReplicationFailed},
 			{Seq: delivery.Seq{Index: ^uint64(0)}, Status: object.ReplicationCompleted},
 		}
-		if err := s.AckOutbox(ctx, "site-b", rows[1].Seq, 0, results); err != nil {
+		if _, err := s.AckOutbox(ctx, "site-b", rows[1].Seq, 0, results); err != nil {
 			t.Fatalf("AckOutbox with results: %v", err)
 		}
 		for name, tt := range map[string]struct {
@@ -1286,10 +1294,10 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		// acknowledgement.
 		acked := cursor(t, s, "site-b").Acked
 		bad := []delivery.Result{{Seq: rows[2].Seq, Status: object.ReplicationCompleted}, {Seq: rows[3].Seq, Status: object.ReplicationPending}}
-		if err := s.AckOutbox(ctx, "site-b", rows[4].Seq, 0, bad); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := s.AckOutbox(ctx, "site-b", rows[4].Seq, 0, bad); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("a result that says pending = %v", err)
 		}
-		if err := s.AckOutbox(ctx, "site-b", rows[4].Seq, 0, make([]delivery.Result, delivery.MaxAckResults+1)); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := s.AckOutbox(ctx, "site-b", rows[4].Seq, 0, make([]delivery.Result, delivery.MaxAckResults+1)); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("more results than an acknowledgement carries = %v", err)
 		}
 		if got := cursor(t, s, "site-b"); got.Acked != acked {
@@ -1300,7 +1308,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		}
 		// A row of another target names nothing for this one.
 		target(t, s, "site-c", delivery.KindS3)
-		if err := s.AckOutbox(ctx, "site-c", delivery.Seq{}, 0, []delivery.Result{{Seq: rows[2].Seq, Status: object.ReplicationFailed}}); err != nil {
+		if _, err := s.AckOutbox(ctx, "site-c", delivery.Seq{}, 0, []delivery.Result{{Seq: rows[2].Seq, Status: object.ReplicationFailed}}); err != nil {
 			t.Fatal(err)
 		}
 		if got := version(t, s, "photos", "claimed", object.VersionRef{ID: sampleVersionID(4)}); got.Replication != object.ReplicationPending {
@@ -1532,7 +1540,7 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		target(t, s, "site-b", delivery.KindS3)
 		newest := object.VersionRef{ID: sampleVersionID(4)}
 		result := delivery.Result{Bucket: "in-order", Key: "k", Version: newest, Status: object.ReplicationCompleted}
-		if err := s.AckOutbox(ctx, "site-b", delivery.Seq{}, 0, []delivery.Result{result}); err != nil {
+		if _, err := s.AckOutbox(ctx, "site-b", delivery.Seq{}, 0, []delivery.Result{result}); err != nil {
 			t.Fatalf("AckOutbox: %v", err)
 		}
 		if got := version(t, s, "in-order", "k", newest); got.Replication != object.ReplicationReplica {
@@ -1708,6 +1716,201 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 		}
 		if got := version(t, s, "vault", "ledger", ref); got.VersionID != stored.VersionID {
 			t.Errorf("the locked version = %+v", got)
+		}
+	})
+
+	t.Run("a delete marker has an ID", func(t *testing.T) {
+		t.Parallel()
+		s := replicaBucket(t, "copy")
+		if err := s.CreateBucket(ctx, bucket.Bucket{Name: "photos", CreatedAt: contractTime}); err != nil {
+			t.Fatal(err)
+		}
+		versioned(t, s, "photos")
+		null := replicaOf("copy", "k", 1, 100)
+		null.Replica.Null = true
+		put(t, s, null)
+		before := usage(t, s, "copy").Usage
+		// The copy of a marker without an ID would share its place with the
+		// null version of its key: refused at its sequence, below it and
+		// above it, as the null version or not, and nothing changed.
+		for _, seq := range []uint64{50, 100, 150} {
+			for _, asNull := range []bool{false, true} {
+				o := ports.DeleteOptions{At: contractTime, Replica: &object.Replica{From: sourceID, Seq: seq, Null: asNull}}
+				if _, err := s.DeleteObject(ctx, "copy", "k", o); !errors.Is(err, domain.ErrInvalidArgument) {
+					t.Errorf("the copy of a marker without an ID at %d (null: %t) = %v, want %v", seq, asNull, err, domain.ErrInvalidArgument)
+				}
+			}
+		}
+		if got := usage(t, s, "copy").Usage; got.UsageTotals != before.UsageTotals {
+			t.Errorf("refused copies changed the usage to %+v, was %+v", got.UsageTotals, before.UsageTotals)
+		}
+		if got, err := s.GetObject(ctx, "copy", "k"); err != nil || !got.Is(object.VersionRef{Null: true}) {
+			t.Errorf("after refused copies the key holds %+v, %v", got, err)
+		}
+		// A copy with an ID is taken, wherever it stands.
+		if _, err := s.DeleteObject(ctx, "copy", "k", ports.DeleteOptions{MarkerID: sampleVersionID(9), At: contractTime, Replica: &object.Replica{From: sourceID, Seq: 100}}); err != nil {
+			t.Errorf("the copy of a marker with an ID, at the sequence of the null version: %v", err)
+		}
+		// And so is the marker of a delete that says who deletes, which is
+		// every delete where all members know entry schema 5.
+		put(t, s, sized("photos", "k", 2, 10))
+		if _, err := s.DeleteObject(ctx, "photos", "k", ports.DeleteOptions{At: contractTime, By: "user/alice"}); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("a marker without an ID, by somebody = %v, want %v", err, domain.ErrInvalidArgument)
+		}
+		if got, err := s.GetObject(ctx, "photos", "k"); err != nil || got.DeleteMarker {
+			t.Errorf("after a refused delete the key holds %+v, %v", got, err)
+		}
+		if deleted, err := s.DeleteObject(ctx, "photos", "k", ports.DeleteOptions{MarkerID: sampleVersionID(8), At: contractTime, By: "user/alice"}); err != nil || deleted.Marker == nil {
+			t.Errorf("a delete with an ID for its marker = %+v, %v", deleted, err)
+		}
+	})
+
+	t.Run("a result by version is of a bucket that is sent to the target", func(t *testing.T) {
+		t.Parallel()
+		s := withBucket(t, "src", "src2", "other")
+		versioned(t, s, "src", "src2", "other")
+		for _, name := range []string{"site-b", "site-c", "site-z"} {
+			target(t, s, name, delivery.KindS3)
+		}
+		all := bucket.ReplicationRule{ID: "all", Enabled: true}
+		replicate(t, s, "src", "site-b", all)
+		replicate(t, s, "src2", "site-c", all)
+		versions := map[string]object.Version{}
+		for i, name := range []string{"src", "src2", "other"} {
+			versions[name] = put(t, s, sized(name, "k", byte(i+1), 10))
+		}
+		of := func(name string, status object.ReplicationStatus) delivery.Result {
+			return delivery.Result{Bucket: name, Key: "k", Version: versions[name].Ref(), Status: status}
+		}
+		status := func(name string) object.ReplicationStatus {
+			t.Helper()
+			return version(t, s, name, "k", versions[name].Ref()).Replication
+		}
+		for name, tt := range map[string]struct {
+			target string
+			result delivery.Result
+		}{
+			"a target that no document names":                {"site-z", of("src", object.ReplicationCompleted)},
+			"a bucket without a document":                    {"site-b", of("other", object.ReplicationFailed)},
+			"the version of a bucket sent to another target": {"site-b", of("src2", object.ReplicationCompleted)},
+			"a bucket that is not there":                     {"site-b", delivery.Result{Bucket: "missing", Key: "k", Version: object.VersionRef{Null: true}, Status: object.ReplicationFailed}},
+		} {
+			unrelated, err := s.AckOutbox(ctx, tt.target, delivery.Seq{}, 0, []delivery.Result{tt.result})
+			if err != nil || unrelated != 1 {
+				t.Errorf("%s: AckOutbox = %d not the target's, %v; want 1 and no refusal", name, unrelated, err)
+			}
+		}
+		if status("src") != object.ReplicationPending || status("src2") != object.ReplicationPending || status("other") != "" {
+			t.Errorf("results that were not their target's to give left %q, %q and %q", status("src"), status("src2"), status("other"))
+		}
+		for _, name := range []string{"src", "src2", "other"} {
+			want := int64(1)
+			if name == "other" {
+				want = 0
+			}
+			if got := usage(t, s, name).Usage; got.ReplicationPending != want || got.ReplicationFailed != 0 {
+				t.Errorf("%s counts %d pending and %d failed", name, got.ReplicationPending, got.ReplicationFailed)
+			}
+		}
+		// Beside results that are the target's, one that is not is passed
+		// over: the acknowledgement is taken, and says how many were.
+		rows := read(t, s, "site-b", 10)
+		unrelated, err := s.AckOutbox(ctx, "site-b", rows[len(rows)-1].Seq, 0, []delivery.Result{
+			of("other", object.ReplicationFailed), of("src", object.ReplicationFailed), of("src2", object.ReplicationCompleted),
+		})
+		if err != nil || unrelated != 2 || status("src") != object.ReplicationFailed || status("src2") != object.ReplicationPending {
+			t.Errorf("a mixed acknowledgement = %d not the target's, %v; src %q, src2 %q", unrelated, err, status("src"), status("src2"))
+		}
+		if got := cursor(t, s, "site-b").Acked; got != rows[len(rows)-1].Seq {
+			t.Errorf("a mixed acknowledgement left the cursor at %s", got)
+		}
+		if unrelated, err := s.AckOutbox(ctx, "site-c", delivery.Seq{}, 0, []delivery.Result{of("src2", object.ReplicationCompleted)}); err != nil || unrelated != 0 ||
+			status("src2") != object.ReplicationCompleted {
+			t.Errorf("the result of the bucket's own target = %d not the target's, %v; %q", unrelated, err, status("src2"))
+		}
+		// The configuration is the one that is stored when the
+		// acknowledgement is applied.
+		if err := s.SetBucketConfig(ctx, "src", bucket.ConfigReplication, nil); err != nil {
+			t.Fatal(err)
+		}
+		if unrelated, err := s.AckOutbox(ctx, "site-b", delivery.Seq{}, 0, []delivery.Result{of("src", object.ReplicationCompleted)}); err != nil || unrelated != 1 ||
+			status("src") != object.ReplicationFailed {
+			t.Errorf("a result for a bucket whose configuration was removed = %d not the target's, %v; %q", unrelated, err, status("src"))
+		}
+	})
+
+	t.Run("a target goes on admitting the buckets that name it", func(t *testing.T) {
+		t.Parallel()
+		s := withBucket(t, "photos", "logs-eu")
+		target(t, s, "hook", delivery.KindWebhook, "photos", "logs-*")
+		notify(t, s, "photos", rule("all", "hook"))
+		notify(t, s, "logs-eu", rule("all", "hook"))
+		replaced := func(buckets ...string) error {
+			tg := SampleTarget("hook", delivery.KindWebhook)
+			tg.Buckets = buckets
+			return s.PutTarget(ctx, tg, noAudit)
+		}
+		for name, buckets := range map[string][]string{
+			"narrowed to one of the two":   {"photos"},
+			"narrowed to the other":        {"logs-*"},
+			"closed to every bucket":       nil,
+			"open to buckets nobody named": {"elsewhere"},
+		} {
+			if err := replaced(buckets...); !errors.Is(err, domain.ErrEntityInUse) {
+				t.Errorf("a target %s = %v, want %v", name, err, domain.ErrEntityInUse)
+			}
+		}
+		if got, err := s.GetTarget(ctx, "hook"); err != nil || len(got.Buckets) != 2 || got.Refs != 2 {
+			t.Errorf("after refused changes the target is open to %v with %d references, %v", got.Buckets, got.Refs, err)
+		}
+		for name, buckets := range map[string][]string{
+			"widened to every bucket": {"*"},
+			"widened by one":          {"photos", "logs-*", "more"},
+			"written another way":     {"p*", "logs-eu"},
+		} {
+			if err := replaced(buckets...); err != nil {
+				t.Errorf("a target %s: %v", name, err)
+			}
+		}
+		// Once the document that needed it is gone, the list is narrowed.
+		if err := s.SetBucketConfig(ctx, "logs-eu", bucket.ConfigNotification, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := replaced("logs-*"); !errors.Is(err, domain.ErrEntityInUse) {
+			t.Errorf("a target narrowed past the bucket that still names it = %v", err)
+		}
+		if err := replaced("photos"); err != nil {
+			t.Errorf("a target narrowed after the document was removed: %v", err)
+		}
+		if err := s.SetBucketConfig(ctx, "photos", bucket.ConfigNotification, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := replaced(); err != nil {
+			t.Errorf("a target that nothing names, closed to every bucket: %v", err)
+		}
+	})
+
+	t.Run("a deployment has so many targets", func(t *testing.T) {
+		t.Parallel()
+		s := withBucket(t)
+		for i := range delivery.MaxTargets {
+			target(t, s, fmt.Sprintf("hook-%03d", i), delivery.KindWebhook)
+		}
+		if err := s.PutTarget(ctx, SampleTarget("one-more", delivery.KindS3), noAudit); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("one target more than a deployment has = %v, want %v", err, domain.ErrInvalidArgument)
+		}
+		if _, err := s.GetTarget(ctx, "one-more"); !errors.Is(err, domain.ErrEntityNotFound) {
+			t.Errorf("a target that was refused: %v", err)
+		}
+		// One that is there is replaced at the bound, and a place that was
+		// freed is taken again.
+		target(t, s, "hook-007", delivery.KindWebhook, "photos")
+		if err := s.DeleteTarget(ctx, "hook-000", noAudit); err != nil {
+			t.Fatal(err)
+		}
+		target(t, s, "one-more", delivery.KindS3)
+		if listed, err := s.ListTargets(ctx); err != nil || len(listed) != delivery.MaxTargets {
+			t.Errorf("ListTargets = %d targets, %v", len(listed), err)
 		}
 	})
 
@@ -1935,7 +2138,7 @@ func OutboxBoundContract(t *testing.T, bound int, open func(t *testing.T) Schema
 	if err != nil || len(mine) != 2 {
 		t.Fatalf("ReadOutbox = %d rows, %v", len(mine), err)
 	}
-	if err := s.AckOutbox(ctx, "live", mine[0].Seq, 0, nil); err != nil {
+	if _, err := s.AckOutbox(ctx, "live", mine[0].Seq, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1990,6 +2193,30 @@ func OutboxBoundContract(t *testing.T, bound int, open func(t *testing.T) Schema
 	}
 	if _, cursors = state(); !cursors["site-b"].ResyncNeeded {
 		t.Error("a resync that is still running cleared the need for one")
+	}
+	// Only the resync of a bucket that is sent to the target clears its
+	// mark: not that of a bucket without a replication configuration, and
+	// not one for a target the configuration does not name.
+	if err := s.CreateBucket(ctx, bucket.Bucket{Name: "elsewhere", CreatedAt: contractTime}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutTarget(ctx, SampleTarget("site-c", delivery.KindS3), noAudit); err != nil {
+		t.Fatal(err)
+	}
+	for name, done := range map[string]bucket.Resync{
+		"a bucket that is sent nowhere":             {Bucket: "elsewhere", Target: "site-b", State: bucket.ResyncDone},
+		"a target the configuration does not name":  {Bucket: "photos", Target: "site-c", State: bucket.ResyncDone},
+		"a bucket that is sent nowhere, for site-c": {Bucket: "elsewhere", Target: "site-c", State: bucket.ResyncDone},
+	} {
+		if err := s.PutResync(ctx, done); err != nil {
+			t.Fatalf("%s: PutResync = %v", name, err)
+		}
+		if got, err := s.GetResync(ctx, done.Bucket); err != nil || got != done {
+			t.Errorf("%s: the record is %+v, %v", name, got, err)
+		}
+		if _, cursors = state(); !cursors["site-b"].ResyncNeeded {
+			t.Errorf("%s: its resync, done, cleared the mark of site-b", name)
+		}
 	}
 	record.State = bucket.ResyncDone
 	if err := s.PutResync(ctx, record); err != nil {

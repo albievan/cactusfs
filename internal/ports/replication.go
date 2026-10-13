@@ -40,7 +40,11 @@ type ReplicationStore interface {
 	// PutResync stores how far the resync of a bucket has come, in place
 	// of what was stored. A record that says the walk is done
 	// (bucket.ResyncDone) also clears delivery.Cursor.ResyncNeeded of its
-	// target. The error wraps domain.ErrBucketNotFound,
+	// target, when the replication configuration of the bucket names
+	// that target. The mark is of the target and not of the bucket: one
+	// bucket that is done clears it for all that are sent there, so who
+	// resyncs goes through every bucket of the target before it says
+	// "done" of the last. The error wraps domain.ErrBucketNotFound,
 	// domain.ErrEntityNotFound when there is no such target, and
 	// domain.ErrInvalidArgument for a record that bucket.Resync.Validate
 	// refuses.

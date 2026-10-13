@@ -32,3 +32,16 @@ func HoldStateForTest(s *Store) (release func()) {
 // PolicyPageBuckets is the most buckets one page of
 // LocalConfig.BucketPolicies reads.
 const PolicyPageBuckets = policyPageBuckets
+
+// SetOutboxBoundForTest makes the outbox of a store hold so many rows in
+// place of delivery.MaxOutboxRows. The bound is part of the replicated
+// format: every member of a cluster under test is given the same.
+func SetOutboxBoundForTest(s *Store, rows uint64) {
+	setOutboxBound(s.fsm, rows)
+}
+
+func setOutboxBound(f *fsm, rows uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outboxRows = rows
+}

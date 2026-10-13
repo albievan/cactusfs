@@ -5,7 +5,13 @@
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found", points 1 to 5 and 7) and to the domain
-  and the ports of PLAN 8.0.4 and 8.0.5
+  and the ports of PLAN 8.0.4 and 8.0.5; 2026-10-13, to the state machine of PLAN 8.0.9:
+  the order of two versions at one sequence, what is decided before a key is looked at,
+  and two holes it found (the null version of before versions; a retention that has
+  passed); and to the review of PLAN 8.0.8 and 8.0.9 (ruled by the owner, 2026-10-13):
+  the copy of a marker has an ID, a result by version is of a bucket that is sent to
+  the target, when a resync clears the mark of its target, what "the order is total"
+  holds for, and what a lifecycle delete of a late proposer loses
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -110,6 +116,12 @@ with headers of our own:
   bucket kept versions, and it crosses by a resync. `replica` is said by whoever commits
   the version and is not kept: what is stored of it is the version's `Seq` and its
   status, `REPLICA`.
+- **The copy of a delete marker has an ID that is not all zeros**, whether it is the
+  null version of its key or not: one without is refused with `ErrInvalidArgument` and
+  changes nothing (ADR-0023, "A delete marker has an ID"). A marker of all zeros would
+  share its place with the null version of its key, and what the destination holds
+  would depend on which of the two arrived first. No source sends one: a marker is made
+  with a random ID, also where it becomes the null version of its key.
 
 **The destination refuses a replica request unless every one of these holds** - each
 refusal with nothing stored:
@@ -183,7 +195,39 @@ So the order of arrival does not matter. A retry, the live stream and a resync c
 interleave and arrive in any order: the same set of replica entries gives the same
 `objects`, `versions` and `versionids`, byte for byte (the property test of PLAN
 8.0.9). And a request that is sent twice is refused the second time with `ErrConflict`,
-which the source takes as "it is there".
+which the source takes as "it is there" - a refusal changes nothing, so nothing is
+counted twice.
+
+**The order is total.** A deployment that numbers its versions itself never has two of
+one key at one sequence, but a source at fault may send two. Of two versions at one
+sequence the newer is the one whose version ID is the lesser, byte for byte, the null
+version before every other - which is the order of the keys of `versions/<bucket>`
+(the key, the inverted sequence, the ID). Without it the current version of such a key
+would be whichever copy arrived first.
+
+**It is total over versions that differ in their sequence or their ID** - which is every
+two versions a source that works sends. Two copies under ONE version ID with different
+contents are not ordered by anything: the first to arrive is kept and the later is
+refused with `ErrConflict`, which its source reads as "it is there". So for those, and
+only for those, the destination depends on the order of arrival. Only a source at fault
+sends them - an ID is random and names one version - and the destination cannot tell
+which of the two is the version: it keeps one and says nothing false of the other, whose
+status at the source becomes `COMPLETED` for contents the destination does not have.
+Accepted; a destination that compared the entity tag of the copy with the one it holds
+could answer `rejected` instead, and that is the client's to add (PLAN 8.1.4), not the
+state's.
+
+**What the state says of the bucket is decided before anything of the key is looked
+at**, and before anything is made: an ordinary write into a replica bucket, a copy from
+another deployment, a copy into a bucket that is no replica, and a replica delete that
+names a version (`ErrInvalidArgument`: removing a version is never the copy of
+anything) are refused first, whatever the key holds, and leave the state as it was, byte
+for byte.
+
+In the usage of the bucket a copy is one version of its size more, `high` rises to its
+sequence, and what its key counts for among the objects of the bucket is read from where
+the copy was put: an older copy that arrives late is not the current version. A copy is
+held to the quota of the destination like any put.
 
 After promotion a version made at the destination gets
 `Seq = max(index, high + 1)` (ADR-0023), so it is the newest of its key whatever
@@ -208,7 +252,7 @@ purpose, and is accepted.
 |---|---|---|
 | a new version a rule matches, with its content type, user metadata, tags, retention and legal hold | yes | |
 | a delete marker made by a caller | when the rule says so (`DeleteMarkerReplication`) | S3's own default is no |
-| a delete marker made by a lifecycle rule (`by` is `service/lifecycle`) | **no** | each site expires by its own rules |
+| a delete marker made by a lifecycle rule (`by` is `service/lifecycle`) | **no** - but see below for one written at the upgrade | each site expires by its own rules |
 | a later change of the tags, retention or legal hold of a version | yes (PLAN 8.1.5; the first thing to be cut) | |
 | **a version removed for good** | **never** | a source that was taken over must not be able to purge the destination |
 | a version encrypted with a key of the customer's (SSE-C) | **no**: status `FAILED`, class `sse_c` | the key is not ours to use |
@@ -227,6 +271,18 @@ way past 5 GiB. Stale replica uploads of a key are aborted before a new one is b
 An object is resumed from the durable cursor - whole; a part is resumed only within
 one leader's time.
 
+**A lifecycle delete written as schema 4 loses `by`.** Who deleted is carried by an
+entry of schema 5 and left out below (ADR-0023). A proposer that learns of level 5 a
+moment late - the lifecycle worker of a node that has not yet seen the last member
+register - writes its delete as schema 4, without `by`; the state machine then cannot
+tell it from a caller's, and where the deciding rule sends markers on, the marker of
+that lifecycle delete is replicated like a caller's. The window is the moment between
+the last registration and the proposer seeing it, once in the life of a cluster, and
+needs a replication configuration to exist already - which needs level 5 itself, so in
+practice a delete that was decided before the upgrade ended and proposed after the
+first configuration was put. Nothing is lost: the destination gets a marker its own
+lifecycle rules would have made, earlier than it would have.
+
 ### Status
 
 Stored on the version, shown as `x-amz-replication-status` on GET and HEAD:
@@ -242,8 +298,11 @@ Stored on the version, shown as `x-amz-replication-status` on GET and HEAD:
 A status is written only on a version that still exists, and never over `REPLICA`.
 
 **A result names a row or a version** (ADR-0023): `{seq, status}` for the version of a
-row that is still in the outbox and was for this target, `{b, k, vid, status}` for the
-version itself. The live stream reports by row. **A resync reports by version**: what it
+row that is still in the outbox and was for this target as replication,
+`{b, k, vid, status}` for the version itself - **of a bucket whose stored replication
+configuration names the target that acknowledges, and of no other**: a result for a
+version of a bucket that is not sent to that target changes nothing, does not refuse the
+acknowledgement, and is counted in its answer, which the worker logs. The live stream reports by row. **A resync reports by version**: what it
 sends was there before the configuration, or its row was dropped at the bound, so there
 is no row to name, and without this such a version would stay `PENDING`, or without a
 status, although the other site has it. Results are taken only from a target of kind `s3`.
@@ -350,8 +409,20 @@ null version** - `x-cactusfs-replica-version-id: null`, `replica.null` true - an
 stored as the null version of its key there, at the source's sequence: what S3 does for
 objects that were there before. The cursor is stored after every pass
 (`replication.resync.put`, in `resync/<bucket>`: `bucket.Resync`, with `state` `running`
-or `done`), so a new leader goes on from it. A record whose `state` is `done` clears
-`resync_needed` of its target.
+or `done`, stored with `"v":1` before it like every record), so a new leader goes on from
+it. The record needs its bucket and its target to be there, and goes with its bucket. A record whose `state` is `done` clears
+`resync_needed` of its target **when the stored replication configuration of its bucket
+names that target**, and not otherwise: a walk through a bucket that is not sent there
+has sent it nothing.
+
+**The mark is of the target, not of the bucket.** `resync_needed` is one flag on the
+cursor of a target, and a resync is of one bucket: the record of one bucket that is done
+clears the mark for every bucket that is sent to that target, though another of them
+may have lost rows at the bound too. That is the limit of schema 5, and it is kept
+outside the state: **the worker resyncs every bucket whose replication configuration
+names the target, and writes `done` for the last of them only when all are through**
+(PLAN 8.1.6); until then it writes `running`. A mark for each pair of bucket and target
+would be a field more in the state, and a schema 6 (ADR-0023, "Open", 6).
 
 It is the way versions from before the configuration get across, and the way a target
 that lost rows at the bound of the outbox is made whole.
@@ -466,6 +537,20 @@ Defaults are applied until answered.
    of that source. The stricter answer - root holds none of the three actions that are
    granted by name only, and a user must be given them - would change what root can do
    to a governance retention today, and is the owner's to choose.
+6. **The null version of before versions cannot cross as it stands** (found at PLAN
+   8.0.9, for PLAN 8.1.6). A version written while its bucket kept no versions is stored
+   at sequence 0, as it always was; a replica's sequence is from 1 (`Replica.Validate`).
+   The ruling says that a null version is resynced "at the source's sequence", which for
+   exactly the versions it is about is 0, and refused. Default until ruled: the source
+   sends such a version at sequence 1 - below every version its bucket made since it
+   keeps versions, whose sequences are indexes of entries far above - and nothing of the
+   replicated format changes.
+7. **A retention that has passed at the destination refuses the copy** (found at PLAN
+   8.0.9, for PLAN 8.1.4). A copy travels with its retention, and Object Lock at the
+   destination refuses a retain-until date that is not in the future, by its own clock
+   - so a version whose retention ended before it was sent is refused with
+   `ErrInvalidArgument`, which the source reads as `rejected` and `FAILED`. Default
+   until ruled: the source leaves a retention out that has passed by its own clock.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode

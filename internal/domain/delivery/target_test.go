@@ -40,7 +40,7 @@ func sealedMark(mark string) iam.SealedSecret {
 
 func webhook() delivery.Target {
 	return delivery.Target{
-		Name: "hook", Kind: delivery.KindWebhook, Endpoint: "https://" + markEndpoint + ".example.com/in/" + markPath,
+		Name: "hook", Kind: delivery.KindWebhook, Endpoint: "https://" + markEndpoint + ".example.com", SealedPath: sealedMark(markPath),
 		Buckets: []string{"photos", "logs-*"}, Auth: delivery.Auth{Mode: delivery.AuthBearer},
 		Secret: sealedMark(markSealed), SignKey: sealedMark(markSigning),
 		CreatedAt: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC),
@@ -99,6 +99,19 @@ func TestTargetValidate(t *testing.T) {
 			x.Auth, x.Secret = delivery.Auth{Mode: delivery.AuthNone}, iam.SealedSecret{}
 		}),
 		"a webhook without a signing key": change(webhook(), func(x *delivery.Target) { x.SignKey = iam.SealedSecret{} }),
+		"a webhook without a path":        change(webhook(), func(x *delivery.Target) { x.SealedPath = iam.SealedSecret{} }),
+		"a webhook on a port":             change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com:8443" }),
+		"a webhook at an address of IPv6": change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://[2001:db8::1]:8443" }),
+		"a secret of a ciphertext alone": change(webhook(), func(x *delivery.Target) {
+			x.Secret = iam.SealedSecret{Ciphertext: []byte{1}}
+		}),
+		"sealed fields at their bounds": change(webhook(), func(x *delivery.Target) {
+			x.SealedPath = iam.SealedSecret{
+				KMSKeyID: strings.Repeat("k", delivery.MaxSealedKeyBytes), WrappedKey: make([]byte, delivery.MaxSealedKeyBytes),
+				Nonce: make([]byte, 64), Ciphertext: make([]byte, delivery.MaxSealedBytes),
+			}
+			x.Secret, x.SignKey = x.SealedPath, x.SealedPath
+		}),
 		"a webhook with a CA":             change(webhook(), func(x *delivery.Target) { x.CAPEM = bytes.Join([][]byte{cert, cert}, []byte("\n")) }),
 		"a webhook that admits no bucket": change(webhook(), func(x *delivery.Target) { x.Buckets, x.Audit = nil, true }),
 		"a NATS server":                   natsTarget(),
@@ -118,13 +131,32 @@ func TestTargetValidate(t *testing.T) {
 		many[i] = fmt.Sprintf("bucket-%d", i)
 	}
 	refused := map[string]delivery.Target{
-		"no name":                              change(webhook(), func(x *delivery.Target) { x.Name = "" }),
-		"a name in capitals":                   change(webhook(), func(x *delivery.Target) { x.Name = "Hook" }),
-		"no kind":                              change(webhook(), func(x *delivery.Target) { x.Kind = "" }),
-		"a kind there is not":                  change(webhook(), func(x *delivery.Target) { x.Kind = "kafka" }),
-		"no endpoint":                          change(webhook(), func(x *delivery.Target) { x.Endpoint = "" }),
-		"an endpoint in the clear":             change(webhook(), func(x *delivery.Target) { x.Endpoint = "http://" + markEndpoint + ".example.com/in" }),
-		"an endpoint with a user":              change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://" + markEndpoint + "@hooks.example.com/in" }),
+		"no name":                             change(webhook(), func(x *delivery.Target) { x.Name = "" }),
+		"a name in capitals":                  change(webhook(), func(x *delivery.Target) { x.Name = "Hook" }),
+		"no kind":                             change(webhook(), func(x *delivery.Target) { x.Kind = "" }),
+		"a kind there is not":                 change(webhook(), func(x *delivery.Target) { x.Kind = "kafka" }),
+		"no endpoint":                         change(webhook(), func(x *delivery.Target) { x.Endpoint = "" }),
+		"an endpoint in the clear":            change(webhook(), func(x *delivery.Target) { x.Endpoint = "http://" + markEndpoint + ".example.com" }),
+		"an endpoint with its path":           change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/in/" + markPath }),
+		"an endpoint that ends in a slash":    change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/" }),
+		"an endpoint with a slash too many":   change(webhook(), func(x *delivery.Target) { x.Endpoint = "https:///" + markPath }),
+		"an endpoint of a scheme and nothing": change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://" }),
+		"an endpoint of a port and no host":   change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://:8443" }),
+		"a NATS server of a port and no host": change(natsTarget(), func(x *delivery.Target) { x.Endpoint = "tls://:4222" }),
+		"a secret of a key and no ciphertext": change(webhook(), func(x *delivery.Target) { x.Secret.Ciphertext = nil }),
+		"a path of a nonce and no ciphertext": change(webhook(), func(x *delivery.Target) { x.SealedPath = iam.SealedSecret{Nonce: []byte{1}} }),
+		"a signing key of a name and nothing": change(webhook(), func(x *delivery.Target) { x.SignKey = iam.SealedSecret{KMSKeyID: "k"} }),
+		"a secret of the mode none, half there": change(webhook(), func(x *delivery.Target) {
+			x.Auth, x.Secret = delivery.Auth{}, iam.SealedSecret{WrappedKey: []byte{1}}
+		}),
+		"a NATS server with a path":            change(natsTarget(), func(x *delivery.Target) { x.SealedPath = sealedMark(markPath) }),
+		"another deployment with a path":       change(site(), func(x *delivery.Target) { x.SealedPath = sealedMark(markPath) }),
+		"a sealed path that is too long":       change(webhook(), func(x *delivery.Target) { x.SealedPath.Ciphertext = make([]byte, delivery.MaxSealedBytes+1) }),
+		"a secret that is too long":            change(webhook(), func(x *delivery.Target) { x.Secret.Ciphertext = make([]byte, delivery.MaxSealedBytes+1) }),
+		"a signing key with a key too long":    change(webhook(), func(x *delivery.Target) { x.SignKey.WrappedKey = make([]byte, delivery.MaxSealedKeyBytes+1) }),
+		"a sealed path with a name too long":   change(webhook(), func(x *delivery.Target) { x.SealedPath.KMSKeyID = strings.Repeat("k", delivery.MaxSealedKeyBytes+1) }),
+		"a secret with a nonce too long":       change(webhook(), func(x *delivery.Target) { x.Secret.Nonce = make([]byte, 65) }),
+		"an endpoint with a user":              change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://" + markEndpoint + "@hooks.example.com" }),
 		"an endpoint with a query":             change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/in?key=" + markEndpoint }),
 		"an endpoint with a fragment":          change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/in#" + markEndpoint }),
 		"an endpoint with a space":             change(webhook(), func(x *delivery.Target) { x.Endpoint = "https://hooks.example.com/ in" }),
@@ -176,6 +208,20 @@ func TestTargetValidate(t *testing.T) {
 			x.SignKey = sealedMark(markSigning)
 		}),
 	}
+	// A sealed field is set exactly when it has a ciphertext, also in a
+	// target that nobody validated: a key, a nonce or the name of a KMS key
+	// by itself is no secret and no path, and is not shown as one.
+	half := delivery.Target{
+		Name: "hook", Kind: delivery.KindWebhook, Endpoint: "https://hooks.example.com",
+		Secret: iam.SealedSecret{WrappedKey: []byte{1}}, SignKey: iam.SealedSecret{Nonce: []byte{1}}, SealedPath: iam.SealedSecret{KMSKeyID: "k"},
+	}
+	if shown := half.Shown(); half.SecretSet() || half.SignKeySet() || half.PathSet() || shown.SecretSet || shown.SignKeySet || shown.PathSet {
+		t.Errorf("sealed fields without a ciphertext are told as set: %+v", shown)
+	}
+	half.Secret.Ciphertext, half.SignKey.Ciphertext, half.SealedPath.Ciphertext = []byte{1}, []byte{1}, []byte{1}
+	if !half.SecretSet() || !half.SignKeySet() || !half.PathSet() {
+		t.Error("sealed fields with a ciphertext are told as not set")
+	}
 	for name, target := range refused {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -183,7 +229,7 @@ func TestTargetValidate(t *testing.T) {
 			if !errors.Is(err, domain.ErrInvalidArgument) {
 				t.Fatalf("Validate = %v, want %v", err, domain.ErrInvalidArgument)
 			}
-			for _, mark := range []string{markEndpoint, markSealed, markSigning} {
+			for _, mark := range []string{markEndpoint, markSealed, markSigning, markPath} {
 				if strings.Contains(err.Error(), mark) {
 					t.Errorf("the refusal tells what it must not: %v", err)
 				}
@@ -476,10 +522,14 @@ func TestTargetsAreShownByNameAndKind(t *testing.T) {
 	// A copy shares nothing with what it was made from.
 	clone := target.Clone()
 	clone.Buckets[0], clone.Secret.Ciphertext[0], clone.SignKey.Nonce[0] = "other", 'x', 'x'
-	if target.Buckets[0] != "photos" || target.Secret.Ciphertext[0] != 'M' || target.SignKey.Nonce[0] != 'M' {
+	clone.SealedPath.Ciphertext[0], clone.SealedPath.WrappedKey[0], clone.SealedPath.Nonce[0] = 'x', 'x', 'x'
+	if target.Buckets[0] != "photos" || target.Secret.Ciphertext[0] != 'M' || target.SignKey.Nonce[0] != 'M' ||
+		target.SealedPath.Ciphertext[0] != 'M' || target.SealedPath.WrappedKey[0] != 'M' || target.SealedPath.Nonce[0] != 'M' {
 		t.Error("a copy of a target shares with it")
 	}
-	if got := string(delivery.SecretAAD("hook")) + " " + string(delivery.SignKeyAAD("hook")); got != "target/hook/secret target/hook/sign_key" {
+	// Each sealed field is sealed with additional data of its own, so that
+	// one moved to another target or to another field does not open.
+	if got := string(delivery.SecretAAD("hook")) + " " + string(delivery.SignKeyAAD("hook")) + " " + string(delivery.PathAAD("hook")); got != "target/hook/secret target/hook/sign_key target/hook/path" {
 		t.Errorf("the additional data of the secrets: %q", got)
 	}
 }
@@ -593,12 +643,26 @@ func TestTargetOrigin(t *testing.T) {
 		{"https:/" + markPath, "", true},
 		{"", "", false},
 	} {
-		target := delivery.Target{Name: "hook", Kind: delivery.KindWebhook, Endpoint: tt.endpoint}
-		if got := target.Origin(); got != tt.origin || target.PathSet() != tt.pathSet || strings.Contains(got, markPath) {
-			t.Errorf("%q: Origin() = %q, PathSet() = %v; want %q, %v", tt.endpoint, got, target.PathSet(), tt.origin, tt.pathSet)
+		origin, path := delivery.SplitEndpoint(tt.endpoint)
+		if pathSet := path != "" && path != "/"; origin != tt.origin || pathSet != tt.pathSet || strings.Contains(origin, markPath) || origin+path != tt.endpoint {
+			t.Errorf("SplitEndpoint(%q) = %q, %q; want the origin %q and a path: %v", tt.endpoint, origin, path, tt.origin, tt.pathSet)
 		}
-		if shown := target.Shown(); shown.Origin != tt.origin || shown.PathSet != tt.pathSet {
+		// A target that nobody validated shows no more than that, and says
+		// it has a path exactly when a sealed one is kept with it.
+		target := delivery.Target{Name: "hook", Kind: delivery.KindWebhook, Endpoint: tt.endpoint}
+		if got := target.Origin(); got != tt.origin || target.PathSet() || strings.Contains(got, markPath) {
+			t.Errorf("%q: Origin() = %q, PathSet() = %v; want %q and no path", tt.endpoint, got, target.PathSet(), tt.origin)
+		}
+		target.SealedPath = sealedMark(markPath)
+		if shown := target.Shown(); shown.Origin != tt.origin || !shown.PathSet {
 			t.Errorf("%q: Shown() = %+v", tt.endpoint, shown)
+		}
+		// What the cut gives is what a target keeps: an endpoint Validate
+		// takes exactly when it is an origin of the scheme that names a
+		// host.
+		kept := delivery.Target{Name: "hook", Kind: delivery.KindWebhook, Endpoint: origin}
+		if err := kept.Validate(); (err == nil) != (strings.HasPrefix(origin, "https://") && origin != "https://") {
+			t.Errorf("a webhook at the origin %q: Validate = %v", origin, err)
 		}
 	}
 }
@@ -613,8 +677,12 @@ func FuzzTargetOrigin(f *testing.F) {
 	f.Add("https:///x")
 	f.Add("no scheme")
 	f.Fuzz(func(t *testing.T, endpoint string) {
+		origin, path := delivery.SplitEndpoint(endpoint)
 		target := delivery.Target{Name: "hook", Kind: delivery.KindWebhook, Endpoint: endpoint}
-		origin := target.Origin()
+		if target.Origin() != origin || origin+path != endpoint || target.PathSet() {
+			t.Fatalf("SplitEndpoint(%q) = %q, %q; Origin() = %q, PathSet() = %v", endpoint, origin, path, target.Origin(), target.PathSet())
+		}
+		pathSet := path != "" && path != "/"
 		if !strings.HasPrefix(endpoint, origin) {
 			t.Fatalf("Origin(%q) = %q is not its beginning", endpoint, origin)
 		}
@@ -625,8 +693,8 @@ func FuzzTargetOrigin(f *testing.F) {
 		if origin != "" && rest != "" && rest[0] != '/' {
 			t.Fatalf("Origin(%q) = %q ends before the host does", endpoint, origin)
 		}
-		if target.PathSet() != (rest != "" && rest != "/") {
-			t.Fatalf("PathSet(%q) = %v, the rest is %q", endpoint, target.PathSet(), rest)
+		if rest != path {
+			t.Fatalf("SplitEndpoint(%q): the path %q, the rest %q", endpoint, path, rest)
 		}
 		parsed, err := delivery.CheckEndpoint(delivery.KindWebhook, endpoint)
 		if err != nil {
@@ -637,8 +705,17 @@ func FuzzTargetOrigin(f *testing.F) {
 		if (parsed.Path == "") != (rest == "") {
 			t.Fatalf("CheckEndpoint(%q) finds the path %q, the cut %q", endpoint, parsed.Path, rest)
 		}
-		if parsed.PathSet() != target.PathSet() {
-			t.Fatalf("%q: a path by CheckEndpoint %v, by the cut %v", endpoint, parsed.PathSet(), target.PathSet())
+		if parsed.PathSet() != pathSet {
+			t.Fatalf("%q: a path by CheckEndpoint %v, by the cut %v", endpoint, parsed.PathSet(), pathSet)
+		}
+		// What the use case keeps of an endpoint it took - its origin, and
+		// the path sealed - is a target the state machine keeps.
+		kept := delivery.Target{Name: "hook", Kind: delivery.KindWebhook, Endpoint: origin}
+		if pathSet {
+			kept.SealedPath = sealedMark(markPath)
+		}
+		if err := kept.Validate(); err != nil {
+			t.Fatalf("a webhook at the origin of %q: %v", endpoint, err)
 		}
 	})
 }

@@ -22,10 +22,11 @@ import (
 // hexadecimal characters; and what is optional is left out when it is empty
 // or false.
 //
-// bucket.quota.put and bucket.usage.walk are applied in bucketusage.go. The
-// other five, and what an older command carries of schema 5 - that a version
-// is a replica, the two kinds of bucket configuration - are read and written
-// here and applied by nothing yet: see notYet.
+// bucket.quota.put and bucket.usage.walk are applied in bucketusage.go;
+// target.put and target.delete in targets.go; outbox.ack, and the rows every
+// change of an object appends, in outbox.go; bucket.replica.put,
+// replication.resync.put and what makes a version the copy of one of another
+// deployment in replica.go.
 const (
 	cmdSetBucketQuota   = "bucket.quota.put"
 	cmdWalkBucketUsage  = "bucket.usage.walk"
@@ -91,15 +92,22 @@ type targetAuthRecord struct {
 // sealed; the plaintext never enters the log. Refs is the store's to count
 // and CreatedAt the store's to keep for a target that exists: what an entry
 // says of either is not taken.
+//
+// Endpoint is the origin of the URL the target was defined with - scheme,
+// host, port - and EndpointPath its path, sealed through the KMS by the use
+// case before it proposed the entry: the path of a webhook may be its
+// credential, and neither the log nor the state ever holds one in the clear.
+// A target without a path has no EndpointPath.
 type targetRecord struct {
-	V        int      `json:"v"`
-	Name     string   `json:"name"`
-	Kind     string   `json:"kind"`
-	Endpoint string   `json:"endpoint"`
-	Region   string   `json:"region,omitempty"`
-	Subject  string   `json:"subject,omitempty"`
-	CAPEM    []byte   `json:"ca_pem,omitempty"`
-	Buckets  []string `json:"buckets"`
+	V            int           `json:"v"`
+	Name         string        `json:"name"`
+	Kind         string        `json:"kind"`
+	Endpoint     string        `json:"endpoint"`
+	EndpointPath *sealedRecord `json:"endpoint_path,omitempty"`
+	Region       string        `json:"region,omitempty"`
+	Subject      string        `json:"subject,omitempty"`
+	CAPEM        []byte        `json:"ca_pem,omitempty"`
+	Buckets      []string      `json:"buckets"`
 	// Audit says that the target is sent the audit trail.
 	Audit     bool             `json:"audit,omitempty"`
 	Auth      targetAuthRecord `json:"auth"`
@@ -114,7 +122,8 @@ func targetToRecord(t delivery.Target) targetRecord {
 	buckets := make([]string, len(t.Buckets))
 	copy(buckets, t.Buckets)
 	return targetRecord{
-		V: targetRecordVersion, Name: t.Name, Kind: string(t.Kind), Endpoint: t.Endpoint, Region: t.Region, Subject: t.Subject,
+		V: targetRecordVersion, Name: t.Name, Kind: string(t.Kind), Endpoint: t.Endpoint, EndpointPath: sealedToRecord(t.SealedPath),
+		Region: t.Region, Subject: t.Subject,
 		CAPEM: t.CAPEM, Buckets: buckets, Audit: t.Audit, Auth: targetAuthRecord{Mode: string(t.Auth.Mode), ID: t.Auth.ID},
 		Secret: sealedToRecord(t.Secret), SignKey: sealedToRecord(t.SignKey), Refs: t.Refs,
 		CreatedAt: t.CreatedAt.UTC(), UpdatedAt: t.UpdatedAt.UTC(),
@@ -123,7 +132,8 @@ func targetToRecord(t delivery.Target) targetRecord {
 
 func (r targetRecord) toDomain() delivery.Target {
 	return delivery.Target{
-		Name: r.Name, Kind: delivery.Kind(r.Kind), Endpoint: r.Endpoint, Region: r.Region, Subject: r.Subject,
+		Name: r.Name, Kind: delivery.Kind(r.Kind), Endpoint: r.Endpoint, SealedPath: r.EndpointPath.toDomain(),
+		Region: r.Region, Subject: r.Subject,
 		CAPEM: r.CAPEM, Buckets: r.Buckets, Audit: r.Audit, Auth: delivery.Auth{Mode: delivery.AuthMode(r.Auth.Mode), ID: r.Auth.ID},
 		Secret: r.Secret.toDomain(), SignKey: r.SignKey.toDomain(), Refs: r.Refs, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
@@ -211,7 +221,8 @@ type bucketReplicaCmd struct {
 }
 
 // resyncCmd is the record of the walk that sends another deployment what it
-// lacks of a bucket: bucket.Resync, every field always written.
+// lacks of a bucket: bucket.Resync, every field always written. It is stored
+// as resyncRecord, which says its version before it.
 type resyncCmd struct {
 	Bucket  string `json:"bucket"`
 	Target  string `json:"target"`
@@ -255,34 +266,4 @@ func (r *replicaRecord) toDomain() *object.Replica {
 		return nil
 	}
 	return &object.Replica{From: r.From, Seq: r.Seq, Null: r.Null}
-}
-
-// notYet reports, as a refusal, that an entry of schema 5 asks for what no
-// state machine applies yet: targets and the outbox (PLAN 8.0.8), replica
-// buckets, replicas and the record of a resync (PLAN 8.0.9). The entries are
-// read and written already, so that the schema is one schema; nothing
-// proposes one, because no binary announces schema 5 before all of it is
-// applied (MetadataVersion, PLAN 8.0.10). Each of those steps takes its rows
-// out of here, and TestWhatSchema5DoesNotApplyYet holds the list.
-//
-// A refusal and not a stop: the entry is in the log of every member alike,
-// and every member refuses it alike.
-func notYet(e entry) *applyResult {
-	var what string
-	switch {
-	case e.Type == cmdPutTarget || e.Type == cmdDeleteTarget || e.Type == cmdAckOutbox:
-		what = "targets and the outbox"
-	case e.SetBucketConfig != nil && (e.SetBucketConfig.Kind == bucket.ConfigNotification || e.SetBucketConfig.Kind == bucket.ConfigReplication):
-		what = "notification and replication documents"
-	case e.Type == cmdSetBucketReplica || e.Type == cmdPutResync:
-		what = "replica buckets and resyncs"
-	case e.PutObject != nil && e.PutObject.Replica != nil,
-		e.CompleteUpload != nil && e.CompleteUpload.Replica != nil,
-		e.DeleteVersion != nil && e.DeleteVersion.Replica != nil,
-		e.CreateUpload != nil && e.CreateUpload.ReplicaFrom != "":
-		what = "replicas"
-	default:
-		return nil
-	}
-	return refusal(domain.ErrUnavailable, "%s are not applied by this release yet", what)
 }

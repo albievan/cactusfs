@@ -10,6 +10,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -355,6 +356,12 @@ func applySetVersioning(tx *bbolt.Tx, cmd versioningCmd) (applyResult, error) {
 	if err := bucket.ValidateVersioningChange(bucket.Versioning(cmd.Status), b.ObjectLock); err != nil {
 		return applyResult{err: err}, nil
 	}
+	// A bucket that sends its versions to another deployment, or takes them
+	// from one, keeps versions (ADR-0026). Neither exists in a state that
+	// no entry of schema 5 was applied to.
+	if cmd.Status != string(bucket.VersioningEnabled) && (b.ReplicaFrom != "" || delivered(tx, b, bucket.ConfigReplication) != nil) {
+		return refuse(domain.ErrInvalidBucketState, "bucket %s is replicated, or is a replica, and keeps its versions", cmd.Bucket)
+	}
 	b.Versioning = cmd.Status
 	data, err := json.Marshal(*b)
 	if err != nil {
@@ -464,13 +471,16 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 		return applyResult{err: err}, nil
 	}
 	// What an answer names is never taken from an entry; nor is where the
-	// version stands in replication, which the state decides.
+	// version stands in replication, which the state decides. That the
+	// version is the copy of one of another deployment is said by the entry
+	// and is not kept: what is kept of it is its sequence and its status.
+	replica := v.Replica.toDomain()
 	v.Dropped, v.Replication, v.Replica = nil, "", nil
 	usage, err := keepUsage(tx, v.Bucket)
 	if err != nil {
 		return applyResult{}, err
 	}
-	removed, delta, refused, err := commitVersion(tx, b, &v, now, usage, true)
+	removed, delta, to, refused, err := commitVersion(tx, b, &v, now, usage, commit{admit: true, event: delivery.EventPut, replica: replica})
 	if err != nil {
 		return applyResult{}, err
 	}
@@ -486,6 +496,9 @@ func applyPutObject(tx *bbolt.Tx, v versionRecord, now applied) (applyResult, er
 		}
 	}
 	if err := usage.add(tx, delta, now); err != nil {
+		return applyResult{}, err
+	}
+	if err := tell(tx, now, delivery.EventPut, v, v.CreatedBy, to); err != nil {
 		return applyResult{}, err
 	}
 	if err := noteUpload(tx, v, now); err != nil {
@@ -541,9 +554,43 @@ func applyDeleteObject(tx *bbolt.Tx, cmd deleteObjectCmd, now applied) (applyRes
 	if err := usage.add(tx, delta, now); err != nil {
 		return applyResult{}, err
 	}
+	// A version removed for good is told, by whatever entry it went
+	// (outbox.go); this one says nothing of who removed it.
+	if b != nil {
+		if err := tellRemoved(tx, now, b, *previous, ""); err != nil {
+			return applyResult{}, err
+		}
+	}
 	return applyResult{previous: previous, events: []ports.Event{
 		{Type: ports.EventObjectDeleted, Data: objectEvent(*previous)},
 	}}, nil
+}
+
+// tellRemoved appends the row of a version that an entry removed for good.
+// Its removal is told to who asked to be told; it is never sent on to another
+// deployment (bucket.ReplicationConfig.Match).
+func tellRemoved(tx *bbolt.Tx, now applied, b *bucketRecord, removed versionRecord, by string) error {
+	to, err := consumersOf(tx, b, delivery.EventDelete, removed.Key, by, false, removed.Replication)
+	if err != nil {
+		return err
+	}
+	return tell(tx, now, delivery.EventDelete, removed, by, to)
+}
+
+// tellChanged appends the row of a later change of something that is kept
+// with a version - its tags, its retention, its legal hold - for a version
+// that is being, or was, sent to another deployment. Who made the change is
+// not said by the entry.
+func tellChanged(tx *bbolt.Tx, now applied, event delivery.Event, v versionRecord) error {
+	b, err := readBucket(tx, v.Bucket)
+	if err != nil || b == nil {
+		return err
+	}
+	to, err := consumersOf(tx, b, event, v.Key, "", false, v.Replication)
+	if err != nil {
+		return err
+	}
+	return tell(tx, now, event, v, "", to)
 }
 
 // applyDeleteVersion deletes an object, or one version of it.
@@ -558,17 +605,48 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 	if err := object.ValidateKey(cmd.Key); err != nil {
 		return applyResult{err: err}, nil
 	}
-	state := bucket.Versioning(b.Versioning)
-	h, err := openHistory(tx, cmd.Bucket, true)
-	if err != nil {
-		return applyResult{}, err
+	// What the state says of the bucket is decided before anything of the
+	// key is looked at, and before anything is made: a delete that would
+	// leave a delete marker is, in a replica bucket, the source's to make
+	// and nobody else's, and no other bucket takes the marker of a source.
+	// Removing one version for good is judged as everywhere - and is never
+	// the copy of anything (ADR-0026).
+	replica := cmd.Replica.toDomain()
+	if cmd.VersionRef != "" && replica != nil {
+		return refuse(domain.ErrInvalidArgument, "a replica of a delete marker names no version to remove")
 	}
+	if cmd.VersionRef == "" {
+		if refused := replicaAllowed(b, replica); refused != nil {
+			return *refused, nil
+		}
+	}
+	state := bucket.Versioning(b.Versioning)
 	// What the key counts for among the objects of the bucket before the
 	// delete and after it is read from "objects"; what the delete removes
 	// and makes is added by the branch that does it. One delta for the key.
 	usage, err := keepUsage(tx, cmd.Bucket)
 	if err != nil {
 		return applyResult{}, err
+	}
+	// A bucket is given its place in "versions" by the first delete that
+	// looks there, whether it is then refused or not: so the release of
+	// schema 4 leaves it, and so it stays for a bucket without a usage
+	// record, which is every bucket of a state below schema 5. A bucket with
+	// one, and the copy of a marker - both of schema 5 altogether - are
+	// decided on a history opened for reading, and forWriting is called
+	// before the first write: what is refused, and what finds nothing to
+	// delete, leaves nothing behind (as commitVersion has it).
+	late := usage.kept || replica != nil
+	h, err := openHistory(tx, cmd.Bucket, !late)
+	if err != nil {
+		return applyResult{}, err
+	}
+	forWriting := func() error {
+		if !late {
+			return nil
+		}
+		h, err = openHistory(tx, cmd.Bucket, true)
+		return err
 	}
 	before, err := usage.current(h.current, cmd.Key)
 	if err != nil {
@@ -610,6 +688,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		if refused := removable(target, now, cmd.Bypass); refused != nil {
 			return *refused, nil
 		}
+		if err := forWriting(); err != nil {
+			return applyResult{}, err
+		}
 		if err := h.remove(*target, storedKey); err != nil {
 			return applyResult{}, err
 		}
@@ -622,6 +703,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		// One version less; and another may be the current one now.
 		removes(&delta, target)
 		if err := keep(); err != nil {
+			return applyResult{}, err
+		}
+		if err := tellRemoved(tx, now, b, *target, cmd.By); err != nil {
 			return applyResult{}, err
 		}
 		return applyResult{previous: target, events: []ports.Event{
@@ -637,6 +721,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		if refused := removable(previous, now, false); refused != nil {
 			return *refused, nil
 		}
+		if err := forWriting(); err != nil {
+			return applyResult{}, err
+		}
 		if err := h.current.Delete([]byte(cmd.Key)); err != nil {
 			return applyResult{}, err
 		}
@@ -647,30 +734,51 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		if err := keep(); err != nil {
 			return applyResult{}, err
 		}
+		if err := tellRemoved(tx, now, b, *previous, cmd.By); err != nil {
+			return applyResult{}, err
+		}
 		return applyResult{previous: previous, events: []ports.Event{
 			{Type: ports.EventObjectDeleted, Time: cmd.At, Data: objectEvent(*previous)},
 		}}, nil
 	}
 
 	// The bucket keeps versions: the delete is itself a version, a marker.
+	// What the entry says of it is judged before anything is made.
+	markerID, err := object.ParseID(cmd.MarkerID)
+	if err != nil {
+		return refuse(domain.ErrInvalidArgument, "delete marker ID")
+	}
+	// A marker whose ID is all zeros would share its place in "versions"
+	// with the null version of its key - the key of that is the sequence and
+	// sixteen zeros too - so that what a key holds would depend on which of
+	// the two arrived first, and no row could tell of it. The copy of a
+	// marker is refused for it always, and any marker an entry of schema 5
+	// makes; below schema 5 the entry is applied as the release of that
+	// schema applies it, and no proposer ever wrote one.
+	if markerID.IsZero() && (replica != nil || now.schema >= entrySchema5) {
+		return refuse(domain.ErrInvalidArgument, "a delete marker has an ID that is not all zeros")
+	}
 	marker := versionRecord{
 		Bucket: cmd.Bucket, Key: cmd.Key, VersionID: cmd.MarkerID, ModifiedAt: cmd.At.UTC(),
 		// A marker has no data; the ID of none is all zeros.
 		DataID: object.ID{}.String(),
 		Seq:    usage.seq(now), DeleteMarker: true, Versioned: state == bucket.VersioningEnabled,
 	}
-	if _, err := object.ParseID(cmd.MarkerID); err != nil {
-		return refuse(domain.ErrInvalidArgument, "delete marker ID")
+	if replica != nil {
+		// The copy of a marker of the bucket's source: under the ID it has
+		// there - or as the null version - and at the sequence it has there.
+		marker.Versioned, marker.Seq, marker.Replication = !replica.Null, replica.Seq, string(object.ReplicationReplica)
 	}
-	if marker.Versioned {
-		if taken, _, err := h.find(cmd.Key, cmd.MarkerID); err != nil {
+	if marker.Versioned || replica != nil {
+		if taken, _, err := h.find(cmd.Key, refOf(marker)); err != nil {
 			return applyResult{}, err
 		} else if taken != nil {
-			return refuse(domain.ErrConflict, "version %s of %s/%s exists", cmd.MarkerID, cmd.Bucket, cmd.Key)
+			return refuse(domain.ErrConflict, "version %s of %s/%s exists", refOf(marker), cmd.Bucket, cmd.Key)
 		}
 	}
 	var removed *versionRecord
-	if state == bucket.VersioningSuspended {
+	var removedKey []byte
+	if state == bucket.VersioningSuspended && replica == nil {
 		// The marker is the null version; the null version there was goes.
 		old, storedKey, err := h.find(cmd.Key, object.NullVersion)
 		if err != nil {
@@ -679,21 +787,48 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 		if refused := removable(old, now, false); refused != nil {
 			return *refused, nil
 		}
-		if old != nil {
-			if err := h.remove(*old, storedKey); err != nil {
-				return applyResult{}, err
-			}
-			if err := dropData(tx, old); err != nil {
-				return applyResult{}, err
-			}
-			removed = old
+		removed, removedKey = old, storedKey
+	}
+	// Who the marker is for is known before it is stored: a marker that is
+	// sent on to another deployment is stored as one that is waiting to be.
+	// And a marker waits exactly when the row that sends it on is appended:
+	// one that cannot be told of - below schema 5, one whose ID is all zeros
+	// in a bucket that keeps versions - is for nobody (tellable).
+	to, err := consumersOf(tx, b, delivery.EventMarker, cmd.Key, cmd.By, replica != nil, "")
+	if err != nil {
+		return applyResult{}, err
+	}
+	if to, err = tellable(tx, now, delivery.EventMarker, marker, cmd.By, to); err != nil {
+		return applyResult{}, err
+	}
+	if replicated(to) {
+		marker.Replication = string(object.ReplicationPending)
+		delta.ReplicationPending++
+	}
+	// Nothing was changed so far, and nothing refuses from here on.
+	if err := forWriting(); err != nil {
+		return applyResult{}, err
+	}
+	if removed != nil {
+		if err := h.remove(*removed, removedKey); err != nil {
+			return applyResult{}, err
+		}
+		if err := dropData(tx, removed); err != nil {
+			return applyResult{}, err
 		}
 	}
-	if err := h.retire(cmd.Key); err != nil {
-		return applyResult{}, err
-	}
-	if err := h.putOlder(marker); err != nil {
-		return applyResult{}, err
+	if replica != nil {
+		// By its sequence, wherever that is among the versions of the key.
+		if err := h.placeReplica(marker); err != nil {
+			return applyResult{}, err
+		}
+	} else {
+		if err := h.retire(cmd.Key); err != nil {
+			return applyResult{}, err
+		}
+		if err := h.putOlder(marker); err != nil {
+			return applyResult{}, err
+		}
 	}
 	// A version of no bytes more, at its sequence; less the null version
 	// it replaced. A delete that makes a marker frees or costs nothing
@@ -702,6 +837,9 @@ func applyDeleteVersion(tx *bbolt.Tx, cmd deleteVersionCmd, now applied) (applyR
 	delta.Versions++
 	removes(&delta, removed)
 	if err := keep(); err != nil {
+		return applyResult{}, err
+	}
+	if err := tell(tx, now, delivery.EventMarker, marker, cmd.By, to); err != nil {
 		return applyResult{}, err
 	}
 	events := []ports.Event{{Type: ports.EventObjectDeleteMarkerCreated, Time: cmd.At, Data: objectEvent(marker)}}
@@ -820,6 +958,9 @@ func applySetRetention(tx *bbolt.Tx, cmd retentionCmd, now applied) (applyResult
 		return applyResult{}, err
 	}
 	stored := *target
+	if err := tellChanged(tx, now, delivery.EventRetention, stored); err != nil {
+		return applyResult{}, err
+	}
 	return applyResult{stored: &stored, events: []ports.Event{
 		{Type: ports.EventObjectRetentionChanged, Time: now.at, Data: objectEvent(stored)},
 	}}, nil
@@ -841,44 +982,77 @@ func applySetLegalHold(tx *bbolt.Tx, cmd legalHoldCmd, now applied) (applyResult
 		return applyResult{}, err
 	}
 	stored := *target
+	if err := tellChanged(tx, now, delivery.EventLegalHold, stored); err != nil {
+		return applyResult{}, err
+	}
 	return applyResult{stored: &stored, events: []ports.Event{
 		{Type: ports.EventObjectLegalHoldChanged, Time: now.at, Data: objectEvent(stored)},
 	}}, nil
 }
 
+// commit says how a version is committed: whether its bucket's quota is
+// asked, by what kind of change it comes about, and whether it is the copy of
+// a version of another deployment.
+type commit struct {
+	admit   bool
+	event   delivery.Event
+	replica *object.Replica
+}
+
 // commitVersion puts a new version of a key into the state, as the bucket
 // keeps versions at the time of the entry, and returns the version it removed
-// for good, if any. It fills in what the state decides: the sequence, and
-// what keeps the version. When it refuses, nothing was changed. The
-// references to stored data are the caller's to keep.
+// for good, if any. It fills in what the state decides: the sequence, what
+// keeps the version, and where it stands in replication. When it refuses,
+// nothing was changed. The references to stored data are the caller's to
+// keep.
 //
 // It also returns what the change does to the usage of the bucket: the
 // version it committed, less the one it removed, and what the key counts for
 // among the objects of the bucket after less before. The caller adds it to
 // the record (usageKeeper.add) - with the parts of the upload, when it is a
-// completion. With admit, a change whose net would take the bucket past its
-// quota is refused with domain.ErrQuotaExceeded before anything is changed
-// (ADR-0024); a completion asks for none, since it moves bytes that were
-// counted already and never adds any.
-func commitVersion(tx *bbolt.Tx, b *bucketRecord, v *versionRecord, now applied, usage usageKeeper, admit bool) (*versionRecord, bucket.UsageDelta, *applyResult, error) {
+// completion. With how.admit, a change whose net would take the bucket past
+// its quota is refused with domain.ErrQuotaExceeded before anything is
+// changed (ADR-0024); a completion asks for none, since it moves bytes that
+// were counted already and never adds any.
+//
+// And it returns who the change is for, by the documents of the bucket: the
+// caller appends the row (tell) when everything else of the entry is done. A
+// version that is sent on to another deployment is stored as waiting to be.
+//
+// With how.replica the version is the copy of one of the bucket's source
+// (replica.go): it keeps the ID it was given, is stored at the sequence it
+// has there, replaces nothing, and is the current version of its key only
+// when no version of the key outranks it. A replica bucket takes nothing
+// else, and no other bucket takes a replica (replicaAllowed).
+func commitVersion(
+	tx *bbolt.Tx, b *bucketRecord, v *versionRecord, now applied, usage usageKeeper, how commit,
+) (*versionRecord, bucket.UsageDelta, []delivery.Consumer, *applyResult, error) {
 	none := bucket.UsageDelta{}
 	// What keeps the version: what the put asked for, or else what the
 	// bucket gives every version. Decided here, on the time of this entry.
 	lock := v.Lock.toDomain()
 	switch {
 	case !b.ObjectLock && !lock.IsZero():
-		return nil, none, refusal(domain.ErrLockNotConfigured, "bucket %s was not created with Object Lock", v.Bucket), nil
+		return nil, none, nil, refusal(domain.ErrLockNotConfigured, "bucket %s was not created with Object Lock", v.Bucket), nil
 	case b.ObjectLock && now.at.IsZero():
-		return nil, none, refusal(domain.ErrUnavailable, "an entry without a time cannot be judged against Object Lock"), nil
+		return nil, none, nil, refusal(domain.ErrUnavailable, "an entry without a time cannot be judged against Object Lock"), nil
 	case b.ObjectLock && lock.Retention != nil:
 		if err := lock.Retention.Validate(now.at); err != nil {
-			return nil, none, &applyResult{err: err}, nil
+			return nil, none, nil, &applyResult{err: err}, nil
 		}
 	case b.ObjectLock && b.DefaultRetention != nil:
 		rule := bucket.DefaultRetention{Mode: object.RetentionMode(b.DefaultRetention.Mode), Days: b.DefaultRetention.Days, Years: b.DefaultRetention.Years}
 		lock.Retention = &object.Retention{Mode: rule.Mode, Until: rule.Until(now.at)}
 	}
 	v.Lock = lockToRecord(lock)
+	// The state decides who writes the bucket, whoever asks.
+	if refused := replicaAllowed(b, how.replica); refused != nil {
+		return nil, none, nil, refused, nil
+	}
+	to, err := consumersOf(tx, b, how.event, v.Key, v.CreatedBy, how.replica != nil, "")
+	if err != nil {
+		return nil, none, nil, nil, err
+	}
 	state := bucket.Versioning(b.Versioning)
 	// A bucket that keeps versions is given its place in "versions" by the
 	// first put that looks there, whether it is then refused or not: so the
@@ -887,11 +1061,12 @@ func commitVersion(tx *bbolt.Tx, b *bucketRecord, v *versionRecord, now applied,
 	// refuse by its quota, and a refusal by the quota leaves nothing behind:
 	// it is decided on a history opened for reading, and forWriting is
 	// called where the place was made already before - at the refusals that
-	// were always there, and before anything is written.
-	late := usage.kept && state != bucket.Unversioned
+	// were always there, and before anything is written. A replica is of
+	// schema 5 altogether, and no refusal of one leaves anything.
+	late := (usage.kept && state != bucket.Unversioned) || how.replica != nil
 	h, err := openHistory(tx, v.Bucket, state != bucket.Unversioned && !late)
 	if err != nil {
-		return nil, none, nil, err
+		return nil, none, nil, nil, err
 	}
 	forWriting := func() error {
 		if !late {
@@ -902,25 +1077,73 @@ func commitVersion(tx *bbolt.Tx, b *bucketRecord, v *versionRecord, now applied,
 	}
 	before, err := usage.current(h.current, v.Key)
 	if err != nil {
-		return nil, none, nil, err
+		return nil, none, nil, nil, err
 	}
-	// The version it commits is the current one of its key from here on.
+	// The version it commits is the current one of its key from here on -
+	// but for a replica, which is where its sequence puts it.
 	delta := bucket.UsageDelta{
 		Key: v.Key, Versions: 1, StoredBytes: countedSize(v.Size), Objects: 1 - before.objects, CurrentBytes: countedSize(v.Size) - before.bytes,
+	}
+	// A version waits to be sent on exactly when the row that sends it on is
+	// appended (tellable); whether it is stored under its ID or as the null
+	// version, which the row says, is decided by the bucket and the entry.
+	told := *v
+	told.Versioned = state == bucket.VersioningEnabled
+	if how.replica != nil {
+		told.Versioned = !how.replica.Null
+	}
+	if to, err = tellable(tx, now, how.event, told, v.CreatedBy, to); err != nil {
+		return nil, none, nil, nil, err
+	}
+	if replicated(to) {
+		v.Replication = string(object.ReplicationPending)
+		delta.ReplicationPending = 1
 	}
 	// admitted reports, as a refusal, that the change would take the bucket
 	// past its quota. It is asked when what the change removes is known and
 	// before anything is changed.
 	admitted := func(removed *versionRecord) *applyResult {
 		removes(&delta, removed)
-		if admit && !usage.admits(b.QuotaBytes, delta) {
+		if how.admit && !usage.admits(b.QuotaBytes, delta) {
 			return refusedByQuota(v.Bucket)
 		}
 		return nil
 	}
 	var removed *versionRecord
-	switch state {
-	case bucket.VersioningEnabled:
+	switch {
+	case how.replica != nil:
+		// The copy of a version of the bucket's source: with the ID and the
+		// time it was given - or as the null version of its key - at the
+		// sequence it has there, and never sent on.
+		v.Versioned, v.Seq, v.Replication = !how.replica.Null, how.replica.Seq, string(object.ReplicationReplica)
+		// A copy that arrives a second time is refused, and changes
+		// nothing: its source reads the refusal as "it is there".
+		if taken, _, err := h.find(v.Key, refOf(*v)); err != nil {
+			return nil, none, nil, nil, err
+		} else if taken != nil {
+			return nil, none, nil, refusal(domain.ErrConflict, "version %s of %s/%s exists", refOf(*v), v.Bucket, v.Key), nil
+		}
+		// Whether the copy becomes the current version of its key does not
+		// decide what it costs: its bytes are stored either way.
+		if refused := admitted(nil); refused != nil {
+			return nil, none, nil, refused, nil
+		}
+		if err := forWriting(); err != nil {
+			return nil, none, nil, nil, err
+		}
+		if err := h.placeReplica(*v); err != nil {
+			return nil, none, nil, nil, err
+		}
+		// What the key counts for among the objects of the bucket is read
+		// from where the copy was put, not assumed: an older copy that
+		// arrives late is not the current version.
+		after, err := usage.current(h.current, v.Key)
+		if err != nil {
+			return nil, none, nil, nil, err
+		}
+		delta.Objects, delta.CurrentBytes, delta.Seq = after.objects-before.objects, after.bytes-before.bytes, v.Seq
+		return nil, delta, to, nil, nil
+	case state == bucket.VersioningEnabled:
 		// The sequence is the index of the entry - or, in a bucket that
 		// holds versions at the sequences of another deployment, one above
 		// the greatest of them (bucket.Usage.NextSeq).
@@ -929,63 +1152,63 @@ func commitVersion(tx *bbolt.Tx, b *bucketRecord, v *versionRecord, now applied,
 		// key already has is a mistake, and two versions under one name
 		// would make one of them unreachable.
 		if taken, _, err := h.find(v.Key, v.VersionID); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		} else if taken != nil {
-			return nil, none, refusal(domain.ErrConflict, "version %s of %s/%s exists", v.VersionID, v.Bucket, v.Key), forWriting()
+			return nil, none, nil, refusal(domain.ErrConflict, "version %s of %s/%s exists", v.VersionID, v.Bucket, v.Key), forWriting()
 		}
 		if refused := admitted(nil); refused != nil {
-			return nil, none, refused, nil
+			return nil, none, nil, refused, nil
 		}
 		if err := forWriting(); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
 		if err := h.retire(v.Key); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
-	case bucket.VersioningSuspended:
+	case state == bucket.VersioningSuspended:
 		// The new version is the null version; the one there was goes.
 		v.Versioned, v.Seq = false, usage.seq(now)
 		old, storedKey, err := h.find(v.Key, object.NullVersion)
 		if err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
 		if refused := removable(old, now, false); refused != nil {
-			return nil, none, refused, forWriting()
+			return nil, none, nil, refused, forWriting()
 		}
 		if refused := admitted(old); refused != nil {
-			return nil, none, refused, nil
+			return nil, none, nil, refused, nil
 		}
 		if err := forWriting(); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
 		if old != nil {
 			if err := h.remove(*old, storedKey); err != nil {
-				return nil, none, nil, err
+				return nil, none, nil, nil, err
 			}
 			removed = old
 		}
 		if err := h.retire(v.Key); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
 	default:
 		v.Versioned, v.Seq = false, 0
 		if removed, err = readVersion(h.current, v.Key); err != nil {
-			return nil, none, nil, err
+			return nil, none, nil, nil, err
 		}
 		if refused := removable(removed, now, false); refused != nil {
-			return nil, none, refused, nil
+			return nil, none, nil, refused, nil
 		}
 		if refused := admitted(removed); refused != nil {
-			return nil, none, refused, nil
+			return nil, none, nil, refused, nil
 		}
 	}
 	delta.Seq = v.Seq
 	data, err := json.Marshal(v)
 	if err != nil {
-		return nil, none, nil, err
+		return nil, none, nil, nil, err
 	}
 	if err := h.current.Put([]byte(v.Key), data); err != nil {
-		return nil, none, nil, err
+		return nil, none, nil, nil, err
 	}
-	return removed, delta, nil, nil
+	return removed, delta, to, nil, nil
 }

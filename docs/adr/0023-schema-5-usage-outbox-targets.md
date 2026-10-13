@@ -11,7 +11,16 @@
   of an endpoint shown to nobody, the addresses never connected to, and a clamp that
   begins a recount; and on 2026-10-13, to the state machine of PLAN 8.0.7: how the walk
   goes through the uploads, and what a put costs; and to its review: what a size below
-  nothing counts for, and a walk that no stored key can stop
+  nothing counts for, and a walk that no stored key can stop; and that day to the ruling
+  that the path of a target's endpoint is sealed, and to the state machine of PLAN 8.0.8
+  and 8.0.9: the records of a target, a row, a cursor and a resync as they are stored,
+  what a `bucket.create` may carry, which entries append a row, what a deleted target
+  leaves, and the order of versions at one sequence (ADR-0026); and to the review of
+  8.0.8 and 8.0.9 (ruled by the owner, 2026-10-13): a delete marker has an ID; a result
+  by version is of a bucket that is sent to the target; a target goes on admitting the
+  buckets that name it, and the state keeps which they are (`targetrefs`); the number
+  of targets and of the targets a document names; the largest row and the outbox at its
+  bound, in bytes; and when a resync clears the mark of its target
 - **Builds on:** ADR-0003 (metadata), ADR-0005 (cluster, levels), ADR-0008 (the leader's
   time, versions and their sequence), ADR-0016 (entry schema 3, the level rule as it
   stands), ADR-0019 (entry schema 4, the schema byte as a switch)
@@ -66,6 +75,11 @@ below 5.
 | `replication.resync.put` | `put_resync` | `{bucket, target, state, key, version, scanned, sent}`: `bucket.Resync`. `state` is `running` or `done`; `key` and `version` are the last version dealt with (`version` as `object.VersionRef` writes one: `null` or 32 hexadecimal characters), both empty before the first; `sent` is never more than `scanned` | the same |
 
 `decodeEntry` refuses each of the seven in an entry that claims a schema below 5.
+
+The target record an entry carries is the stored record, with `"v":1`: its `endpoint` is
+the origin and its path is in `endpoint_path`, sealed by the use case before it proposed
+the entry. **No entry and no record holds the path of an endpoint in the clear** (ruled
+2026-10-13; "Targets", below).
 
 **Old commands with something new.**
 
@@ -125,10 +139,11 @@ reader reads.
 | Bucket | Key | Value |
 |---|---|---|
 | `bucketusage` | bucket name | `{"v":1,"exact","objects","current_bytes","versions","stored_bytes","upload_bytes","replication_pending","replication_failed","high","count":{"phase","cursor","objects","current_bytes","versions","stored_bytes","upload_bytes","replication_pending","replication_failed"}}`: what `bucket.Usage.Record` writes. Every field is always written but `count`, which is there only while a count or a recount is under way; `phase` is 1, 2 or 3 (below) |
-| `targets` | target name | `{"v":1,"name","kind","endpoint","region","subject","ca_pem","buckets":[pattern],"audit","auth":{"mode","id"},"secret":sealed,"sign_key":sealed,"refs","created_at","updated_at"}`; `kind` is `webhook`, `nats` or `s3`; `auth.mode` is `none`, `bearer`, `basic`, `token` or `sigv4` |
-| `outbox` | 10 bytes: the index of the entry (8, big-endian), then the number of the row within the entry (2) | `{"v":1,"e","b","k","vid","sz","et","at","by","to":[consumer]}`; `e` is `put`, `complete`, `marker`, `delete`, `tags`, `retention` or `legalhold`; a consumer is `n:<target>` (notification) or `r:<target>` (replication) |
-| `outboxcursor` | target name | `{"v":1,"from","acked","audit_acked","lost","resync_needed"}` |
-| `resync` | bucket name | the payload of `replication.resync.put` |
+| `targets` | target name | `{"v":1,"name","kind","endpoint","endpoint_path":sealed,"region","subject","ca_pem","buckets":[pattern],"audit","auth":{"mode","id"},"secret":sealed,"sign_key":sealed,"refs","created_at","updated_at"}`; `kind` is `webhook`, `nats` or `s3`; `auth.mode` is `none`, `bearer`, `basic`, `token` or `sigv4`. `endpoint` is the **origin** of the URL - scheme, host, port - and `endpoint_path` its path, sealed (below); a sealed field is `{"kms_key_id","wrapped_key","nonce","ciphertext"}`. Left out when empty: `endpoint_path`, `region`, `subject`, `ca_pem`, `audit`, `auth.id`, `secret`, `sign_key`, `refs`; `buckets` is always a list |
+| `targetrefs/<target>` | bucket name | the kinds of document of that bucket that name the target, a letter each, in this order: `n` for its notification rules, `r` for its replication configuration (so `n`, `r` or `nr`). A bucket of bbolt for each target that a document names, and none for a target that nothing names; `refs` of the target record is the number of letters under it. It says **which** buckets hold a target, which the count does not ("Targets") |
+| `outbox` | 10 bytes: the index of the entry (8, big-endian), then the number of the row within the entry (2) | `{"v":1,"e","b","k","vid","sz","et","at","by","to":[consumer]}`; `e` is `put`, `complete`, `marker`, `delete`, `tags`, `retention` or `legalhold`; a consumer is `n:<target>` (notification) or `r:<target>` (replication). `sz` and `et` are left out for a delete marker (and `sz` when it is 0), `by` when nobody was recorded; `at` is the time of the entry in UTC |
+| `outboxcursor` | target name | `{"v":1,"from","acked","audit_acked","lost","resync_needed"}`, every field always written; `from` and `acked` are places as 20 hexadecimal characters |
+| `resync` | bucket name | `{"v":1,` and then the payload of `replication.resync.put`: `"bucket","target","state","key","version","scanned","sent"}`, every field always written |
 | `meta` | `outboxcount`, `outboxdropped` | 8 bytes each, big-endian: the `rows` and the `dropped` of the outbox's state |
 
 | Existing record | New field | Written by |
@@ -142,6 +157,27 @@ reader reads.
 All of them are left out when empty, so a record that carries none of them is the
 record of schema 4. `replica` itself is not stored: what is kept of it is the version's
 `Seq` and its `replication`, which is `REPLICA`.
+
+The records the store encodes - a target, a row, a cursor, a resync, the two counts, and
+a bucket, a version and an upload with what schema 5 added - are pinned together by
+`internal/adapters/raftmeta/testdata/schema5-records.golden.txt`: what one small history
+leaves in the state, a line a record.
+
+**A `bucket.create` carries no document that names a target.** A `bucket.create` of
+schema 2 and above stores the `config` its entry carries, of any kind; no proposer ever
+wrote one, and the release of schema 4 applies such an entry alike. A `notification` or
+`replication` document is made by a `bucket.config.put` of schema 5 and by nothing else:
+only there is it judged against the targets it names, and counted by them. So
+
+- while the state is below schema 5, what a `bucket.create` carried under those two
+  names is stored as the release of schema 4 stores it, byte for byte, and **read by
+  nothing**: no row is appended by it, and nothing is refused for it;
+- the entry that makes the state schema 5 removes those two kinds from every bucket
+  record, in the same transaction (one read of every bucket record, once; it writes
+  none in a state that members wrote);
+- from then on a `bucket.create`, of whatever schema byte, is stored without them. No
+  member of the release before can be past that entry, so every member that applies a
+  later `bucket.create` stores the same record.
 
 ### The switch - and why it is not the schema byte
 
@@ -327,6 +363,47 @@ A row is validated as `delivery.Item` is: one row for a change, for all the cons
 has, and a target a consumer of it once at most. A target is of one kind, so a row is for
 it as `n:` or as `r:`, never both.
 
+**Which entries append a row**, each one row, whatever the schema byte of the entry
+(the switch above):
+
+| Entry | Row | `by` |
+|---|---|---|
+| `object.put` | `put`, of the version it commits | `created_by` of the version |
+| `upload.complete` | `complete`, of the version it commits | `created_by` |
+| `object.version.delete` that leaves a marker | `marker`, of the marker | `by` of the delete |
+| `object.version.delete` of one version, or in a bucket that keeps none | `delete`, of the version that went | `by` |
+| `object.delete` (schema 1) | `delete` | none |
+| `object.tags.put`, `object.retention.put`, `object.legalhold.put` | `tags`, `retention`, `legalhold` - for replication only, of a version whose status is not empty and not `REPLICA` | none: the entry does not say |
+
+A version that a put or a marker replaces where versions are not kept, or are suspended,
+is told by the row of what replaced it and has none of its own. A part, the creation or
+the abort of an upload, and an entry that was refused append nothing. In the row: the
+time is that of the entry, and for an entry of schema 1, which has none, that of the
+newest entry that had one; a size below nothing is told as 0, as it is counted; a name
+of an actor that `bucket.ValidateCreator` refuses, or that the schema of the entry does
+not carry, is left out, and so is an entity tag of more than 128 bytes
+(`delivery.MaxItemETag`), which nothing holds an entry to. **What cannot be a row is not
+appended**, by every member alike, and nothing else of the entry is undone - and **a
+version waits to be sent on exactly when the row that sends it on is appended**: whether
+a row can be kept is asked before the version is stored (`tellable`), so that nothing is
+`PENDING`, and counted so, for a row that is not there.
+
+**A delete marker has an ID.** A marker whose ID is all zeros would share its place in
+`versions/<bucket>` with the null version of its key - both keys end in the sequence and
+sixteen zeros - so that what the key holds, and what the bucket counts, would depend on
+which of the two arrived first; and no row could name it. So:
+
+- **the copy of a marker** (`replica`) with an ID of all zeros is refused with
+  `ErrInvalidArgument`, always, whatever its sequence and whether it is the null version
+  or not;
+- **any marker an entry of schema 5 makes** with such an ID is refused the same way -
+  which is every delete where all members know schema 5, since a delete that says who
+  deletes is written as schema 5. A delete that makes no marker (of one version, or in a
+  bucket that keeps none) is not asked for one;
+- **below schema 5 nothing changes**: the entry is applied as the release of that schema
+  applies it, byte for byte. No proposer ever wrote such a marker; one that a log holds
+  is stored, is told to nobody, and is not `PENDING`.
+
 **One log, one cursor a target.** The node that leads delivers: for each target it
 reads the rows after the target's cursor, in order, hands each to what delivers that
 kind of consumer, and acknowledges through Raft with `outbox.ack` every 100 rows or
@@ -347,9 +424,11 @@ never returned.
 
 - it is refused whole, with `ErrInvalidArgument` and nothing changed, when it carries
   more than 1 000 results, a result that `delivery.Result.Validate` refuses (a row and a
-  version both, neither, or a status that is not `COMPLETED` or `FAILED`), or **any
+  version both, neither, or a status that is not `COMPLETED` or `FAILED`), a place
+  (`upto`, a result's `seq`) that is not 20 lower-case hexadecimal characters, or **any
   result for a target that is not of kind `s3`**: results are of replication. A target
-  that is not there is `ErrEntityNotFound`;
+  that is not there is `ErrEntityNotFound`, and that is asked first: of a target that is
+  not there nothing else can be said;
 - **`upto` is clamped**: an `upto` beyond the last row there is counts as that row - and
   as the cursor's own place when the outbox is empty - so that no acknowledgement passes
   what was not written yet;
@@ -359,16 +438,41 @@ never returned.
   true` and of no other** (ADR-0025);
 - each result sets the `replication` of the version it names (ADR-0026). A result by
   `seq` names the version of that row, **when the row is still there and was for this
-  target as `r:`**; a result by `{b, k, vid, status}` names the version itself - that is
-  how a version a resync sent, or one whose row was dropped at the bound, gets its
-  status. Either way the status is written only on a version that still exists and is
-  not `REPLICA`; a result that names what is gone changes nothing and is no error. A
-  status that changes moves `replication_pending` and `replication_failed` of the
-  bucket's usage record;
+  target as `r:`**; a result by `{b, k, vid, status}` names the version itself, **when
+  the bucket is there and its stored replication configuration names this target** -
+  that is how a version a resync sent, or one whose row was dropped at the bound, gets
+  its status. Either way the status is written only on a version that still exists and
+  is not `REPLICA`; a result that names what is gone - a row that was trimmed or dropped,
+  a key or a version that is not there - changes nothing and is no error. A status that
+  changes moves `replication_pending` and `replication_failed` of the bucket's usage
+  record;
+- **a result that is well formed and is not this target's to give changes nothing, and
+  does not refuse the acknowledgement**: a row that was for another target, or for this
+  one as `n:`; a version of a bucket that is not there, that has no replication
+  configuration, or whose configuration names another target. The cursor moves, the
+  other results are taken, and the answer of the entry counts such results
+  (`unrelated`, left out when 0; `ports.Outbox.AckOutbox` returns it) for the worker to
+  log. Only what the first point lists - a result that is malformed - refuses the
+  whole. Without this rule any target of kind `s3` could mark a version of any bucket
+  `FAILED` or `COMPLETED` and move the counts of a bucket it is not sent;
 - it then trims rows at or below the lowest cursor of all targets, at most 1 000 an
   entry (`delivery.MaxOutboxTrim`).
 
-A bucket that is deleted leaves its rows to their targets.
+A bucket that is deleted leaves its rows to their targets: its deletion walks nothing of
+the outbox, takes the bucket out of `refs` and out of `targetrefs` of the targets its two
+documents named, and removes the record of its resync.
+
+**A target that is deleted** takes its cursor with it and leaves its rows where they
+are: they are cut as all rows are, when every target that is left has passed them. The
+cursor that held rows back may have been its own, so `target.delete` trims as an
+acknowledgement does - at most 1 000 rows, at or below the lowest cursor that is left;
+**with no target left every row is behind every target.** What one entry does not cut
+is cut by the next acknowledgement of any target; a deployment whose last target was
+deleted keeps what is left - at most the bound - until a target is defined again, whose
+first acknowledgement goes on cutting. A row that is dropped at the bound for a consumer
+whose target is gone is lost to nobody, and only the cursors of the consumers of a row
+are read when it is dropped: the cost of a drop does not grow with the number of
+targets.
 
 **The state of the outbox** as `ports.Outbox.OutboxCursors` returns it is `{cursors,
 rows, dropped}`: the cursor of every target in name order, how many rows the outbox
@@ -380,11 +484,38 @@ bound since the deployment began (`outboxdropped`).
 each) are. At the bound the oldest row is dropped, `outboxdropped` rises, and each
 consumer of that row that had not passed it gets `lost` raised by one - and
 `resync_needed` for a replication consumer (`Cursor.Dropped`). `resync_needed` is
-cleared by a `replication.resync.put` whose `state` is `done`, for the target it names.
+cleared by a `replication.resync.put` whose `state` is `done`, for the target it names,
+**when the stored replication configuration of the record's bucket names that target**
+(ADR-0026, "Resync"; the mark is of the target, see "Open", 6).
 **A target that cannot be reached never refuses a write and never grows the
 state without bound; past the bound it loses its oldest rows, and that is counted, said
-in its status, in a metric and in the audit trail.** At the bound the outbox is some
-hundreds of megabytes of the bbolt file, and of every snapshot.
+in its status, in a metric and in the audit trail.**
+
+**The bound is of rows, and a row has a largest size.** What a row carries is bounded
+by rules of bytes that apply holds every entry to:
+
+| Part of the row | Bound | Bytes in the record, at most |
+|---|---|---|
+| the key | 1 024 bytes of UTF-8 (`object.MaxKeyLength`) | 6 144: a character that the record writes as `\u00XX` - `<`, `>`, `&`, a control character - is six bytes for one |
+| the bucket | 63 bytes: a bucket of a longer name is given no `notification` or `replication` document (`bucket.MaxNameLength`; a `bucket.create` is not held to a name in apply) | 63 |
+| the entity tag | 128 bytes (`delivery.MaxItemETag`); a longer one is left out of the row | 768 |
+| who made the change | 256 bytes (`bucket.ValidateCreator`); a name that cannot be kept is left out | 1 536 |
+| the consumers | 16 notification targets, which is all one document names (`bucket.MaxDocumentTargets`), and the one target a bucket is sent on to; a name is 63 bytes | 17 x 68 - 1 = 1 155 |
+| everything else | the kind of change, the version, a size of 19 digits, the time to the nanosecond, the names of the fields | 164 |
+
+**The largest row is 9 830 bytes** (a `complete`; a `put` of the same is 9 825, pinned by
+`TestTheLargestRowOfTheOutbox`), and its key 10. **At the bound the outbox is at most
+1 000 000 x 9 840 bytes = 9.84 GB of keys and records** - and **more of the bbolt
+file**, which keeps a record of that size in whole pages (10 to 12 GB with pages of
+4 KiB) - **and as much of every snapshot.** That is the worst case, which needs every key of a million changes to
+be 1 024 angle brackets and every bucket to tell seventeen targets. A row as proposers
+write them - a key of some tens of bytes, an entity tag of 32 characters, one to three
+consumers - is 200 to 350 bytes, and a full outbox 0.2 to 0.35 GB. The bound is not of
+bytes: see "Open", 7.
+
+A drop at the bound reads and writes the cursors of the consumers of the row that goes
+and no others - at most 17 - and an acknowledgement reads the cursor of every target to
+find the lowest, of which there are at most 256 (`delivery.MaxTargets`).
 
 A cursor is made with its target and begins at the entry that made it (`from`): a
 target defined under a name that was used before is sent nothing of before. It stays
@@ -404,21 +535,48 @@ with JetStream, or another CactusFS deployment (`s3`).
 - **Each target lists the buckets that may use it** (`buckets`: names, or patterns with
   `*`). The list must be said; an empty list admits none.
 - **Apply refuses** a `notification` or `replication` document that names a target that
-  does not exist, is of a kind that does not fit, or does not admit the bucket. `refs`
-  counts the documents that name a target and follows put, replace, removal and the
-  deletion of a bucket; a target with `refs > 0` cannot be deleted (`ErrEntityInUse`).
+  does not exist, is of a kind that does not fit, or does not admit the bucket; one that
+  names more than 16 targets (`bucket.MaxDocumentTargets`, a rule of the canonical
+  document); and any such document for a bucket whose name is longer than 63 bytes.
+  `refs` counts the documents that name a target and follows put, replace, removal and
+  the deletion of a bucket; a target with `refs > 0` cannot be deleted
+  (`ErrEntityInUse`). **`targetrefs/<target>` says which buckets those documents are
+  of**, and is kept by the same function, in the same transaction: a document that is
+  put, replaced or removed, and a bucket that is deleted, move the bucket's letter there
+  as they move the count, and a target that is deleted takes what is left of its place
+  with it.
 - **A target that documents name cannot change its kind** (`ErrEntityInUse` while
   `refs > 0`): what was matched for a webhook is not to be handed to another
-  deployment. Everything else of a target is replaced whole by `target.put`, but for
-  three things that are the store's: `refs`, which it counts; `created_at`, which a
-  target that exists keeps; and the cursor.
+  deployment. **Nor can it stop admitting a bucket whose document names it**: a
+  `target.put` whose `buckets` no longer admit one of the buckets under
+  `targetrefs/<target>` is refused with `ErrEntityInUse` and changes nothing - the
+  document was judged against the list as it was, and nothing judges it again, so a
+  target narrowed past a bucket would go on being sent that bucket's changes. A list
+  that is widened, one that is written another way and admits the same buckets, and one
+  that is narrowed after the document that needed it was removed, are taken. The refusal
+  of the kind is decided first. Everything else of a target is replaced whole by
+  `target.put`, but for three things that are the store's: `refs`, which it counts;
+  `created_at`, which a target that exists keeps; and the cursor.
+- **A deployment has at most 256 targets** (`delivery.MaxTargets`): a `target.put` that
+  would define one more is refused with `ErrInvalidArgument`, as every bound of a
+  count that apply holds is; one that replaces a target that exists is taken at the
+  bound. Every acknowledgement and every `target.delete` reads the cursor of each
+  target, and the bound is what keeps that a known cost.
 - **Apply judges bytes; the use case judges what they mean.** `delivery.Target.Validate`
   runs in apply on members built with different releases of Go, so it decides by rules
   of bytes that are written out in the domain and calls no clock, no resolver and no
   parser of the standard library whose answer a release may change - not `net/url`, not
   `encoding/pem`, not `encoding/base64`, not `crypto/x509`: the name; the kind; an
   endpoint of 1 to 2 048 bytes of printable ASCII that begins with the scheme of the
-  kind and holds none of `@`, `?`, `#` and `\`; at most 1 000 `buckets`, each 1 to 63 of
+  kind, holds none of `@`, `?`, `#` and `\`, **has no slash behind `://`: it is an
+  origin, and its path is sealed**, and **names a host: something stands behind `://`,
+  and it does not begin with the colon of a port** (whether what stands there is a host
+  is `CheckEndpoint`'s to say); the sealed fields - `secret`, `sign_key`,
+  `endpoint_path` - by whether they are there and by their length alone (a ciphertext
+  of at most 8 KiB, `delivery.MaxSealedBytes`; a wrapped key and the name of its KMS key
+  of at most 1 KiB each). **A sealed field is there when it has a ciphertext**, and one
+  that has a wrapped key, a nonce or the name of a KMS key without a ciphertext is
+  refused: it is nothing that could be opened, and is neither a secret nor none; at most 1 000 `buckets`, each 1 to 63 of
   the characters of a bucket name and `*`, none twice; `ca_pem` of at most 64 KiB that
   is **framed** as certificates and as nothing else - lines ending in LF or CRLF; only
   empty lines outside a block; a block is the line `-----BEGIN CERTIFICATE-----`, one or
@@ -430,7 +588,8 @@ with JetStream, or another CactusFS deployment (`s3`).
   `none`, `token` or `basic`, a `subject` without wildcards and no `region`; `s3` has
   `sigv4`, a `region`, no `subject`, and is never sent the audit trail. A mode other
   than `none` needs a secret and `none` has none; `auth.id` is there for `basic` and
-  `sigv4` and only there; only a `webhook` has a `sign_key`. Whether the endpoint can be
+  `sigv4` and only there; only a `webhook` has a `sign_key`, and only a `webhook` an
+  `endpoint_path`. Whether the endpoint can be
   connected to and whether the certificates can be read is asked by the use case before
   the target is proposed (`delivery.CheckEndpoint`; `delivery.CheckCA`, which is where
   `encoding/pem` and `crypto/x509` are called). Whatever `CheckCA` takes, `Validate`
@@ -448,8 +607,18 @@ with JetStream, or another CactusFS deployment (`s3`).
   shown of a target is `delivery.Target.Shown`, a type of its own (`ShownTarget`) that
   has no field for a path or a secret, made by `Target.Origin`, which cuts by bytes at
   the first slash after `://`; every printed form of a `Target` and of an `Endpoint` -
-  `fmt`, `slog`, JSON - leaves the path out. The path is stored in the clear in the
-  target record (metadata is not encrypted at rest, as before) - see "Open".
+  `fmt`, `slog`, JSON - leaves the path out.
+- **The path of an endpoint is a secret, and is sealed** (ruled 2026-10-13, before the
+  codec of a target was fixed). The use case takes the URL the administrator sent, judges
+  it (`delivery.CheckEndpoint`), cuts it by bytes at the first slash behind `://`
+  (`delivery.SplitEndpoint`) and proposes the origin in the clear - what the placing of
+  an egress rule and a status need - and the path sealed through the KMS with the
+  additional data `target/<name>/path` (`delivery.PathAAD`), beside the secret and the
+  signing key. A path of a single slash, and none, is no path and no field. In the
+  domain `Target.Endpoint` is the origin and `Target.SealedPath` the blob;
+  `Target.PathSet` is whether there is one. **Apply never sees a path in the clear**: it
+  refuses an endpoint that has anything behind its host and port, and judges the sealed
+  field by its bytes. The worker opens the path when it dials.
 - **Secrets are sealed through the KMS exactly as the secrets of API keys are**
   (`iam.Seal`, ADR-0006, ADR-0010): a data key of their own, wrapped by the KMS key,
   with the additional data `target/<name>/secret` and `target/<name>/sign_key`, so that
@@ -576,17 +745,23 @@ somebody asks would make a quota wait for an operator.
   more into one with a record, with a quota or without. In time that is below what the
   runs differ by among themselves - 50 to 90 microseconds an entry when the drive is not
   waited for, in both trees - and nothing beside the 5 to 6 milliseconds the drive takes
-  to make an entry durable. The row of the outbox is not written yet (PLAN 8.0.8).
+  to make an entry durable. For the row (PLAN 8.0.8, `BenchmarkApplyPutWithARow`, the
+  same machine): into a bucket whose notification rules match every put, 340
+  allocations and 125 kB with one rule and 1 457 and 240 kB with a hundred, the document
+  being parsed at every put - 72 and 139 microseconds an entry when the drive is not
+  waited for. A bucket without a document reads nothing for it.
 - **A key with very many versions makes one long step of the walk**: a walk entry ends
   at a key boundary, so a key of a million versions is one apply of about four seconds,
   with every other change waiting. Accepted; it happens once a bucket, and at a
   recount.
-- The outbox is in the snapshot: up to some hundreds of megabytes at the bound.
+- The outbox is in the snapshot: 0.2 to 0.35 GB at the bound for rows as proposers
+  write them, and up to 9.84 GB of rows - 10 to 12 GB of the file - in the worst case
+  the rules of bytes allow ("The bound").
 - Rule matching, the two canonical documents and the rules of `bucket.Usage` are part
   of the replicated format.
 - Metadata is not encrypted at rest (as before): the outbox holds object keys and the
-  names of actors; a target record holds its endpoint in the clear and its secrets
-  sealed.
+  names of actors; a target record holds the origin of its endpoint in the clear, and
+  its path and its secrets sealed.
 - One slow target delays only itself. A target that many buckets use is one queue:
   what stalls it stalls all of them.
 - The whole state machine of three features lands before any of them can be used. If
@@ -625,15 +800,44 @@ Defaults are applied until answered.
    The cost: an administrator cannot read back what was typed, and changes the host by
    sending the whole URL again. The other answers are an action of its own
    (`admin:GetTargetEndpoint`, held by `cluster-admin`) or showing the path to whoever
-   holds `admin:PutTarget`; neither is planned. Not decided here either: whether the
-   path should be **sealed** through the KMS like the secret, so that it is not in the
-   clear in the metadata and its snapshots - that is a field of the target record, and
-   has to be ruled before the codec of PLAN 8.0.8 is written.
+   holds `admin:PutTarget`; neither is planned. **Ruled 2026-10-13: the path is sealed**
+   through the KMS like the secret, and is in the clear neither in the log nor in the
+   state nor in a snapshot ("Targets"). Whether an administrator should be able to read
+   it back stays open, and the default stays: nobody can.
 4. **Should a count that was clamped stop being called exact?** Default: no - the record
    stays exact, a recount begins in the same entry, and the clamp is counted. A quota
    therefore goes on being judged by a figure that is known to be wrong until the
    recount ends (at 0: it admits more than it should; at the bound: nothing). Only a
    fault of this code clamps.
+
+5. **May a result that names a version give a status to any version?** **Ruled
+   2026-10-13: no.** A result by `{b, k, vid, status}` is taken only for a version of a
+   bucket whose stored replication configuration names the target that acknowledges; any
+   other changes nothing, does not refuse the acknowledgement, and is counted in its
+   answer ("`outbox.ack`"). A version of before the configuration still gets its status
+   from a resync, which runs for the target the configuration names; the result of a
+   resync that outlived an edit of the configuration is passed over, and the worker logs
+   the count.
+6. **`resync_needed` is of a target, and a resync is of a bucket.** **Ruled 2026-10-13:**
+   a record that says `done` clears the mark of its target only when the stored
+   replication configuration of its bucket names that target. The mark itself stays of
+   the target: one bucket that is done clears it for every bucket that is sent there,
+   though another of them may have lost rows too. That limit is accepted for schema 5;
+   the worker of PLAN 8.1.6 resyncs every bucket whose configuration names the target
+   before it reports the last of them `done`, and a mark of each pair of bucket and
+   target would be a field more in the state and a schema 6.
+7. **Should the outbox be bounded in bytes?** It is bounded in rows, and in what a row
+   can be: 0.2 to 0.35 GB when it is full of rows as proposers write them, 9.84 GB of
+   rows in the worst case ("The bound"). Default: rows, as written - a bound in bytes
+   needs the sum of the sizes kept in the state and a drop that removes more than one
+   row. An operator who cannot spare the worst case has the two bounds that make it:
+   keys of 1 024 bytes are S3's, and `MaxDocumentTargets` could be lowered before schema
+   5 is announced.
+8. **A target beyond the bound is `ErrInvalidArgument`.** The 257th target is refused
+   with the sentinel every other bound of a count in apply uses (the results of an
+   acknowledgement, the rules of a document, the buckets of a target), and both APIs
+   answer 400. A sentinel of its own (`too_many_targets`, as sub-buckets have one) is a
+   wire name and two rows of the mappers of the inbound adapters; default: none.
 
 Ruled on 2026-10-12 and now in the text above: a result of `outbox.ack` may name a
 version as well as a row; the usage record carries `replication_pending` and

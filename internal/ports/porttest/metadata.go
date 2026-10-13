@@ -331,6 +331,18 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		return ports.DeleteResult{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
 	}
 	versions := m.objects[bucketName][key]
+	// What the state says of the bucket is decided before anything of the
+	// key is looked at.
+	if o.Version != nil && o.Replica != nil {
+		return ports.DeleteResult{}, fmt.Errorf("%w: a replica of a delete marker names no version to remove", domain.ErrInvalidArgument)
+	}
+	if o.Version == nil {
+		// What would leave a delete marker is, in a replica bucket, the
+		// source's to do and nobody else's.
+		if err := m.replicaAllowed(b, o.Replica); err != nil {
+			return ports.DeleteResult{}, err
+		}
+	}
 	if !o.Expect.IsZero() {
 		var subject *object.Version
 		for i := range versions {
@@ -341,16 +353,6 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		}
 		if subject == nil || subject.VersionID != o.Expect {
 			return ports.DeleteResult{}, fmt.Errorf("%w: %s/%s is not the version the delete was decided for", domain.ErrConflict, bucketName, key)
-		}
-	}
-	if o.Version != nil && o.Replica != nil {
-		return ports.DeleteResult{}, fmt.Errorf("%w: a replica of a delete marker names no version to remove", domain.ErrInvalidArgument)
-	}
-	if o.Version == nil {
-		// What would leave a delete marker is, in a replica bucket, the
-		// source's to do and nobody else's.
-		if err := m.replicaAllowed(b, o.Replica); err != nil {
-			return ports.DeleteResult{}, err
 		}
 	}
 	m.seq++
@@ -372,6 +374,14 @@ func (m *MemMetadata) DeleteObject(_ context.Context, bucketName, key string, o 
 		m.store(bucketName, key, rest)
 		m.gone(removed, o.By)
 		return ports.DeleteResult{Removed: removed, RemovedParts: m.forget(removed)}, nil
+	}
+	// A marker whose ID is all zeros would share its place with the null
+	// version of its key. The copy of one is refused, and so is the marker of
+	// a delete that says who deletes - which is every delete where all
+	// members know entry schema 5; one that says neither is taken as the
+	// releases before took it.
+	if o.MarkerID.IsZero() && (o.Replica != nil || o.By != "") {
+		return ports.DeleteResult{}, fmt.Errorf("%w: a delete marker has an ID that is not all zeros", domain.ErrInvalidArgument)
 	}
 	marker := object.Version{
 		Bucket: bucketName, Key: key, VersionID: o.MarkerID, ModifiedAt: o.At.UTC(), Seq: m.sequence(bucketName),

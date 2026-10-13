@@ -9,6 +9,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -23,10 +24,16 @@ const (
 // state machine checks that it is of a kind there is and of a size it keeps.
 //
 // Which kinds there are depends on the schema of the entry, not on the
-// binary: tag rules exist from schema 3 on. In an entry of an older schema
-// that kind is refused, exactly as the binary of that schema refuses it, so
-// that the two never disagree about an entry; bucket.ValidConfigKind stays
-// the list of schema 2.
+// binary: tag rules exist from schema 3 on, and the notification rules and
+// the replication configuration from schema 5 on. In an entry of an older
+// schema such a kind is refused, exactly as the binary of that schema refuses
+// it, so that the two never disagree about an entry; bucket.ValidConfigKind
+// stays the list of schema 2.
+//
+// The two kinds of schema 5 are the exception to "what a document means is
+// the business of whoever reads it": the state machine reads them, to match
+// every change of an object by (outbox.go), so it takes them only as the
+// bytes their parsers write and judges the targets they name (targets.go).
 func applySetBucketConfig(tx *bbolt.Tx, cmd bucketConfigCmd, now applied) (applyResult, error) {
 	b, err := readBucket(tx, cmd.Bucket)
 	if err != nil {
@@ -35,10 +42,27 @@ func applySetBucketConfig(tx *bbolt.Tx, cmd bucketConfigCmd, now applied) (apply
 	switch {
 	case b == nil:
 		return refuse(domain.ErrBucketNotFound, "%s", cmd.Bucket)
-	case !bucket.ValidConfigKind(cmd.Kind) && (cmd.Kind != bucket.ConfigTagRules || now.schema < entrySchema3):
+	case !bucket.ValidConfigKind(cmd.Kind) && (cmd.Kind != bucket.ConfigTagRules || now.schema < entrySchema3) &&
+		(!deliveredKind(cmd.Kind) || now.schema < entrySchema5):
 		return refuse(domain.ErrInvalidArgument, "bucket configuration %q", cmd.Kind)
 	case len(cmd.Document) > bucket.MaxConfigBytes:
 		return refuse(domain.ErrInvalidArgument, "bucket configuration of %d bytes", len(cmd.Document))
+	}
+	if deliveredKind(cmd.Kind) {
+		// The two documents the state machine matches changes by (schema
+		// 5): taken in their canonical form only, and only when every
+		// target they name is there, fits and admits the bucket. The
+		// targets are counted by the documents that name them.
+		names, refused, err := checkDelivered(tx, b, cmd.Kind, cmd.Document)
+		if err != nil {
+			return applyResult{}, err
+		}
+		if refused != nil {
+			return *refused, nil
+		}
+		if err := replaceDelivered(tx, b, cmd.Kind, names); err != nil {
+			return applyResult{}, err
+		}
 	}
 	if len(cmd.Document) == 0 {
 		delete(b.Config, cmd.Kind)
@@ -81,6 +105,9 @@ func applySetTags(tx *bbolt.Tx, cmd tagsCmd, now applied) (applyResult, error) {
 		return applyResult{}, err
 	}
 	stored := *target
+	if err := tellChanged(tx, now, delivery.EventTags, stored); err != nil {
+		return applyResult{}, err
+	}
 	return applyResult{stored: &stored, events: []ports.Event{
 		{Type: ports.EventObjectTagsChanged, Time: now.at, Data: objectEvent(stored)},
 	}}, nil

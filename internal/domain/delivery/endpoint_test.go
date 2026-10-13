@@ -407,7 +407,15 @@ func FuzzCheckEndpoint(f *testing.F) {
 			}
 		}
 		// A target with this endpoint is one the state machine keeps.
-		target := delivery.Target{Name: "t", Kind: delivery.Kind(kind), Endpoint: endpoint, Subject: "s", Region: "r"}
+		// It keeps the origin; the path of a webhook is sealed beside it.
+		origin, path := delivery.SplitEndpoint(endpoint)
+		target := delivery.Target{Name: "t", Kind: delivery.Kind(kind), Endpoint: origin, Subject: "s", Region: "r"}
+		if got.PathSet() != (path != "" && path != "/") {
+			t.Fatalf("%q: a path by CheckEndpoint %v, the cut gives %q", endpoint, got.PathSet(), path)
+		}
+		if got.PathSet() {
+			target.SealedPath.Ciphertext = []byte{1}
+		}
 		switch target.Kind {
 		case delivery.KindWebhook:
 			target.Subject, target.Region = "", ""

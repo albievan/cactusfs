@@ -824,10 +824,13 @@ type wireResult struct {
 	// recount which found other totals than were kept (schema 5).
 	Usage []byte `json:"usage,omitempty"`
 	Drift bool   `json:"drift,omitempty"`
+	// Unrelated counts the results of an acknowledgement that were not its
+	// target's to give and changed nothing (schema 5); left out when none.
+	Unrelated int `json:"unrelated,omitempty"`
 }
 
 func encodeResult(r applyResult) ([]byte, error) {
-	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker, Parts: r.parts, Usage: r.usage, Drift: r.drift}
+	w := wireResult{Previous: r.previous, Stored: r.stored, Marker: r.marker, Parts: r.parts, Usage: r.usage, Drift: r.drift, Unrelated: r.unrelated}
 	if r.err != nil {
 		w.Codes, w.Message = domain.Codes(r.err), r.err.Error()
 		if len(w.Codes) == 0 {
@@ -843,7 +846,7 @@ func decodeResult(data []byte) (applyResult, error) {
 	if err := json.Unmarshal(data, &w); err != nil {
 		return applyResult{}, fmt.Errorf("malformed answer from the metadata leader: %w", err)
 	}
-	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker, parts: w.Parts, usage: w.Usage, drift: w.Drift}
+	r := applyResult{previous: w.Previous, stored: w.Stored, marker: w.Marker, parts: w.Parts, usage: w.Usage, drift: w.Drift, unrelated: w.Unrelated}
 	if len(w.Codes) > 0 {
 		r.err = domain.FromCodes(w.Codes, w.Message)
 	}
