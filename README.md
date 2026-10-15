@@ -109,7 +109,7 @@ Said plainly, so that nobody finds out by trying:
   `501 Not Implemented`. Events are published inside the process only;
   there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
   stores.
-- **Planned, not built:** the console's preview of PDF, DOCX and XLSX objects (Goal O: images, text, CSV and JSON are previewed in a dialog of the object's opened row; those three kinds offer only a download yet); a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
+- **Planned, not built:** the console's preview of DOCX and XLSX objects (Goal O: images, text, CSV, JSON and PDF are previewed in a dialog of the object's opened row; those two kinds offer only a download yet); a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
   bucket's policy through the S3 API only.
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
   the port and the replicated store exist. No use case, no API and no console screen
