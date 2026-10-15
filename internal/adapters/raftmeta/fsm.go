@@ -81,8 +81,8 @@ import (
 //
 // A state machine opens the states it can go on from: those up to the schema
 // of the newest entry it applies (fsm.supported). This binary announces
-// schema 4 (MetadataVersion), so it refuses a state of schema 5, and a
-// snapshot of one, as the release of schema 4 does.
+// schema 5 (MetadataVersion) and opens a state of schema 5 and a snapshot of
+// one; the release of schema 4 refuses both.
 const (
 	stateSchemaVersion = 1
 	stateSchemaTimed   = 2

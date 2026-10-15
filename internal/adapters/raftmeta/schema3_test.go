@@ -315,8 +315,8 @@ func TestVersionOf(t *testing.T) {
 			}
 		})
 	}
-	if MetadataVersion != entrySchema4 {
-		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema4)
+	if MetadataVersion != entrySchema5 {
+		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema5)
 	}
 }
 
@@ -674,14 +674,14 @@ func TestStateBecomesSchema3WithItsFirstEntryOfSchema3(t *testing.T) {
 	if got := stateSchema(t, f); got != stateSchema3 {
 		t.Errorf("after reopening: state schema %d", got)
 	}
-	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema4+1) }); err != nil {
+	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema5+1) }); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema4+1, err, domain.ErrUnsupportedFormat)
+		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema5+1, err, domain.ErrUnsupportedFormat)
 	}
 }
 
@@ -1452,8 +1452,12 @@ func TestTheTagsOfAnUploadAreBoundedInBytes(t *testing.T) {
 	}
 
 	// The store refuses what is no tag before it proposes anything: the
-	// state is not touched, and stays one the release before opens.
+	// state is not touched, and stays one the release before opens. (The
+	// store is held to schema 4: at level 5 the bucket below is itself an
+	// entry of schema 5, ADR-0023, and the state would say so before any of
+	// these calls.)
 	store := openStore(t, t.TempDir())
+	asSchema4Release(store)
 	ctx := t.Context()
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
 		t.Fatal(err)

@@ -155,6 +155,9 @@ type Store struct {
 	// stopped is closed when the state machine has stopped.
 	stopped  chan struct{}
 	stopOnce sync.Once
+	// scanRows is how many rows one call of ReadOutbox looks at: outboxScan.
+	// Tests lower it.
+	scanRows int
 }
 
 var (
@@ -183,7 +186,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	s := &Store{
 		root: root, logger: cfg.Logger, leaderWait: cfg.Timing.LeaderWait,
 		supported: MetadataVersion, versionOf: versionOf, stopped: make(chan struct{}),
-		clock: cfg.Clock, clustered: cfg.Cluster != nil,
+		clock: cfg.Clock, clustered: cfg.Cluster != nil, scanRows: outboxScan,
 	}
 	if s.clock == nil {
 		s.clock = wallClock{}

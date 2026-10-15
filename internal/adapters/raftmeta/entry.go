@@ -74,12 +74,12 @@ const (
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
 //
-// It is still 4: the codec reads and writes entries of schema 5, and the
-// state machine applies them when it is told that it may (fsm.supported,
-// which only tests raise), but this binary neither announces schema 5 nor
-// proposes an entry of it until all of its state machine is written (PLAN
-// 8.0.10).
-const MetadataVersion = entrySchema4
+// It is 5 (ADR-0023): every member that registers it applies everything of
+// schema 5, and once all have, the cluster writes it. The bytes of an entry
+// and of a stored record of schema 5 are fixed from here on
+// (testdata/schema5-entries.golden.txt, testdata/schema5-records.golden.txt):
+// a change of either needs a schema 6.
+const MetadataVersion = entrySchema5
 
 // Command types.
 const (
@@ -558,7 +558,7 @@ func writtenAt(e entry, needs, level byte) byte {
 		return max(needs, entrySchema4)
 	case cmdCreateBucket:
 		if level >= entrySchema5 {
-			return entrySchema5
+			return max(needs, entrySchema5)
 		}
 	}
 	return needs

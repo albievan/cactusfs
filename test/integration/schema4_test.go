@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.etcd.io/bbolt"
 
+	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/test/clustertest"
 )
 
@@ -101,10 +102,11 @@ func schema4Cluster(ctx context.Context, c *clustertest.Cluster, id string, root
 	return answer.Leader, levels, nil
 }
 
-// schema4Recorded is what a cluster does once every member has registered
-// that it knows schema 4 (ADR-0019), and the second half of a rolling upgrade
-// to it: a bucket has its creator, an upload and a download are in the record
-// of the bucket, and every member holds the same - asked through the
+// schema4Recorded is what a cluster whose nodes are all of this tree does
+// once every member has registered what this tree applies - schema 4 and the
+// schema after it (ADR-0019, ADR-0023) - and the second half of a rolling
+// upgrade to it: a bucket has its creator, an upload and a download are in
+// the record of the bucket, and every member holds the same - asked through the
 // management API of each node, and read from the state database of each
 // member while it is stopped. Then the leader of the metadata group is
 // stopped: the cluster goes on recording under another, the old leader
@@ -121,18 +123,33 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 	nodes := clustertest.Nodes
 	after := bucketName + "-after"
 
-	c.Eventually("every node to have registered that it knows schema 4", 2*time.Minute, func() bool {
+	// Every node is of this tree when this is asked, and registers what this
+	// tree applies: exactly that, which is the fourth schema or a later one.
+	// A release of a later schema does everything below as the release of
+	// schema 4 did (ADR-0023).
+	const mine = raftmeta.MetadataVersion
+	c.Eventually(fmt.Sprintf("every node to have registered that it knows schema %d", mine), 2*time.Minute, func() bool {
 		_, levels, err := schema4Cluster(ctx, c, "node4", root)
 		if err != nil || len(levels) != len(nodes) {
 			return false
 		}
 		for _, level := range levels {
-			if level != 4 {
+			if level != mine {
 				return false
 			}
 		}
 		return true
 	})
+	// And every node has seen it: a node writes a bucket in the schema it
+	// believes the cluster takes, and one that has not yet applied the last
+	// registration would write it below - without its creator, or as an
+	// entry of a schema below this tree's - for good.
+	for _, id := range nodes {
+		c.Eventually(fmt.Sprintf("%s to say the deployment is at level %d", id, mine), 2*time.Minute, func() bool {
+			view, _, err := settingsRead(t, c, id, root)
+			return err == nil && view.Cluster.MetadataLevel == mine
+		})
+	}
 
 	// awaitDownloads waits until a node says the latest downloads of the
 	// bucket are these rows. A node that cannot answer for a moment - there
@@ -205,7 +222,8 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 	}
 	// alike compares what the members hold of schema 4: the same bucket
 	// records and the same records of use, byte for byte, in states that all
-	// say schema 4.
+	// say the schema of this tree. (A bucket that is created at the level
+	// of this tree is an entry of its schema: of the fifth, ADR-0023.)
 	alike := func(when string, members map[string]schema4Member) schema4Member {
 		t.Helper()
 		first := members[nodes[0]]
@@ -214,8 +232,8 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 			if !read {
 				t.Fatalf("%s: the state of %s was not read", when, id)
 			}
-			if member.Schema != 4 || !member.Kept {
-				t.Errorf("%s: the state of %s says schema %d, a place for records of buckets' use: %t; want 4 and one", when, id, member.Schema, member.Kept)
+			if member.Schema != uint64(mine) || !member.Kept {
+				t.Errorf("%s: the state of %s says schema %d, a place for records of buckets' use: %t; want %d and one", when, id, member.Schema, member.Kept, mine)
 			}
 			if !maps.Equal(member.Activity, first.Activity) {
 				t.Errorf("%s: bucketactivity on %s:\n%v\non %s:\n%v", when, id, member.Activity, nodes[0], first.Activity)
@@ -372,8 +390,9 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 }
 
 // TestBucketActivityIsTheSameOnEveryMember: a cluster of four nodes of this
-// release is at level 4 from its formation - every node registers that it
-// knows schema 4 - and from then on records who creates a bucket and each
+// release is at this release's level from its formation - every node
+// registers that it knows schema 4, and the schema after it - and from then
+// on records who creates a bucket and each
 // bucket's latest uploads and downloads (ADR-0019). The record is derived by
 // every member from the log, so every member must hold the same: the three
 // that vote and the one that does not, asked through their APIs and read

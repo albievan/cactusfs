@@ -165,7 +165,7 @@ func everyCommand() map[string]entry {
 		"object.delete":                             {Type: cmdDeleteObject, DeleteObject: &deleteObjectCmd{Bucket: "b", Key: "k"}},
 		"root.set":                                  {Type: cmdSetRoot, SetRoot: &rootRecord{AccessKeyID: "ROOT"}},
 		"topology.set":                              {Type: cmdSetTopology, SetTopology: &topologyRecord{}},
-		"node.set":                                  {Type: cmdSetNode, SetNode: &nodeRecord{ID: "n1", MetadataVersion: MetadataVersion}},
+		"node.set":                                  {Type: cmdSetNode, SetNode: &nodeRecord{ID: "n1", MetadataVersion: entrySchema4}},
 		"node.remove":                               {Type: cmdRemoveNode, RemoveNode: &removeNodeCmd{ID: "n1"}},
 		"iam.user.put":                              {Type: cmdPutUser, IAM: &iamCmd{User: &userRecord{Name: "albie"}}},
 		"audit.append":                              {Type: cmdAppendAudit, IAM: &iamCmd{Audit: &auditRecord{Actor: "root"}}},
@@ -484,14 +484,18 @@ func TestStateBecomesSchema4WithItsFirstEntryOfSchema4(t *testing.T) {
 	}
 }
 
-// TestAStateOfSchema4IsReopenedAndANewerOneRefused: this binary opens what
-// it wrote; a state of a schema it does not know it refuses, as the release
-// of schema 3 refuses this one.
+// TestAStateOfSchema4IsReopenedAndANewerOneRefused: the release of schema 4
+// opens what it wrote; a state of a schema it does not know it refuses, as
+// the release of schema 3 refuses that one. (The store is held to schema 4:
+// on a node of this release on its own the bucket below is an entry of
+// schema 5, ADR-0023. What this release opens and refuses is
+// TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5.)
 func TestAStateOfSchema4IsReopenedAndANewerOneRefused(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ctx := t.Context()
 	store := openStore(t, dir)
+	asSchema4Release(store)
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedBy: "user/albie"}); err != nil {
 		t.Fatal(err)
 	}
@@ -513,6 +517,7 @@ func TestAStateOfSchema4IsReopenedAndANewerOneRefused(t *testing.T) {
 	// The log is replayed over the state at the next start, and changes
 	// nothing in it: the record is not written a second time.
 	store = openStore(t, dir)
+	asSchema4Release(store)
 	got, err := store.BucketActivities(ctx, []string{"b"})
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("after a restart = %+v, %v; want %+v", got, err, want)
@@ -534,7 +539,7 @@ func TestAStateOfSchema4IsReopenedAndANewerOneRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = root.Close() }()
-	if f, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
+	if f, err := openFSMOf(root, entrySchema4); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		if f != nil {
 			_ = f.close()
 		}
@@ -582,7 +587,8 @@ func TestAStateMachineHeldToSchema3StopsAtAnEntryOfSchema4(t *testing.T) {
 			}
 		})
 	}
-	// An entry of schema 5 stops this binary in the same way.
+	// An entry of a schema this binary does not know stops it in the same
+	// way.
 	m := newMachine(t)
 	if r := m.raw(MetadataVersion+1, entry{Type: cmdPutObject, PutObject: versionToRecord(v)}); !r.fatal || !errors.Is(r.err, domain.ErrUnsupportedFormat) {
 		t.Errorf("an entry of schema %d = %+v, want the state machine to stop", MetadataVersion+1, r.err)
@@ -997,10 +1003,16 @@ func TestAStoreHeldToSchema3WritesNothingOfSchema4(t *testing.T) {
 // not. So a creator that the state machine would refuse - by its bytes, not
 // by the state - the store refuses by itself, and proposes nothing; and a
 // question about too many buckets is refused before the store is asked.
+//
+// The store is held to schema 4: at level 5 the first bucket is itself an
+// entry of schema 5 (ADR-0023), and the state would say 5 before any of
+// these calls. What schema 5 refuses before it proposes is asked in
+// store5_test.go.
 func TestWhatSchema4RefusesIsRefusedBeforeItIsProposed(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store := openStore(t, t.TempDir())
+	asSchema4Release(store)
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1160,6 +1172,11 @@ func FuzzBucketActivityRecord(f *testing.F) {
 // next batch of reads write the record - the same bytes on every member, and
 // still after the leader has changed. A bucket that is deleted takes its
 // record with it.
+//
+// The release the nodes come back with is the one of schema 4: with this
+// one, of schema 5, the first bucket after the last registration would be an
+// entry of schema 5, and the state would say 5 before schema 4 was looked at.
+// That upgrade is TestRollingUpgradeToSchema5.
 func TestRollingUpgradeToSchema4(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -1261,10 +1278,10 @@ func TestRollingUpgradeToSchema4(t *testing.T) {
 	nothingOfSchema4("before the upgrade", names...)
 
 	for i, id := range nodes {
-		// The node is stopped and comes back with this release.
+		// The node is stopped and comes back with the release of schema 4.
 		c.stop(id)
 		c.mu.Lock()
-		c.schema3[id] = false
+		c.schema3[id], c.schema4[id] = false, true
 		c.mu.Unlock()
 		store := c.start(id, id != "s4")
 		c.ready(id)
@@ -1292,7 +1309,7 @@ func TestRollingUpgradeToSchema4(t *testing.T) {
 		}
 	}
 
-	// All four run this release and have said so. Nothing of schema 4 was
+	// All four run that release and have said so. Nothing of schema 4 was
 	// written yet: the upgrade could be undone.
 	for _, id := range nodes {
 		eventually(t, "node "+id+" to see every member on schema 4", func() bool {
@@ -1478,10 +1495,16 @@ func TestANodeOfSchema3StopsAtAnEntryOfSchema4(t *testing.T) {
 // expresses, no member of that release can be in the cluster: it stopped at
 // the first such entry. So a member whose record is gone no longer takes the
 // cluster back, and the record of a bucket's use goes on being kept.
+//
+// The members run the release of schema 4: a bucket of this one is an entry
+// of schema 5 once all have registered (ADR-0023), and the state would hold
+// what only schema 5 expresses - which TestSchema5WhenAMemberHasNotRegistered
+// is about.
 func TestSchema4WhenAMemberHasNotRegistered(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	c := newTestCluster(t)
+	c.allOfSchema4("m1", "m2", "m3", "s4")
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("m1")
@@ -1554,11 +1577,13 @@ func TestSchema4WhenAMemberHasNotRegistered(t *testing.T) {
 // TestALeaderRefusesAnEntryOfSchema4BelowLevel4: what a node that knows the
 // cluster a moment late proposes as schema 4 is refused by the leader -
 // nothing is logged - and written again as the cluster takes it: the put
-// succeeds, and no record is kept.
+// succeeds, and no record is kept. (The members run the release of schema
+// 4; the same of schema 5 is TestALeaderRefusesAnEntryOfSchema5BelowLevel5.)
 func TestALeaderRefusesAnEntryOfSchema4BelowLevel4(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	c := newTestCluster(t)
+	c.allOfSchema4("m1", "m2", "m3", "s4")
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("s4")

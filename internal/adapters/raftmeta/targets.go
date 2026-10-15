@@ -75,6 +75,14 @@ func readTarget(tx *bbolt.Tx, name string) (*targetRecord, error) {
 	if raw == nil {
 		return nil, nil
 	}
+	return decodeTarget(name, raw)
+}
+
+// decodeTarget reads a stored record of a target. The error wraps
+// domain.ErrIntegrity for bytes that are no record, and
+// domain.ErrUnsupportedFormat for a record of a version this binary does not
+// know.
+func decodeTarget(name string, raw []byte) (*targetRecord, error) {
 	var record targetRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("%w: stored target %s: %w", domain.ErrIntegrity, name, err)

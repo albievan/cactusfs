@@ -18,15 +18,18 @@ import (
 // to keep which buckets name a target ("targetrefs": three lines more, and
 // every line that was there the same bytes).
 //
-// Once schema 5 is announced (PLAN 8.0.10) it must not be run to replace
-// those files: a change of them is then a change of what two releases write,
-// and needs a rise of the entry schema. It is kept so that it can be seen how
-// the files came to be, writes nowhere unless it is told where, and refuses
-// to write over a file that exists.
+// Schema 5 is announced (PLAN 8.0.10), and schema5-entries.golden.txt and
+// schema5-records.golden.txt are FROZEN from that step on: a change of them
+// is a change of what two releases write, and needs a rise of the entry
+// schema (testdata/README.md; TestTheGoldenFilesOfSchema5AreFrozen holds the
+// two files to the bytes they had). This writer must not be run to replace
+// them. It is kept so that it can be seen how the files came to be, writes
+// nowhere unless it is told where, and refuses to write over a file that
+// exists.
 func TestWriteSchema5Golden(t *testing.T) {
 	dir := os.Getenv("CACTUSFS_SCHEMA5_GOLDEN_OUT")
 	if dir == "" {
-		t.Fatal("CACTUSFS_SCHEMA5_GOLDEN_OUT names no directory: the golden files are not written into this tree")
+		t.Fatal("CACTUSFS_SCHEMA5_GOLDEN_OUT names no directory: the golden files are frozen, and are not written into this tree")
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {

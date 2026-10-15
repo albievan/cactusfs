@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -119,23 +118,22 @@ func sessionRollingProblem(body []byte) string {
 // never skipped. It is not run beside other tests: it waits, for minutes,
 // for a sweep, and what it asserts before that is a matter of seconds.
 //
-// How it is run. Today `make test-rolling` selects with `-run` and a prefix -
-// `-run 'TestRollingUpgradeFromSchema3ToSchema4'`, the image built from
-// SCHEMA3_COMMIT - and this test is among those it runs. PLAN 8.0.11 is to
-// select one test by its exact name (ROLLING_TEST) and the release before by
-// ROLLING_FROM_COMMIT; from then on this test is not run unless it is named:
+// How it is run. `make test-rolling` runs the tests whose names begin with
+// ROLLING_TEST against an image of ROLLING_FROM_COMMIT, so this test is run
+// with the upgrade from schema 3 to schema 4, as CI runs it:
+//
+//	make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4
+//
+// or by itself:
 //
 //	make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4SessionLock
 //
 // and by hand, with an image of the release before built and named:
 //
-//	CACTUSFS_TEST_IMAGE_SCHEMA3=<image> go test -count=1 -timeout 40m \
+//	CACTUSFS_TEST_IMAGE_ROLLING_FROM=<image> CACTUSFS_TEST_ROLLING_FROM_COMMIT=0b7d825 go test -count=1 -timeout 40m \
 //	    -tags=integration,rollingupgrade -run '^TestRollingUpgradeFromSchema3ToSchema4SessionLock$' ./test/integration/
 func TestRollingUpgradeFromSchema3ToSchema4SessionLock(t *testing.T) {
-	old := os.Getenv(schema3ImageEnv)
-	if old == "" {
-		t.Fatalf("%s names no image: this test runs members of the release before beside one of this release, and needs an image of it", schema3ImageEnv)
-	}
+	old := rollingFrom(t, "0b7d825")
 	voters, fresh := clustertest.Nodes[:3], "node4"
 	images := map[string]string{}
 	for _, id := range voters {

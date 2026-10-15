@@ -351,10 +351,13 @@ func (s *Store) entryVersion() (byte, error) {
 	// entries. A member that has merely not registered yet - one that was
 	// just added - does not take the cluster back. The same holds for a
 	// state of schema 3 and the release before it, and for a state of
-	// schema 4 and the release of schema 3.
+	// schema 4 and the release of schema 3, and for a state of schema 5 and
+	// the release of schema 4 (ADR-0023).
 	floor := byte(entrySchemaVersion)
 	if err := s.fsm.view(func(tx *bbolt.Tx) error {
 		switch schema := readStateSchema(tx); {
+		case schema >= stateSchema5:
+			floor = entrySchema5
 		case schema >= stateSchema4:
 			floor = entrySchema4
 		case schema >= stateSchema3:

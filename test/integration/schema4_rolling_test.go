@@ -18,12 +18,43 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/test/clustertest"
 )
 
-// schema3ImageEnv names the image of the release of schema 3 that the
-// rolling upgrade starts from.
-const schema3ImageEnv = "CACTUSFS_TEST_IMAGE_SCHEMA3"
+// The release a rolling upgrade starts from, as `make test-rolling` hands it
+// to the tests: the image it built from the history of the repository, and
+// the commit it built it from (ROLLING_FROM_COMMIT).
+const (
+	rollingFromImageEnv  = "CACTUSFS_TEST_IMAGE_ROLLING_FROM"
+	rollingFromCommitEnv = "CACTUSFS_TEST_ROLLING_FROM_COMMIT"
+	// schema3Commit is the last commit whose MetadataVersion is 3: the
+	// release the upgrade to schema 4 starts from.
+	schema3Commit = "0b7d825"
+	// rollingCommitLength is the fewest characters a commit is named by.
+	rollingCommitLength = 7
+)
+
+// rollingFrom returns the image of the release a rolling upgrade starts
+// from. A test of a rolling upgrade is about one release before - what it
+// asserts is what THAT release registers, writes and answers - so it names
+// the commit, and fails when no image is named or the image is of another
+// commit. It is never skipped.
+func rollingFrom(t *testing.T, commit string) string {
+	t.Helper()
+	image, built := os.Getenv(rollingFromImageEnv), os.Getenv(rollingFromCommitEnv)
+	if image == "" {
+		t.Fatalf("%s names no image: this test upgrades a cluster of the release of commit %s, and needs an image of it (make test-rolling ROLLING_FROM_COMMIT=%s ROLLING_TEST=%s)",
+			rollingFromImageEnv, commit, commit, t.Name())
+	}
+	// Either may be the short form of the other, of seven characters or
+	// more: a shorter one names no commit.
+	if len(built) < rollingCommitLength || len(commit) < rollingCommitLength || (!strings.HasPrefix(built, commit) && !strings.HasPrefix(commit, built)) {
+		t.Fatalf("%s says the image %s is of commit %q: this test is of the upgrade from commit %s (make test-rolling ROLLING_FROM_COMMIT=%s ROLLING_TEST=%s)",
+			rollingFromCommitEnv, image, built, commit, commit, t.Name())
+	}
+	return image
+}
 
 // schema4Downloads returns how often the record of an object (ADR-0016) says
 // it was downloaded, asked of a node.
@@ -60,7 +91,10 @@ func schema4HeldAt3(t *testing.T, c *clustertest.Cluster, voters []string) []str
 	defer cancel()
 	root := gridBearer(c.AccessKey, c.SecretKey)
 	content := randomBytes(t, 100_000)
-	levels := map[string]int{"node4": 4}
+	// What a node of this tree registers: the newest schema it applies,
+	// which is the fourth or a later one.
+	const mine = raftmeta.MetadataVersion
+	levels := map[string]int{"node4": mine}
 	for _, id := range voters {
 		levels[id] = 3
 	}
@@ -157,7 +191,7 @@ func schema4HeldAt3(t *testing.T, c *clustertest.Cluster, voters []string) []str
 		below(id, schema4MemberOf(t, c.MetaFile(id, "state.db")))
 		c.Upgrade(id, "")
 		c.WaitReady(id)
-		levels[id] = 4
+		levels[id] = mine
 		registered()
 		if i < len(voters)-1 {
 			// Still held by the members that are left: through the
@@ -171,13 +205,24 @@ func schema4HeldAt3(t *testing.T, c *clustertest.Cluster, voters []string) []str
 // TestRollingUpgradeFromSchema3ToSchema4: a cluster of the release of
 // schema 3 is upgraded to this release one node at a time (ADR-0019), with
 // the binaries themselves: the three voters start from the image
-// $CACTUSFS_TEST_IMAGE_SCHEMA3 names - an image of commit 0b7d825, the last
-// whose MetadataVersion is 3 - and the fourth node from the image under
+// $CACTUSFS_TEST_IMAGE_ROLLING_FROM names - an image of commit 0b7d825, the
+// last whose MetadataVersion is 3 - and the fourth node from the image under
 // test. Nothing stands in for the release before.
 //
-//	git archive 0b7d825 | docker build -t cactusfs:schema3 -
-//	CACTUSFS_TEST_IMAGE_SCHEMA3=cactusfs:schema3 go test -tags='integration rollingupgrade' \
-//	    -run '^TestRollingUpgradeFromSchema3ToSchema4$' -count=1 -timeout 30m ./test/integration/
+//	make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4
+//
+// which is
+//
+//	git archive 0b7d825 | docker build -t cactusfs-test:rolling-from -
+//	CACTUSFS_TEST_IMAGE_ROLLING_FROM=cactusfs-test:rolling-from CACTUSFS_TEST_ROLLING_FROM_COMMIT=0b7d825 \
+//	    go test -tags='integration rollingupgrade' -run 'TestRollingUpgradeFromSchema3ToSchema4' -count=1 -timeout 40m ./test/integration/
+//
+// This tree is of a later schema than the fourth: its nodes register that,
+// the cluster rises past 4 when the last voter has been upgraded, and what
+// is asserted of the level and of the states from then on is the schema of
+// this tree (schema4Recorded): every node is of it by then.
+// The upgrade from the release of schema 4 is
+// TestRollingUpgradeFromSchema4ToSchema5.
 //
 // It is behind a build tag of its own because that image cannot be made
 // from this tree: it needs the history of the repository, which an export of
@@ -186,15 +231,12 @@ func schema4HeldAt3(t *testing.T, c *clustertest.Cluster, voters []string) []str
 //
 // While any member is of the release before: create, put and get succeed,
 // no bucket has a creator, no record is kept, the state says 3
-// (schema4HeldAt3). When the last has registered that it knows schema 4: the
-// creator is recorded, the record is written, and it is the same on every
+// (schema4HeldAt3). When the last has registered that it knows schema 4, or
+// a later one: the creator is recorded, the record is written, and it is the same on every
 // member, also after a change of leader (schema4Recorded) - while the
 // buckets of before stay as they were.
 func TestRollingUpgradeFromSchema3ToSchema4(t *testing.T) {
-	old := os.Getenv(schema3ImageEnv)
-	if old == "" {
-		t.Fatalf("%s names no image: this test upgrades a cluster of the release of schema 3, and needs an image of it", schema3ImageEnv)
-	}
+	old := rollingFrom(t, schema3Commit)
 	t.Parallel()
 	voters := clustertest.Nodes[:3]
 	images := map[string]string{}

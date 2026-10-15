@@ -111,7 +111,9 @@ func schema4StateOf(t *testing.T, metaDir string) schema4State {
 // The first upload makes it a state of schema 4: the bucket that was
 // uploaded to has a record of its latest use, and no other has one. A bucket
 // created from then on has its creator; those of the fixture have none. All
-// of it is there after a restart, beside everything the fixture held.
+// of it is there after a restart, beside everything the fixture held. (That
+// bucket, made by a node of this release on its own, is an entry of schema 5:
+// the state says 5 from there on, ADR-0023.)
 func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	// Not beside the others: this test starts one node as a process and is
 	// done in seconds when it has the machine, and it ran out of its three
@@ -211,14 +213,14 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	}
 	node.srv.stop(t)
 
-	// used says of a state that it is of schema 4 and holds, of the bucket
-	// that was uploaded to, the upload - and the download, while it is among
-	// the latest three - and returns the state.
-	used := func(when string, downloaded bool) schema4State {
+	// used says of a state that it is of the schema given and holds, of the
+	// bucket that was uploaded to, the upload - and the download, while it is
+	// among the latest three - and returns the state.
+	used := func(when string, schema uint64, downloaded bool) schema4State {
 		t.Helper()
 		state := schema4StateOf(t, meta)
-		if state.Schema != 4 || !state.Kept {
-			t.Fatalf("%s: schema %d, a place for records of buckets' use: %t; want a state of schema 4 with one", when, state.Schema, state.Kept)
+		if state.Schema != schema || !state.Kept {
+			t.Fatalf("%s: schema %d, a place for records of buckets' use: %t; want a state of schema %d with one", when, state.Schema, state.Kept, schema)
 		}
 		record := state.Activity[first.Name]
 		if record.V != 1 || len(record.Uploads) != 1 || record.Uploads[0].Key != added.Key || record.Uploads[0].By != contents.Writer.Actor {
@@ -241,7 +243,7 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 		}
 		return state
 	}
-	state := used("after the first upload", true)
+	state := used("after the first upload", 4, true)
 	if len(state.Activity) != 1 {
 		t.Errorf("after the first upload there are records of %d buckets, want only that of %s: %+v", len(state.Activity), first.Name, state.Activity)
 	}
@@ -306,8 +308,11 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	node.srv.stop(t)
 
 	// (Root has read more of the first bucket since than a record names:
-	// the user's download is no longer among the latest three.)
-	state = used("after a restart", false)
+	// the user's download is no longer among the latest three.) The state is
+	// of schema 5 by now: the bucket that was created above, by a store on
+	// its own, is an entry of schema 5 (ADR-0023) - what becomes of a
+	// deployment of schema 4 then is TestUpgradeFromSchema4.
+	state = used("after a restart", 5, false)
 	if record := state.Activity[first.Name]; len(record.Downloads) != bucket.MaxRecentDownloads || record.Downloads[0].By != schema3Root {
 		t.Errorf("after a restart the downloads of %s = %+v; want the latest %d, by %s", first.Name, record.Downloads, bucket.MaxRecentDownloads, schema3Root)
 	}

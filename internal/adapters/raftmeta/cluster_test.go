@@ -22,6 +22,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/domain/tagging"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -50,10 +51,12 @@ type testCluster struct {
 	// newer names the nodes that run the binary of the next release, older
 	// those that run the binary of the release of entry schema 2, and
 	// schema3 those that run the binary of the release of entry schema 3,
-	// the one before this.
+	// and schema4 those that run the binary of the release of entry schema
+	// 4, the one before this.
 	newer   map[string]bool
 	older   map[string]bool
 	schema3 map[string]bool
+	schema4 map[string]bool
 }
 
 type recorder struct {
@@ -79,7 +82,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	return &testCluster{
 		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{},
 		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, schema3: map[string]bool{},
-		deaf: map[string]bool{},
+		schema4: map[string]bool{}, deaf: map[string]bool{},
 	}
 }
 
@@ -193,6 +196,9 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	if c.schema3[id] {
 		asSchema3Release(store)
 	}
+	if c.schema4[id] {
+		asSchema4Release(store)
+	}
 	c.mu.Lock()
 	c.stores[id] = store
 	c.members[id] = Member{ID: id, RaftAddr: listener.Addr().String(), Voter: voter}
@@ -227,7 +233,7 @@ func asPreviousRelease(s *Store) {
 }
 
 // asSchema3Release makes a store behave like the binary of the release
-// before this one, which applies entry schema 3 and nothing newer: it
+// of schema 3, which applies entry schema 3 and nothing newer: it
 // announces 3 when it registers, writes nothing above it - no bucket with its
 // creator, and a put, a completion and a batch of reads as it always wrote
 // them - and stops at an entry of schema 4.
@@ -235,6 +241,29 @@ func asSchema3Release(s *Store) {
 	s.supported = entrySchema3
 	s.fsm.supported = entrySchema3
 	s.versionOf = func(e entry) byte { return min(versionOf(e), entrySchema3) }
+}
+
+// asSchema4Release makes a store behave like the binary of the release
+// before this one, which applies entry schema 4 and nothing newer: it
+// announces 4 when it registers, writes nothing above it - a bucket as it
+// always wrote one, a delete without who deleted - and stops at an entry of
+// schema 5. What only this release can be asked - a quota, a walk, a target,
+// a replica - that binary has no caller for; asked of this stand-in it is
+// answered as this release answers it below level 5: unavailable, with
+// nothing logged.
+func asSchema4Release(s *Store) {
+	s.supported = entrySchema4
+	s.fsm.supported = entrySchema4
+}
+
+// allOfSchema4 makes every node named run the release of schema 4 when it
+// is started.
+func (c *testCluster) allOfSchema4(ids ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
+		c.schema4[id] = true
+	}
 }
 
 func (c *testCluster) stop(id string) {
@@ -640,10 +669,19 @@ func TestUnreachableLeader(t *testing.T) {
 	c := newTestCluster(t)
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 
-	// The answer is lost after the leader committed the entry.
+	// The answer is lost after the leader committed the entry. (Only then:
+	// a leader that answered that it did not take the entry - on a busy
+	// machine it may have lost its place a moment before - logged nothing,
+	// says so, and is asked again; were that answer lost too, the entry
+	// would be called "perhaps committed" and looked for in vain.)
 	lost := errors.New("connection reset")
 	c.mu.Lock()
-	c.afterPropose = func(error) error { return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, lost) }
+	c.afterPropose = func(err error) error {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %w", domain.ErrOutcomeUnknown, lost)
+	}
 	c.mu.Unlock()
 	err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "maybe"})
 	if !errors.Is(err, domain.ErrOutcomeUnknown) || !errors.Is(err, lost) {
@@ -776,8 +814,9 @@ func TestRollingUpgrade(t *testing.T) {
 // TestAnOlderNodeStopsRatherThanMisapply: if an entry of a newer format does
 // reach a node that cannot apply it, that node's state machine stops and the
 // node leaves the group; it never guesses. The rest of the cluster goes on.
-// That is so for a release to come, and it is so for this release and the
-// one before it: a node of schema 2 that meets an entry of schema 3.
+// That is so for a release to come, for this release and the one before it -
+// a node of schema 4 that meets an entry of schema 5 - and for the releases
+// before: a node of schema 2 that meets an entry of schema 3.
 func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 	t.Parallel()
 	definition := tagging.Definition{Key: "too-new", CreatedAt: time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)}
@@ -786,14 +825,17 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 		prepare func(c *testCluster)
 		// claimed is the version the old node s4 is wrongly said to have.
 		claimed int
+		// claimedState is the same version as a state says its schema.
+		claimedState uint64
 		// write makes the entry s4 cannot apply; wrote asks for what it
 		// made.
 		write func(ctx context.Context, s *Store) error
 		wrote func(ctx context.Context, s *Store) error
 	}{
 		"a release to come": {
-			prepare: func(c *testCluster) { c.newer["m1"], c.newer["m2"], c.newer["m3"] = true, true, true },
-			claimed: MetadataVersion + 1,
+			prepare:      func(c *testCluster) { c.newer["m1"], c.newer["m2"], c.newer["m3"] = true, true, true },
+			claimed:      MetadataVersion + 1,
+			claimedState: uint64(MetadataVersion + 1),
 			write: func(ctx context.Context, s *Store) error {
 				return s.CreateBucket(ctx, bucket.Bucket{Name: "too-new"})
 			},
@@ -802,9 +844,22 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 				return err
 			},
 		},
+		"schema 5 and the release before": {
+			prepare:      func(c *testCluster) { c.schema4["s4"] = true },
+			claimed:      entrySchema5,
+			claimedState: uint64(entrySchema5),
+			write: func(ctx context.Context, s *Store) error {
+				return s.PutTarget(ctx, porttest.SampleTarget("too-new", delivery.KindWebhook), audit.Record{})
+			},
+			wrote: func(ctx context.Context, s *Store) error {
+				_, err := s.GetTarget(ctx, "too-new")
+				return err
+			},
+		},
 		"schema 3 and the release before": {
-			prepare: func(c *testCluster) { c.older["s4"] = true },
-			claimed: entrySchema3,
+			prepare:      func(c *testCluster) { c.older["s4"] = true },
+			claimed:      entrySchema3,
+			claimedState: uint64(entrySchema3),
 			write: func(ctx context.Context, s *Store) error {
 				return s.PutTagDefinition(ctx, definition, audit.Record{})
 			},
@@ -849,9 +904,13 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 				t.Errorf("write on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
 			}
 			// It did not apply the entry in some other way: nothing of
-			// schema 3 is in its state, which still says what it said.
-			if got := rawState(t, c.store("s4").fsm, schema3Buckets()...); len(got) != 0 {
+			// schema 3 is in its state, and nothing of schema 5, and the
+			// state still says what it said.
+			if got := rawState(t, c.store("s4").fsm, slices.Concat(schema3Buckets(), schema5Buckets())...); len(got) != 0 {
 				t.Errorf("the stopped node holds %v", got)
+			}
+			if schema := stateSchema(t, c.store("s4").fsm); schema >= test.claimedState {
+				t.Errorf("the stopped node's state says schema %d", schema)
 			}
 			for _, id := range []string{"m1", "m2", "m3"} {
 				if err := test.wrote(ctx, c.store(id)); err != nil {
@@ -1190,16 +1249,22 @@ func (b *behindLeader) proposed() []byte {
 // (ADR-0016: nothing is refused that worked before); what cannot go without
 // schema 3 fails as "unavailable", which a caller may try again - never as a
 // format this binary does not understand, which nobody tries again.
+//
+// The members run the release of schema 4: with this one the bucket below
+// is an entry of schema 5 (ADR-0023), and the state would say 5 before
+// schema 3 was looked at. A proposer of schema 5 behind its leader is
+// TestALeaderRefusesAnEntryOfSchema5BelowLevel5.
 func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	c := newTestCluster(t)
+	c.allOfSchema4("m1", "m2", "m3", "s4")
 	c.form([]string{"m1", "m2", "m3"}, []string{"s4"})
 	c.register("m1", "m2", "m3", "s4")
 	store := c.store("s4")
-	eventually(t, "s4 to see every member on the newest schema", func() bool {
+	eventually(t, "s4 to see every member on schema 4", func() bool {
 		level, err := store.entryVersion()
-		return err == nil && level == MetadataVersion
+		return err == nil && level == entrySchema4
 	})
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b"}); err != nil {
 		t.Fatal(err)
@@ -1303,7 +1368,7 @@ func TestAProposerBehindTheLeaderWritesBelowTheRefusedSchema(t *testing.T) {
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "never"}); !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrOutcomeUnknown) {
 		t.Errorf("a change the leader refuses in every schema = %v, want a definite %v", err, domain.ErrUnavailable)
 	}
-	if got := behind.proposed(); len(got) == 0 || len(got) > int(MetadataVersion) {
+	if got := behind.proposed(); len(got) == 0 || len(got) > entrySchema4 {
 		t.Errorf("that change was proposed %d times, want at most once a schema", len(got))
 	}
 }
@@ -1757,13 +1822,22 @@ func TestTheLeaderStampsEntries(t *testing.T) {
 	})
 	// The leader's clock jumps back; time in the state does not.
 	clocks[leader].set(noon.Add(-time.Hour))
+	// s4 writes the bucket in the schema it believes the cluster takes, and
+	// learns of the last registration when it has applied that entry: one
+	// written a moment before would be of a schema below 5 for good.
+	eventually(t, "s4 to see every member on schema 5", func() bool {
+		level, err := c.store("s4").entryVersion()
+		return err == nil && level == entrySchema5
+	})
 	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "after-the-jump"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"m1", "m2", "m3", "s4"} {
+		// (The bucket is an entry of schema 5 once every member has
+		// registered it, ADR-0023, and the state says so.)
 		eventually(t, "node "+id+" to have the leader's time", func() bool {
 			schema, at := stateOf(id)
-			return schema == stateSchemaTimed && at.Equal(noon)
+			return schema == stateSchema5 && at.Equal(noon)
 		})
 	}
 }

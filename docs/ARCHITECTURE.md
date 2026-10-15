@@ -526,7 +526,7 @@ sharded Raft groups later; that move needs an ADR. On-disk formats and Raft entr
 carry a version; no node writes an entry format newer than the oldest member of the
 cluster understands, so version N runs alongside N+1 during a rolling upgrade.
 
-The entry schema is at 4:
+The entry schema is at 5:
 
 | Schema | Adds | ADR |
 |---|---|---|
@@ -534,12 +534,63 @@ The entry schema is at 4:
 | 2 | the leader's time on every entry; object versions, delete markers, Object Lock, bucket configuration, multipart uploads | 0008 (with 0009, 0011, 0012) |
 | 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules and tag definitions, which the state machine applies and no use case sends yet | 0016 (with 0017, 0018) |
 | 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
+| 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets and the record of a resync - which the state machine applies and the store proposes, and no use case sends yet | 0023 (with 0024, 0025, 0026) |
 
-Upgrades from schema 2 and from schema 3 are tested against fixtures written by the
-binaries of those schemas (`test/integration/testdata`), and a rolling upgrade from 3
-to 4 with the binaries themselves (`make test-rolling`). After the last member is
-upgraded, the first entry of the new schema ends the way back to the release before
-(ADR-0016, ADR-0019).
+Upgrades from schema 2, 3 and 4 are tested against fixtures written by the binaries of
+those schemas (`test/integration/testdata`), and rolling upgrades from 3 to 4 and from
+4 to 5 with the binaries themselves (`make test-rolling`, which takes the release to
+start from and the test of that upgrade: `ROLLING_FROM_COMMIT`, `ROLLING_TEST`). After
+the last member is upgraded, the first entry of the new schema ends the way back to the
+release before (ADR-0016, ADR-0019, ADR-0023).
+
+Schema 5 (ADR-0023) adds seven commands - `bucket.quota.put`, `bucket.usage.walk`,
+`target.put`, `target.delete`, `outbox.ack`, `bucket.replica.put`,
+`replication.resync.put` - two kinds of bucket configuration (`notification`,
+`replication`), and `replica`, `replica_from` and `by` on a put, a completion, an upload
+and a delete. In the state, each made when it is first written:
+
+| Bucket of bbolt | Key | Holds |
+|---|---|---|
+| `bucketusage` | bucket name | the usage record (`bucket.Usage`): objects, current bytes, versions, stored bytes, the bytes of parts of uploads in progress, the versions pending and failed in replication, the greatest sequence, and where a count stands |
+| `targets` | target name | a target: its kind, the origin of its endpoint, and - sealed through the KMS - its path, its secret and its signing key |
+| `targetrefs/<target>` | bucket name | which kinds of document of that bucket name the target: `n`, `r` or `nr` |
+| `outbox` | index of the entry and number of the row | a row: what changed, of which version, for which consumers |
+| `outboxcursor` | target name | how far delivery to the target has come, what it lost, whether it needs a resync |
+| `resync` | bucket name | how far the resync of a bucket has come |
+| `meta` | `outboxcount`, `outboxdropped` | the rows the outbox holds, and those pushed out at its bound |
+
+and on the records that were there: `quota_bytes` and `replica_from` of a bucket,
+`replication` of a version, `replica_from` of an upload - all left out when empty, so a
+record without them is the record of schema 4.
+
+A usage record is made by an entry of schema 5 and by no other - exact and empty by the
+`bucket.create` of a new bucket, which is written as schema 5 once every member knows
+it, or in counting state by the first `bucket.usage.walk` for a bucket that was there -
+and from then on **every** entry that changes a key or a part keeps it, whatever its
+schema byte (unlike the record of a bucket's latest use, which goes by the byte): a
+counter that missed a put written a moment late would be wrong for good. The walk counts
+a bucket online, a bounded number of records an entry, with its cursor in the record. A
+put or a part that would take a bucket past its quota is refused where it is applied.
+The store implements `ports.BucketUsageStore`, `ports.TargetStore`, `ports.Outbox` and
+`ports.ReplicationStore`; below level 5 every change of theirs is "unavailable", with
+nothing logged, and there is nothing to read.
+
+**What makes a state schema 5 today is one thing: a bucket that is created** at level 5.
+Nothing else in this build proposes an entry of schema 5 - the worker that counts
+buckets without being asked, the APIs of quotas, targets, notifications and replication
+are of later steps of milestone 8 and answer `501` - so a deployment upgraded to this
+build keeps its way back to the release of schema 4 until its first new bucket, and the
+buckets it had are not counted yet. That way back is walked with **every node stopped
+first** and then all started on the release of schema 4, never a node at a time: a node
+taken back has a record that says 5 until it registers again, the leader goes on
+writing schema 5 meanwhile, and one bucket created in that time stops the node taken
+back at that entry - fail-safe, its state untouched, and cured by starting it on this
+release again - and ends the way back for the cluster (ADR-0023, "Rollback";
+`TestARollingRollbackFromLevel5EndsAtTheFirstBucket`). A bucket created through a node
+that had not yet seen level 5 is written below schema 5 and has no usage record until
+the counter of PLAN 8.3.1 walks it. The bytes of schema 5 are frozen: the golden files
+`schema5-entries.golden.txt` and `schema5-records.golden.txt`
+(`internal/adapters/raftmeta/testdata`) may not change without a schema 6.
 
 Schema 4 adds who created a
 bucket (`created_by` on `bucket.create`) and no command. It is also the schema a put, a
@@ -738,9 +789,11 @@ four at a time.
 - **Events.** Every state change other components care about is an event named
   `cactusfs.<aggregate>.<event>.v1`, defined in `api/asyncapi/events.yaml` and derived
   from **applied Raft entries**, never published from a handler. Delivery goes through
-  `ports.EventPublisher`. **Implemented:** the contract, sixteen events (buckets,
+  `ports.EventPublisher`. **Implemented:** the contract, twenty events (buckets,
   objects, versioning, Object Lock, bucket configuration, tags, the root credential,
-  topology, nodes, the audit trail), and the in-process publisher (at most once per
+  topology, nodes, the audit trail - and, of entry schema 5, the quota and the replica
+  mode of a bucket and a target defined or deleted, which the state machine tells of
+  and no use case causes yet), and the in-process publisher (at most once per
   node; counted in `cactusfs_events_total`). NATS JetStream and webhooks are milestone 8
   and do not exist. Consumers dedupe by event ID.
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
@@ -894,7 +947,10 @@ each one fails on.
 
 - `make test-chaos` and `make test-rolling` are outside `make check` and CI jobs of
   their own. The second builds the release before this entry schema from the history
-  of the repository, which a clean export has not.
+  of the repository, which a clean export has not: commit 84334a7 for the upgrade from
+  schema 4 to 5, which is what it runs when told nothing, and 0b7d825 for that from 3
+  to 4 (`make test-rolling ROLLING_FROM_COMMIT=0b7d825
+  ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4`); CI runs both.
 
 - `make test-k8s` (`test/k8s`, build tag `k8s`) is outside `make check` and a CI job of
   its own, because k3s needs a privileged container: the chart installed on k3s with the

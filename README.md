@@ -119,9 +119,17 @@ Said plainly, so that nobody finds out by trying:
   sizes and user metadata are in the metadata store in the clear
   ([threat model](docs/threat-model.md)).
 - **No rotation of the local KMS key**, and no revocation list for node certificates.
-- **A rolling upgrade is tested with the binaries themselves for one step only**: from
-  entry schema 3 to 4 (`make test-rolling`). Older states are tested by opening
-  fixtures that the older binaries wrote.
+- **A rolling upgrade is tested with the binaries themselves for two steps only**: from
+  entry schema 3 to 4 and from 4 to 5 (`make test-rolling`). Older states are tested by
+  opening fixtures that the older binaries wrote.
+- **Entry schema 5 is in the metadata and nothing uses it yet.** A cluster of this
+  release counts what every new bucket holds, in its replicated state, and knows quotas,
+  targets, a delivery outbox and replica buckets there; no API shows or sets any of it
+  yet, and a bucket that existed before the upgrade is not counted until a later
+  release counts it. Neither is a bucket created through a node that had not yet seen
+  that every node knows schema 5 - in the moment after the last node's upgrade, or
+  while a node is not registered: it is written as before, and has no usage record
+  until that later release counts it.
 
 ## Build from source
 
@@ -641,13 +649,47 @@ kubectl -n cactusfs wait --for=condition=Ready pod/<node ID>-0 --timeout=5m
 **Going back.** While nodes of two releases run side by side, none writes a metadata
 entry newer than the oldest of them understands, so a node can be taken back to the
 release before. When the last node runs a release that raises the entry schema, the
-cluster begins to write the new schema by itself, and the first such write - in
-practice the first upload, the first flushed count of downloads or the first bucket
-created - ends the way back: the release before refuses that state rather than misread
-it. Nothing is lost then, but no node of the older release starts
+cluster begins to write the new schema by itself, and the first such write ends the way
+back: the release before refuses that state rather than misread it. Nothing is lost
+then, but no node of the older release starts
 ([ADR-0016](docs/adr/0016-object-access-and-schema-3.md),
-[ADR-0019](docs/adr/0019-bucket-activity-and-schema-4.md)). To keep a way back, hold one
-node at the release before until you are sure.
+[ADR-0019](docs/adr/0019-bucket-activity-and-schema-4.md),
+[ADR-0023](docs/adr/0023-schema-5-usage-outbox-targets.md)). To keep a way back, hold one
+node at the release before until you are sure: that is the only way back that can be
+walked a node at a time.
+
+**Once every node runs the new release, do not go back a node at a time.** If no write
+of the new schema has happened yet, the way back is still there - but only like this:
+
+1. stop **every** node;
+2. start all of them on the release before.
+
+A rolling rollback is not safe. A node that is taken back keeps, in the cluster's
+records, the schema its newer release registered until it has started and registered
+again; until then the cluster goes on writing the new schema, and one such write in that
+time - with this release, one bucket created by anybody, through any node - is an entry
+the node taken back cannot apply. There is no switch that closes the cluster to such
+writes meanwhile, so nothing but stopping every node first keeps them out.
+
+If it happens all the same: the node that was taken back stops its metadata at that
+entry and guesses nothing. It is not ready (`/readyz`), every request that needs its
+metadata fails, and its log and its health say
+`metadata state machine stopped at entry <n>: ... metadata entry schema version 5`.
+Its data and its state are untouched, and the other nodes go on - but the way back is
+over for the whole cluster, and if the nodes taken back are most of those that vote,
+the cluster has no metadata quorum and serves nothing until they return. To recover,
+start that node on the new release again: it applies the entry it stopped at and
+carries on. Nothing is lost.
+
+Which write that is depends on the release you come from:
+
+| From a release of | The way back ends with |
+|---|---|
+| entry schema 3 | the first upload, the first flushed count of downloads or the first bucket created |
+| entry schema 4 (this release raises it to 5) | **the first bucket that is created** after the last node was upgraded - through S3 or the management API, on any node. Uploads, downloads, deletes and multipart uploads into the buckets you have do not end it. A node that runs alone has no other node to wait for: its first new bucket ends it |
+
+A later release of milestone 8 will count the buckets you already have by itself, within
+seconds of the last node's upgrade, and the way back from schema 5 will then end there.
 
 Two things about the machine, which are not the chart's to do:
 
@@ -930,7 +972,7 @@ Suites outside `make check`:
 | Target | What it does |
 |---|---|
 | `make test-chaos` | fault injection: against the built binary (corruption, lost shards, replaced drives, kill during writes) and against a cluster of four containers (nodes killed during writes, the leader killed, the network partitioned, two nodes away, shards corrupted and deleted on other nodes) |
-| `make test-rolling` | a rolling upgrade with the binaries themselves: three voters of the release before this entry schema, built from the history of the repository (so not possible in a clean export), and a fourth node of this tree, upgraded one at a time |
+| `make test-rolling` | a rolling upgrade with the binaries themselves: three voters of the release before this entry schema, built from the history of the repository (so not possible in a clean export), and a fourth node of this tree, upgraded one at a time. From schema 4 to 5 when told nothing; `ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4` runs the one from schema 3 to 4 |
 | `make test-k8s` | the chart installed on k3s in one container, with the image this tree builds, under the `restricted` Pod Security Standard: an S3 round trip, a pod away, the NetworkPolicy enforced. Needs a privileged container |
 
 Everything else:
@@ -953,7 +995,7 @@ Everything else:
 | `make remote-<target>` | the same target on another machine, below |
 
 CI (`.github/workflows/ci.yml`) runs `make check`, `make test-chaos`, `make test-rolling`
-and `make test-k8s` as jobs of their own, and the unit tests on Linux, macOS and
+(both upgrades) and `make test-k8s` as jobs of their own, and the unit tests on Linux, macOS and
 Windows.
 
 **On another machine.** When the machine you work on must not run containers,

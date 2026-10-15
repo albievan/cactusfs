@@ -39,6 +39,18 @@ ifeq ($(origin COMMIT),undefined)
 COMMIT := $(shell sh scripts/buildid.sh commit)
 endif
 
+# The rolling upgrade `make test-rolling` runs: the commit whose release the
+# cluster starts from, and the test that upgrades it to this tree. They are
+# a pair - a test asserts what THAT release registers, writes and answers, and
+# fails when it is handed the image of another commit:
+#   make test-rolling                                    # schema 4 to 5 (ADR-0023)
+#   make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4
+# 84334a7 is the commit whose binary wrote the fixture of schema 4
+# (test/integration/testdata/schema-4); 0b7d825 is the last whose
+# MetadataVersion is 3. Both are handed to the builder, which runs the recipe.
+ROLLING_FROM_COMMIT ?= 84334a7
+ROLLING_TEST        ?= TestRollingUpgradeFromSchema4ToSchema5
+
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen settings-docs fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
@@ -123,6 +135,7 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-e VERSION=$(VERSION) -e BUILD=$(BUILD) -e COMMIT=$(COMMIT) -e IMAGE=$(IMAGE) \
 	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
 	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE \
+	-e ROLLING_FROM_COMMIT=$(ROLLING_FROM_COMMIT) -e ROLLING_TEST=$(ROLLING_TEST) \
 	$(if $(GO_P),-e GOFLAGS=-p=$(GO_P) -e GOMAXPROCS=$(GO_P))
 
 builder:
@@ -265,19 +278,23 @@ test-chaos:
 # A rolling upgrade with the binaries themselves: three voters of the release
 # before this entry schema - built here from the history of the repository,
 # which is why this is not part of `make check`: a clean export has none -
-# and a fourth node of this tree, upgraded one at a time (ADR-0019). Must pass
-# before a release that raises the entry schema is rolled out.
+# and a fourth node of this tree, upgraded one at a time (ADR-0019, ADR-0023).
+# Must pass before a release that raises the entry schema is rolled out.
+# Which release, and which test upgrades it: ROLLING_FROM_COMMIT and
+# ROLLING_TEST, above. The test is run by its name as a prefix, so that a test
+# that bears the name of an upgrade and says more of it runs with it; that the
+# test of the name itself is there is asked first.
 # It says `docker`, as the gates' own scripts do: inside the builder image that
 # is the client of whichever engine's socket was passed through.
-SCHEMA3_COMMIT ?= 0b7d825
 test-rolling:
-	@go test -tags=integration,rollingupgrade -list '^TestRollingUpgradeFromSchema3ToSchema4$$' ./test/integration/ | \
-		grep -qx TestRollingUpgradeFromSchema3ToSchema4 || \
-		{ echo "test-rolling: FAIL - no test TestRollingUpgradeFromSchema3ToSchema4 in test/integration: nothing would run" >&2; exit 1; }
-	git archive $(SCHEMA3_COMMIT) | docker build --quiet -t cactusfs-test:schema3 - >/dev/null
-	CACTUSFS_TEST_IMAGE_SCHEMA3=cactusfs-test:schema3 go test -race -count=1 -timeout 40m \
-		-tags=integration,rollingupgrade -run 'TestRollingUpgradeFromSchema3ToSchema4' ./test/integration/
-	@echo "test-rolling: PASS"
+	@go test -tags=integration,rollingupgrade -list '^$(ROLLING_TEST)$$' ./test/integration/ | \
+		grep -qx '$(ROLLING_TEST)' || \
+		{ echo "test-rolling: FAIL - no test $(ROLLING_TEST) in test/integration: nothing would run" >&2; exit 1; }
+	git archive $(ROLLING_FROM_COMMIT) | docker build --quiet -t cactusfs-test:rolling-from - >/dev/null
+	CACTUSFS_TEST_IMAGE_ROLLING_FROM=cactusfs-test:rolling-from CACTUSFS_TEST_ROLLING_FROM_COMMIT=$(ROLLING_FROM_COMMIT) \
+		go test -race -count=1 -timeout 40m \
+		-tags=integration,rollingupgrade -run '$(ROLLING_TEST)' ./test/integration/
+	@echo "test-rolling: PASS ($(ROLLING_FROM_COMMIT) to this tree, $(ROLLING_TEST))"
 
 # The Helm chart on a real Kubernetes: k3s in one container, the chart
 # installed with the image this tree builds, in a namespace that enforces the

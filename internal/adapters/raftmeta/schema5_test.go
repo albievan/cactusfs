@@ -34,11 +34,22 @@ import (
 const schema5EntriesFile = "schema5-entries.golden.txt"
 
 // newMachine5 is the state machine of a binary whose newest entry schema is
-// the fifth: what this one becomes when it announces schema 5 (PLAN 8.0.10).
+// the fifth: this one, since it announces schema 5 (PLAN 8.0.10). It says
+// so by name where a test is about schema 5 and not about "the newest".
 func newMachine5(t *testing.T) *machine {
 	t.Helper()
 	m := newMachine(t)
 	m.f.supported = entrySchema5
+	return m
+}
+
+// newMachine4 is the state machine of the release of schema 4, the one
+// before this: it applies entries up to the fourth schema and stops at one
+// of the fifth.
+func newMachine4(t *testing.T) *machine {
+	t.Helper()
+	m := newMachine(t)
+	m.f.supported = entrySchema4
 	return m
 }
 
@@ -189,8 +200,9 @@ func schema5EntryBytes(t *testing.T) []byte {
 // file - both forms of a result of outbox.ack, a replica with "null" and
 // without it. A place in the outbox is 20 hexadecimal characters, a version
 // "null" or 32 of them, and what is optional is left out. A change that
-// makes this test fail makes two releases write other entries: it needs a
-// rise of the entry schema once schema 5 is announced, not a new file.
+// makes this test fail makes two releases write other entries: schema 5 is
+// announced and the file is frozen (PLAN 8.0.10), so it needs a rise of the
+// entry schema, not a new file.
 func TestTheEntriesOfSchema5ArePinned(t *testing.T) {
 	t.Parallel()
 	want, err := fs.ReadFile(os.DirFS("testdata"), schema5EntriesFile)
@@ -352,8 +364,9 @@ func schema5RecordBytes(t *testing.T) []byte {
 // kind of document; a row of the outbox; a cursor; the record of a
 // resync, which says its version; the two counts; and the records that were
 // there before, with what schema 5 added to them. A change that makes this
-// test fail makes two releases store other bytes: it needs a rise of the
-// entry schema once schema 5 is announced, not a new file.
+// test fail makes two releases store other bytes: schema 5 is announced and
+// the file is frozen (PLAN 8.0.10), so it needs a rise of the entry schema,
+// not a new file.
 func TestTheRecordsOfSchema5ArePinned(t *testing.T) {
 	t.Parallel()
 	want, err := fs.ReadFile(os.DirFS("testdata"), schema5RecordsFile)
@@ -777,10 +790,11 @@ func TestStateBecomesSchema5WithItsFirstEntryOfSchema5(t *testing.T) {
 	}
 }
 
-// TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5: this binary announces
-// schema 4, and refuses a state of schema 5 and a snapshot of one as the
-// release of schema 4 does - there is no way back once an entry of schema 5
-// was applied. The binary it becomes at PLAN 8.0.10 opens both, and goes on.
+// TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5: the release of schema 4
+// refuses a state of schema 5 and a snapshot of one - there is no way back
+// once an entry of schema 5 was applied. This binary, which announces schema
+// 5, opens both and goes on; and a state of a schema above its own it
+// refuses in turn.
 func TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -810,44 +824,60 @@ func TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if f, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
+	if f, err := openFSMOf(root, entrySchema4); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		if f != nil {
 			_ = f.close()
 		}
-		t.Fatalf("this binary opens a state of schema 5: %v", err)
+		t.Fatalf("the release of schema 4 opens a state of schema 5: %v", err)
 	}
-	if f, err = openFSMOf(root, entrySchema5); err != nil {
-		t.Fatalf("a binary of schema 5 does not open its own state: %v", err)
+	// This binary, as it is built: openFSM is what a store opens with.
+	if f, err = openFSM(root); err != nil {
+		t.Fatalf("this binary does not open its own state: %v", err)
 	}
 	defer func() { _ = f.close() }()
 	if got := rawState(t, f, everyBucket(t, f)...); !reflect.DeepEqual(got, want) {
 		t.Errorf("the state of schema 5 was changed by being opened")
 	}
 
-	// A snapshot of it: refused by this binary, which keeps the state it
-	// has; taken by one of schema 5.
-	old := newMachine(t)
+	// A snapshot of it: refused by the release of schema 4, which keeps the
+	// state it has; taken by this binary.
+	old := newMachine4(t)
 	old.bucket("mine", bucket.Unversioned)
 	mine := rawState(t, old.f, everyBucket(t, old.f)...)
 	if err := old.f.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Fatalf("this binary restores a snapshot of schema 5: %v", err)
+		t.Fatalf("the release of schema 4 restores a snapshot of schema 5: %v", err)
 	}
 	if got := rawState(t, old.f, everyBucket(t, old.f)...); !reflect.DeepEqual(got, mine) {
 		t.Errorf("a snapshot that was refused changed the state")
 	}
-	next := newMachine5(t)
+	next := newMachine(t)
 	if err := next.f.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
-		t.Fatalf("a binary of schema 5 does not restore a snapshot of schema 5: %v", err)
+		t.Fatalf("this binary does not restore a snapshot of schema 5: %v", err)
 	}
 	if got := rawState(t, next.f, everyBucket(t, next.f)...); !reflect.DeepEqual(got, want) {
 		t.Errorf("the restored state is not the one the snapshot was taken of")
 	}
+
+	// And what is above this binary it refuses, as that release refuses
+	// this: a state marked with a schema it does not know.
+	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema5+1) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.close(); err != nil {
+		t.Fatal(err)
+	}
+	if newer, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
+		if newer != nil {
+			_ = newer.close()
+		}
+		t.Errorf("this binary opens a state of schema %d: %v", stateSchema5+1, err)
+	}
 }
 
-// TestThisBinaryStopsAtAnEntryOfSchema5: the binary that announces schema 4
-// does not apply an entry of schema 5 in some other way - not a put it could
-// read every field of, either. It stops, with its state as it was.
-func TestThisBinaryStopsAtAnEntryOfSchema5(t *testing.T) {
+// TestTheReleaseOfSchema4StopsAtAnEntryOfSchema5: the binary that announces
+// schema 4 does not apply an entry of schema 5 in some other way - not a put
+// it could read every field of, either. It stops, with its state as it was.
+func TestTheReleaseOfSchema4StopsAtAnEntryOfSchema5(t *testing.T) {
 	t.Parallel()
 	commands := schema5Commands(t)
 	commands["a put that says nothing new"] = entry{Type: cmdPutObject, PutObject: versionToRecord(porttest.SampleVersion("b", "k", 2))}
@@ -855,11 +885,11 @@ func TestThisBinaryStopsAtAnEntryOfSchema5(t *testing.T) {
 	for name, e := range commands {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			m := newMachine(t)
+			m := newMachine4(t)
 			m.bucket("b", bucket.Unversioned)
 			before := rawState(t, m.f, everyBucket(t, m.f)...)
 			if r := m.raw(entrySchema5, e); !r.fatal || !errors.Is(r.err, domain.ErrUnsupportedFormat) {
-				t.Fatalf("an entry of schema 5 on this binary = %+v, want it to stop with %v", r.err, domain.ErrUnsupportedFormat)
+				t.Fatalf("an entry of schema 5 on the release of schema 4 = %+v, want it to stop with %v", r.err, domain.ErrUnsupportedFormat)
 			}
 			if after := rawState(t, m.f, everyBucket(t, m.f)...); !reflect.DeepEqual(after, before) {
 				t.Errorf("the entry it stopped at changed the state")
@@ -987,8 +1017,8 @@ func TestAResultOfAnAcknowledgementIsReadAsItIsWritten(t *testing.T) {
 }
 
 // TestThisReleaseAppliesALogOfLevel4AsTheSchema4ReleaseDoesWhenItKnowsSchema5:
-// the state machine that applies schema 5 - what this binary is from PLAN
-// 8.0.10 on - makes of a log of level 4 the outcomes and the state database
+// the state machine that applies schema 5 - what this binary is since PLAN
+// 8.0.10 - makes of a log of level 4 the outcomes and the state database
 // of the release of schema 4, byte for byte. Nothing of schema 5 is in a
 // state no entry of schema 5 was applied to: not the bucket of usage
 // records, and not a byte of any record that was there before.
@@ -1003,16 +1033,17 @@ func TestThisReleaseAppliesALogOfLevel4AsTheSchema4ReleaseDoesWhenItKnowsSchema5
 	}
 }
 
-// TestAStoreHeldToSchema4WritesNothingOfSchema5: this binary announces
-// schema 4, so its store is one of a cluster at level 4. A put, a delete that
-// says who and a bucket are written and applied exactly as before - who
-// deleted is left out - and what has no older form is refused as
-// unavailable, with nothing logged: a replica, an upload of a source, a
-// replica delete.
+// TestAStoreHeldToSchema4WritesNothingOfSchema5: a store of a cluster at
+// level 4 - held there as a member of the release of schema 4 holds it. A
+// put, a delete that says who and a bucket are written and applied exactly
+// as before - who deleted is left out - and what has no older form is
+// refused as unavailable, with nothing logged: a replica, an upload of a
+// source, a replica delete.
 func TestAStoreHeldToSchema4WritesNothingOfSchema5(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store := openStore(t, t.TempDir())
+	asSchema4Release(store)
 	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedBy: "user/albie"}); err != nil {
 		t.Fatal(err)
 	}

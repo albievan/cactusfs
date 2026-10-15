@@ -31,8 +31,8 @@ import (
 
 // The usage record of every bucket, the walk that counts a bucket, and the
 // quota that is held in apply (ADR-0023, "Bucket usage"; ADR-0024; PLAN
-// 8.0.7). The state machines here apply schema 5, as this binary does from
-// PLAN 8.0.10 on.
+// 8.0.7). The state machines here apply schema 5, as this binary does since
+// PLAN 8.0.10.
 
 // usageBytes returns the usage record of a bucket as it is stored; nil when
 // it has none.

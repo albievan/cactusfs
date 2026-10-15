@@ -122,6 +122,26 @@ func (s *Store) SetBucketConfig(ctx context.Context, name, kind string, document
 		// without looking at the state is refused before it is proposed.
 		return fmt.Errorf("raftmeta.SetBucketConfig: %w: bucket configuration of %d bytes, at most %d", domain.ErrInvalidArgument, len(document), bucket.MaxConfigBytes)
 	}
+	// So for the two kinds of schema 5 (ADR-0023): a document that is not
+	// in its canonical form is refused by every member by its bytes alone,
+	// and here before any of them sees it. A document of a version this
+	// release does not know is told as that - domain.ErrUnsupportedFormat,
+	// by the domain's own reader - which only the proposer may say: where
+	// an entry is applied the same document is a refusal like any other
+	// (unreadDocument), since "unsupported format" from a state machine
+	// means that it stopped.
+	if len(document) > 0 {
+		var err error
+		switch kind {
+		case bucket.ConfigNotification:
+			_, err = bucket.ParseNotificationConfig(document)
+		case bucket.ConfigReplication:
+			_, err = bucket.ParseReplicationConfig(document)
+		}
+		if err != nil {
+			return fmt.Errorf("raftmeta.SetBucketConfig: %w", err)
+		}
+	}
 	e := entry{Type: cmdSetBucketConfig, SetBucketConfig: &bucketConfigCmd{Bucket: name, Kind: kind, Document: document}}
 	if _, err := s.propose(ctx, e); err != nil {
 		return fmt.Errorf("raftmeta.SetBucketConfig: %w", err)

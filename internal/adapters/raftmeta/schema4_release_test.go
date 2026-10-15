@@ -478,8 +478,8 @@ func TestThisReleaseAppliesALogOfLevel4AsTheSchema4ReleaseDoes(t *testing.T) {
 	if again := schema4ReleaseLog(t); !slices.EqualFunc(log, again, bytes.Equal) {
 		t.Fatal("the generator of the log does not make the same log twice")
 	}
-	// The two are one configuration while this binary announces schema 4,
-	// and two from PLAN 8.0.10 on, when "this release" applies schema 5.
+	// Two configurations since this binary announces schema 5 (PLAN
+	// 8.0.10): "this release" applies schema 5, and comes to the same.
 	for name, supported := range map[string]byte{"this release": 0, "held to schema 4": entrySchema4} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

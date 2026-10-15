@@ -1,7 +1,13 @@
 # ADR-0023: Entry schema 5 - bucket usage, the delivery outbox, targets, outbound connections
 
-- **Status:** proposed (2026-10-12). It becomes accepted when the code of PLAN 8.0 has
-  landed and the gates have seen it (PLAN 8.3.6)
+- **Status:** accepted (2026-10-13, PLAN 8.0.10): entry schema 5 is in the codec and the
+  state machine whole, the store proposes and reads it, and `MetadataVersion` is 5 - a
+  node of this release registers it and a cluster of such nodes writes it. **The bytes
+  of schema 5 are frozen from that step on** ("Frozen", below). Not built yet, each
+  with the step of `PLAN.md` that brings it: the worker that counts without being asked
+  (8.3.1), the delivery worker (8.0.14), targets as a use case (8.0.13), outbound
+  connections (8.0.12), and everything of ADR-0024 to ADR-0026, which stay proposed.
+  It was proposed on 2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found") and to the domain and the ports of PLAN
@@ -709,6 +715,24 @@ then bring every bucket to exactly the manifest's figures (PLAN 8.0.10); by
 `TestUpgradeFromSchema3`, unchanged; and by a rolling upgrade from the image of 84334a7
 with the binaries themselves (`TestRollingUpgradeFromSchema4ToSchema5`, PLAN 8.0.11).
 
+**As built at PLAN 8.0.10.** The test of the fixture is `TestUpgradeFromSchema4`
+(`test/integration/schema5_upgrade_test.go`): the deployment of 84334a7 is opened by the
+binary, read, and written to in every way the release of schema 4 knew - the state says
+4 after each - then the first bucket is created and it says 5; the walk, which no API
+asks for before PLAN 8.3.3, is proposed through the metadata store on the deployment's
+own state, fifty records an entry, and brings every bucket to the manifest's figures
+(the bucket of 300 keys in seven entries); a recount finds no drift; and a put, a delete
+marker, a part and an abort through S3 then move the stored records by exactly what they
+are. `TestTheSchema4FixtureIsCountedToItsManifest` (`internal/adapters/raftmeta`) is the
+same walk on a copy of the fixture's metadata alone, through the store's real start-up.
+The manifest counts delete markers apart from versions; a usage record counts a marker
+as a version of no bytes, so the record's `versions` is the manifest's `versions` and
+`markers` together, and the number of uploads in progress is not in a record at all.
+With stores that stand in for the two releases the upgrade is
+`TestRollingUpgradeToSchema5`: at every step each of the seventeen changes that have no
+form below schema 5 is answered "unavailable" with nothing logged, through a node of
+either release.
+
 ### Rollback
 
 Possible until the first schema-5 entry is applied; from then on the release before
@@ -733,6 +757,143 @@ somebody asks would make a quota wait for an operator.
   no node starts until it is rolled forward again: an outage, not a loss.
 - A member of the release before that is joined to a cluster whose state is 5 stops at
   the first entry of schema 5 or at the snapshot it is sent. It fails safe.
+
+**In the release that announces schema 5 (PLAN 8.0.10) the way back ends later than
+that, and by one thing only: the first bucket that is created.** At level 5 a
+`bucket.create` is written as schema 5, through whichever node. Nothing else this build
+does is an entry of schema 5: the worker that proposes a walk without being asked is
+PLAN 8.3.1's, no use case says who deletes yet (`by`), and every API that would propose
+one of the seven commands or a `notification` or `replication` document answers 501
+until its step. So a cluster that was upgraded to this build and creates no bucket stays
+in a state the release of schema 4 opens - for as long as that holds - and a deployment
+that creates one has lost its way back with that entry, whether the bucket was made or
+the entry refused (a bucket of a name that exists). Registering is no such entry: with
+every member at level 5 and nothing created, every state still says 4
+(`TestRollingUpgradeToSchema5`, `TestUpgradeFromSchema4`). From PLAN 8.3.1 on the text
+above holds as written: within seconds of the last registration.
+
+**From level 5 the way back is not walked a node at a time** (ruled at the review of
+PLAN 8.0.10 and 8.0.11, 2026-10-13). While a member of the release before remains, the
+cluster is at level 4 and any node can be taken back: that is "hold one member", above.
+Once every member has registered 5 and no entry of schema 5 was applied, every state is
+still one the release of schema 4 opens - but the level is 5, and stays 5 through a
+rolling rollback: a node that is taken back under its ID has a node record that says 5
+until it has started and registered again, and while it is down or has not registered
+the leader, a node of this release, goes on saying 5. One bucket created in that time,
+by anybody, through any node of this release, is an entry of schema 5. Then:
+
+- the cluster takes it, and the states of the members of this release are of schema 5:
+  the way back is over **for the whole cluster**;
+- every node that was taken back stops at that entry
+  (`metadata state machine stopped at entry <n>: ... metadata entry schema version 5`,
+  in its log and its health; it is not ready and refuses every request). It fails
+  safe: it applied nothing of the entry and its state is the one it had. Stopped, it
+  leaves the metadata group; if the nodes taken back are a majority of the voters, the
+  group has no quorum until they return;
+- the cure is forward: the node is started on this release again, applies the entry
+  and goes on. Nothing is lost.
+
+So the way back from level 5 is, in this order: **stop every node; start all of them on
+the release of schema 4.** With no node of this release running nothing can propose
+schema 5, and the release of schema 4 writes nothing above 4 whatever the node records
+say. The other safe order would be to keep buckets from being created until every node
+has registered 4 again - and there is no switch for that: nothing in this release
+closes bucket creation to every caller, so it is not offered as a procedure. The README
+says the same ("Going back").
+
+Pinned by `TestARollingRollbackFromLevel5EndsAtTheFirstBucket`
+(`internal/adapters/raftmeta`): four members at level 5, the states untouched, one
+taken back and not yet registered; the leader says 5, a bucket is created, the node
+taken back stops with its state as it was, the others say schema 5, and the node
+started on this release again holds the bucket.
+
+**What a node of the release of schema 4 answers when it is handed an entry of schema
+5** - as the leader is, when a node taken back comes to lead while its record says 5
+and a member of this release proposes a bucket - is that release's and cannot be
+changed here: it reads the entry before it asks whether it leads or what the cluster
+writes, and answers `ErrUnsupportedFormat` alone, **not "unavailable"**
+(`Store.ProposeLocal`, and before it `Store.Subject` in the node RPC, both by
+`decodeEntry`). Nothing is logged, so no state is touched and the way back stays open;
+but the proposer, a node of this release, rightly does not take that answer for a
+leader that knows the cluster better (`aboveLevel` is the two errors together), does
+not write the bucket again as schema 4, and the caller is told of a format that is not
+understood - an error nobody tries again - where "unavailable, the cluster is being
+rolled back" would have been true. It passes when the node has registered 4: every
+member that has seen that writes buckets as the release of schema 4 does
+(`TestANodeTakenBackAtLevel5RefusesAnEntryOfSchema5`, with a store that stands in for
+that release; the code of that path is the same in commit 84334a7).
+
+**No guard was built into this release** for the window. Two were weighed. A node that
+starts on a state whose own node record says more than it applies is the start-up of
+the release before, which is not ours to change. A leader of this release that held
+back schema 5 while a member has not been heard from since it last registered would
+need what the level rule does not have - the liveness of members, judged alike by every
+proposer - and would still not cover a node that is back, connected and has not
+registered yet; it would be new machinery in the path of every write for a window the
+procedure above closes. Documentation and the two tests are the ruling.
+
+### Frozen
+
+`MetadataVersion` is 5 from PLAN 8.0.10 on, and with it the bytes of schema 5 are fixed:
+members of two releases write and read them. Frozen from that step on are
+
+- `internal/adapters/raftmeta/testdata/schema5-entries.golden.txt` - every command of
+  schema 5 and every old command with what schema 5 lets it carry, as it is logged;
+- `internal/adapters/raftmeta/testdata/schema5-records.golden.txt` - every record schema
+  5 added to the state, and every older record with what schema 5 added to it;
+- the golden files of the canonical documents and of the usage record in
+  `internal/domain/bucket/testdata/`, and `bucket-usage-record*.golden.json` beside the
+  two above.
+
+`TestTheGoldenFilesOfSchema5AreFrozen` holds the first two to the SHA-256 they had when
+schema 5 was announced (`testdata/README.md` has the sums), so that a change of the
+codec cannot pass by being written into them. A change of any of these bytes - a field,
+an order, an escape, a rule by which a member derives a record from the log - is a
+schema 6: an ADR, a migration and an upgrade test.
+
+### The store, as built
+
+What the ports say and the text above left open (PLAN 8.0.10):
+
+- **Every call of `WalkBucketUsage` is one entry**, also for a record that is exact and
+  not being counted, which the entry leaves as it is. Whether there is something to
+  count is decided where the entry is applied, and the answer is the record that entry
+  left - on any node, with no read before the write. Who counts reads `BucketUsages`
+  first and asks for what is not exact.
+- **`BucketUsages` is this node's own copy**, as the port says; on a node that does not
+  lead it may be a moment behind what the node itself just wrote. Every other read of
+  schema 5 (`GetTarget`, `ListTargets`, `ReadOutbox`, `OutboxCursors`, `GetResync`) waits
+  for the leader's index, like every read of the store.
+- **`ReadOutbox` looks at no more than 4 000 rows a call** (`outboxScan`), whoever they
+  are for, and says how far it came (`upto`): the place of the last row it looked at,
+  also when that row is for another target, so that a call which found nothing and came
+  further is repeated from there. It begins behind `after` and behind the place the
+  target's cursor began at, whichever is later. A `limit` that cannot be is refused
+  before the leader is asked whether the node's copy is current, and so before it is
+  known whether there is such a target.
+- **What the state machine would refuse by bytes alone the store refuses before it
+  proposes**, so that such a call is not what ends the way back: a limit, a quota, a
+  name no bucket or target can have, a target `Validate` refuses, a result that names
+  nothing, more results than an acknowledgement carries, a source that is no deployment
+  ID, a resync that is no record, an audit record that cannot be kept - and a
+  `notification` or `replication` document that is not canonical. For that last the
+  store uses the domain's own reader, so a document of a version this release does not
+  know is `ErrUnsupportedFormat` from the proposer, as the contract of the port asks;
+  where an ENTRY carries such a document it stays the refusal `ErrInvalidArgument`
+  (ruled with PLAN 8.0.8: a refusal never says that a format is not supported, which
+  from a state machine means that it stopped).
+- **`writtenAt` never writes an entry below what it needs**: a `bucket.create` at level
+  5 is `max(needs, 5)`, as a put at level 4 is `max(needs, 4)`.
+- **A bucket created through a node that has not yet seen level 5** - one that has not
+  applied the last registration, or that holds the cluster back for a member without a
+  record - is written below schema 5, which the leader takes: the bucket is made, has no
+  usage record, and stays so until the counter of PLAN 8.3.1 walks it. Nothing is
+  refused for it and nothing is wrong in the state; a quota for such a bucket is
+  `ErrConflict` until it is counted.
+- **Once the state is of schema 5 the level is 5 whatever the node records say**
+  (`Store.entryVersion`): neither a member without a record nor one registered at a
+  schema below takes the cluster back, since no node of the release before can be a
+  member of it - it stopped at the first entry of schema 5.
 
 ## Consequences
 

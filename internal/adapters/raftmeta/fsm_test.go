@@ -713,7 +713,7 @@ func TestTimedEntries(t *testing.T) {
 	// A state of a schema this binary does not know is refused, as the
 	// previous release refuses this one.
 	if err := f.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchema4+1))
+		return tx.Bucket(metaBucket()).Put(schemaKey(), binary.BigEndian.AppendUint64(nil, stateSchema5+1))
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -40,6 +40,15 @@ func SetOutboxBoundForTest(s *Store, rows uint64) {
 	setOutboxBound(s.fsm, rows)
 }
 
+// SetOutboxScanForTest makes one call of ReadOutbox on a store look at so
+// many rows in place of outboxScan. It is no part of the replicated format:
+// it bounds a read of this node, and is set on the node that is asked.
+func SetOutboxScanForTest(s *Store, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scanRows = rows
+}
+
 func setOutboxBound(f *fsm, rows uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

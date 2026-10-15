@@ -5,7 +5,6 @@ package integration_test
 import (
 	"encoding/json"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -17,8 +16,9 @@ import (
 // TestRollingUpgradeFromSchema3ToSchema4Settings: the settings of a
 // deployment in the middle of a rolling upgrade (PLAN H.10), with the
 // binaries themselves. The three voters start from the image
-// $CACTUSFS_TEST_IMAGE_SCHEMA3 names - a release from before a node could be
-// asked for its settings - and the fourth node from the image under test.
+// $CACTUSFS_TEST_IMAGE_ROLLING_FROM names - of commit 0b7d825, a release from
+// before a node could be asked for its settings - and the fourth node from
+// the image under test.
 //
 // The node of this release answers for all four: for itself, and of each node
 // of the release before that it cannot be asked - "unsupported", which is
@@ -28,13 +28,12 @@ import (
 // "unsupported", whichever of the two nodes of this release is asked.
 //
 // It bears the name of the rolling upgrade it is a part of, so that `make
-// test-rolling`, which runs the tests of that name, runs it too. Without the
-// image named it fails; it is never skipped.
+// test-rolling ROLLING_FROM_COMMIT=0b7d825
+// ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4`, which runs the tests
+// of that name, runs it too. Without the image named, or with an image of
+// another commit, it fails; it is never skipped.
 func TestRollingUpgradeFromSchema3ToSchema4Settings(t *testing.T) {
-	old := os.Getenv(schema3ImageEnv)
-	if old == "" {
-		t.Fatalf("%s names no image: this test asks nodes of the release of schema 3 for their settings, and needs an image of it", schema3ImageEnv)
-	}
+	old := rollingFrom(t, schema3Commit)
 	t.Parallel()
 	nodes, voters := clustertest.Nodes, clustertest.Nodes[:3]
 	images := map[string]string{}

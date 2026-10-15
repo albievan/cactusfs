@@ -56,8 +56,10 @@ func stateOf(t *testing.T, metaDir string) (schema uint64, buckets []string) {
 // Then a sub-bucket, tag rules and a tag definition are written over it, and
 // the state says schema 3. A record of reads follows: a node on its own is at
 // the level of this release, where a batch of reads is written as an entry of
-// schema 4 (ADR-0019), so from then on the state says 4. All of it is there
-// after a restart, beside everything the fixture held.
+// schema 4 (ADR-0019), so from then on the state says 4. And last a bucket is
+// made: at that level a bucket.create is an entry of schema 5 (ADR-0023),
+// which gives the bucket its usage record, and from then on the state says 5.
+// All of it is there after a restart, beside everything the fixture held.
 func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	// Not beside the others: this test starts one node as a process and is
 	// done in seconds when it has the machine, and it ran out of its three
@@ -107,12 +109,8 @@ func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	if err := store.SetBucketConfig(ctx, schema2Bucket, bucket.ConfigTagging, []byte(`{"Team":"Storage"}`)); err != nil {
 		t.Fatalf("a write of schema 2 over the fixture: %v", err)
 	}
-	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "made-by-this-release", CreatedAt: time.Now()}); err != nil {
-		t.Fatalf("a bucket made over the fixture: %v", err)
-	}
-	if err := store.DeleteBucket(ctx, "made-by-this-release"); err != nil {
-		t.Fatalf("a bucket deleted over the fixture: %v", err)
-	}
+	// (A bucket is not made here: by a node of this release on its own it
+	// is an entry of schema 5. It is made last, below.)
 	shut(store)
 	if schema, buckets := stateOf(t, dir); schema != 2 || len(buckets) != 0 {
 		t.Fatalf("after opening and writing what schema 2 has: schema %d, buckets %v; the release before could not go back to it", schema, buckets)
@@ -193,5 +191,28 @@ func TestUpgradeFromSchema2ToSchema3(t *testing.T) {
 	}
 	// The log is replayed over the state at the next start, and changes
 	// nothing in it.
+	store = open()
+	check(store)
+
+	// A bucket made by this release, on a node on its own: an entry of
+	// schema 5. It has its usage record from the start, the bucket of the
+	// fixture has none, and the state says 5 - with everything above still
+	// in it.
+	const made = "made-by-this-release"
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: made, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("a bucket made over the fixture: %v", err)
+	}
+	usage, err := store.BucketUsages(ctx, []string{made, schema2Bucket})
+	if err != nil || len(usage) != 2 || !usage[0].Usage.Exact || usage[1].Usage != (bucket.Usage{}) {
+		t.Errorf("the usage of the bucket made by this release, and of the fixture's = %+v, %v; want an exact record and none", usage, err)
+	}
+	if err := store.DeleteBucket(ctx, made); err != nil {
+		t.Fatalf("a bucket deleted over the fixture: %v", err)
+	}
+	check(store)
+	shut(store)
+	if schema, buckets := stateOf(t, dir); schema != 5 || len(buckets) != 4 {
+		t.Errorf("after a bucket was made by this release: schema %d, buckets %v; want 5 and all four", schema, buckets)
+	}
 	check(open())
 }

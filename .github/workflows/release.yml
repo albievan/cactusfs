@@ -70,12 +70,12 @@ jobs:
           persist-credentials: false
       - run: make test-chaos
 
-  # As in ci.yml: a rolling upgrade from the release before this entry schema,
-  # which is built from the history of the repository.
+  # As in ci.yml: the rolling upgrades from the releases before this entry
+  # schema, which are built from the history of the repository.
   rolling:
     name: make test-rolling
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -83,7 +83,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - run: make test-rolling
+      - name: make test-rolling (schema 4 to 5)
+        run: make test-rolling
+      - name: make test-rolling (schema 3 to 4)
+        run: make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4
 
   # Build, publish, sign, verify - and only then the GitHub Release.
   release:
