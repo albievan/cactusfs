@@ -102,9 +102,11 @@ Said plainly, so that nobody finds out by trying:
   and no chart at `oci://ghcr.io/albievan/charts` yet; the commands that name them apply
   from the first release. Until then, build the image yourself.
 - **Milestone 8: replication between sites, bucket notifications, quotas.** None of the
-  three works. Their paths are in the contract of the management API - a bucket's
-  quota, notifications, replication and replica mode, and targets - and every one of
-  them answers `501 Not Implemented`. Events are published inside the process only;
+  three works. Notification targets can be defined, read, listed and deleted
+  (`/targets`, with their secrets sealed and never shown) - nothing sends to them yet,
+  and their status answers `501`. A bucket's quota, notifications, replication and
+  replica mode are in the contract of the management API and answer
+  `501 Not Implemented`. Events are published inside the process only;
   there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
   stores.
 - **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
@@ -133,8 +135,8 @@ Said plainly, so that nobody finds out by trying:
   opening fixtures that the older binaries wrote.
 - **Entry schema 5 is in the metadata and nothing uses it yet.** A cluster of this
   release counts what every new bucket holds, in its replicated state, and knows quotas,
-  targets, a delivery outbox and replica buckets there; no API shows or sets any of it
-  yet, and a bucket that existed before the upgrade is not counted until a later
+  targets, a delivery outbox and replica buckets there; only targets can be set through
+  the API yet, and a bucket that existed before the upgrade is not counted until a later
   release counts it. Neither is a bucket created through a node that had not yet seen
   that every node knows schema 5 - in the moment after the last node's upgrade, or
   while a node is not registered: it is written as before, and has no usage record
@@ -782,7 +784,8 @@ What the API has, under `/api/v1` (the contract is
 | `/cluster`, `/cluster/maintenance` | nodes, drives and erasure sets; healing, scrubbing and collection |
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
-| `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`, `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets` (with `/{name}` and `/{name}/status`) | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
+| `/targets` and `/targets/{name}` | milestone 8: define, read, list and delete a notification target; its secret and signing key sealed through the KMS, the key shown once; answers `503` until every member counts in schema 5 |
+| `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`, `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets/{name}/status` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
