@@ -79,8 +79,9 @@ control and a hash-chained audit trail.
   its own row, and who uploaded and how often an object was downloaded; uploads that go
   on while you use other screens, with a bar at the top of every screen that shows them
   and what the console did; search; users, groups, roles, policies and API keys; the
-  cluster; the settings of every node; the audit log. A session that times out while it
-  uploads is locked, not ended, until your password unlocks it.
+  cluster; the settings of every node; the audit log. A bucket's page shows its details
+  and can delete every object, after asking for your password. A session that times out
+  while it uploads is locked, not ended, until your password unlocks it.
 - **Deployment.** A distroless, non-root container image; a four-node compose cluster
   for development (Docker or rootless Podman); a Helm chart for Kubernetes and k3s with
   a default-deny NetworkPolicy under the `restricted` Pod Security Standard.
@@ -106,9 +107,7 @@ Said plainly, so that nobody finds out by trying:
   them answers `501 Not Implemented`. Events are published inside the process only;
   there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
   stores.
-- **Planned, not built:** a bucket's details at the top of its page, and "Delete all"
-  objects behind the user's password ([`PLAN.md`](PLAN.md), Goal M); a visual builder
-  of policies in the console (milestone 9). Today a policy is edited as JSON, and a
+- **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
   bucket's policy through the S3 API only.
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
   the port and the replicated store exist. No use case, no API and no console screen
@@ -804,6 +803,20 @@ build it runs are shown under the logo.
   end it at once. `--session-lock-max 0` turns locking off. Without an upload the
   session ends at its timeout, as before
   ([ADR-0027](docs/adr/0027-session-lock.md)).
+- **A bucket's details on its page.** Above its objects: how many objects and how much
+  storage, when it was made and by whom, its policy, and the last upload and download.
+  A figure counted from the index rather than kept as the bucket changes says "not
+  exact", and one you may not see says so - neither is shown as 0.
+- **Delete all.** Beside "Delete selected", a bucket's page can delete every object of
+  the bucket, all pages of it. It says what will happen - how many objects, that a
+  bucket keeping versions keeps them and gets delete markers, that versions under Object
+  Lock stay - and asks for your password, which the server checks (`POST /session/unlock`,
+  the same throttle and audit as an unlock; five wrong passwords end the session)
+  before anything is deleted. Each object is still one `DELETE` judged by the
+  authorizer, so the password guards against mistakes; it is not a permission
+  ([threat model](docs/threat-model.md), open question 32). Deletions, of both kinds,
+  go eight at a time, go on across screens with their progress in the bar at the top,
+  can be cancelled, and end with a notice of what was deleted and what was not, and why.
 
 ### Who uploaded an object, and who downloaded it
 

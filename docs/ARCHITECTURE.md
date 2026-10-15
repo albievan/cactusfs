@@ -889,6 +889,9 @@ The full analysis is in `docs/threat-model.md`. In brief:
   out while it uploads is locked - it may store objects and nothing else - until the
   user's password unlocks it; a changed password ends every session of the user
   **(implemented, ADR-0027; section 6)**.
+  The console's "Delete all" asks for the password through the same unlock before it
+  begins; each deletion is still judged by the authorizer, so that is a confirmation,
+  not a permission (threat model, open question 32).
 - Versioning and Object Lock for ransomware resistance **(implemented, ADR-0008, 0009)**.
 - Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset.
 
