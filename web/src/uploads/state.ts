@@ -237,6 +237,33 @@ export function underWay(uploads: readonly Upload[]): Upload[] {
   return ofBatches(uploads, batchesInFlight(uploads));
 }
 
+/** The batches that are, or were until just now, on their way together. */
+export interface Run {
+  /** Whether a file of them is on its way. */
+  active: boolean;
+  batches: ReadonlySet<string>;
+}
+
+/** No run yet. */
+export const NO_RUN: Run = { active: false, batches: new Set() };
+
+/**
+ * What the run is, now that these batches have a file on its way. A run
+ * begins when files are sent off while nothing is on its way, takes in what
+ * is sent off until nothing is, and is then kept - over - until the next.
+ */
+export function runAfter(run: Run, flying: ReadonlySet<string>): Run {
+  if (flying.size === 0) {
+    return run.active ? { active: false, batches: run.batches } : run;
+  }
+  if (!run.active) {
+    return { active: true, batches: flying };
+  }
+  return [...flying].every((batch) => run.batches.has(batch))
+    ? run
+    : { active: true, batches: new Set([...run.batches, ...flying]) };
+}
+
 /** Which uploads are meant: those of a batch, those of a bucket, or - neither named - all. */
 export interface UploadScope {
   batch?: string;

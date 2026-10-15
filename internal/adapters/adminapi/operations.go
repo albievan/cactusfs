@@ -57,7 +57,9 @@ func (o *operations) SignIn(ctx context.Context, request api.SignInRequestObject
 	if err != nil {
 		return nil, err
 	}
-	cookie := httpsession.Cookie(signed.Token, signed.ExpiresAt).String()
+	// The browser keeps the cookie for as long as the session can be
+	// locked, which is longer than to its timeout: it is what unlocks.
+	cookie := httpsession.Cookie(signed.Token, signed.CookieExpires).String()
 	return api.SignIn200JSONResponse{
 		Body:    api.Session{User: signed.User, CsrfToken: signed.CSRFToken, ExpiresAt: signed.ExpiresAt, Server: o.server()},
 		Headers: api.SignIn200ResponseHeaders{SetCookie: &cookie},
@@ -75,6 +77,16 @@ func (o *operations) GetSession(ctx context.Context, _ api.GetSessionRequestObje
 	}
 	if info.token != "" {
 		identity.Via = api.IdentityViaSession
+		// What the session is - locked or not - is the use case's to say.
+		status, err := o.h.cfg.Sessions.Status(ctx, info.token)
+		if errors.Is(err, domain.ErrAccessDenied) {
+			// It ended between the authentication of this request and now.
+			return nil, errors.Join(errUnauthenticated, err)
+		}
+		if err != nil {
+			return nil, err
+		}
+		identity.Locked, identity.ExpiresAt, identity.LockEndsAt = &status.Locked, &status.ExpiresAt, timeOrNil(status.LockEndsAt)
 	} else {
 		identity.AccessKeyId = &info.principal.AccessKeyID
 	}
@@ -91,6 +103,36 @@ func (o *operations) SignOut(ctx context.Context, _ api.SignOutRequestObject) (a
 	}
 	cookie := httpsession.Expired().String()
 	return api.SignOut204Response{Headers: api.SignOut204ResponseHeaders{SetCookie: &cookie}}, nil
+}
+
+// UnlockSession implements api.StrictServerInterface. Whether the password
+// unlocks the session, and what follows from one that does not, is the use
+// case's; this carries the tokens.
+func (o *operations) UnlockSession(ctx context.Context, request api.UnlockSessionRequestObject) (api.UnlockSessionResponseObject, error) {
+	info := infoOf(ctx)
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	if info.token == "" {
+		return nil, fmt.Errorf("%w: the request was made with an API key, which has no session to unlock", domain.ErrInvalidArgument)
+	}
+	unlocked, err := o.h.cfg.Sessions.Unlock(ctx, info.token, request.Body.Password, info.session)
+	if errors.Is(err, domain.ErrCredentialNotFound) && errors.Is(err, domain.ErrTooManyAttempts) {
+		// This request ended the session, for too many wrong passwords:
+		// 401, and the browser forgets its cookie. A session that had
+		// ended before is a 401 too, and the cookie is left alone: it may
+		// be this session, unlocked a moment ago by the same request sent
+		// twice, and the cookie the browser has by now is the new one.
+		info.sessionEnded = true
+	}
+	if err != nil {
+		return nil, err
+	}
+	cookie := httpsession.Cookie(unlocked.Token, unlocked.CookieExpires).String()
+	return api.UnlockSession200JSONResponse{
+		Body:    api.Session{User: unlocked.User, CsrfToken: unlocked.CSRFToken, ExpiresAt: unlocked.ExpiresAt, Server: o.server()},
+		Headers: api.UnlockSession200ResponseHeaders{SetCookie: &cookie},
+	}, nil
 }
 
 // --- buckets ---

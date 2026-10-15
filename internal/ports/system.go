@@ -17,7 +17,9 @@ type Clock interface {
 // through after authentication. The rule is default deny.
 type Authorizer interface {
 	// Authorize returns nil when the request is allowed and an error
-	// wrapping domain.ErrAccessDenied when it is not.
+	// wrapping domain.ErrAccessDenied when it is not - or wrapping
+	// domain.ErrSessionLocked, and not ErrAccessDenied, when it is refused
+	// because the caller's console session is locked.
 	Authorize(ctx context.Context, req iam.Request) error
 	// Allowed reports whether Authorize would allow the request: the same
 	// decision, from the same reading of the policies, but a refusal is
@@ -26,6 +28,10 @@ type Authorizer interface {
 	// over a hundred buckets must not write a hundred denials - and is
 	// never to be used as the gate of an operation: whatever a caller asks
 	// for by name goes through Authorize. The error is not nil only when
-	// the decision could not be made, and then nothing is allowed.
+	// the decision could not be made, and then nothing is allowed - and
+	// for a caller whose console session is locked, when it wraps
+	// domain.ErrSessionLocked: such a caller is never answered "no", which
+	// would leave a list empty where it is to be refused. That refusal
+	// ends the operation that asked, and is recorded as one of Authorize.
 	Allowed(ctx context.Context, req iam.Request) (bool, error)
 }

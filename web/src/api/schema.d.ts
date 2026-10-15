@@ -11,7 +11,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Who is making this request */
+        /**
+         * Who is making this request
+         * @description The identity of the caller. For a console session it also says when the session reaches its timeout
+         *     and whether it is locked. A locked session can ask this.
+         */
         get: operations["getSession"];
         put?: never;
         /**
@@ -23,6 +27,42 @@ export interface paths {
         post: operations["signIn"];
         /** Sign out */
         delete: operations["signOut"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/session/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unlock the session with the user's password
+         * @description Checks the password of the user the session belongs to - no user name is taken - and gives the session
+         *     its full authority back, for another lifetime. The session gets a new token, set as the cookie, and a
+         *     new CSRF token, returned once, here; the tokens it had are refused from then on. It is accepted on a
+         *     session that is not locked too, and does the same.
+         *
+         *     A password that is not accepted answers 403 with the code `AccessDenied` - not 401 - and the session
+         *     stays as it was. Too many attempts from one address answer 429 with the code `TooManyAttempts` and
+         *     `Retry-After`, as at sign-in: failed sign-ins and failed unlocks are counted together. After too many
+         *     wrong passwords for one session the session is ended: the answer is then 401 and the cookie is
+         *     cleared. A session that had ended before is answered 401 as well, and the cookie is left alone.
+         *     A request made with an API key answers 400: a key has nothing to unlock.
+         *
+         *     Send it once. The tokens the request came with are refused the moment it has succeeded: the same
+         *     request sent again answers 401, although the session lives on under the tokens of the first answer.
+         *
+         *     `Idempotency-Key` is accepted and has no effect: nothing of a request that holds a password is kept,
+         *     and an answer that holds a session is never given twice.
+         */
+        post: operations["unlockSession"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -522,7 +562,12 @@ export interface paths {
         };
         /** Get a user */
         get: operations["getUser"];
-        /** Change a user */
+        /**
+         * Change a user
+         * @description Replaces the groups, the roles and the state of a user, and the password when one is given. A new
+         *     password ends every console session of the user at once - locked ones too, and that of the caller
+         *     when the caller changes their own: the next request of such a session answers 401.
+         */
         put: operations["updateUser"];
         post?: never;
         /** Delete a user */
@@ -932,6 +977,13 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        UnlockRequest: {
+            /**
+             * Format: password
+             * @description The password of the user the session belongs to.
+             */
+            password: string;
+        };
         /**
          * @description Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
          *     else: no answer to a request without a credential names it, and no response header does.
@@ -954,7 +1006,10 @@ export interface components {
             user: string;
             /** @description Send it back in `X-CSRF-Token` with every request that changes something. */
             csrf_token: string;
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description When the session reaches its timeout.
+             */
             expires_at: string;
             server: components["schemas"]["ServerVersion"];
         };
@@ -966,6 +1021,23 @@ export interface components {
             via: "api_key" | "session";
             user?: string;
             access_key_id?: string;
+            /**
+             * @description Only with `via: session`. True when the session has reached its timeout and is kept because its
+             *     user is uploading objects: it may store objects, ask this, unlock and sign out, and nothing else.
+             */
+            locked?: boolean;
+            /**
+             * Format: date-time
+             * @description Only with `via: session`. When the session reaches - or, if it is locked, reached - its timeout.
+             */
+            expires_at?: string;
+            /**
+             * Format: date-time
+             * @description Only with `via: session`, and only where sessions can lock. The latest moment the session can stay
+             *     locked to: it has ended by then whatever is being uploaded. A locked session usually ends
+             *     earlier, a moment after its last upload.
+             */
+            lock_ends_at?: string;
         };
         Bucket: {
             name: string;
@@ -2113,6 +2185,38 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    unlockSession: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnlockRequest"];
+            };
+        };
+        responses: {
+            /** @description Unlocked. The session has a new token and a new CSRF token. */
+            200: {
+                headers: {
+                    /** @description The session cookie, with the new token. */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
             };
             default: components["responses"]["Problem"];
         };

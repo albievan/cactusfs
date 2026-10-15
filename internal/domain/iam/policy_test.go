@@ -3,11 +3,16 @@ package iam_test
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/netip"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/quick"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -465,6 +470,22 @@ func FuzzPolicyDecision(f *testing.F) {
 				t.Fatal("a key's own policy allowed what its owner's did not")
 			}
 		}
+		// A locked session (ADR-0027): whatever the policies say, it reads
+		// nothing, and stores an object exactly where it could unlocked.
+		for _, policies := range [][]iam.Document{nil, {allow}, {deny}, {allow, deny}, {denyAsAllow}} {
+			locked := iam.Principal{User: "u", Policies: policies, LockedSession: true}
+			if err := iam.Decide(iam.Request{Principal: locked, Action: iam.ActionGetObject, Resource: resource, Now: policyNow}); !errors.Is(err, domain.ErrSessionLocked) {
+				t.Fatalf("a locked session reading an object: %v", err)
+			}
+			unlocked := locked
+			unlocked.LockedSession = false
+			put := iam.Request{Principal: locked, Action: iam.ActionPutObject, Resource: resource, Now: policyNow}
+			was := iam.Decide(put)
+			put.Principal = unlocked
+			if is := iam.Decide(put); (was == nil) != (is == nil) || errors.Is(was, domain.ErrSessionLocked) {
+				t.Fatalf("storing an object: locked %v, unlocked %v", was, is)
+			}
+		}
 	})
 }
 
@@ -620,5 +641,192 @@ func TestBypassIsNeverGrantedByAWildcard(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("a key whose inline policy says s3:* may bypass governance")
+	}
+}
+
+// declaredActions reads the actions iam.go declares: every constant of the
+// type Action. A test that walks them covers an action the day it is added.
+func declaredActions(t *testing.T) []iam.Action {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "iam.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []iam.Action
+	for _, decl := range file.Decls {
+		general, ok := decl.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range general.Specs {
+			values, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if kind, ok := values.Type.(*ast.Ident); !ok || kind.Name != "Action" {
+				continue
+			}
+			for _, value := range values.Values {
+				literal, ok := value.(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					t.Fatalf("an action of iam.go is not a string literal: %v", value)
+				}
+				name, err := strconv.Unquote(literal.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actions = append(actions, iam.Action(name))
+			}
+		}
+	}
+	if len(actions) < 70 || !slices.Contains(actions, iam.ActionPutObject) || !slices.Contains(actions, iam.ActionNodeRPC) {
+		t.Fatalf("only %d actions were read from iam.go", len(actions))
+	}
+	return actions
+}
+
+// TestALockedSessionMayOnlyStoreObjects walks every action there is, for
+// principals of every standing: a locked session is refused each of them
+// with domain.ErrSessionLocked - which is no denial - but storing an object,
+// which is decided as for the same principal with a session that is not
+// locked (ADR-0027).
+func TestALockedSessionMayOnlyStoreObjects(t *testing.T) {
+	t.Parallel()
+	everything := mustPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`)
+	noPut := mustPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}]}`)
+	oneBucket := mustPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::inbox/*"}]}`)
+	public := mustBucketPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::inbox/*"}]}`, "inbox")
+	session := func(policies ...iam.Document) iam.Principal {
+		return iam.Principal{User: "alice", Policies: policies, Session: iam.Session{SecureTransport: true}}
+	}
+	principals := []struct {
+		name      string
+		principal iam.Principal
+		// put says whether the principal, not locked, may store inbox/k.
+		put bool
+	}{
+		{"a cluster administrator", session(iam.BuiltInPolicies()[iam.RoleClusterAdmin]), true},
+		{"a reader", session(iam.BuiltInPolicies()[iam.RoleReadOnly]), false},
+		{"a user with everything", session(everything), true},
+		{"a user who is denied uploads", session(everything, noPut), false},
+		{"a user of one bucket", session(oneBucket), true},
+		{"a user without a policy", session(), false},
+		// No session is ever any of these; the rule holds whoever it is.
+		{"the root identity", iam.Principal{AccessKeyID: "ROOT", Root: true}, true},
+		{"a key with a boundary", iam.Principal{AccessKeyID: "K", User: "alice", Policies: []iam.Document{everything}, Boundary: &oneBucket}, true},
+		{"a node", iam.Principal{NodeID: "n1"}, false},
+		{"the lifecycle service", iam.Principal{Service: iam.ServiceLifecycle}, false},
+	}
+	resources := []iam.Resource{
+		{Bucket: "inbox", Key: "k"}, {Bucket: "inbox"}, {}, {Admin: "user/alice"}, {Admin: "audit"}, {Node: "n1"},
+	}
+	actions := declaredActions(t)
+	for _, tt := range principals {
+		locked := tt.principal
+		locked.LockedSession = true
+		for _, action := range actions {
+			for _, resource := range resources {
+				for _, policy := range []*iam.BucketPolicy{nil, public} {
+					req := iam.Request{Principal: locked, Action: action, Resource: resource, Now: policyNow, BucketPolicy: policy}
+					err := iam.Decide(req)
+					if action != iam.ActionPutObject {
+						if !errors.Is(err, domain.ErrSessionLocked) || errors.Is(err, domain.ErrAccessDenied) {
+							t.Errorf("%s, locked: %s on %s = %v, want the session is locked and no denial", tt.name, action, resource, err)
+						}
+						continue
+					}
+					req.Principal = tt.principal
+					unlocked := iam.Decide(req)
+					if (err == nil) != (unlocked == nil) || errors.Is(err, domain.ErrSessionLocked) {
+						t.Errorf("%s: storing %s locked = %v, unlocked = %v", tt.name, resource, err, unlocked)
+					}
+				}
+			}
+		}
+		// The table says what it means.
+		put := iam.Decide(iam.Request{Principal: locked, Action: iam.ActionPutObject, Resource: iam.Resource{Bucket: "inbox", Key: "k"}, Now: policyNow})
+		if (put == nil) != tt.put {
+			t.Errorf("%s, locked: storing inbox/k = %v, want allowed %v", tt.name, put, tt.put)
+		}
+		if put != nil && !errors.Is(put, domain.ErrAccessDenied) {
+			t.Errorf("%s, locked: a refused upload is %v, want a denial", tt.name, put)
+		}
+	}
+	// A principal that is not locked is never told that it is.
+	for _, tt := range principals {
+		for _, action := range actions {
+			if err := iam.Decide(iam.Request{Principal: tt.principal, Action: action, Resource: iam.Resource{Bucket: "inbox", Key: "k"}, Now: policyNow}); errors.Is(err, domain.ErrSessionLocked) {
+				t.Errorf("%s, not locked: %s = %v", tt.name, action, err)
+			}
+		}
+	}
+}
+
+// TestLockedSessionProperty: for policies, a bucket policy, an action and a
+// resource taken at random - a locked session and anything but s3:PutObject
+// is always domain.ErrSessionLocked, and a locked s3:PutObject is decided as
+// the unlocked one is.
+func TestLockedSessionProperty(t *testing.T) {
+	t.Parallel()
+	actions := declaredActions(t)
+	effects := []iam.Effect{iam.Allow, iam.Deny}
+	actionPatterns := []string{"*", "s3:*", "s3:Put*", "s3:PutObject", "s3:Get*", "admin:*", "s3:?utObject", "s3:DeleteObject"}
+	resourcePatterns := []string{"*", "arn:aws:s3:::*", "arn:aws:s3:::inbox/*", "arn:aws:s3:::inbox", "arn:aws:s3:::other/*", "arn:aws:s3:::inbox/k?"}
+	buckets := []string{"inbox", "other", ""}
+	keys := []string{"k1", "deep/er/key", ""}
+	pick := func(n uint8, of int) int { return int(n) % of }
+	document := func(picks []uint8) iam.Document {
+		doc := iam.Document{Version: iam.PolicyVersion}
+		for i := 0; i+2 < len(picks) && len(doc.Statements) < 4; i += 3 {
+			doc.Statements = append(doc.Statements, iam.Statement{
+				Effect:    effects[pick(picks[i], len(effects))],
+				Actions:   []string{actionPatterns[pick(picks[i+1], len(actionPatterns))]},
+				Resources: []string{resourcePatterns[pick(picks[i+2], len(resourcePatterns))]},
+			})
+		}
+		return doc
+	}
+	property := func(own, second, ofBucket []uint8, action uint16, bucketName, key, shape uint8) bool {
+		var policies []iam.Document
+		for _, picks := range [][]uint8{own, second} {
+			if doc := document(picks); len(doc.Statements) > 0 && doc.Validate() == nil {
+				policies = append(policies, doc)
+			}
+		}
+		resource := iam.Resource{Bucket: buckets[pick(bucketName, len(buckets))], Key: keys[pick(key, len(keys))]}
+		req := iam.Request{
+			Principal: iam.Principal{User: "alice", Policies: policies, LockedSession: true},
+			Action:    actions[int(action)%len(actions)], Resource: resource, Now: policyNow,
+		}
+		if shape%4 == 0 {
+			// Now and then the action there is an exception for.
+			req.Action = iam.ActionPutObject
+		}
+		if doc := document(ofBucket); resource.Bucket != "" && len(doc.Statements) > 0 && shape%2 == 0 {
+			// The policy of the bucket, saying the same of everybody.
+			statements := make([]map[string]any, len(doc.Statements))
+			for i, st := range doc.Statements {
+				statements[i] = map[string]any{
+					"Effect": st.Effect, "Principal": "*", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::" + resource.Bucket + "/*",
+				}
+			}
+			raw, err := json.Marshal(map[string]any{"Version": iam.PolicyVersion, "Statement": statements})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed, err := iam.ParseBucketPolicy(raw, resource.Bucket); err == nil {
+				req.BucketPolicy = &parsed
+			}
+		}
+		locked := iam.Decide(req)
+		if req.Action != iam.ActionPutObject {
+			return errors.Is(locked, domain.ErrSessionLocked) && !errors.Is(locked, domain.ErrAccessDenied)
+		}
+		req.Principal.LockedSession = false
+		unlocked := iam.Decide(req)
+		return (locked == nil) == (unlocked == nil) && !errors.Is(locked, domain.ErrSessionLocked)
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 5000}); err != nil {
+		t.Error(err)
 	}
 }

@@ -23,6 +23,7 @@ const (
 	groupTLS           = "tls"
 	groupKMS           = "kms"
 	groupBootstrap     = "bootstrap"
+	groupSessions      = "sessions"
 	groupMaintenance   = "maintenance"
 	groupObservability = "observability"
 )
@@ -42,6 +43,7 @@ func settingGroups() []settingGroup {
 		{Name: groupTLS, Title: "TLS: certificates of the listeners and of the node"},
 		{Name: groupKMS, Title: "KMS: the key that wraps data keys"},
 		{Name: groupBootstrap, Title: "Bootstrap: the root credentials of a new deployment"},
+		{Name: groupSessions, Title: "Console sessions: how long one lasts, and what becomes of it while it uploads"},
 		{Name: groupMaintenance, Title: "Maintenance: background work"},
 		{Name: groupObservability, Title: "Observability: log, audit export and traces"},
 	}
@@ -375,6 +377,38 @@ func serverSettings() []settingSpec {
 			DefaultNote: "generated, and shown once, by a new deployment",
 			Usage:       "secret key of the root credentials a new deployment begins with; set it together with $" + envRootKeyID,
 			bind:        func(t *settingTargets) any { return &t.cfg.secrets.rootSecretKey },
+		},
+
+		// Console sessions (ADR-0027). The same on every node: any gateway
+		// may be asked what a session is.
+		{
+			Name: "session-lifetime", Env: envSessionLifetime, Flag: true, Default: durationText(app.DefaultSessionLifetime),
+			Group: groupSessions, Kind: plain, Scope: all,
+			Usage: "how long a console session lasts, from sign-in or from its last unlock, before it reaches its timeout",
+			Doc: "how long a console session lasts, from sign-in or from its last unlock, before it reaches its timeout (`" +
+				durationText(minSessionLifetime) + "` to `" + durationText(maxSessionLifetime) + "`). Nothing extends it: at the timeout " +
+				"the user signs in again, or - while objects are being uploaded with the session - it is locked until the user's password unlocks it. " +
+				"It must be the same on every node: any gateway may be asked what a session is",
+			bind: func(t *settingTargets) any { return &t.cfg.SessionLifetime },
+		},
+		{
+			Name: "session-upload-grace", Env: envSessionGrace, Flag: true, Default: durationText(app.DefaultSessionUploadGrace),
+			Group: groupSessions, Kind: plain, Scope: all,
+			Usage: "how long after its last upload a console session that is locked ends",
+			Doc: "how long after its last upload a console session that is locked ends (`" + durationText(minSessionGrace) + "` to `" +
+				durationText(maxSessionGrace) + "`). While a session uploads, each node it uploads through writes one entry to the metadata log in a third of this time. " +
+				"It must be the same on every node",
+			bind: func(t *settingTargets) any { return &t.cfg.SessionUploadGrace },
+		},
+		{
+			Name: "session-lock-max", Env: envSessionLockMax, Flag: true, Default: durationText(app.DefaultSessionLockMax),
+			Group: groupSessions, Kind: plain, Scope: all,
+			Usage: "the longest a console session stays locked, counted from its timeout, whatever is being uploaded; 0: a session never locks",
+			Doc: "the longest a console session that reached its timeout while it uploads stays locked - able to store objects and nothing else - " +
+				"counted from the timeout, whatever is still being uploaded (at most `" + durationText(maxSessionLockMax) +
+				"`); `0`: a session never locks, and ends at its timeout. It must be the same on every node: a gateway with a smaller value " +
+				"takes for ended what another takes for locked, and the node that leads the metadata group removes session records by its own",
+			bind: func(t *settingTargets) any { return &t.cfg.SessionLockMax },
 		},
 
 		// Maintenance.

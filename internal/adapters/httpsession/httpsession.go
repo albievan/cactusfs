@@ -22,13 +22,17 @@ const (
 	CSRFHeader = "X-CSRF-Token"
 )
 
-// Set stores a session token in the response. expires is when the session
-// ends; the browser drops the cookie then.
+// Set stores a session token in the response. expires is until when the
+// browser is to keep it: the latest moment the session can be of use, which
+// is later than its timeout where a session that times out while it uploads
+// is locked and can be unlocked (ADR-0027). The server decides what the
+// session is; the cookie only has to be there for as long.
 func Set(w http.ResponseWriter, token string, expires time.Time) {
 	http.SetCookie(w, Cookie(token, expires))
 }
 
-// Cookie returns the cookie that holds a session token until expires.
+// Cookie returns the cookie that holds a session token until expires; see
+// Set for what expires is.
 func Cookie(token string, expires time.Time) *http.Cookie {
 	return &http.Cookie{
 		Name: CookieName, Value: token, Path: "/", Expires: expires,

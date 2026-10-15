@@ -57,6 +57,10 @@ func errorMappings() []mapping {
 		{errAuthSignature, apiError{http.StatusForbidden, "SignatureDoesNotMatch", "The request signature that the server calculated does not match the signature that you provided."}},
 		{domain.ErrCredentialNotFound, apiError{http.StatusForbidden, "InvalidAccessKeyId", "The access key ID that you provided does not exist in our records."}},
 		{domain.ErrAccessDenied, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},
+		// A console session is no credential of this API, so no request
+		// here is ever made by a locked one (ADR-0027). Should a use case
+		// say so all the same, it is a refusal like any other.
+		{domain.ErrSessionLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},
 
 		// Payload.
 		{errUnsupportedPayload, errNotImplemented()},

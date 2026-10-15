@@ -279,6 +279,12 @@ type Principal struct {
 	// worker that carries out lifecycle rules is ServiceLifecycle. No
 	// request can authenticate as a service.
 	Service string
+	// LockedSession marks the user of a console session that has reached
+	// its timeout and is kept because the user is uploading objects
+	// (ADR-0027). Such a principal may store objects where the user may,
+	// and nothing else: Decide says so. Only the session use case sets it;
+	// no API key, node or service is ever locked.
+	LockedSession bool
 }
 
 // ServiceLifecycle is the service that carries out the lifecycle rules of
@@ -361,9 +367,20 @@ type Request struct {
 //     explicit Deny wins over every Allow.
 //   - An API key with an inline policy may do what its owner may do AND the
 //     inline policy allows: a key never exceeds its owner.
+//   - A locked session (Principal.LockedSession) may store objects, and
+//     nothing else, whatever its user is allowed: every other action is
+//     refused before a policy is read. Storing an object is then decided as
+//     for the same user with a session that is not locked.
 //
-// A refusal wraps domain.ErrAccessDenied.
+// A refusal wraps domain.ErrAccessDenied - but the refusal of a locked
+// session, which wraps domain.ErrSessionLocked and not ErrAccessDenied: it
+// says nothing of what the user may do.
 func Decide(req Request) error {
+	if req.Principal.LockedSession && req.Action != ActionPutObject {
+		// First of all: no policy, no kind of principal and no kind of
+		// action has a say in it.
+		return fmt.Errorf("%w: %s may not %s on %s until it is unlocked", domain.ErrSessionLocked, req.Principal.Name(), req.Action, req.Resource)
+	}
 	if req.Principal.Anonymous() {
 		// Only the policy of a bucket lets anybody in unauthenticated,
 		// and only to read.

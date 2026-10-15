@@ -39,6 +39,10 @@ React console that talks only to that API and holds no business or authorization
   `SameSite=Strict`), with the CSRF token in `X-CSRF-Token` on every request that
   changes something. A JSON body must be sent as `application/json`, which a form on
   another site cannot do.
+- A session that times out while its user uploads is locked, not ended
+  ([ADR-0027](0027-session-lock.md)): it is answered 423 `SessionLocked` by everything
+  but the upload, `GET /session`, `POST /session/unlock` and sign-out, until the user's
+  password unlocks it. The cookie's `Expires` is the latest moment that can last to.
 - Failed sign-ins are limited to ten in five minutes per client address, per node, in
   memory. An attempt is counted before the password is checked, so guesses made at the
   same moment count like guesses made one by one. A cluster allows as many attempts as
@@ -88,9 +92,12 @@ trail. A failed sign-in is always the same 401.
   record into every mutating Raft entry; that can still be done, compatibly.
 - An answer of the server failing (5xx) or larger than 64 KiB is not kept.
 - Signing in accepts the header and ignores it: an answer that holds a session is never
-  given twice.
+  given twice. So does unlocking a session (ADR-0027), whose body holds a password: no
+  fingerprint of it is ever stored.
 - A replayed answer is not authorized again. It is the answer the same caller was
-  already given.
+  already given. *But not to a locked console session* (ADR-0027): that is given no
+  stored answer and reserves no key - it is refused, 423, where the key is looked up -
+  except for an upload, which a locked session may make and so may repeat.
 - The records are four new commands in Raft entry schema version 1
   (`idempotency.begin`, `.complete`, `.delete`, `.expire`). No release has shipped
   version 1, as with the IAM commands (ADR-0006).

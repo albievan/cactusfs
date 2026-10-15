@@ -39,7 +39,18 @@ type IdempotentRequest struct {
 	// Fingerprint describes the request, so that the same key with
 	// another request is recognised.
 	Fingerprint string
+	// Principal is who makes the request, as it was authenticated.
+	Principal iam.Principal
+	// Upload says that the request stores an object - the one request a
+	// locked console session may make, and so the one it may repeat.
+	Upload bool
 }
+
+// ActionRepeatRequest names, in the audit trail, the asking for what an
+// idempotency key stands for: the answer of a request that was made before,
+// or the reservation of one that is made now. It is not an action a policy
+// grants; whoever was authenticated may ask - but a locked session.
+const ActionRepeatRequest iam.Action = "auth:RepeatRequest"
 
 // IdempotentAnswer is the answer a request got.
 type IdempotentAnswer struct {
@@ -71,6 +82,9 @@ type IdempotencyService struct {
 	store ports.IdempotencyStore
 	kms   ports.KMS
 	clock ports.Clock
+	// authz refuses a locked session; nil, the domain's decision is taken
+	// as it is and nothing is recorded.
+	authz ports.Authorizer
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
@@ -80,6 +94,37 @@ type IdempotencyService struct {
 // cryptographically secure random source.
 func NewIdempotencyService(store ports.IdempotencyStore, kms ports.KMS, clock ports.Clock, entropy io.Reader) *IdempotencyService {
 	return &IdempotencyService{store: store, kms: kms, clock: clock, entropy: entropy}
+}
+
+// WithAuthorizer gives the service the authorizer that refuses - and records
+// that it refused - a locked console session that asks for a stored answer
+// or reserves a key.
+func (s *IdempotencyService) WithAuthorizer(authz ports.Authorizer) *IdempotencyService {
+	s.authz = authz
+	return s
+}
+
+// locked refuses a locked console session everything but the repeat of an
+// upload (ADR-0027). A stored answer is given without the use case being
+// asked again - it is the answer the same caller was already given - and
+// that is no way round the lock: an answer may hold what a locked session
+// must not read, the secret of an API key it made while it was not locked.
+// Nor does a locked session reserve a key: its request is refused, and is
+// not to cost the replicated log two entries first.
+//
+// The decision is the domain's, made through the authorizer, which records
+// the refusal as it records every other.
+func (s *IdempotencyService) locked(ctx context.Context, req IdempotentRequest) error {
+	if !req.Principal.LockedSession || req.Upload {
+		// Storing an object is what a locked session may do, where its
+		// user may: the use case behind the key decides that.
+		return nil
+	}
+	ask := iam.Request{Principal: req.Principal, Action: ActionRepeatRequest, Resource: iam.Resource{Admin: "request"}}
+	if s.authz != nil {
+		return s.authz.Authorize(ctx, ask)
+	}
+	return iam.Decide(ask)
 }
 
 func hashHex(parts ...string) string {
@@ -98,10 +143,15 @@ func hashHex(parts ...string) string {
 //
 // The error wraps domain.ErrIdempotencyKeyReused when the key belongs to
 // another request, and domain.ErrRequestInProgress when the first request
-// with the key has not finished.
+// with the key has not finished. For a locked console session and anything
+// but an upload it wraps domain.ErrSessionLocked: no answer is looked for
+// and nothing is reserved.
 func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (*IdempotentAnswer, Reservation, error) {
 	if req.Scope == "" || req.Key == "" {
 		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w: no scope or key", domain.ErrInvalidArgument)
+	}
+	if err := s.locked(ctx, req); err != nil {
+		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
 	}
 	reservation := Reservation{id: hashHex(req.Scope, req.Key), fingerprint: hashHex(req.Fingerprint)}
 	// A stale record is removed and the key reserved again: twice at

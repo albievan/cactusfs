@@ -63,6 +63,12 @@ Usage of cactusfs server:
     	pause between two passes of the scrubber, which verifies and heals every object; 0 disables it ($CACTUSFS_SCRUB_INTERVAL) (default 24h0m0s)
   -scrub-rate-mib int
     	limit on how fast the scrubber reads, in MiB per second; 0 is no limit ($CACTUSFS_SCRUB_RATE_MIB) (default 64)
+  -session-lifetime duration
+    	how long a console session lasts, from sign-in or from its last unlock, before it reaches its timeout ($CACTUSFS_SESSION_LIFETIME) (default 30m0s)
+  -session-lock-max duration
+    	the longest a console session stays locked, counted from its timeout, whatever is being uploaded; 0: a session never locks ($CACTUSFS_SESSION_LOCK_MAX) (default 12h0m0s)
+  -session-upload-grace duration
+    	how long after its last upload a console session that is locked ends ($CACTUSFS_SESSION_UPLOAD_GRACE) (default 1m30s)
   -shutdown-timeout duration
     	time allowed for in-flight requests to finish once the listeners have closed ($CACTUSFS_SHUTDOWN_TIMEOUT) (default 30s)
   -tls-cert path

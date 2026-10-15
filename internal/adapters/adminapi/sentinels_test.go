@@ -88,6 +88,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrRequestInProgress:    {409, "RequestInProgress"},
 		domain.ErrTooManyAttempts:      {429, "TooManyAttempts"},
 		domain.ErrNotSupported:         {500, "InternalError"},
+		domain.ErrSessionLocked:        {423, "SessionLocked"},
 	}
 	sentinels := domain.Sentinels()
 	if len(sentinels) != len(answers) {
@@ -124,5 +125,16 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 	}
 	if denied := problemOf(fmt.Errorf("%w: %w", domain.ErrQuotaExceeded, domain.ErrAccessDenied)); denied.code != "AccessDenied" {
 		t.Errorf("a denial that also names the quota is told as %s", denied.code)
+	}
+
+	// The refusal of a locked session (ADR-0027): 423, never the 401 by
+	// which a console takes its session for gone, and told as the lock even
+	// when the error names a denial as well.
+	locked := problemOf(fmt.Errorf("bucket.List: %w: user/alice", domain.ErrSessionLocked))
+	if locked.status != 423 || locked.code != "SessionLocked" || locked.title == "" || locked.detail != "" {
+		t.Errorf("the refusal of a locked session = %+v", locked)
+	}
+	if both := problemOf(fmt.Errorf("%w: %w", domain.ErrAccessDenied, domain.ErrSessionLocked)); both.code != "SessionLocked" {
+		t.Errorf("a locked session that is also denied is told as %s", both.code)
 	}
 }

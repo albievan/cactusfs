@@ -21,11 +21,29 @@ info:
 
     **Errors** are `application/problem+json` (RFC 9457).
 
+    **A locked session.** A console session that reaches its timeout while its
+    user is uploading objects is not ended: it is locked. A locked session may
+    store objects (`putObject`), read its own state (`getSession`), unlock
+    (`unlockSession`) and sign out (`signOut`). Every other operation answers
+    423 with the problem code `SessionLocked` - not 401, which says that the
+    session is gone. The password of the session's user unlocks it. A session
+    is locked no longer than the uploads last and a moment more, and no longer
+    than the deployment allows; then it has ended, and the answer is 401. An
+    API key is never locked. What is wrong with a request whoever sent it is
+    still said first: 400, 404, 415 and 501 are answered to a locked session
+    as to any other.
+
+    **A changed password** ends every console session of the user, at once,
+    that of the user who changed it included: the next request answers 401.
+
     **Idempotency.** Every request that changes something accepts
     `Idempotency-Key`. A request repeated with the same key and the same
     content gets the answer the first one got, and changes nothing again; with
     the same key and other content it is refused with 422; while the first is
     still being carried out it is refused with 409. Keys are kept for 24 hours.
+    A locked session is given no answer that was kept, and none of its
+    answers is: with a key or without, it is answered 423 - but for an upload,
+    whose repeat is answered as ever.
 servers:
   - url: /api/v1
 security:
@@ -87,6 +105,9 @@ paths:
       operationId: getSession
       tags: [session]
       summary: Who is making this request
+      description: |
+        The identity of the caller. For a console session it also says when the session reaches its timeout
+        and whether it is locked. A locked session can ask this.
       responses:
         '200':
           description: The identity of the caller.
@@ -111,6 +132,54 @@ paths:
               description: Clears the session cookie.
               schema:
                 type: string
+        default:
+          $ref: '#/components/responses/Problem'
+  /session/unlock:
+    post:
+      operationId: unlockSession
+      tags: [session]
+      summary: Unlock the session with the user's password
+      description: |
+        Checks the password of the user the session belongs to - no user name is taken - and gives the session
+        its full authority back, for another lifetime. The session gets a new token, set as the cookie, and a
+        new CSRF token, returned once, here; the tokens it had are refused from then on. It is accepted on a
+        session that is not locked too, and does the same.
+
+        A password that is not accepted answers 403 with the code `AccessDenied` - not 401 - and the session
+        stays as it was. Too many attempts from one address answer 429 with the code `TooManyAttempts` and
+        `Retry-After`, as at sign-in: failed sign-ins and failed unlocks are counted together. After too many
+        wrong passwords for one session the session is ended: the answer is then 401 and the cookie is
+        cleared. A session that had ended before is answered 401 as well, and the cookie is left alone.
+        A request made with an API key answers 400: a key has nothing to unlock.
+
+        Send it once. The tokens the request came with are refused the moment it has succeeded: the same
+        request sent again answers 401, although the session lives on under the tokens of the first answer.
+
+        `Idempotency-Key` is accepted and has no effect: nothing of a request that holds a password is kept,
+        and an answer that holds a session is never given twice.
+      security:
+        - session: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnlockRequest'
+      responses:
+        '200':
+          description: Unlocked. The session has a new token and a new CSRF token.
+          headers:
+            Set-Cookie:
+              description: The session cookie, with the new token.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
         default:
           $ref: '#/components/responses/Problem'
   /buckets:
@@ -967,6 +1036,10 @@ paths:
       operationId: updateUser
       tags: [users]
       summary: Change a user
+      description: |
+        Replaces the groups, the roles and the state of a user, and the password when one is given. A new
+        password ends every console session of the user at once - locked ones too, and that of the caller
+        when the caller changes their own: the next request of such a session answers 401.
       x-cactusfs-action: admin:PutUser
       parameters:
         - $ref: '#/components/parameters/EntityName'
@@ -1722,6 +1795,16 @@ components:
           format: password
           minLength: 1
           maxLength: 1024
+    UnlockRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          format: password
+          description: The password of the user the session belongs to.
+          minLength: 1
+          maxLength: 1024
     ServerVersion:
       type: object
       description: |
@@ -1754,6 +1837,7 @@ components:
         expires_at:
           type: string
           format: date-time
+          description: When the session reaches its timeout.
         server:
           $ref: '#/components/schemas/ServerVersion'
     Identity:
@@ -1772,6 +1856,23 @@ components:
           type: string
         access_key_id:
           type: string
+        locked:
+          type: boolean
+          description: |
+            Only with `via: session`. True when the session has reached its timeout and is kept because its
+            user is uploading objects: it may store objects, ask this, unlock and sign out, and nothing else.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Only with `via: session`. When the session reaches - or, if it is locked, reached - its timeout.
+        lock_ends_at:
+          type: string
+          format: date-time
+          description: |
+            Only with `via: session`, and only where sessions can lock. The latest moment the session can stay
+            locked to: it has ended by then whatever is being uploaded. A locked session usually ends
+            earlier, a moment after its last upload.
     Bucket:
       type: object
       required: [name, created_at]

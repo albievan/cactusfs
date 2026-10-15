@@ -57,6 +57,10 @@ const (
 	patternDownload = "GET " + BasePath + "/buckets/{bucket}/object"
 )
 
+// patternUnlock is the operation that unlocks a session. Its body holds a
+// password, and nothing of it is kept: not a fingerprint either.
+const patternUnlock = "POST " + BasePath + "/session/unlock"
+
 // Identities resolves API keys. It is implemented by app.IdentityService.
 type Identities interface {
 	// SecretFor returns the secret of an access key and the principal it
@@ -153,6 +157,9 @@ type requestInfo struct {
 	// token is the session token the request came with, when it was
 	// authenticated by a session.
 	token string
+	// sessionEnded is set by the operation that ended the session of the
+	// request: the answer then makes the browser forget its cookie.
+	sessionEnded bool
 	// contentLength is the declared length of the request body, or -1.
 	contentLength int64
 	// started is set once the response has begun.
@@ -276,8 +283,19 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 		}
+		if upload && info.token != "" {
+			// The session use case is told that an upload of the session
+			// is in flight on this node, and when it no longer is: what a
+			// session that reaches its timeout meanwhile then is, it
+			// decides (ADR-0027). Nothing is decided here.
+			defer h.cfg.Sessions.UploadBegun(ctx, info.token)()
+		}
 		key := r.Header.Get(headerIdempotency)
-		if key == "" || public || !httpsession.Mutating(r) {
+		if key == "" || public || !httpsession.Mutating(r) || r.Pattern == patternUnlock {
+			// Unlocking takes the header and does nothing with it, as
+			// signing in does: its body holds a password, of which not
+			// even a hash is kept, and its answer holds a session, which
+			// is never given twice.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -407,6 +425,9 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	}
 	answer, reservation, err := h.cfg.Idempotency.Begin(ctx, app.IdempotentRequest{
 		Scope: scopeOf(info), Key: key, Fingerprint: strings.Join([]string{r.Method, r.URL.Path, r.URL.RawQuery, content}, "\n"),
+		// Who asks, and whether for an upload: what follows from that is
+		// the use case's to say.
+		Principal: info.principal, Upload: upload,
 	})
 	if err != nil {
 		h.fail(w, r, err)
@@ -429,7 +450,10 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	// is still there.
 	done, cancel := context.WithTimeout(context.WithoutCancel(ctx), completeTimeout)
 	defer cancel()
-	if recorder.tooLarge || recorder.status == 0 {
+	if recorder.tooLarge || recorder.status == 0 || recorder.status == http.StatusLocked {
+		// Not an answer to keep. That of a locked session least of all: it
+		// is of the moment, and the repeat that comes once the session is
+		// unlocked is to be carried out, not told "locked" for a day.
 		err = h.cfg.Idempotency.Abandon(done, reservation)
 	} else {
 		err = h.cfg.Idempotency.Complete(done, reservation, app.IdempotentAnswer{
@@ -478,6 +502,12 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusTooManyRequests, code: "TooManyAttempts", title: "Too many attempts"}
 	case is(domain.ErrTooManyRequests):
 		return problem{status: http.StatusTooManyRequests, code: codeTooManyRequests, title: "Too many requests at once"}
+	case is(domain.ErrSessionLocked):
+		// Not a 401, which says that the session is gone, and not a denial:
+		// the session is there and waits for its user's password (ADR-0027).
+		// It is asked before the denial, so that an error that names both is
+		// told as the lock.
+		return problem{status: http.StatusLocked, code: "SessionLocked", title: "The session is locked"}
 	case is(domain.ErrAccessDenied):
 		return problem{status: http.StatusForbidden, code: "AccessDenied", title: "Access denied"}
 	case is(domain.ErrQuotaExceeded):
@@ -531,6 +561,9 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	info := infoOf(ctx)
 	p := problemOf(err)
+	if info.sessionEnded && !info.started {
+		httpsession.Clear(w)
+	}
 	switch {
 	case info.started:
 		// The response has begun - a download failed part-way. Nothing
@@ -574,7 +607,7 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		p.detail = err.Error()
 	case p.status == http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "300")
-	case p.status == http.StatusForbidden:
+	case p.status == http.StatusForbidden, p.status == http.StatusLocked:
 		// A refusal says nothing about what it protects.
 	default:
 		p.detail = err.Error()

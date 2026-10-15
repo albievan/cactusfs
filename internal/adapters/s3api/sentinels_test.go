@@ -88,6 +88,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrRequestInProgress:    {500, "InternalError"},
 		domain.ErrTooManyAttempts:      {500, "InternalError"},
 		domain.ErrNotSupported:         {500, "InternalError"},
+		domain.ErrSessionLocked:        {403, "AccessDenied"},
 	}
 	sentinels := domain.Sentinels()
 	if len(sentinels) != len(answers) {

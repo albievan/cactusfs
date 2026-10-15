@@ -294,3 +294,122 @@ type stuckPolicies struct{}
 func (stuckPolicies) BucketPolicies(context.Context, string, func(string, []byte) error) (string, error) {
 	return "b05", nil
 }
+
+// TestAuthorizerOnALockedSession: a locked session (ADR-0027) is refused
+// everything but storing an object - by Authorize with a record in the audit
+// trail that says why and a line in the log, by Allowed with the same error
+// and never with a plain "no", which would leave a list empty. That refusal
+// of Allowed ends the operation that asked, so it is recorded too: once, the
+// repeat being counted. Storing an object is decided by the policies as
+// ever. No policy of a bucket is read to refuse a locked session: not one,
+// and not a page of a walk of them all.
+func TestAuthorizerOnALockedSession(t *testing.T) {
+	t.Parallel()
+	everything := []iam.Document{{
+		Version: iam.PolicyVersion, Statements: []iam.Statement{{Effect: iam.Allow, Actions: []string{"*"}, Resources: []string{"*"}}},
+	}}
+	locked := iam.Principal{User: "alice", Policies: everything, LockedSession: true}
+	reader := iam.Principal{User: "bob", Policies: []iam.Document{iam.BuiltInPolicies()[iam.RoleReadOnly]}, LockedSession: true}
+	site, page := iam.Resource{Bucket: "site"}, iam.Resource{Bucket: "site", Key: "index.html"}
+
+	tests := map[string]struct {
+		request iam.Request
+		// primed makes the request scope one of a search: the policies of
+		// all buckets are walked.
+		primed bool
+		// want is nil when the request is allowed.
+		want error
+	}{
+		"listing the buckets":                   {request: iam.Request{Principal: locked, Action: iam.ActionListAllMyBuckets}, want: domain.ErrSessionLocked},
+		"listing a bucket":                      {request: iam.Request{Principal: locked, Action: iam.ActionListBucket, Resource: site}, want: domain.ErrSessionLocked},
+		"listing a bucket, in a search":         {request: iam.Request{Principal: locked, Action: iam.ActionListBucket, Resource: site}, primed: true, want: domain.ErrSessionLocked},
+		"reading an object":                     {request: iam.Request{Principal: locked, Action: iam.ActionGetObject, Resource: page}, want: domain.ErrSessionLocked},
+		"what the bucket's policy makes public": {request: iam.Request{Principal: reader, Action: iam.ActionGetObject, Resource: page}, want: domain.ErrSessionLocked},
+		"deleting an object":                    {request: iam.Request{Principal: locked, Action: iam.ActionDeleteObject, Resource: page}, want: domain.ErrSessionLocked},
+		"administering users":                   {request: iam.Request{Principal: locked, Action: iam.ActionPutUser, Resource: iam.Resource{Admin: "user/eve"}}, want: domain.ErrSessionLocked},
+		"reading the audit trail":               {request: iam.Request{Principal: locked, Action: iam.ActionGetAuditLog, Resource: iam.Resource{Admin: "audit"}}, want: domain.ErrSessionLocked},
+		"storing an object":                     {request: iam.Request{Principal: locked, Action: iam.ActionPutObject, Resource: page}},
+		"storing an object, in a search":        {request: iam.Request{Principal: locked, Action: iam.ActionPutObject, Resource: page}, primed: true},
+		"storing an object without the right":   {request: iam.Request{Principal: reader, Action: iam.ActionPutObject, Resource: page}, want: domain.ErrAccessDenied},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := app.WithRequestScope(t.Context())
+			meta, trail, clock, logs := porttest.NewMemMetadata(), porttest.NewMemIAM(), porttest.NewClock(testNow), &syncBuffer{}
+			if err := meta.CreateBucket(ctx, bucket.Bucket{Name: "site", CreatedAt: testNow}); err != nil {
+				t.Fatal(err)
+			}
+			public := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`
+			if err := meta.SetBucketConfig(ctx, "site", bucket.ConfigPolicy, []byte(public)); err != nil {
+				t.Fatal(err)
+			}
+			source := &countingPolicies{meta: meta, clock: clock}
+			if tt.primed {
+				app.PrimeBucketPolicies(ctx, source)
+			}
+			logger := slog.New(slog.NewJSONHandler(logs, nil))
+			auditor := app.NewAuditor(trail, clock, logger)
+			authz := app.NewAuthorizer(logger, clock, auditor).WithBucketPolicies(source)
+			records := func() []audit.Record {
+				auditor.Flush(ctx)
+				all, err := trail.ListAudit(ctx, 0, 100)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return all
+			}
+			isLock := errors.Is(tt.want, domain.ErrSessionLocked)
+
+			allowed, err := authz.Allowed(ctx, tt.request)
+			switch {
+			case isLock:
+				// Never (false, nil): a filter would take that for "leave
+				// it out" and answer an empty list.
+				if allowed || !errors.Is(err, domain.ErrSessionLocked) || errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("Allowed = %v, %v; want false and the session is locked", allowed, err)
+				}
+			case err != nil || allowed != (tt.want == nil):
+				t.Fatalf("Allowed = %v, %v; want %v and no error", allowed, err, tt.want == nil)
+			}
+			wantLines := 0
+			if isLock {
+				wantLines = 1
+			}
+			if n := len(records()); n != wantLines || strings.Count(logs.String(), `"msg"`) != wantLines {
+				t.Fatalf("Allowed left %d audit records, want %d, and this in the log: %s", n, wantLines, logs.String())
+			}
+
+			err = authz.Authorize(ctx, tt.request)
+			if tt.want == nil {
+				if err != nil || len(records()) != 0 {
+					t.Fatalf("Authorize = %v, with %d audit records", err, len(records()))
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) || errors.Is(err, domain.ErrSessionLocked) != isLock || (isLock && errors.Is(err, domain.ErrAccessDenied)) {
+				t.Fatalf("Authorize = %v, want %v", err, tt.want)
+			}
+			all := records()
+			reason, line := "not allowed by policy", "authorization denied"
+			if isLock {
+				reason, line = "the session is locked", "refused: the session is locked"
+			}
+			// A record for the refusal of Authorize - and, of a locked
+			// session, the one Allowed left before; a line in the log for
+			// each. (Asking for the trail in between made the auditor
+			// forget that the second is a repeat of the first.)
+			if len(all) != wantLines+1 || strings.Count(logs.String(), `"msg"`) != wantLines+1 || strings.Count(logs.String(), line) != wantLines+1 {
+				t.Fatalf("Authorize left %+v; the log: %s", all, logs.String())
+			}
+			for _, r := range all {
+				if r.Outcome != audit.Denied || r.Action != string(tt.request.Action) || r.Actor != "user/"+tt.request.Principal.User || r.Details["reason"] != reason {
+					t.Errorf("the record of the refusal = %+v", r)
+				}
+			}
+			if isLock && (source.one.Load() != 0 || source.all.Load() != 0) {
+				t.Errorf("refusing a locked session read %d policies and %d pages of them", source.one.Load(), source.all.Load())
+			}
+		})
+	}
+}

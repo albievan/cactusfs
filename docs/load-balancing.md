@@ -183,6 +183,23 @@ session cookie is `__Host-cactusfs-session`: `Secure`, `HttpOnly`, `SameSite=Str
 reached over HTTPS at the balancer too, and it belongs at the root of a host name of
 its own - not under a path prefix.
 
+Two things about console sessions concern whoever sets up the balancer
+([ADR-0027](adr/0027-session-lock.md)):
+
+- **A session that times out while it uploads is locked, not ended**, and what makes it
+  so is a record the node that serves the upload keeps in the replicated metadata. Any
+  node answers alike: still no sticky sessions. An upload through the console is one
+  `PUT` for an object, and may take longer than a balancer lets a request take - set its
+  timeouts for the largest object the console is to upload, as for the S3 port.
+- **Sign-in and unlock count wrong passwords by the address of the peer** - ten in five
+  minutes, on each node by itself. Behind a balancer that ends TLS, or any NAT, every
+  user comes from one address and shares that count: ten wrong passwords of anybody make
+  all of them wait five minutes, on that node. Forwarded-for headers are not trusted. A
+  balancer that passes TCP through (and keeps the client's address) does not have this.
+
+The three settings `session-lifetime`, `session-upload-grace` and `session-lock-max`
+must be the same on every node behind the balancer.
+
 ## 2. Docker Desktop (compose)
 
 The development cluster of [`deploy/compose/compose.yaml`](../deploy/compose/compose.yaml)

@@ -72,7 +72,12 @@ func (v view) Nodes(context.Context) ([]cluster.Node, error) {
 type fixture struct {
 	t *testing.T
 	*httptest.Server
-	store       *porttest.MemIAM
+	store *porttest.MemIAM
+	// watched is the store as the session and the idempotency use cases
+	// are given it: it counts what a test asks about, and sessions is the
+	// use case the handler signs in with.
+	watched     *watchedStore
+	sessions    *app.SessionService
 	clock       *porttest.Clock
 	auditor     *app.Auditor
 	iam         *app.IAMService
@@ -114,7 +119,7 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	authz := app.NewAuthorizer(logger, f.clock, f.auditor).WithBucketPolicies(meta)
 	f.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: f.store, Trail: f.store, Authz: authz, Auditor: f.auditor, KMS: kms, Hasher: &porttest.Hasher{},
-		Clock: f.clock, Entropy: rand.Reader,
+		Clock: f.clock, Entropy: rand.Reader, Sessions: f.store,
 	})
 	f.identities = app.NewIdentityService(meta, kms, f.clock, rand.Reader).WithIAM(f.store, f.auditor)
 	generated, err := f.identities.EnsureRoot(ctx, nil)
@@ -126,9 +131,11 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.watched = &watchedStore{MemIAM: f.store, leases: make(chan struct{}, 64)}
 	sessions := app.NewSessionService(app.SessionServiceConfig{
-		Sessions: f.store, Users: f.store, Provider: provider, Auditor: f.auditor, Clock: f.clock, Entropy: rand.Reader,
+		Sessions: f.watched, Users: f.store, Provider: provider, Auditor: f.auditor, Clock: f.clock, Entropy: rand.Reader,
 	})
+	f.sessions = sessions
 
 	drive := porttest.NewMemShardStore("drive-a")
 	topology, err := cluster.NewTopology([]string{drive.DriveID(), "drive-b"})
@@ -177,7 +184,7 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	}
 	config := adminapi.Config{
 		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
-		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.store, kms, f.clock, rand.Reader),
+		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
 		Observe: func(_ context.Context, o adminapi.Observation) {
@@ -1442,6 +1449,15 @@ func TestWhatIsPublic(t *testing.T) {
 	for _, operations := range doc.Paths {
 		for _, operation := range operations {
 			if operation.Security != nil {
+				if operation.OperationID == "unlockSession" {
+					// The one operation that narrows the requirement: a
+					// session is what it unlocks, and an API key has none.
+					// Narrowed, not lifted - it is not public.
+					if own := *operation.Security; len(own) != 1 || len(own[0]) != 1 || own[0]["session"] == nil {
+						t.Errorf("unlockSession requires %v, want a session and nothing else", own)
+					}
+					continue
+				}
 				if len(*operation.Security) != 0 {
 					t.Errorf("%s has a security requirement of its own", operation.OperationID)
 				}

@@ -172,6 +172,7 @@ func TestParseServerConfig(t *testing.T) {
 			DevPlaintext: true, LogLevel: slog.LevelInfo, ShutdownTimeout: 30 * time.Second,
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
 			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second, TLSReloadInterval: time.Minute,
+			SessionLifetime: 30 * time.Minute, SessionUploadGrace: 90 * time.Second, SessionLockMax: 12 * time.Hour,
 			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
@@ -278,6 +279,32 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "reads recorded too often", args: dev("--access-flush-interval", "4s"), env: passphrase, wantErr: "access flush interval"},
 		{name: "reads never recorded", args: dev("--access-flush-interval", "0"), env: passphrase, wantErr: "access flush interval"},
 		{name: "bad access flush interval variable", env: withPassphrase(map[string]string{envAccessFlush: "often"}), wantErr: envAccessFlush},
+		{
+			name: "console sessions, by flag over variable", args: dev("--session-lifetime", "10s", "--session-upload-grace", "5s", "--session-lock-max", "1m"),
+			env: withPassphrase(map[string]string{envSessionLifetime: "1h", envSessionGrace: "2m", envSessionLockMax: "2h"}),
+			want: base(func(c *serverConfig) {
+				c.SessionLifetime, c.SessionUploadGrace, c.SessionLockMax = 10*time.Second, 5*time.Second, time.Minute
+			}),
+		},
+		{
+			name: "console sessions, by variable, at their longest", args: dev(),
+			env: withPassphrase(map[string]string{envSessionLifetime: "12h", envSessionGrace: "10m", envSessionLockMax: "24h"}),
+			want: base(func(c *serverConfig) {
+				c.SessionLifetime, c.SessionUploadGrace, c.SessionLockMax = 12*time.Hour, 10*time.Minute, 24*time.Hour
+			}),
+		},
+		{
+			name: "console sessions that never lock", args: dev("--session-lock-max", "0"), env: passphrase,
+			want: base(func(c *serverConfig) { c.SessionLockMax = 0 }),
+		},
+		{name: "a session too short", args: dev("--session-lifetime", "9s"), env: passphrase, wantErr: "session-lifetime 9s: must be between 10s and 12h"},
+		{name: "a session too long", args: dev("--session-lifetime", "12h1m"), env: passphrase, wantErr: "session-lifetime"},
+		{name: "a session of no time", args: dev("--session-lifetime", "0"), env: passphrase, wantErr: "session-lifetime"},
+		{name: "an upload grace too short", args: dev("--session-upload-grace", "4s"), env: passphrase, wantErr: "session-upload-grace 4s: must be between 5s and 10m"},
+		{name: "an upload grace too long", env: withPassphrase(map[string]string{envSessionGrace: "11m"}), args: dev(), wantErr: "session-upload-grace"},
+		{name: "a session locked for too long", args: dev("--session-lock-max", "25h"), env: passphrase, wantErr: "session-lock-max 25h: must be between 0"},
+		{name: "a session locked for less than no time", args: dev("--session-lock-max", "-1s"), env: passphrase, wantErr: "session-lock-max"},
+		{name: "bad session lifetime variable", env: withPassphrase(map[string]string{envSessionLifetime: "long"}), wantErr: envSessionLifetime},
 		{
 			name: "certificates read again more often, by flag over variable", args: dev("--tls-reload-interval", "5s"),
 			env:  withPassphrase(map[string]string{envTLSReload: "10m"}),

@@ -426,6 +426,15 @@ func NewAuthorizer(logger *slog.Logger, clock ports.Clock, auditor *Auditor) *Au
 func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Request, refusal, err error) {
 	// The time of the decision is this node's, never the caller's.
 	req.Now = a.clock.Now()
+	if req.Principal.LockedSession {
+		// What a locked session is refused, the domain refuses before any
+		// policy has a say (ADR-0027): asked without the policy of the
+		// bucket, it answers that already, and no policy is read for it.
+		// The decision is the domain's; this only spares the reading.
+		if refusal := iam.Decide(req); errors.Is(refusal, domain.ErrSessionLocked) {
+			return req, refusal, nil
+		}
+	}
 	policy, err := a.scopedPolicy(ctx, req)
 	if err != nil {
 		a.logger.ErrorContext(ctx, "the policy of a bucket cannot be read; the request is refused",
@@ -439,12 +448,40 @@ func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Re
 // Allowed implements ports.Authorizer: the decision of Authorize without
 // its record. A refusal is neither audited nor logged, so this is for
 // filtering what a caller is shown and never the gate of an operation.
+//
+// The refusal of a locked session is no "no": it is returned as the error,
+// which wraps domain.ErrSessionLocked. What is left out of a list for it
+// would read as "there is nothing", and a locked session is to be told that
+// it is locked. Because that error ends the operation that asked - it is
+// its refusal, and for a search the only one - it is recorded as Authorize
+// records it; the auditor counts the repeats of one caller, so a filter that
+// asks a hundred times writes one record.
 func (a *Authorizer) Allowed(ctx context.Context, req iam.Request) (bool, error) {
-	_, refusal, err := a.decide(ctx, req)
+	req, refusal, err := a.decide(ctx, req)
 	if err != nil {
 		return false, err
 	}
+	if errors.Is(refusal, domain.ErrSessionLocked) {
+		a.refused(ctx, req, refusal)
+		return false, fmt.Errorf("authorize: %w", refusal)
+	}
 	return refusal == nil, nil
+}
+
+// refused writes a refusal to the log and to the audit trail.
+func (a *Authorizer) refused(ctx context.Context, req iam.Request, refusal error) {
+	message, reason := "authorization denied", "not allowed by policy"
+	if errors.Is(refusal, domain.ErrSessionLocked) {
+		message, reason = "refused: the session is locked", "the session is locked"
+	}
+	a.logger.WarnContext(ctx, message,
+		slog.String("principal", req.Principal.Name()),
+		slog.String("action", string(req.Action)),
+		slog.String("resource", req.Resource.String()),
+	)
+	if a.auditor != nil {
+		a.auditor.Denied(ctx, req, reason)
+	}
 }
 
 // Authorize implements ports.Authorizer.
@@ -454,14 +491,7 @@ func (a *Authorizer) Authorize(ctx context.Context, req iam.Request) error {
 		return err
 	}
 	if refusal != nil {
-		a.logger.WarnContext(ctx, "authorization denied",
-			slog.String("principal", req.Principal.Name()),
-			slog.String("action", string(req.Action)),
-			slog.String("resource", req.Resource.String()),
-		)
-		if a.auditor != nil {
-			a.auditor.Denied(ctx, req, "not allowed by policy")
-		}
+		a.refused(ctx, req, refusal)
 	}
 	return refusal
 }

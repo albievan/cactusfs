@@ -54,7 +54,7 @@ func newIAMFixture(t *testing.T) *iamFixture {
 	f.authz = app.NewAuthorizer(logger, f.clock, f.auditor)
 	f.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: f.store, Trail: f.store, Authz: f.authz, Auditor: f.auditor, KMS: kms, Hasher: f.hasher,
-		Clock: f.clock, Entropy: rand.Reader,
+		Clock: f.clock, Entropy: rand.Reader, Sessions: f.store,
 	})
 	f.identities = app.NewIdentityService(f.meta, kms, f.clock, rand.Reader).WithIAM(f.store, f.auditor)
 	generated, err := f.identities.EnsureRoot(context.Background(), nil)
@@ -1048,6 +1048,12 @@ func TestSessions(t *testing.T) {
 		t.Errorf("a session at the end of its lifetime = %v", err)
 	}
 	f.clock.Advance(time.Second)
+	// It is not swept yet: a session past its timeout may be locked, for as
+	// long as sessions can be (ADR-0027). After that it is.
+	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 0 || f.store.Sessions() != 1 {
+		t.Errorf("Sweep at the timeout = %d, %v; %d sessions left", removed, err, f.store.Sessions())
+	}
+	f.clock.Advance(app.DefaultSessionLockMax)
 	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 1 || f.store.Sessions() != 0 {
 		t.Errorf("Sweep = %d, %v; %d sessions left", removed, err, f.store.Sessions())
 	}

@@ -62,6 +62,7 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0024](0024-quotas.md) | Quotas | proposed; **not implemented** beyond the contract (PLAN 8A) |
 | [0025](0025-bucket-notifications.md) | Bucket notifications and the export of the audit trail | proposed; **not implemented** beyond the contracts (PLAN 8B) |
 | [0026](0026-replication-between-sites.md) | Replication between sites, and the conflict rule | proposed; **not implemented** beyond the contracts (PLAN 8C) |
+| [0027](0027-session-lock.md) | A console session that locks while it uploads | proposed; the server side is written (PLAN L.0 to L.8), the console is not (PLAN L.9, L.10) |
 
 "Implemented" is the state of the code on 2026-10-12; `PLAN.md` has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a

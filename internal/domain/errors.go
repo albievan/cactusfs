@@ -53,7 +53,8 @@ var (
 	// ErrAccessDenied reports that the authorizer refused the request.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrCredentialNotFound reports an access key ID that does not exist or
-	// is no longer valid.
+	// is no longer valid - or a console session that has ended, where the
+	// caller is to be told that and not that a password was wrong.
 	ErrCredentialNotFound = errors.New("credential not found")
 	// ErrBadDigest reports that the payload did not match a digest the client
 	// declared for it.
@@ -175,6 +176,13 @@ var (
 	// ErrEntityInUse means that something still refers to what was to be
 	// removed: a role a user holds, a policy a role contains.
 	ErrEntityInUse = errors.New("entity is in use")
+	// ErrSessionLocked means that a console session has reached its timeout
+	// and is kept only because its user is uploading objects (ADR-0027):
+	// it may store objects, and nothing else, until the user's password
+	// unlocks it. It is no ErrAccessDenied: nothing a policy says is behind
+	// it, and whoever is told it must not take it for "not allowed" - or
+	// for "not there", or for an empty list.
+	ErrSessionLocked = errors.New("the session is locked")
 )
 
 // Errors of the management API's request handling.
@@ -311,6 +319,7 @@ func LocalSentinels() []error {
 		ErrRequestInProgress,
 		ErrTooManyAttempts,
 		ErrNotSupported,
+		ErrSessionLocked,
 	}
 }
 

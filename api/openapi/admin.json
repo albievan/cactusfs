@@ -3,7 +3,7 @@
   "info": {
     "title": "CactusFS management API",
     "version": "1.0.0",
-    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\n"
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever.\n"
   },
   "servers": [
     {
@@ -119,6 +119,7 @@
           "session"
         ],
         "summary": "Who is making this request",
+        "description": "The identity of the caller. For a console session it also says when the session reaches its timeout\nand whether it is locked. A locked session can ask this.\n",
         "responses": {
           "200": {
             "description": "The identity of the caller.",
@@ -157,6 +158,62 @@
                 "description": "Clears the session cookie.",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/session/unlock": {
+      "post": {
+        "operationId": "unlockSession",
+        "tags": [
+          "session"
+        ],
+        "summary": "Unlock the session with the user's password",
+        "description": "Checks the password of the user the session belongs to - no user name is taken - and gives the session\nits full authority back, for another lifetime. The session gets a new token, set as the cookie, and a\nnew CSRF token, returned once, here; the tokens it had are refused from then on. It is accepted on a\nsession that is not locked too, and does the same.\n\nA password that is not accepted answers 403 with the code `AccessDenied` - not 401 - and the session\nstays as it was. Too many attempts from one address answer 429 with the code `TooManyAttempts` and\n`Retry-After`, as at sign-in: failed sign-ins and failed unlocks are counted together. After too many\nwrong passwords for one session the session is ended: the answer is then 401 and the cookie is\ncleared. A session that had ended before is answered 401 as well, and the cookie is left alone.\nA request made with an API key answers 400: a key has nothing to unlock.\n\nSend it once. The tokens the request came with are refused the moment it has succeeded: the same\nrequest sent again answers 401, although the session lives on under the tokens of the first answer.\n\n`Idempotency-Key` is accepted and has no effect: nothing of a request that holds a password is kept,\nand an answer that holds a session is never given twice.\n",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnlockRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unlocked. The session has a new token and a new CSRF token.",
+            "headers": {
+              "Set-Cookie": {
+                "description": "The session cookie, with the new token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
                 }
               }
             }
@@ -1341,6 +1398,7 @@
           "users"
         ],
         "summary": "Change a user",
+        "description": "Replaces the groups, the roles and the state of a user, and the password when one is given. A new\npassword ends every console session of the user at once - locked ones too, and that of the caller\nwhen the caller changes their own: the next request of such a session answers 401.\n",
         "x-cactusfs-action": "admin:PutUser",
         "parameters": [
           {
@@ -2531,6 +2589,21 @@
           }
         }
       },
+      "UnlockRequest": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "format": "password",
+            "description": "The password of the user the session belongs to.",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
       "ServerVersion": {
         "type": "object",
         "description": "Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody\nelse: no answer to a request without a credential names it, and no response header does.\n",
@@ -2571,7 +2644,8 @@
           },
           "expires_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "When the session reaches its timeout."
           },
           "server": {
             "$ref": "#/components/schemas/ServerVersion"
@@ -2608,6 +2682,20 @@
           },
           "access_key_id": {
             "type": "string"
+          },
+          "locked": {
+            "type": "boolean",
+            "description": "Only with `via: session`. True when the session has reached its timeout and is kept because its\nuser is uploading objects: it may store objects, ask this, unlock and sign out, and nothing else.\n"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Only with `via: session`. When the session reaches - or, if it is locked, reached - its timeout.\n"
+          },
+          "lock_ends_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Only with `via: session`, and only where sessions can lock. The latest moment the session can stay\nlocked to: it has ended by then whatever is being uploaded. A locked session usually ends\nearlier, a moment after its last upload.\n"
           }
         }
       },

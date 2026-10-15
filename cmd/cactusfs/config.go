@@ -52,6 +52,9 @@ const (
 	envLifecycle       = "CACTUSFS_LIFECYCLE_INTERVAL"
 	envGCGrace         = "CACTUSFS_GC_GRACE"
 	envAccessFlush     = "CACTUSFS_ACCESS_FLUSH_INTERVAL"
+	envSessionLifetime = "CACTUSFS_SESSION_LIFETIME"
+	envSessionGrace    = "CACTUSFS_SESSION_UPLOAD_GRACE"
+	envSessionLockMax  = "CACTUSFS_SESSION_LOCK_MAX"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envNodeID          = "CACTUSFS_NODE_ID"
 	envRoles           = "CACTUSFS_ROLES"
@@ -94,12 +97,23 @@ const (
 	// minGCGrace is the shortest grace period accepted. Writes in progress
 	// are protected from the collector by other means; the grace period is
 	// what remains when those do not apply, so it is kept generous.
-	minGCGrace     = time.Hour
-	loopbackHost   = "127.0.0.1"
-	metaDirName    = "meta"
-	kmsKeyFileName = "kms-local.json"
-	kmsLocal       = "local"
-	kmsVault       = "vault"
+	minGCGrace = time.Hour
+	// The bounds of the three settings of console sessions (ADR-0027). A
+	// session shorter than ten seconds cannot be worked with, and one longer
+	// than half a day is no short-lived session; a grace shorter than five
+	// seconds does not outlast the pause between two uploads, and one longer
+	// than ten minutes keeps a session whose uploads are long done; a
+	// session is locked for a day at the most.
+	minSessionLifetime = 10 * time.Second
+	maxSessionLifetime = 12 * time.Hour
+	minSessionGrace    = 5 * time.Second
+	maxSessionGrace    = 10 * time.Minute
+	maxSessionLockMax  = 24 * time.Hour
+	loopbackHost       = "127.0.0.1"
+	metaDirName        = "meta"
+	kmsKeyFileName     = "kms-local.json"
+	kmsLocal           = "local"
+	kmsVault           = "vault"
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -172,6 +186,15 @@ type serverConfig struct {
 	// AccessFlushInterval is how often the reads of objects this node
 	// counted are handed to the metadata store.
 	AccessFlushInterval time.Duration
+	// SessionLifetime is how long a console session lasts, from sign-in or
+	// from its last unlock, before it reaches its timeout.
+	SessionLifetime time.Duration
+	// SessionUploadGrace is how long after its last upload a session that
+	// is locked ends. SessionLockMax is the longest a session stays locked,
+	// counted from its timeout; zero means that sessions never lock
+	// (ADR-0027).
+	SessionUploadGrace time.Duration
+	SessionLockMax     time.Duration
 	// AllowDriveReplacement confirms that one empty drive may take the place
 	// of one missing drive at this start.
 	AllowDriveReplacement bool
@@ -332,6 +355,24 @@ func parseServerSettings(args []string, getenv func(string) string, stderr io.Wr
 	return cfg, sources, nil
 }
 
+// validateSessions rejects a lifetime, a grace or a cap of console sessions
+// that is out of its range, naming the setting.
+func (c *serverConfig) validateSessions() error {
+	if c.SessionLifetime < minSessionLifetime || c.SessionLifetime > maxSessionLifetime {
+		return fmt.Errorf("session-lifetime %s: must be between %s and %s",
+			durationText(c.SessionLifetime), durationText(minSessionLifetime), durationText(maxSessionLifetime))
+	}
+	if c.SessionUploadGrace < minSessionGrace || c.SessionUploadGrace > maxSessionGrace {
+		return fmt.Errorf("session-upload-grace %s: must be between %s and %s",
+			durationText(c.SessionUploadGrace), durationText(minSessionGrace), durationText(maxSessionGrace))
+	}
+	if c.SessionLockMax < 0 || c.SessionLockMax > maxSessionLockMax {
+		return fmt.Errorf("session-lock-max %s: must be between 0, which means that a session never locks, and %s",
+			durationText(c.SessionLockMax), durationText(maxSessionLockMax))
+	}
+	return nil
+}
+
 // validate rejects configurations that would break a data-security rule and
 // fills in the settings that derive from others.
 func (c *serverConfig) validate() error {
@@ -353,6 +394,9 @@ func (c *serverConfig) validate() error {
 	}
 	if c.GCGrace < minGCGrace {
 		return fmt.Errorf("garbage collection grace period %s: must be at least %s", c.GCGrace, minGCGrace)
+	}
+	if err := c.validateSessions(); err != nil {
+		return err
 	}
 	if err := c.validateTransport(); err != nil {
 		return err

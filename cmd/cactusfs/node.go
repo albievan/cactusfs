@@ -256,19 +256,27 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		return err
 	}
 	hasher := n.telemetry.InstrumentPasswords(argon)
+	sessionStore := n.telemetry.InstrumentSessions(n.meta)
 	n.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: identities, Trail: trail, Authz: n.authorizer, Auditor: n.auditor, KMS: kms, Hasher: hasher,
-		Clock: n.clock, Entropy: rand.Reader,
+		Clock: n.clock, Entropy: rand.Reader, Sessions: sessionStore,
 	})
 	provider, err := app.NewLocalIdentityProvider(identities, hasher, rand.Reader)
 	if err != nil {
 		return err
 	}
+	// The setting says 0 for "a session never locks"; the use case, whose
+	// zero is its default, says it with a negative value.
+	lockMax := cfg.SessionLockMax
+	if lockMax == 0 {
+		lockMax = -1
+	}
 	n.sessions = app.NewSessionService(app.SessionServiceConfig{
-		Sessions: n.telemetry.InstrumentSessions(n.meta), Users: identities,
+		Sessions: sessionStore, Users: identities,
 		Provider: n.telemetry.InstrumentIdentityProvider(provider), Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
+		Lifetime: cfg.SessionLifetime, UploadGrace: cfg.SessionUploadGrace, LockMax: lockMax,
 	})
-	n.idempotency = app.NewIdempotencyService(n.telemetry.InstrumentIdempotency(n.meta), kms, n.clock, rand.Reader)
+	n.idempotency = app.NewIdempotencyService(n.telemetry.InstrumentIdempotency(n.meta), kms, n.clock, rand.Reader).WithAuthorizer(n.authorizer)
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
 		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },
@@ -653,6 +661,9 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.auditor.Run(ctx) })
 	n.background.Go(func() { n.identities.Run(ctx) })
 	n.background.Go(func() { n.sweepSessions(ctx) })
+	// The upload leases of the console sessions this node serves uploads
+	// for (ADR-0027).
+	n.background.Go(func() { n.sessions.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases

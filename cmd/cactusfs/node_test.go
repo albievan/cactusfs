@@ -21,6 +21,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 )
 
@@ -416,4 +417,55 @@ func scrapeCounter(t *testing.T, tel *telemetry.Telemetry, name string) float64 
 	}
 	t.Fatalf("no metric %s", name)
 	return 0
+}
+
+// TestANodeWiresWhatEndsAndRefusesSessions holds the composition root to two
+// wirings of ADR-0027 that no use case can see from inside: the IAM use case
+// is given the store of sessions - without it a change of password ends no
+// session - and the idempotency use case the authorizer - without it a
+// locked session that repeats a request is refused and not audited.
+func TestANodeWiresWhatEndsAndRefusesSessions(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	n := mustStart(t, nodeConfig(t.TempDir())).node
+	visitor := iam.Session{SourceIP: netip.MustParseAddr("127.0.0.1"), SecureTransport: true, RequestID: "REQ-1"}
+	root := iam.Principal{AccessKeyID: "ROOT", Root: true, Session: visitor}
+
+	t.Run("a change of password ends the sessions", func(t *testing.T) {
+		signed, err := n.sessions.SignIn(ctx, app.DefaultAdminName, app.DefaultAdminPassword, visitor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := n.sessions.Authenticate(ctx, signed.Token, "", false, visitor); err != nil {
+			t.Fatalf("the session before the change: %v", err)
+		}
+		changed := strings.Join([]string{"a", "password", "changed", "by", "root"}, " ")
+		if _, err := n.iam.UpdateUser(ctx, root, app.UserInput{Name: app.DefaultAdminName, Roles: []string{iam.RoleClusterAdmin}, Password: changed}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := n.sessions.Authenticate(ctx, signed.Token, "", false, visitor); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("the session after its user's password changed = %v, want refused", err)
+		}
+	})
+
+	t.Run("a locked session that repeats a request is refused, and audited", func(t *testing.T) {
+		locked := iam.Principal{User: app.DefaultAdminName, LockedSession: true, Session: visitor}
+		_, _, err := n.idempotency.Begin(ctx, app.IdempotentRequest{
+			Scope: "user/" + app.DefaultAdminName, Key: "a-key-of-the-test", Fingerprint: "DELETE /buckets/photos", Principal: locked,
+		})
+		if !errors.Is(err, domain.ErrSessionLocked) {
+			t.Fatalf("Begin for a locked session = %v", err)
+		}
+		n.auditor.Flush(ctx)
+		records, err := n.meta.ListAudit(ctx, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range records {
+			if r.Action == string(app.ActionRepeatRequest) && r.Actor == "user/"+app.DefaultAdminName && r.Outcome == audit.Denied {
+				return
+			}
+		}
+		t.Errorf("no audit record of the refusal among %d records", len(records))
+	})
 }

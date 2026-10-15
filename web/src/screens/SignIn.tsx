@@ -5,11 +5,46 @@ import logo from '../assets/brand/cactusfs-logo-tagline.svg';
 import { useAction } from '../ui/hooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
 
+/**
+ * Why a session ended by itself, as far as the console can tell: it timed
+ * out, the password was wrong as often as ends a session, or it is not known
+ * - the API said only that the session was gone.
+ */
+export type SessionEndReason = 'timed-out' | 'wrong-passwords' | 'signed-out';
+
+/** What is known of a session that ended by itself: nobody signed out of it. */
+export interface SessionEnded {
+  /** Why it ended, as far as is known. */
+  reason: SessionEndReason;
+  /**
+   * How the uploads that were on their way together last stood when it
+   * ended - what was not stored by then is not going to be - or null when
+   * there were none.
+   */
+  uploads: { stored: number; notStored: number } | null;
+}
+
 interface SignInProps {
   /** Called with the CSRF token of the new session. */
   onSignedIn: (csrfToken: string) => void;
   /** Why signing out failed, when it did; null otherwise. */
   signOutError: unknown;
+  /** Set when the session before this screen ended by itself; it is said then, with how its uploads stood. */
+  ended?: SessionEnded | null;
+}
+
+/** What the sign-in screen says of a session that ended, by why it ended. */
+const ENDED: Record<SessionEndReason, string> = {
+  'timed-out': 'You were signed out: your session timed out.',
+  'wrong-passwords': 'You were signed out: the password was wrong too many times.',
+  'signed-out': 'You were signed out.',
+};
+
+/** "3 objects were stored, 1 was not." */
+function storedAndNot(stored: number, notStored: number): string {
+  const were = stored === 1 ? '1 object was stored' : `${String(stored)} objects were stored`;
+  const wereNot = notStored === 1 ? '1 was not' : `${String(notStored)} were not`;
+  return `${were}, ${wereNot}.`;
 }
 
 /**
@@ -18,8 +53,12 @@ interface SignInProps {
  * whoever has the page read to them.
  * The API sets the session token as an HttpOnly cookie; the password is sent
  * once and kept nowhere.
+ *
+ * When the session before it ended by itself the form says so, why when
+ * that is known, and how the uploads stood: whoever comes back to the console finds the sign-in screen
+ * where an upload was, and is told why.
  */
-export function SignIn({ onSignedIn, signOutError }: SignInProps) {
+export function SignIn({ onSignedIn, signOutError, ended = null }: SignInProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [shown, setShown] = useState(false);
@@ -40,6 +79,14 @@ export function SignIn({ onSignedIn, signOutError }: SignInProps) {
         <img className="signin-logo" src={logo} alt="CactusFS" />
         <form className="signin-form" onSubmit={submit}>
           <h1>Sign in</h1>
+          {ended === null ? null : (
+            <div className="signin-ended" role="status">
+              <p className="signin-ended-title">{ENDED[ended.reason]}</p>
+              {ended.uploads === null ? null : (
+                <p className="signin-ended-uploads">{storedAndNot(ended.uploads.stored, ended.uploads.notStored)}</p>
+              )}
+            </div>
+          )}
           <ProblemNotice error={action.error ?? signOutError} />
           <label className="field">
             <span>User name</span>

@@ -30,6 +30,8 @@ type IAMService struct {
 	kms     ports.KMS
 	hasher  ports.PasswordHasher
 	clock   ports.Clock
+	// sessions is where a change of password ends the user's sessions.
+	sessions ports.SessionStore
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
@@ -40,6 +42,9 @@ type IAMServiceConfig struct {
 	Store ports.IAMStore
 	Trail ports.AuditLog
 	Authz ports.Authorizer
+	// Sessions is where a change of password ends the sessions of the
+	// user. It may be nil where there are no console sessions.
+	Sessions ports.SessionStore
 	// Auditor builds the records of changes.
 	Auditor *Auditor
 	KMS     ports.KMS
@@ -53,7 +58,7 @@ type IAMServiceConfig struct {
 func NewIAMService(cfg IAMServiceConfig) *IAMService {
 	return &IAMService{
 		store: cfg.Store, trail: cfg.Trail, authz: cfg.Authz, auditor: cfg.Auditor, kms: cfg.KMS,
-		hasher: cfg.Hasher, clock: cfg.Clock, entropy: cfg.Entropy,
+		hasher: cfg.Hasher, clock: cfg.Clock, entropy: cfg.Entropy, sessions: cfg.Sessions,
 	}
 }
 
@@ -165,7 +170,8 @@ func (s *IAMService) CreateUser(ctx context.Context, p iam.Principal, in UserInp
 }
 
 // UpdateUser replaces a user's groups, roles and state, and the password
-// when one is given.
+// when one is given. A new password ends every console session of the user,
+// that of the caller included when the caller changes their own.
 func (s *IAMService) UpdateUser(ctx context.Context, p iam.Principal, in UserInput) (iam.User, error) {
 	record, err := s.allow(ctx, p, iam.ActionPutUser, "user", in.Name, userDetails("update", in))
 	if err != nil {
@@ -183,6 +189,21 @@ func (s *IAMService) UpdateUser(ctx context.Context, p iam.Principal, in UserInp
 	}
 	if err := s.store.PutUser(ctx, user, false, record); err != nil {
 		return iam.User{}, fmt.Errorf("iam.UpdateUser: %w", err)
+	}
+	if in.Password != "" && s.sessions != nil {
+		// Whoever holds a session of the user proved the old password:
+		// every one of them ends, active or locked, on every node
+		// (ADR-0027). After the password, so that no session begun with
+		// the old one comes after the mark. Should this fail, the password
+		// is changed and the sessions are not ended: the caller is told,
+		// the audit trail says so, and the same request again ends them.
+		if err := endSessionsOf(ctx, s.sessions, user.Name, s.clock.Now()); err != nil {
+			// Not the change of the password, which is recorded with it:
+			// what did not follow. The error says nothing of the password.
+			s.auditor.Succeeded(ctx, s.auditor.Record(p, ActionEndSessions, iam.Resource{Admin: "user/" + user.Name}, audit.Failed,
+				map[string]string{"reason": "the password is changed, but the sessions of the user are not ended", "error": err.Error()}))
+			return iam.User{}, fmt.Errorf("iam.UpdateUser: the password is changed, but the sessions of the user are not ended: %w", err)
+		}
 	}
 	return redact(user), nil
 }
@@ -528,6 +549,11 @@ func (s *IAMService) DeleteAPIKey(ctx context.Context, p iam.Principal, accessKe
 		owner = ""
 	}
 	record, authErr := s.allow(ctx, p, iam.ActionDeleteKey, "user", owner, map[string]string{"access_key_id": bound(accessKeyID)})
+	if errors.Is(authErr, domain.ErrSessionLocked) {
+		// A locked session is told that it is locked, which is no denial
+		// (ADR-0027) - and, like one, nothing about the key.
+		return fmt.Errorf("iam.DeleteAPIKey: %w", domain.ErrSessionLocked)
+	}
 	if authErr != nil {
 		// The refusal says nothing about the key: not whether it exists,
 		// not whose it is.

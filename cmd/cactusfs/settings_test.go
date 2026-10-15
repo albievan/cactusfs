@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
@@ -94,6 +95,7 @@ func TestSettingsClassification(t *testing.T) {
 	}
 	sameEverywhere := []string{
 		"gc-grace", "kms", "lifecycle-interval", "peers", "region", "s3-domain", "scrub-interval", "scrub-rate-mib",
+		"session-lifetime", "session-lock-max", "session-upload-grace",
 		"vault-addr", "vault-key", "vault-namespace", "vault-transit-mount",
 	}
 	got := map[cluster.SettingKind][]string{}
@@ -438,5 +440,17 @@ func TestDurationText(t *testing.T) {
 		if back, err := time.ParseDuration(got); err != nil || back != d {
 			t.Errorf("durationText(%v) = %q, which reads back as %v (%v)", d, got, back, err)
 		}
+	}
+}
+
+// TestSessionBoundsFitTheHorizonOfAPasswordChange: the mark a change of
+// password leaves is kept for app.SessionsEndHorizon, and that must be
+// longer than any session that was there at the change can last - the
+// longest lifetime and the longest lock a node takes as its settings
+// (ADR-0027). Whoever raises a bound meets this.
+func TestSessionBoundsFitTheHorizonOfAPasswordChange(t *testing.T) {
+	t.Parallel()
+	if longest := maxSessionLifetime + maxSessionLockMax + maxSessionGrace; longest >= app.SessionsEndHorizon {
+		t.Errorf("a session can last %s, locked included; the mark of a password change is kept %s", longest, app.SessionsEndHorizon)
 	}
 }

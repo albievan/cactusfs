@@ -9,12 +9,14 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -342,5 +344,123 @@ func TestGuessesAtTheSameMomentAreCounted(t *testing.T) {
 	// another reason than a wrong guess does not count.
 	if _, err := sessions.SignIn(ctx, "nobody", "x", iam.Session{SourceIP: netip.MustParseAddr("203.0.113.78")}); !errors.Is(err, domain.ErrAccessDenied) {
 		t.Errorf("another address = %v", err)
+	}
+}
+
+// countingIdempotency counts what the idempotency use case asks of its
+// store.
+type countingIdempotency struct {
+	ports.IdempotencyStore
+	begun, read atomic.Int64
+}
+
+func (c *countingIdempotency) BeginIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
+	c.begun.Add(1)
+	return c.IdempotencyStore.BeginIdempotent(ctx, r)
+}
+
+func (c *countingIdempotency) GetIdempotent(ctx context.Context, id string) (ports.IdempotencyRecord, error) {
+	c.read.Add(1)
+	return c.IdempotencyStore.GetIdempotent(ctx, id)
+}
+
+// TestIdempotencyOfALockedSession: a stored answer is given without the use
+// case being asked again - and that is no way round the lock of a console
+// session (ADR-0027). A locked session is given no stored answer and reserves
+// no key: it is refused, the refusal is in the audit trail, and the store is
+// not even asked. The one request it may make, an upload, it may repeat.
+func TestIdempotencyOfALockedSession(t *testing.T) {
+	t.Parallel()
+	alice := iam.Principal{User: "alice", Session: session("198.51.100.7")}
+	locked := alice
+	locked.LockedSession = true
+	answer := app.IdempotentAnswer{Status: 201, ContentType: "application/json", Body: []byte(`{"secret_key":"shown once"}`)}
+	tests := map[string]struct {
+		// stored says that the request was carried out before, while the
+		// session was not locked.
+		stored bool
+		upload bool
+		// bare is a service that was given no authorizer.
+		bare bool
+	}{
+		"the answer of a change made before":     {stored: true},
+		"a change made now":                      {},
+		"without an authorizer, a stored answer": {stored: true, bare: true},
+		"without an authorizer, a change":        {bare: true},
+		"the answer of an upload made before":    {stored: true, upload: true},
+		"an upload made now":                     {upload: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			mem, clock, logs := porttest.NewMemIAM(), porttest.NewClock(testNow), &syncBuffer{}
+			kms, err := porttest.NewKMS("test:1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger := slog.New(slog.NewJSONHandler(logs, nil))
+			auditor := app.NewAuditor(mem, clock, logger)
+			store := &countingIdempotency{IdempotencyStore: mem}
+			s := app.NewIdempotencyService(store, kms, clock, rand.Reader)
+			if !tt.bare {
+				s = s.WithAuthorizer(app.NewAuthorizer(logger, clock, auditor))
+			}
+			request := app.IdempotentRequest{Scope: "session:alice", Key: "k-1", Fingerprint: "POST /users/alice/keys {}", Principal: alice, Upload: tt.upload}
+			if tt.stored {
+				_, reservation, err := s.Begin(ctx, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.Complete(ctx, reservation, answer); err != nil {
+					t.Fatal(err)
+				}
+				// Not locked, the repeat is given the answer.
+				if replay, _, err := s.Begin(ctx, request); err != nil || replay == nil || !bytes.Equal(replay.Body, answer.Body) {
+					t.Fatalf("the repeat by a session that is not locked = %+v, %v", replay, err)
+				}
+			}
+			begun, read := store.begun.Load(), store.read.Load()
+
+			request.Principal = locked
+			replay, reservation, err := s.Begin(ctx, request)
+			auditor.Flush(ctx)
+			trail, listErr := mem.ListAudit(ctx, 0, 100)
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if tt.upload {
+				// Decided by the use case behind the key, as ever.
+				if err != nil || (replay != nil) != tt.stored || len(trail) != 0 {
+					t.Fatalf("Begin for the upload of a locked session = %+v, %v; %d audit records", replay, err, len(trail))
+				}
+				if tt.stored && !bytes.Equal(replay.Body, answer.Body) {
+					t.Errorf("the repeat of an upload is answered %s", replay.Body)
+				}
+				if !tt.stored {
+					if err := s.Abandon(ctx, reservation); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return
+			}
+			if !errors.Is(err, domain.ErrSessionLocked) || errors.Is(err, domain.ErrAccessDenied) || replay != nil {
+				t.Fatalf("Begin for a locked session = %+v, %v; want the session is locked", replay, err)
+			}
+			if err := s.Complete(ctx, reservation, answer); err != nil || store.begun.Load() != begun || store.read.Load() != read {
+				t.Errorf("a locked session reserved, or read, a key: %d reservations, %d readings more (%v)",
+					store.begun.Load()-begun, store.read.Load()-read, err)
+			}
+			if tt.bare {
+				return
+			}
+			if len(trail) != 1 || trail[0].Outcome != audit.Denied || trail[0].Actor != "user/alice" || trail[0].Action != string(app.ActionRepeatRequest) ||
+				trail[0].Details["reason"] != "the session is locked" || trail[0].SourceIP != "198.51.100.7" {
+				t.Errorf("the audit trail = %+v", trail)
+			}
+			if !strings.Contains(logs.String(), "the session is locked") || strings.Contains(logs.String(), "shown once") {
+				t.Errorf("the log: %s", logs.String())
+			}
+		})
 	}
 }

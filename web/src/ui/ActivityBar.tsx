@@ -4,7 +4,7 @@ import { useNoticeActions, useNotices } from '../notices/context';
 import type { NoticeKind } from '../notices/state';
 import { routeHref } from '../router';
 import { useUploadList, useUploads } from '../uploads/context';
-import { batchesInFlight, batchesOf, ofBatches, totalsOf, type UploadTotals } from '../uploads/state';
+import { batchesInFlight, batchesOf, NO_RUN, ofBatches, runAfter, totalsOf, type UploadTotals } from '../uploads/state';
 import { UploadTile } from '../uploads/UploadTile';
 import { formatBytes, formatTime } from './format';
 
@@ -100,32 +100,6 @@ function announcementOf(active: boolean, now: UploadTotals, run: UploadTotals): 
   return run.files === 0 ? '' : `Uploads finished: ${outcomeOf(run)}.`;
 }
 
-/** The batches that are, or were until just now, on their way together. */
-interface Run {
-  /** Whether a file of them is on its way. */
-  active: boolean;
-  batches: ReadonlySet<string>;
-}
-
-const NO_RUN: Run = { active: false, batches: new Set() };
-
-/**
- * What the run is, now that these batches have a file on its way. A run
- * begins when files are sent off while nothing is on its way, takes in what
- * is sent off until nothing is, and is then kept - over - until the next.
- */
-function runAfter(run: Run, flying: ReadonlySet<string>): Run {
-  if (flying.size === 0) {
-    return run.active ? { active: false, batches: run.batches } : run;
-  }
-  if (!run.active) {
-    return { active: true, batches: flying };
-  }
-  return [...flying].every((batch) => run.batches.has(batch))
-    ? run
-    : { active: true, batches: new Set([...run.batches, ...flying]) };
-}
-
 const NOTICE_ICON: Record<NoticeKind, string> = {
   success: 'bi-check-circle',
   error: 'bi-exclamation-triangle',
@@ -152,6 +126,14 @@ interface ActivityBarProps {
    * for whoever asked.
    */
   leaving?: LeavingQuestion | null;
+  /**
+   * Set where the bar only says how the uploads stand: on the page of a
+   * locked session. Nothing of it can then be operated - it has no button,
+   * opens nothing and asks nothing - and it names no bucket and no object:
+   * the line, the bar for all the files and what is read out are all there
+   * is. A question in `leaving` is not asked.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -167,8 +149,12 @@ interface ActivityBarProps {
  *
  * Nothing here takes the keyboard away from where it is: a notice that
  * arrives changes a count, and what is read out is a polite live region.
+ *
+ * Read-only, it is not that bar but what it says: see `readOnly`.
  */
-export function ActivityBar({ leaving = null }: ActivityBarProps) {
+export function ActivityBar({ leaving: asked = null, readOnly = false }: ActivityBarProps) {
+  // A bar that cannot be operated asks nothing.
+  const leaving = readOnly ? null : asked;
   const uploads = useUploads();
   const list = useUploadList();
   const notices = useNotices();
@@ -221,7 +207,11 @@ export function ActivityBar({ leaving = null }: ActivityBarProps) {
   };
 
   return (
-    <section className={`activitybar activitybar-is-${phase}`} aria-label="Activity" onKeyDown={onKeyDown}>
+    <section
+      className={`${readOnly ? 'activitybar-readonly' : 'activitybar'} activitybar-is-${phase}`}
+      aria-label="Activity"
+      onKeyDown={readOnly ? undefined : onKeyDown}
+    >
       <div className="activitybar-line">
         <p className="activitybar-summary">
           <i className={`bi ${PHASE_ICON[phase]}`} aria-hidden="true" />
@@ -241,41 +231,43 @@ export function ActivityBar({ leaving = null }: ActivityBarProps) {
         <p className="visually-hidden activitybar-live" aria-live="polite">
           {announcementOf(phase === 'active', now, totalsOf(ofBatches(list, current.batches)))}
         </p>
-        <div className="activitybar-buttons">
-          <button
-            ref={uploadsButton}
-            type="button"
-            className="btn btn-outline-secondary btn-sm"
-            aria-label={`Uploads: ${String(totals.files)}`}
-            aria-expanded={open === 'uploads'}
-            aria-controls="activity-uploads"
-            onClick={() => {
-              toggle('uploads');
-            }}
-            title="Show every upload of this visit: its bucket, how far it is, and why if it was not stored"
-          >
-            <i className="bi bi-upload" aria-hidden="true" /> <span className="btn-text">Uploads</span>
-            <span className="badge activitybar-count">{totals.files}</span>
-          </button>
-          <button
-            ref={noticesButton}
-            type="button"
-            className="btn btn-outline-secondary btn-sm"
-            aria-label={`Notices: ${String(notices.length)}`}
-            aria-expanded={open === 'notices'}
-            aria-controls="activity-notices"
-            onClick={() => {
-              toggle('notices');
-            }}
-            title="Show what happened in this visit, newest first"
-          >
-            <i className="bi bi-bell" aria-hidden="true" /> <span className="btn-text">Notices</span>
-            <span className="badge activitybar-count">{notices.length}</span>
-          </button>
-        </div>
+        {readOnly ? null : (
+          <div className="activitybar-buttons">
+            <button
+              ref={uploadsButton}
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              aria-label={`Uploads: ${String(totals.files)}`}
+              aria-expanded={open === 'uploads'}
+              aria-controls="activity-uploads"
+              onClick={() => {
+                toggle('uploads');
+              }}
+              title="Show every upload of this visit: its bucket, how far it is, and why if it was not stored"
+            >
+              <i className="bi bi-upload" aria-hidden="true" /> <span className="btn-text">Uploads</span>
+              <span className="badge activitybar-count">{totals.files}</span>
+            </button>
+            <button
+              ref={noticesButton}
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              aria-label={`Notices: ${String(notices.length)}`}
+              aria-expanded={open === 'notices'}
+              aria-controls="activity-notices"
+              onClick={() => {
+                toggle('notices');
+              }}
+              title="Show what happened in this visit, newest first"
+            >
+              <i className="bi bi-bell" aria-hidden="true" /> <span className="btn-text">Notices</span>
+              <span className="badge activitybar-count">{notices.length}</span>
+            </button>
+          </div>
+        )}
       </div>
 
-      {leaving === null && open === null ? null : (
+      {readOnly || (leaving === null && open === null) ? null : (
         <div className="activitybar-drop">
           {leaving === null ? null : (
             <div className="confirm activitybar-leaving" role="group" aria-label="Sign out and stop the uploads?">

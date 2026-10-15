@@ -721,8 +721,20 @@ type HealStatus struct {
 
 // Identity defines model for Identity.
 type Identity struct {
-	AccessKeyId *string      `json:"access_key_id,omitempty"`
-	Kind        IdentityKind `json:"kind"`
+	AccessKeyId *string `json:"access_key_id,omitempty"`
+
+	// ExpiresAt Only with `via: session`. When the session reaches - or, if it is locked, reached - its timeout.
+	ExpiresAt *time.Time   `json:"expires_at,omitempty"`
+	Kind      IdentityKind `json:"kind"`
+
+	// LockEndsAt Only with `via: session`, and only where sessions can lock. The latest moment the session can stay
+	// locked to: it has ended by then whatever is being uploaded. A locked session usually ends
+	// earlier, a moment after its last upload.
+	LockEndsAt *time.Time `json:"lock_ends_at,omitempty"`
+
+	// Locked Only with `via: session`. True when the session has reached its timeout and is kept because its
+	// user is uploading objects: it may store objects, ask this, unlock and sign out, and nothing else.
+	Locked *bool `json:"locked,omitempty"`
 
 	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
 	// else: no answer to a request without a credential names it, and no response header does.
@@ -1134,7 +1146,9 @@ type ServerVersion struct {
 // Session defines model for Session.
 type Session struct {
 	// CsrfToken Send it back in `X-CSRF-Token` with every request that changes something.
-	CsrfToken string    `json:"csrf_token"`
+	CsrfToken string `json:"csrf_token"`
+
+	// ExpiresAt When the session reaches its timeout.
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// Server Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
@@ -1459,6 +1473,12 @@ type TargetStatus struct {
 	// act; `unsupported` when the leader is of a release that cannot say. A newer release may add to
 	// the list.
 	State string `json:"state"`
+}
+
+// UnlockRequest defines model for UnlockRequest.
+type UnlockRequest struct {
+	// Password The password of the user the session belongs to.
+	Password string `json:"password"`
 }
 
 // User defines model for User.
@@ -1819,6 +1839,15 @@ type SignInParams struct {
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 
+// UnlockSessionParams defines parameters for UnlockSession.
+type UnlockSessionParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // DeleteTargetParams defines parameters for DeleteTarget.
 type DeleteTargetParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -1908,6 +1937,9 @@ type UpdateRoleJSONRequestBody = RoleUpdate
 
 // SignInJSONRequestBody defines body for SignIn for application/json ContentType.
 type SignInJSONRequestBody = SignInRequest
+
+// UnlockSessionJSONRequestBody defines body for UnlockSession for application/json ContentType.
+type UnlockSessionJSONRequestBody = UnlockRequest
 
 // PutTargetJSONRequestBody defines body for PutTarget for application/json ContentType.
 type PutTargetJSONRequestBody = TargetPut
@@ -2067,6 +2099,9 @@ type ServerInterface interface {
 	// SignIn Sign in to the console
 	// (POST /session)
 	SignIn(w http.ResponseWriter, r *http.Request, params SignInParams)
+	// UnlockSession Unlock the session with the user's password
+	// (POST /session/unlock)
+	UnlockSession(w http.ResponseWriter, r *http.Request, params UnlockSessionParams)
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(w http.ResponseWriter, r *http.Request)
@@ -4870,6 +4905,71 @@ func (siw *ServerInterfaceWrapper) SignIn(w http.ResponseWriter, r *http.Request
 	handler.ServeHTTP(w, r)
 }
 
+// UnlockSession operation middleware
+func (siw *ServerInterfaceWrapper) UnlockSession(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params UnlockSessionParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UnlockSession(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetSettings operation middleware
 func (siw *ServerInterfaceWrapper) GetSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -5635,6 +5735,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/session", wrapper.SignOut)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/session", wrapper.GetSession)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/session", wrapper.SignIn)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/session/unlock", wrapper.UnlockSession)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets", wrapper.ListBuckets)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets", wrapper.CreateBucket)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}", wrapper.DeleteBucket)
@@ -7540,6 +7641,54 @@ func (response SignIndefaultApplicationProblemPlusJSONResponse) VisitSignInRespo
 	return err
 }
 
+type UnlockSessionRequestObject struct {
+	Params UnlockSessionParams
+	Body   *UnlockSessionJSONRequestBody
+}
+
+type UnlockSessionResponseObject interface {
+	VisitUnlockSessionResponse(w http.ResponseWriter) error
+}
+
+type UnlockSession200ResponseHeaders struct {
+	SetCookie *string
+}
+
+type UnlockSession200JSONResponse struct {
+	Body    Session
+	Headers UnlockSession200ResponseHeaders
+}
+
+func (response UnlockSession200JSONResponse) VisitUnlockSessionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UnlockSessiondefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response UnlockSessiondefaultApplicationProblemPlusJSONResponse) VisitUnlockSessionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetSettingsRequestObject struct{}
 
 type GetSettingsResponseObject interface {
@@ -8171,6 +8320,9 @@ type StrictServerInterface interface {
 	// SignIn Sign in to the console
 	// (POST /session)
 	SignIn(ctx context.Context, request SignInRequestObject) (SignInResponseObject, error)
+	// UnlockSession Unlock the session with the user's password
+	// (POST /session/unlock)
+	UnlockSession(ctx context.Context, request UnlockSessionRequestObject) (UnlockSessionResponseObject, error)
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(ctx context.Context, request GetSettingsRequestObject) (GetSettingsResponseObject, error)
@@ -9591,6 +9743,39 @@ func (sh *strictHandler) SignIn(w http.ResponseWriter, r *http.Request, params S
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SignInResponseObject); ok {
 		if err := validResponse.VisitSignInResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UnlockSession operation middleware
+func (sh *strictHandler) UnlockSession(w http.ResponseWriter, r *http.Request, params UnlockSessionParams) {
+	var request UnlockSessionRequestObject
+
+	request.Params = params
+
+	var body UnlockSessionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UnlockSession(ctx, request.(UnlockSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UnlockSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UnlockSessionResponseObject); ok {
+		if err := validResponse.VisitUnlockSessionResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

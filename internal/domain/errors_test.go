@@ -177,6 +177,12 @@ func TestEverySentinelIsInOneOfTheTwoLists(t *testing.T) {
 			}
 		}
 	}
+	// A locked session is no denial (ADR-0027): what is told of it must not
+	// be taken for what a policy said, and no node tells another of it.
+	locked := fmt.Errorf("authorize: %w: user/alice", domain.ErrSessionLocked)
+	if errors.Is(locked, domain.ErrAccessDenied) || len(domain.Codes(locked)) != 0 {
+		t.Errorf("a locked session reads as a denial, or has the wire names %v", domain.Codes(locked))
+	}
 	// What the list returns is the caller's.
 	local[0] = nil
 	if domain.LocalSentinels()[0] == nil {

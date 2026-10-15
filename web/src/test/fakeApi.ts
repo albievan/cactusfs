@@ -78,6 +78,37 @@ export function replayed(answer: Response): Response {
 }
 
 /**
+ * A refusal with the code the API gives it, for what the console tells by
+ * the code, and with whatever headers go with it.
+ */
+export function refusal(status: number, code: string, title: string, headers: Record<string, string> = {}): Response {
+  const body = { type: 'about:blank', title, status, code };
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/problem+json', ...headers },
+  });
+}
+
+/**
+ * What the API answers a locked session that asks for anything but storing
+ * an object, its own state, unlocking and signing out: 423 with the code
+ * `SessionLocked`, as adminapi/handler.go has it. It is not a 401.
+ */
+export function sessionLocked(): Response {
+  return refusal(423, 'SessionLocked', 'The session is locked');
+}
+
+/** What unlocking answers a password it does not accept: 403, and the session stays as it was. */
+export function wrongPassword(): Response {
+  return refusal(403, 'AccessDenied', 'Access denied');
+}
+
+/** What unlocking answers too many attempts from one address: 429 with `Retry-After`, and the session stays as it was. */
+export function tooManyAttempts(): Response {
+  return refusal(429, 'TooManyAttempts', 'Too many attempts', { 'Retry-After': '300' });
+}
+
+/**
  * Replaces `fetch` with a fake management API. A request nobody registered an
  * answer for gets a 501 problem, so that a test cannot pass by accident.
  */
@@ -144,6 +175,132 @@ export function signedIn(routes: Record<string, Handler> = {}): FakeApi {
     'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'alice', server: SERVER }),
     ...routes,
   });
+}
+
+/** How a console session stands, as the API tells it in `GET /session`. */
+export interface SessionAnswer {
+  /** Whether it reached its timeout and is kept for its uploads. */
+  locked: boolean;
+  /** When it reaches, or reached, its timeout. */
+  expiresAt: string;
+  /** The latest moment it can stay locked to; absent where sessions never lock. */
+  lockEndsAt?: string;
+}
+
+/** The answer of `GET /session` for a console session of alice that stands like this. */
+export function sessionOf(answer: SessionAnswer): Response {
+  return json(200, {
+    kind: 'user',
+    via: 'session',
+    user: 'alice',
+    server: SERVER,
+    locked: answer.locked,
+    expires_at: answer.expiresAt,
+    lock_ends_at: answer.lockEndsAt,
+  });
+}
+
+/**
+ * A console session of alice that can lock, as the API has it: what the
+ * test says of it is what the routes answer from then on.
+ */
+export interface FakeSession {
+  /**
+   * How it stands. `open`: before its timeout. `locked`: past it, with an
+   * upload on its way - everything `guarded` answers 423. `ended`: gone -
+   * every route answers 401.
+   */
+  stands: 'open' | 'locked' | 'ended';
+  /** When it reaches, or reached, its timeout. */
+  expiresAt: string;
+  /** The timeout it gets when it is unlocked. */
+  expiresAtOnceUnlocked: string;
+  /** The password that unlocks it. */
+  password: string;
+  /** The CSRF token it accepts now: the one of signedIn until it is unlocked, then `csrf-after-unlock-N`. */
+  csrfToken: string;
+  /** How often it was unlocked. */
+  unlocks: number;
+  /**
+   * `GET /session`, `POST /session/unlock` and `DELETE /session`. Unlocking
+   * takes the CSRF token the session has and the password, and answers as
+   * the API does: 200 with a new CSRF token and a new timeout, 403 for
+   * another password, 401 for a session that has ended.
+   */
+  routes: Record<string, Handler>;
+  /**
+   * An operation a locked session may not carry out: answered by `handler`
+   * while the session is open, 423 `SessionLocked` while it is locked, and
+   * 401 once it has ended.
+   */
+  guarded: (handler: Handler) => Handler;
+  /**
+   * Storing an object, which a locked session may do: answered by `handler`
+   * unless the session has ended (401). Which CSRF token an upload carried
+   * is for the test to look at: one that was sent before an unlock and
+   * answered after it carries, rightly, the token of before.
+   */
+  storing: (handler: Handler) => Handler;
+}
+
+/** A fake session that reaches its timeout at `expiresAt`. */
+export function fakeSession(expiresAt: string, expiresAtOnceUnlocked: string = expiresAt): FakeSession {
+  const ended = () => refusal(401, 'InvalidCredentials', 'Not signed in');
+  const session: FakeSession = {
+    stands: 'open',
+    expiresAt,
+    expiresAtOnceUnlocked,
+    password: 'correct horse battery staple',
+    csrfToken: CSRF_TOKEN,
+    unlocks: 0,
+    routes: {
+      'GET /session': () =>
+        session.stands === 'ended'
+          ? ended()
+          : sessionOf({ locked: session.stands === 'locked', expiresAt: session.expiresAt }),
+      'POST /session/unlock': (call) => {
+        if (session.stands === 'ended') {
+          return ended();
+        }
+        if (call.headers.get('X-CSRF-Token') !== session.csrfToken) {
+          return refusal(403, 'AccessDenied', 'The CSRF token is missing or wrong');
+        }
+        const body = JSON.parse(call.body) as { password?: unknown };
+        if (body.password !== session.password) {
+          return wrongPassword();
+        }
+        session.unlocks += 1;
+        session.stands = 'open';
+        session.csrfToken = `csrf-after-unlock-${String(session.unlocks)}`;
+        session.expiresAt = session.expiresAtOnceUnlocked;
+        return json(200, {
+          user: 'alice',
+          csrf_token: session.csrfToken,
+          expires_at: session.expiresAt,
+          server: SERVER,
+        });
+      },
+      'DELETE /session': () => {
+        if (session.stands === 'ended') {
+          return ended();
+        }
+        session.stands = 'ended';
+        return noContent();
+      },
+    },
+    guarded: (handler) => (call) => {
+      switch (session.stands) {
+        case 'open':
+          return handler(call);
+        case 'locked':
+          return sessionLocked();
+        case 'ended':
+          return ended();
+      }
+    },
+    storing: (handler) => (call) => (session.stands === 'ended' ? ended() : handler(call)),
+  };
+  return session;
 }
 
 /**
