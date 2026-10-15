@@ -11,6 +11,8 @@ import {
 } from '../api/client';
 import { useDeleting, useDeletionList, useDeletions } from '../deletions/context';
 import { doneOf, outcomeOf, progressLineOf, totalOf } from '../deletions/state';
+import { offersPreview } from '../preview/kinds';
+import { PreviewButton } from '../preview/PreviewButton';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatBytes, formatTime } from '../ui/format';
@@ -954,7 +956,8 @@ interface ObjectDetailsProps {
  * the listing says the object was replaced, and not otherwise. That it is on
  * its way, and that it could not be had, is said here, in the row: the
  * details of one object failing are no failure of the screen, nor of the
- * details of another.
+ * details of another. Where the stored type is one the API may preview,
+ * "Preview" is offered beside what is known.
  */
 function ObjectDetails({ bucket, object, known, onKnown }: ObjectDetailsProps) {
   const objectKey = object.key;
@@ -1017,6 +1020,12 @@ function ObjectDetails({ bucket, object, known, onKnown }: ObjectDetailsProps) {
             <dt>Encryption</dt>
             <dd>{metadata.encryption}</dd>
           </dl>
+          {/* Offered from the type the API told; whether it is shown is the API's answer. */}
+          {offersPreview(metadata.content_type) ? (
+            <div className="grid-detail-actions">
+              <PreviewButton bucket={metadata.bucket} objectKey={metadata.key} contentType={metadata.content_type} />
+            </div>
+          ) : null}
         </div>
         <div className="grid-detail-group">
           {/* Asked for again when the object was replaced: another upload has another uploader. */}

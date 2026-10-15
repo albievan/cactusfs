@@ -2628,3 +2628,183 @@ details[open] > summary .node-card-mark {
 .grid-wide td[data-label='Actions'] > .d-flex {
   flex-wrap: nowrap !important;
 }
+
+/* The preview of an object: a modal dialog over the whole console, dimming
+   what is behind it; the whole screen on a phone. Above the activity bar,
+   the tabs and the tooltips of the page. */
+.grid-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(0.75rem, 3vw, 2rem);
+  background: rgb(22 59 44 / 55%);
+  /* A scroll that reaches an end goes no further: not to the page behind. */
+  overscroll-behavior: contain;
+}
+
+.preview-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(72rem, 100%);
+  max-height: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.preview-head,
+.preview-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.preview-head {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+
+.preview-foot {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+}
+
+.preview-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 8rem;
+  padding: 1rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* The focus of the dialog itself, after a click on its text, is not drawn. */
+.preview-dialog:focus {
+  outline: none;
+}
+
+.preview-image-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background: var(--wash);
+  border-radius: var(--bs-border-radius);
+}
+
+.preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100dvh - 14rem);
+  object-fit: contain;
+}
+
+/* At its own size the image is scrolled, not shrunk. */
+.preview-image-actual {
+  display: block;
+  overflow: auto;
+}
+
+.preview-image-actual .preview-image {
+  max-width: none;
+  max-height: none;
+}
+
+.preview-text {
+  margin: 0;
+  padding: 0.75rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: var(--bs-border-radius);
+  font-size: 0.85rem;
+}
+
+.preview-table {
+  overflow: auto;
+}
+
+.preview-csv {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.preview-csv td {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.preview-later-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.25rem;
+  font-weight: 600;
+  color: var(--night-green);
+}
+
+.preview-problem .notice {
+  margin-bottom: 0.5rem;
+}
+
+@media (max-width: 575.98px) {
+  .preview-backdrop {
+    padding: 0;
+  }
+
+  .preview-dialog {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .preview-body {
+    flex: 1 1 auto;
+  }
+
+  .preview-foot {
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .preview-foot .btn,
+  .preview-head .btn,
+  .grid-detail-actions .btn {
+    min-height: 44px;
+  }
+
+  .preview-image {
+    max-height: calc(100dvh - 12rem);
+  }
+}
