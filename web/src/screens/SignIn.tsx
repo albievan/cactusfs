@@ -161,23 +161,46 @@ export function SignIn({ onSignedIn, signOutError, ended = null }: SignInProps) 
   );
 }
 
+// The width of one swell of the dunes. Each line repeats after it, and is
+// drawn twice as wide, so that sliding the lines one swell to the left ends
+// where it began and the motion has no seam.
+const SWELL = 1200;
+// How far apart the points of a line are; at the width the hero is shown
+// the lines read as curves.
+const STEP = 8;
+
+/** One line of the dunes, its baseline at y: two waves of the swell, added. */
+function duneLine(index: number): string {
+  const y = 150 + index * 18;
+  const lift = 90 - index * 4;
+  const points: string[] = [];
+  for (let x = 0; x <= 2 * SWELL; x += STEP) {
+    const turn = (2 * Math.PI * x) / SWELL;
+    const height = y - lift * Math.sin(turn + 0.6) - lift * 0.35 * Math.sin(2 * turn + 1.4 + index * 0.06);
+    points.push(`${String(x)} ${height.toFixed(1)}`);
+  }
+  return `M${points.join(' L')}`;
+}
+
 /**
- * The decoration of the left side: lines of dunes, drawn here. Nothing is
- * fetched, and it says nothing a screen reader needs to read.
+ * The decoration of the left side: lines of dunes, drawn here, drifting
+ * slowly as sand does (no motion where the reader asked for less). Nothing
+ * is fetched, and it says nothing a screen reader needs to read.
  */
 function Dunes() {
   const lines = Array.from({ length: 14 }, (_, index) => index);
   return (
     <svg className="signin-dunes" viewBox="0 0 1200 420" preserveAspectRatio="none" aria-hidden="true">
-      {lines.map((index) => {
-        const y = 150 + index * 18;
-        const lift = 110 - index * 6;
-        const d =
-          `M0 ${String(y + 40)} ` +
-          `C 200 ${String(y - lift)}, 380 ${String(y + lift * 0.9)}, 600 ${String(y)} ` +
-          `S 980 ${String(y - lift * 0.7)}, 1200 ${String(y + 20)}`;
-        return <path key={index} d={d} strokeOpacity={0.12 + index * 0.035} />;
-      })}
+      <g className="signin-dunes-drift">
+        {lines.map((index) => (
+          <path
+            key={index}
+            d={duneLine(index)}
+            strokeOpacity={0.12 + index * 0.035}
+            style={{ animationDelay: `${String(-(lines.length - 1 - index) * 0.45)}s` }}
+          />
+        ))}
+      </g>
     </svg>
   );
 }

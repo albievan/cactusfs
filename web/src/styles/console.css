@@ -822,6 +822,44 @@ html {
   stroke-width: 1.2;
 }
 
+/* The dunes drift one swell (1200 of the drawing's units) to the left and
+   begin again where they started; each line also rises and falls a little,
+   a moment after the one above it, so the sand seems to breathe. */
+.signin-dunes-drift {
+  animation: signin-dunes-drift 60s linear infinite;
+}
+
+.signin-dunes-drift path {
+  animation: signin-dunes-swell 7s ease-in-out infinite alternate;
+}
+
+@keyframes signin-dunes-drift {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-1200px);
+  }
+}
+
+@keyframes signin-dunes-swell {
+  from {
+    transform: translateY(-5px);
+  }
+
+  to {
+    transform: translateY(5px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signin-dunes-drift,
+  .signin-dunes-drift path {
+    animation: none;
+  }
+}
+
 .signin-panel {
   grid-row: 1;
   grid-column: 2;
