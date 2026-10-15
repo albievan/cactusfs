@@ -174,7 +174,7 @@ func TestParseServerConfig(t *testing.T) {
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
 			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second, TLSReloadInterval: time.Minute,
 			SessionLifetime: 30 * time.Minute, SessionUploadGrace: 90 * time.Second, SessionLockMax: 12 * time.Hour,
-			DeliveryTimeout: 30 * time.Second, ReplicationWorkers: 4,
+			DeliveryTimeout: 30 * time.Second, ReplicationWorkers: 4, PreviewMaxSizeMiB: 32,
 			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
@@ -346,6 +346,18 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "a delivery timeout too long", args: dev("--delivery-timeout", "5m1s"), env: passphrase, wantErr: "delivery-timeout"},
 		{name: "no replication workers", args: dev("--replication-workers", "0"), env: passphrase, wantErr: "replication-workers 0: must be between 1 and 32"},
 		{name: "too many replication workers", env: withPassphrase(map[string]string{envReplWorkers: "33"}), args: dev(), wantErr: "replication-workers 33"},
+		{
+			name: "previews, by flag over variable", args: dev("--preview-max-size", "1"),
+			env:  withPassphrase(map[string]string{envPreviewMaxSize: "256"}),
+			want: base(func(c *serverConfig) { c.PreviewMaxSizeMiB = 1 }),
+		},
+		{
+			name: "previews, by variable, at their largest", args: dev(), env: withPassphrase(map[string]string{envPreviewMaxSize: "256"}),
+			want: base(func(c *serverConfig) { c.PreviewMaxSizeMiB = 256 }),
+		},
+		{name: "previews of nothing", args: dev("--preview-max-size", "0"), env: passphrase, wantErr: "preview-max-size 0: must be between 1 and 256 (MiB)"},
+		{name: "previews too large", env: withPassphrase(map[string]string{envPreviewMaxSize: "257"}), args: dev(), wantErr: "preview-max-size 257"},
+		{name: "a preview cap that is no number", env: withPassphrase(map[string]string{envPreviewMaxSize: "32MiB"}), wantErr: envPreviewMaxSize},
 		{name: "a negative replication rate", args: dev("--replication-rate-mib", "-1"), env: passphrase, wantErr: "replication-rate-mib -1: must be between 0"},
 		{name: "a replication rate too high", args: dev("--replication-rate-mib", "1048577"), env: passphrase, wantErr: "replication-rate-mib"},
 		{name: "bad replication workers variable", env: withPassphrase(map[string]string{envReplWorkers: "many"}), wantErr: envReplWorkers},

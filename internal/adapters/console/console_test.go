@@ -17,6 +17,33 @@ func get(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRe
 	return rec
 }
 
+// consolePolicy is the console's Content Security Policy, word for word:
+// its own scripts, styles, fonts and calls; images of its own, data: and the
+// blob: URLs of the previews it fetched; workers of its own (ADR-0028). No
+// eval, no inline code, no WebAssembly, no other host, no frame.
+const consolePolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+	"connect-src 'self'; font-src 'self'; worker-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// TestConsolePolicyLoosensNothing: whatever the policy is written as, it
+// names none of the sources that would let code in.
+func TestConsolePolicyLoosensNothing(t *testing.T) {
+	t.Parallel()
+	for _, page := range []*httptest.ResponseRecorder{
+		get(t, console.NewHandler(fstest.MapFS{"index.html": {Data: []byte("<title>c</title>")}}, true), http.MethodGet, "/"),
+		get(t, console.NewHandler(nil, false), http.MethodGet, "/"),
+	} {
+		csp := page.Header().Get("Content-Security-Policy")
+		for _, loose := range []string{"unsafe-eval", "unsafe-inline", "wasm-unsafe-eval", "unsafe-hashes", "*", "http:", "https:", "strict-dynamic"} {
+			if strings.Contains(csp, loose) {
+				t.Errorf("the policy %q names %s", csp, loose)
+			}
+		}
+		if csp != consolePolicy {
+			t.Errorf("Content-Security-Policy = %q, want %q", csp, consolePolicy)
+		}
+	}
+}
+
 func TestConsoleFiles(t *testing.T) {
 	t.Parallel()
 	dist := fstest.MapFS{
@@ -36,10 +63,8 @@ func TestConsoleFiles(t *testing.T) {
 		t.Errorf("GET of an asset = %d, %v", script.Code, script.Header())
 	}
 	for _, rec := range []*httptest.ResponseRecorder{index, script, get(t, h, http.MethodGet, "/nothing-here")} {
-		csp := rec.Header().Get("Content-Security-Policy")
-		if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe") ||
-			!strings.Contains(csp, "frame-ancestors 'none'") {
-			t.Errorf("Content-Security-Policy = %q", csp)
+		if csp := rec.Header().Get("Content-Security-Policy"); csp != consolePolicy {
+			t.Errorf("Content-Security-Policy = %q, want %q", csp, consolePolicy)
 		}
 		if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("X-Frame-Options") != "DENY" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
 			t.Errorf("security headers = %v", rec.Header())

@@ -185,6 +185,48 @@ func (e NotificationRulePutEvents) Valid() bool {
 	}
 }
 
+// Defines values for PreviewKind.
+const (
+	Csv  PreviewKind = "csv"
+	Docx PreviewKind = "docx"
+	Gif  PreviewKind = "gif"
+	Jpeg PreviewKind = "jpeg"
+	Json PreviewKind = "json"
+	Pdf  PreviewKind = "pdf"
+	Png  PreviewKind = "png"
+	Text PreviewKind = "text"
+	Webp PreviewKind = "webp"
+	Xlsx PreviewKind = "xlsx"
+)
+
+// Valid indicates whether the value is a known member of the PreviewKind enum.
+func (e PreviewKind) Valid() bool {
+	switch e {
+	case Csv:
+		return true
+	case Docx:
+		return true
+	case Gif:
+		return true
+	case Jpeg:
+		return true
+	case Json:
+		return true
+	case Pdf:
+		return true
+	case Png:
+		return true
+	case Text:
+		return true
+	case Webp:
+		return true
+	case Xlsx:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SearchResultKind.
 const (
 	SearchResultKindBucket SearchResultKind = "bucket"
@@ -1003,6 +1045,9 @@ type PolicyUpdate struct {
 	Document PolicyDocument `json:"document"`
 }
 
+// PreviewKind What an object is shown as by the console (`X-CactusFS-Preview-Kind`). Values are only ever added to.
+type PreviewKind string
+
 // Problem Problem details (RFC 9457).
 type Problem struct {
 	// Code A stable name for the kind of problem, for programs.
@@ -1638,6 +1683,15 @@ type GetObjectMetadataParams struct {
 	Key ObjectKey `form:"key" json:"key"`
 }
 
+// PreviewObjectParams defines parameters for PreviewObject.
+type PreviewObjectParams struct {
+	// Key The key of the object.
+	Key ObjectKey `form:"key" json:"key"`
+
+	// VersionId The version to show - `null`, or the ID of a version. Without it, the current version.
+	VersionId *string `form:"version_id,omitempty" json:"version_id,omitempty"`
+}
+
 // ListObjectsParams defines parameters for ListObjects.
 type ListObjectsParams struct {
 	// Prefix Only keys that begin with this.
@@ -1994,6 +2048,9 @@ type ServerInterface interface {
 	// GetObjectMetadata Get what is known about an object
 	// (GET /buckets/{bucket}/object/metadata)
 	GetObjectMetadata(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectMetadataParams)
+	// PreviewObject Get an object's bytes for the console to show
+	// (GET /buckets/{bucket}/object/preview)
+	PreviewObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params PreviewObjectParams)
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(w http.ResponseWriter, r *http.Request, bucket BucketName, params ListObjectsParams)
@@ -2954,6 +3011,68 @@ func (siw *ServerInterfaceWrapper) GetObjectMetadata(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetObjectMetadata(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PreviewObject operation middleware
+func (siw *ServerInterfaceWrapper) PreviewObject(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PreviewObjectParams
+
+	// ------------- Required query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "version_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "version_id", r.URL.Query(), &params.VersionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PreviewObject(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -5761,6 +5880,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.PutObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/metadata", wrapper.GetObjectMetadata)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/access", wrapper.GetObjectAccess)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/preview", wrapper.PreviewObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/search", wrapper.Search)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/users", wrapper.ListUsers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/users", wrapper.CreateUser)
@@ -6303,6 +6423,169 @@ type GetObjectMetadatadefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response GetObjectMetadatadefaultApplicationProblemPlusJSONResponse) VisitGetObjectMetadataResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObjectRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PreviewObjectParams
+}
+
+type PreviewObjectResponseObject interface {
+	VisitPreviewObjectResponse(w http.ResponseWriter) error
+}
+
+type PreviewObject200ResponseHeaders struct {
+	ContentDisposition        string
+	ContentLength             int64
+	ContentSecurityPolicy     string
+	CrossOriginResourcePolicy string
+	ETag                      string
+	XCactusFSPreviewKind      PreviewKind
+	XCactusFSPreviewTruncated bool
+}
+
+type PreviewObject200ApplicationoctetStreamResponse struct {
+	Body          io.Reader
+	Headers       PreviewObject200ResponseHeaders
+	ContentLength int64
+}
+
+func (response PreviewObject200ApplicationoctetStreamResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprint(response.Headers.ContentDisposition))
+	w.Header().Set("Content-Length", fmt.Sprint(response.Headers.ContentLength))
+	w.Header().Set("Content-Security-Policy", fmt.Sprint(response.Headers.ContentSecurityPolicy))
+	w.Header().Set("Cross-Origin-Resource-Policy", fmt.Sprint(response.Headers.CrossOriginResourcePolicy))
+	w.Header().Set("ETag", fmt.Sprint(response.Headers.ETag))
+	w.Header().Set("X-CactusFS-Preview-Kind", fmt.Sprint(response.Headers.XCactusFSPreviewKind))
+	w.Header().Set("X-CactusFS-Preview-Truncated", fmt.Sprint(response.Headers.XCactusFSPreviewTruncated))
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type PreviewObject403ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject403ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject404ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject404ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject409ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject409ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject413ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject413ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject415ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject415ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(415)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject423ApplicationProblemPlusJSONResponse Problem
+
+func (response PreviewObject423ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObject429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type PreviewObject429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers PreviewObject429ResponseHeaders
+}
+
+func (response PreviewObject429ApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PreviewObjectdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PreviewObjectdefaultApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -8284,6 +8567,9 @@ type StrictServerInterface interface {
 	// GetObjectMetadata Get what is known about an object
 	// (GET /buckets/{bucket}/object/metadata)
 	GetObjectMetadata(ctx context.Context, request GetObjectMetadataRequestObject) (GetObjectMetadataResponseObject, error)
+	// PreviewObject Get an object's bytes for the console to show
+	// (GET /buckets/{bucket}/object/preview)
+	PreviewObject(ctx context.Context, request PreviewObjectRequestObject) (PreviewObjectResponseObject, error)
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(ctx context.Context, request ListObjectsRequestObject) (ListObjectsResponseObject, error)
@@ -8829,6 +9115,33 @@ func (sh *strictHandler) GetObjectMetadata(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetObjectMetadataResponseObject); ok {
 		if err := validResponse.VisitGetObjectMetadataResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PreviewObject operation middleware
+func (sh *strictHandler) PreviewObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params PreviewObjectParams) {
+	var request PreviewObjectRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PreviewObject(ctx, request.(PreviewObjectRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PreviewObject")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PreviewObjectResponseObject); ok {
+		if err := validResponse.VisitPreviewObjectResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

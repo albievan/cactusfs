@@ -12,9 +12,12 @@ import (
 
 // contentSecurityPolicy lets the console load its own scripts, styles and
 // images and call its own origin, and nothing else: no inline script, no
-// other host.
-const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
-	"connect-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+// other host. Images may also come from blob: URLs, which the console makes
+// of the previews it fetched itself, and workers - the readers of PDF and
+// Office documents - from its own origin only (ADR-0028). No eval, no inline
+// code, no WebAssembly.
+const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
+	"connect-src 'self'; font-src 'self'; worker-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
 const stubPage = `<!doctype html>
 <html lang="en">

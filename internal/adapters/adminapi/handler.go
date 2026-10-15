@@ -21,6 +21,7 @@ import (
 	"mime"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -50,12 +51,56 @@ const (
 	completeTimeout = 30 * time.Second
 )
 
-// The two operations that carry an object, as the generated router names
-// them.
+// The operations that carry an object, as the generated router names them.
 const (
 	patternUpload   = "PUT " + BasePath + "/buckets/{bucket}/object"
 	patternDownload = "GET " + BasePath + "/buckets/{bucket}/object"
+	patternPreview  = "GET " + BasePath + "/buckets/{bucket}/object/preview"
 )
+
+// DefaultPreviewStall is how long the client of a preview may take to
+// accept the next bytes of it, when Config says nothing else.
+const DefaultPreviewStall = 2 * time.Minute
+
+// previewStall is how long the client of a preview may stall.
+func (h *Handler) previewStall() time.Duration {
+	if h.cfg.PreviewStall > 0 {
+		return h.cfg.PreviewStall
+	}
+	return DefaultPreviewStall
+}
+
+// progressWriter gives every write of a response the time of the stall to
+// be taken by the client: a deadline that moves with progress, where the
+// listener's bounds the whole response.
+type progressWriter struct {
+	http.ResponseWriter
+	transfer *http.ResponseController
+	stall    time.Duration
+}
+
+// newProgressWriter returns w with a deadline of stall from now, moved on at
+// every write.
+func newProgressWriter(w http.ResponseWriter, transfer *http.ResponseController, stall time.Duration) *progressWriter {
+	p := &progressWriter{ResponseWriter: w, transfer: transfer, stall: stall}
+	p.extend()
+	return p
+}
+
+// extend sets the deadline of the next write. The deadline is of the
+// network, and so of the real time, never of the node's clock.
+func (p *progressWriter) extend() {
+	_ = p.transfer.SetWriteDeadline(time.Now().Add(p.stall))
+}
+
+// Write implements http.ResponseWriter.
+func (p *progressWriter) Write(b []byte) (int, error) {
+	p.extend()
+	return p.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the connection.
+func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
 
 // patternUnlock is the operation that unlocks a session. Its body holds a
 // password, and nothing of it is kept: not a fingerprint either.
@@ -106,6 +151,10 @@ type Config struct {
 	SpecJSON []byte
 	// Observe, when not nil, is called after every request.
 	Observe func(ctx context.Context, o Observation)
+	// PreviewStall is how long the client of a preview may take to accept
+	// the next bytes of it before the transfer is ended; zero is
+	// DefaultPreviewStall.
+	PreviewStall time.Duration
 	// Build is which build this node runs. It is told to callers who have
 	// been authenticated and to nobody else: only the operations of the
 	// contract that need a credential name it.
@@ -259,8 +308,9 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 		// Which operation this is, is what the router matched - never what
 		// the path looks like: a user can be named "object".
 		upload := r.Pattern == patternUpload
-		download := r.Pattern == patternDownload && r.Method == http.MethodGet
-		if r.Pattern == patternDownload && r.Method != http.MethodGet {
+		reads := r.Pattern == patternDownload || r.Pattern == patternPreview
+		download := reads && r.Method == http.MethodGet
+		if reads && r.Method != http.MethodGet {
 			// HEAD would fetch and decrypt an object to throw it away;
 			// what is known about an object has its own operation.
 			w.Header().Set("Allow", http.MethodGet)
@@ -274,6 +324,14 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 			transfer := http.NewResponseController(w)
 			_ = transfer.SetReadDeadline(time.Time{})
 			_ = transfer.SetWriteDeadline(time.Time{})
+			if r.Pattern == patternPreview {
+				// But a preview holds one of the few places a node has for
+				// previews until its body is closed: a client that stops
+				// taking the bytes would keep it for ever. Each write must
+				// be taken within the stall; one that is not ends the
+				// transfer, which closes the body and gives the place back.
+				w = newProgressWriter(w, transfer, h.previewStall())
+			}
 		}
 		if !upload {
 			if r.Method == http.MethodPost || r.Method == http.MethodPut {
@@ -553,6 +611,8 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusUnsupportedMediaType, code: "NotPreviewable", title: "The object cannot be previewed"}
 	case is(domain.ErrPreviewTooLarge):
 		return problem{status: http.StatusRequestEntityTooLarge, code: "PreviewTooLarge", title: "The object is too large to preview"}
+	case is(errPreviewNeedsCustomerKey):
+		return problem{status: http.StatusConflict, code: "CustomerKeyRequired", title: "The object is encrypted with a customer key"}
 	case is(domain.ErrMethodNotAllowed):
 		return problem{status: http.StatusMethodNotAllowed, code: "MethodNotAllowed", title: "Not possible for this resource"}
 	case is(domain.ErrBucketAlreadyExists):
@@ -601,7 +661,14 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// more can be said in it: with the write deadline in the past
 		// net/http closes the connection, and the client sees a transfer
 		// that fell short.
-		h.cfg.Logger.ErrorContext(ctx, "response aborted", slog.String("request_id", info.id), slog.Any("error", err))
+		level := slog.LevelError
+		if errors.Is(err, domain.ErrPreviewTooLarge) || errors.Is(err, domain.ErrNotPreviewable) || errors.Is(err, os.ErrDeadlineExceeded) {
+			// No fault of the node: a preview cut off where the object was
+			// found to be no thing to show (a GIF frame past its screen),
+			// or a client that stopped taking what it asked for.
+			level = slog.LevelWarn
+		}
+		h.cfg.Logger.Log(ctx, level, "response aborted", slog.String("request_id", info.id), slog.Any("error", err))
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Unix(1, 0))
 		return
 	case p.status >= http.StatusInternalServerError:

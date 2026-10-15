@@ -109,7 +109,7 @@ Said plainly, so that nobody finds out by trying:
   `501 Not Implemented`. Events are published inside the process only;
   there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
   stores.
-- **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
+- **Planned, not built:** the console's preview of an object (Goal O: its endpoint is built, the dialog and its viewers for images, text, PDF, DOCX and XLSX are not yet); a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
   bucket's policy through the S3 API only.
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
   the port and the replicated store exist. No use case, no API and no console screen
@@ -406,6 +406,12 @@ there as "set" or "not set" and nothing else.
 | `--session-lifetime` | `CACTUSFS_SESSION_LIFETIME` | `30m` | how long a console session lasts, from sign-in or from its last unlock, before it reaches its timeout (`10s` to `12h`). Nothing extends it: at the timeout the user signs in again, or - while objects are being uploaded with the session - it is locked until the user's password unlocks it. It must be the same on every node: any gateway may be asked what a session is. The same on every node |
 | `--session-upload-grace` | `CACTUSFS_SESSION_UPLOAD_GRACE` | `1m30s` | how long after its last upload a console session that is locked ends (`5s` to `10m`). While a session uploads, each node it uploads through writes one entry to the metadata log in a third of this time. It must be the same on every node. The same on every node |
 | `--session-lock-max` | `CACTUSFS_SESSION_LOCK_MAX` | `12h` | the longest a console session that reached its timeout while it uploads stays locked - able to store objects and nothing else - counted from the timeout, whatever is still being uploaded (at most `24h`); `0`: a session never locks, and ends at its timeout. It must be the same on every node: a gateway with a smaller value takes for ended what another takes for locked, and the node that leads the metadata group removes session records by its own. The same on every node |
+
+**Previews: how much of an object the console is sent to show**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--preview-max-size` | `CACTUSFS_PREVIEW_MAX_SIZE` | `32` | the largest object the console is sent to preview, in MiB (`1` to `256`); a larger one is refused (413) before any of it is read, and can be downloaded. Of text, CSV and JSON the first MiB is sent whatever their size. Every preview is a read of up to this much from the drives; a caller has at most 2 running at once and a node 16. A console may ask any gateway. The same on every node |
 
 **Delivery: outbound connections to notification targets and other sites**
 
@@ -778,6 +784,7 @@ What the API has, under `/api/v1` (the contract is
 | `/session`, `/session/unlock` | sign in, the session, sign out; unlock a locked session with the user's password |
 | `/buckets`, `/buckets/{bucket}`, `/buckets/{bucket}/usage` | list, create, read and delete buckets; how many objects a bucket holds and their size |
 | `/buckets/{bucket}/objects`, `/buckets/{bucket}/object`, `/object/metadata`, `/object/access` | list objects; upload, download and delete one; its metadata; who uploaded it and how often it was downloaded |
+| `/buckets/{bucket}/object/preview` | an object's bytes for the console to show it (ADR-0028): PNG, JPEG, GIF, WebP, PDF, DOCX, XLSX, text, CSV and JSON, decided by the stored type and the bytes together; for whoever may read the object and either uploaded the version shown or is allowed `admin:PreviewObject`; always an attachment, never served inline; up to `--preview-max-size`, text to its first MiB; counted as a download |
 | `/search` | buckets by name and objects by key |
 | `/users`, `/users/{name}`, `/users/{name}/keys`, `/keys/{access_key_id}` | users and their API keys |
 | `/groups`, `/roles`, `/policies` (and `/{name}` of each) | groups, roles, policies |

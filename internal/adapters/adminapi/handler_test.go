@@ -89,6 +89,8 @@ type fixture struct {
 	// their way to it.
 	meta   *porttest.MemMetadata
 	access *app.AccessRecorder
+	// drive is the one drive the objects are stored on.
+	drive *porttest.MemShardStore
 	// index is what a search walks: the metadata store, which a test can
 	// hold up; policies where it reads the policies of the buckets, which a
 	// test can make slow.
@@ -155,7 +157,7 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.meta = meta
+	f.meta, f.drive = meta, drive
 	f.access, err = app.NewAccessRecorder(app.AccessRecorderConfig{Store: meta, Node: "node-a", Entropy: rand.Reader, Logger: logger})
 	if err != nil {
 		t.Fatal(err)

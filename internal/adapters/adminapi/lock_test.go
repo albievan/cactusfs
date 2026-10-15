@@ -378,6 +378,7 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"deleteObject":               {path: "/buckets/some-bucket/object?key=k"},
 		"getObjectMetadata":          {path: "/buckets/some-bucket/object/metadata?key=k"},
 		"getObjectAccess":            {path: "/buckets/some-bucket/object/access?key=k"},
+		"previewObject":              {path: "/buckets/some-bucket/object/preview?key=k"},
 		"search":                     {path: "/search?q=k"},
 		"listUsers":                  {path: "/users"},
 		"createUser":                 {path: "/users", body: map[string]any{"name": "new-user", "roles": []string{iam.RoleClusterAdmin}}},
@@ -419,9 +420,12 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"listObjects": {"/buckets/some-bucket/objects?access=true", "/buckets/some-bucket/objects?prefix=k&delimiter=/"},
 		"search":      {"/search?q=k&bucket=some-bucket", "/search?q=some"},
 		"getObject":   {"/buckets/no-such-bucket/object?key=k", "/buckets/some-bucket/object?key=no-such-key"},
-		"getBucket":   {"/buckets/no-such-bucket"},
-		"getUser":     {"/users/nobody"},
-		"listAudit":   {"/audit?limit=1"},
+		"previewObject": {
+			"/buckets/some-bucket/object/preview?key=k&version_id=null", "/buckets/some-bucket/object/preview?key=no-such-key",
+		},
+		"getBucket": {"/buckets/no-such-bucket"},
+		"getUser":   {"/users/nobody"},
+		"listAudit": {"/audit?limit=1"},
 	}
 	// The operations that are not written yet (TestOperationsThatAreNotWrittenYet)
 	// say so before anybody is asked what the caller may do. One that is
@@ -436,7 +440,13 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	// The calls that are refused for another action than the contract
 	// names for their operation: the first question the use case asks. A
 	// search of all buckets asks first whether the caller may list them.
-	auditedAs := map[string]string{"/search?q=k": "s3:ListAllMyBuckets", "/search?q=some": "s3:ListAllMyBuckets"}
+	// A preview asks first whether the caller may download the object.
+	auditedAs := map[string]string{
+		"/search?q=k": "s3:ListAllMyBuckets", "/search?q=some": "s3:ListAllMyBuckets",
+		"/buckets/some-bucket/object/preview?key=k":                 "s3:GetObject",
+		"/buckets/some-bucket/object/preview?key=no-such-key":       "s3:GetObject",
+		"/buckets/some-bucket/object/preview?key=k&version_id=null": "s3:GetObjectVersion",
+	}
 	// What a locked session is for.
 	allowed := []string{"getSession", "signOut", "unlockSession", "putObject"}
 

@@ -868,6 +868,157 @@ paths:
                 $ref: '#/components/schemas/ObjectAccess'
         default:
           $ref: '#/components/responses/Problem'
+  /buckets/{bucket}/object/preview:
+    get:
+      operationId: previewObject
+      tags: [objects]
+      summary: Get an object's bytes for the console to show
+      description: |
+        The bytes of an object version for the console to draw itself, when the object is of a kind it shows:
+        an image (PNG, JPEG, GIF, WebP), a PDF, a Word document (DOCX), an Excel workbook (XLSX), or text, CSV
+        or JSON. The answer is always `application/octet-stream` and an attachment, whatever the object is:
+        `X-CactusFS-Preview-Kind` says what it is, and nothing of it is ever rendered by the browser on the
+        console's origin.
+
+        **Who may.** The caller needs `s3:GetObject` on the object - `s3:GetObjectVersion` when `version_id`
+        is given - because a preview is never more than a download, AND either `admin:PreviewObject` on it or
+        to own the version shown. The owner is the user who uploaded that version - by a console session or by
+        one of their API keys; the root identity and keys that belong to no user own nothing, and a version
+        uploaded before its uploader was recorded has no owner. An explicit Deny of `admin:PreviewObject`
+        refuses the owner as well, an API key's own policy must allow both actions, and a locked session
+        previews nothing. A refusal is written to the audit trail; a preview is not, and counts as a
+        download.
+
+        **What kind of thing it is** is decided from the type the object was stored with AND the signature
+        of its first bytes, never from its key: both must say the same. A stored type of
+        `application/octet-stream`, or none, lets the bytes decide for images and PDF only. SVG, HTML, XML,
+        script and every type not listed are never previewed (415).
+
+        **Bounds.** An object larger than the node's `preview-max-size` (32 MiB unless configured) is refused
+        with 413 before any of it is read - but for text, CSV and JSON, of which the first 1 MiB is sent and
+        `X-CactusFS-Preview-Truncated` says whether there is more. An image may have at most 16 384 pixels on
+        a side and 40 megapixels in all, read from its header (413 when it has more, 415 when its size is not
+        found in its first 256 KiB). A GIF frame that reaches past the GIF's screen is refused: when such a
+        frame begins later in the object, the transfer is cut off there, and the answer is shorter than its
+        `Content-Length` - an error, never a shorter image. A caller has at most 2 previews running at once and
+        a node 16; beyond, the answer is 429 with `Retry-After`. There is no `Range`.
+
+        An object encrypted with a customer key (SSE-C) cannot be previewed: this API never holds the key
+        (409, `code` `CustomerKeyRequired`).
+      x-cactusfs-action: admin:PreviewObject
+      parameters:
+        - $ref: '#/components/parameters/BucketName'
+        - $ref: '#/components/parameters/ObjectKey'
+        - name: version_id
+          in: query
+          description: The version to show - `null`, or the ID of a version. Without it, the current version.
+          schema:
+            type: string
+            pattern: '^(null|[0-9a-f]{32})$'
+      responses:
+        '200':
+          description: The bytes of the version, or the first 1 MiB of them for text, CSV and JSON.
+          headers:
+            X-CactusFS-Preview-Kind:
+              description: What the object is shown as. Values are only ever added to.
+              required: true
+              schema:
+                $ref: '#/components/schemas/PreviewKind'
+            X-CactusFS-Preview-Truncated:
+              description: Whether the object has more bytes than were sent (text, CSV and JSON only).
+              required: true
+              schema:
+                type: boolean
+            Content-Length:
+              required: true
+              schema:
+                type: integer
+                format: int64
+            ETag:
+              description: The entity tag of the version shown.
+              required: true
+              schema:
+                type: string
+            Content-Disposition:
+              description: Always `attachment`.
+              required: true
+              schema:
+                type: string
+            Content-Security-Policy:
+              description: Always `sandbox; default-src 'none'`.
+              required: true
+              schema:
+                type: string
+            Cross-Origin-Resource-Policy:
+              description: Always `same-origin`.
+              required: true
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: |
+            The caller may not download the object, or neither owns the version nor is allowed
+            `admin:PreviewObject` on it (`code` is `AccessDenied`). The refusal is written to the audit trail.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            The object is encrypted with a customer key (SSE-C), which this API never holds (`code` is
+            `CustomerKeyRequired`). It can be downloaded through the S3 API with its key.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '413':
+          description: |
+            The object is larger than a preview may be, or the image has more pixels than a preview may have
+            (`code` is `PreviewTooLarge`). Nothing of the object was sent; it can be downloaded.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '415':
+          description: |
+            The object is not of a kind the console shows, or its stored type and its bytes do not agree
+            (`code` is `NotPreviewable`). Nothing of the object was sent; it can be downloaded.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '423':
+          description: The session is locked (`code` is `SessionLocked`); a locked session previews nothing.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          description: |
+            The caller has 2 previews running already, or the node 16 (`code` is `TooManyRequests`). Nothing
+            was read; the same request can be sent again.
+          headers:
+            Retry-After:
+              description: After how many seconds to send the request again.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
   /search:
     get:
       operationId: search
@@ -1836,6 +1987,11 @@ components:
           description: A stable name for the kind of problem, for programs.
         request_id:
           type: string
+    PreviewKind:
+      type: string
+      description: |
+        What an object is shown as by the console (`X-CactusFS-Preview-Kind`). Values are only ever added to.
+      enum: [png, jpeg, gif, webp, pdf, docx, xlsx, text, csv, json]
     SignInRequest:
       type: object
       required: [username, password]

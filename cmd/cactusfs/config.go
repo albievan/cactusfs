@@ -61,6 +61,7 @@ const (
 	envDeliveryTimeout = "CACTUSFS_DELIVERY_TIMEOUT"
 	envReplWorkers     = "CACTUSFS_REPLICATION_WORKERS"
 	envReplRate        = "CACTUSFS_REPLICATION_RATE_MIB"
+	envPreviewMaxSize  = "CACTUSFS_PREVIEW_MAX_SIZE"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envNodeID          = "CACTUSFS_NODE_ID"
 	envRoles           = "CACTUSFS_ROLES"
@@ -134,6 +135,14 @@ const (
 	minReplicationWorkers     = 1
 	maxReplicationWorkers     = 32
 	maxReplicationRateMiB     = 1 << 20
+)
+
+// The bounds of the cap of previews (ADR-0028), in MiB: the setting is
+// written in MiB, and the use case keeps it in bytes.
+const (
+	defaultPreviewMaxSizeMiB = app.DefaultPreviewMaxSize >> 20
+	minPreviewMaxSizeMiB     = app.MinPreviewMaxSize >> 20
+	maxPreviewMaxSizeMiB     = app.MaxPreviewMaxSize >> 20
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -229,6 +238,11 @@ type serverConfig struct {
 	// second; zero is no limit (ADR-0026).
 	ReplicationWorkers int
 	ReplicationRateMiB int
+	// PreviewMaxSizeMiB is the largest object the console is sent to
+	// preview, in MiB, but for text, CSV and JSON, of which the first MiB
+	// is sent whatever their size (ADR-0028). Zero, in a configuration
+	// that was not parsed, is the default.
+	PreviewMaxSizeMiB int
 	// AllowDriveReplacement confirms that one empty drive may take the place
 	// of one missing drive at this start.
 	AllowDriveReplacement bool
@@ -485,6 +499,9 @@ func (c *serverConfig) validate() error {
 	}
 	if err := c.validateSessions(); err != nil {
 		return err
+	}
+	if c.PreviewMaxSizeMiB < minPreviewMaxSizeMiB || c.PreviewMaxSizeMiB > maxPreviewMaxSizeMiB {
+		return fmt.Errorf("preview-max-size %d: must be between %d and %d (MiB)", c.PreviewMaxSizeMiB, minPreviewMaxSizeMiB, maxPreviewMaxSizeMiB)
 	}
 	if err := c.validateDelivery(); err != nil {
 		return err

@@ -279,3 +279,23 @@ type discardEvents struct{}
 
 // Publish implements ports.EventPublisher.
 func (discardEvents) Publish(context.Context, ports.Event) error { return nil }
+
+// TestThePreviewCapIsWired: the cap of previews a node is given is the one
+// its object service applies (ADR-0028), and a configuration that names
+// none - one a test built by hand - has the default.
+func TestThePreviewCapIsWired(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		mib  int
+		want int64
+	}{
+		{mib: 5, want: 5 << 20},
+		{mib: 0, want: app.DefaultPreviewMaxSize},
+	} {
+		cfg := nodeConfig(t.TempDir())
+		cfg.PreviewMaxSizeMiB = tt.mib
+		if got := mustStart(t, cfg).node.objects.PreviewMaxSize(); got != tt.want {
+			t.Errorf("preview-max-size %d: the object service previews up to %d bytes, want %d", tt.mib, got, tt.want)
+		}
+	}
+}

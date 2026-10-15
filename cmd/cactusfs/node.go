@@ -230,6 +230,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		},
 		Authz: n.authorizer, Clock: n.clock, Entropy: rand.Reader, Logger: logger,
 		Auditor: n.auditor, Access: n.access, AccessStore: accessStore,
+		PreviewMaxSize: int64(cfg.PreviewMaxSizeMiB) << 20,
 	})
 	if err != nil {
 		return err

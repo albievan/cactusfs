@@ -1205,6 +1205,180 @@
         }
       }
     },
+    "/buckets/{bucket}/object/preview": {
+      "get": {
+        "operationId": "previewObject",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Get an object's bytes for the console to show",
+        "description": "The bytes of an object version for the console to draw itself, when the object is of a kind it shows:\nan image (PNG, JPEG, GIF, WebP), a PDF, a Word document (DOCX), an Excel workbook (XLSX), or text, CSV\nor JSON. The answer is always `application/octet-stream` and an attachment, whatever the object is:\n`X-CactusFS-Preview-Kind` says what it is, and nothing of it is ever rendered by the browser on the\nconsole's origin.\n\n**Who may.** The caller needs `s3:GetObject` on the object - `s3:GetObjectVersion` when `version_id`\nis given - because a preview is never more than a download, AND either `admin:PreviewObject` on it or\nto own the version shown. The owner is the user who uploaded that version - by a console session or by\none of their API keys; the root identity and keys that belong to no user own nothing, and a version\nuploaded before its uploader was recorded has no owner. An explicit Deny of `admin:PreviewObject`\nrefuses the owner as well, an API key's own policy must allow both actions, and a locked session\npreviews nothing. A refusal is written to the audit trail; a preview is not, and counts as a\ndownload.\n\n**What kind of thing it is** is decided from the type the object was stored with AND the signature\nof its first bytes, never from its key: both must say the same. A stored type of\n`application/octet-stream`, or none, lets the bytes decide for images and PDF only. SVG, HTML, XML,\nscript and every type not listed are never previewed (415).\n\n**Bounds.** An object larger than the node's `preview-max-size` (32 MiB unless configured) is refused\nwith 413 before any of it is read - but for text, CSV and JSON, of which the first 1 MiB is sent and\n`X-CactusFS-Preview-Truncated` says whether there is more. An image may have at most 16 384 pixels on\na side and 40 megapixels in all, read from its header (413 when it has more, 415 when its size is not\nfound in its first 256 KiB). A GIF frame that reaches past the GIF's screen is refused: when such a\nframe begins later in the object, the transfer is cut off there, and the answer is shorter than its\n`Content-Length` - an error, never a shorter image. A caller has at most 2 previews running at once and\na node 16; beyond, the answer is 429 with `Retry-After`. There is no `Range`.\n\nAn object encrypted with a customer key (SSE-C) cannot be previewed: this API never holds the key\n(409, `code` `CustomerKeyRequired`).\n",
+        "x-cactusfs-action": "admin:PreviewObject",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "name": "version_id",
+            "in": "query",
+            "description": "The version to show - `null`, or the ID of a version. Without it, the current version.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(null|[0-9a-f]{32})$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bytes of the version, or the first 1 MiB of them for text, CSV and JSON.",
+            "headers": {
+              "X-CactusFS-Preview-Kind": {
+                "description": "What the object is shown as. Values are only ever added to.",
+                "required": true,
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewKind"
+                }
+              },
+              "X-CactusFS-Preview-Truncated": {
+                "description": "Whether the object has more bytes than were sent (text, CSV and JSON only).",
+                "required": true,
+                "schema": {
+                  "type": "boolean"
+                }
+              },
+              "Content-Length": {
+                "required": true,
+                "schema": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              },
+              "ETag": {
+                "description": "The entity tag of the version shown.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "description": "Always `attachment`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Security-Policy": {
+                "description": "Always `sandbox; default-src 'none'`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cross-Origin-Resource-Policy": {
+                "description": "Always `same-origin`.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not download the object, or neither owns the version nor is allowed\n`admin:PreviewObject` on it (`code` is `AccessDenied`). The refusal is written to the audit trail.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The object is encrypted with a customer key (SSE-C), which this API never holds (`code` is\n`CustomerKeyRequired`). It can be downloaded through the S3 API with its key.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The object is larger than a preview may be, or the image has more pixels than a preview may have\n(`code` is `PreviewTooLarge`). Nothing of the object was sent; it can be downloaded.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The object is not of a kind the console shows, or its stored type and its bytes do not agree\n(`code` is `NotPreviewable`). Nothing of the object was sent; it can be downloaded.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The session is locked (`code` is `SessionLocked`); a locked session previews nothing.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The caller has 2 previews running already, or the node 16 (`code` is `TooManyRequests`). Nothing\nwas read; the same request can be sent again.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/search": {
       "get": {
         "operationId": "search",
@@ -2625,6 +2799,22 @@
             "type": "string"
           }
         }
+      },
+      "PreviewKind": {
+        "type": "string",
+        "description": "What an object is shown as by the console (`X-CactusFS-Preview-Kind`). Values are only ever added to.\n",
+        "enum": [
+          "png",
+          "jpeg",
+          "gif",
+          "webp",
+          "pdf",
+          "docx",
+          "xlsx",
+          "text",
+          "csv",
+          "json"
+        ]
       },
       "SignInRequest": {
         "type": "object",

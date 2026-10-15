@@ -51,6 +51,8 @@ Usage of cactusfs server:
     	URL of an OTLP/HTTP trace collector; traces are not exported when empty ($CACTUSFS_OTLP_ENDPOINT)
   -peers id=host:port
     	every node of the cluster, this one included, as id=host:port of its node RPC, separated by commas; makes the node a member of a cluster ($CACTUSFS_PEERS)
+  -preview-max-size int
+    	the largest object the console is sent to preview, in MiB, 1 to 256; of text, CSV and JSON the first MiB is sent whatever their size ($CACTUSFS_PREVIEW_MAX_SIZE) (default 32)
   -raft-addr address
     	listen address of the Raft transport ($CACTUSFS_RAFT_ADDR) (default ":9003")
   -region region

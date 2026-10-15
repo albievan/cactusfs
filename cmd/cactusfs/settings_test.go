@@ -96,7 +96,7 @@ func TestSettingsClassification(t *testing.T) {
 	}
 	sameEverywhere := []string{
 		"delivery-timeout", "egress-allow",
-		"gc-grace", "kms", "lifecycle-interval", "peers", "region", "replication-rate-mib", "replication-workers",
+		"gc-grace", "kms", "lifecycle-interval", "peers", "preview-max-size", "region", "replication-rate-mib", "replication-workers",
 		"s3-domain", "scrub-interval", "scrub-rate-mib",
 		"session-lifetime", "session-lock-max", "session-upload-grace",
 		"vault-addr", "vault-key", "vault-namespace", "vault-transit-mount",

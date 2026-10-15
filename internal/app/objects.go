@@ -44,6 +44,11 @@ type ObjectService struct {
 	// usage holds the last count of every bucket that was asked about.
 	usageMu sync.Mutex
 	usage   map[string]*usageEntry
+
+	// previewMaxSize is the largest object previewed, but for the text
+	// kinds; previews counts the previews being read (ADR-0028).
+	previewMaxSize int64
+	previews       previewLimiter
 }
 
 // ObjectServiceConfig lists what an ObjectService depends on.
@@ -72,10 +77,23 @@ type ObjectServiceConfig struct {
 	// a version (ADR-0016).
 	Access      *AccessRecorder
 	AccessStore ports.ObjectAccessStore
+	// PreviewMaxSize is the largest object previewed, but for text, CSV
+	// and JSON, of which the beginning is shown whatever their size: from
+	// MinPreviewMaxSize to MaxPreviewMaxSize bytes, or 0 for
+	// DefaultPreviewMaxSize (ADR-0028).
+	PreviewMaxSize int64
 }
 
 // NewObjectService returns an ObjectService.
 func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
+	previewMaxSize := cfg.PreviewMaxSize
+	if previewMaxSize == 0 {
+		previewMaxSize = DefaultPreviewMaxSize
+	}
+	if previewMaxSize < MinPreviewMaxSize || previewMaxSize > MaxPreviewMaxSize {
+		return nil, fmt.Errorf("app.NewObjectService: %w: a preview's cap of %d bytes is not between %d and %d",
+			domain.ErrInvalidArgument, previewMaxSize, MinPreviewMaxSize, MaxPreviewMaxSize)
+	}
 	storage, err := newShardStorage(cfg.Drives, cfg.Codec, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("app.NewObjectService: %w", err)
@@ -83,7 +101,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
-		access: cfg.Access, accessStore: cfg.AccessStore,
+		access: cfg.Access, accessStore: cfg.AccessStore, previewMaxSize: previewMaxSize,
 		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }

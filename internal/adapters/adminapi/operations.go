@@ -366,15 +366,62 @@ func (o *operations) GetObject(ctx context.Context, request api.GetObjectRequest
 		return nil, err
 	}
 	v := out.Version
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(v.Key)})
-	if disposition == "" {
-		disposition = "attachment"
-	}
+	disposition := attachment(v.Key)
 	modified := v.ModifiedAt.UTC().Format(http.TimeFormat)
 	return api.GetObject200ApplicationoctetStreamResponse{
 		Body: out.Body, ContentLength: v.Size,
 		Headers: api.GetObject200ResponseHeaders{
 			ContentDisposition: &disposition, ContentLength: &v.Size, ETag: &v.ETag, LastModified: &modified,
+		},
+	}, nil
+}
+
+// attachment is the Content-Disposition of an object's content: saved, and
+// never shown, by a browser that is sent it.
+func attachment(key string) string {
+	if disposition := mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(key)}); disposition != "" {
+		return disposition
+	}
+	return "attachment"
+}
+
+// The headers of a preview that are always the same (ADR-0028): whatever a
+// preview holds, a browser that is sent it navigates to nothing, runs
+// nothing, and hands it to no other origin.
+const (
+	previewPolicy         = "sandbox; default-src 'none'"
+	previewResourcePolicy = "same-origin"
+)
+
+// errPreviewNeedsCustomerKey marks an object under SSE-C asked for as a
+// preview. Of a preview, which this API can never make with a customer key,
+// that is a conflict with the state of the object (409) and not, as of a
+// request that could have carried the key, a request to be made otherwise
+// (400): the contract of previewObject says so, and the other operations
+// keep their answer.
+var errPreviewNeedsCustomerKey = errors.New("a preview of an object under a customer key")
+
+// PreviewObject implements api.StrictServerInterface. Who may preview what,
+// of which version and how much, is the use case's to say; this carries its
+// answer, always as an opaque attachment that the console draws itself.
+func (o *operations) PreviewObject(ctx context.Context, request api.PreviewObjectRequestObject) (api.PreviewObjectResponseObject, error) {
+	version := ""
+	if id := request.Params.VersionId; id != nil {
+		version = *id
+	}
+	out, err := o.h.cfg.Objects.Preview(ctx, who(ctx), app.PreviewInput{Bucket: request.Bucket, Key: request.Params.Key, VersionID: version})
+	if errors.Is(err, domain.ErrCustomerKeyRequired) {
+		return nil, errors.Join(errPreviewNeedsCustomerKey, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return api.PreviewObject200ApplicationoctetStreamResponse{
+		Body: out.Body, ContentLength: out.Length,
+		Headers: api.PreviewObject200ResponseHeaders{
+			ContentDisposition: attachment(out.Version.Key), ContentLength: out.Length, ETag: out.Version.ETag,
+			ContentSecurityPolicy: previewPolicy, CrossOriginResourcePolicy: previewResourcePolicy,
+			XCactusFSPreviewKind: api.PreviewKind(out.Kind), XCactusFSPreviewTruncated: out.Truncated,
 		},
 	}, nil
 }

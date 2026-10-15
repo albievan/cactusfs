@@ -464,6 +464,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/buckets/{bucket}/object/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an object's bytes for the console to show
+         * @description The bytes of an object version for the console to draw itself, when the object is of a kind it shows:
+         *     an image (PNG, JPEG, GIF, WebP), a PDF, a Word document (DOCX), an Excel workbook (XLSX), or text, CSV
+         *     or JSON. The answer is always `application/octet-stream` and an attachment, whatever the object is:
+         *     `X-CactusFS-Preview-Kind` says what it is, and nothing of it is ever rendered by the browser on the
+         *     console's origin.
+         *
+         *     **Who may.** The caller needs `s3:GetObject` on the object - `s3:GetObjectVersion` when `version_id`
+         *     is given - because a preview is never more than a download, AND either `admin:PreviewObject` on it or
+         *     to own the version shown. The owner is the user who uploaded that version - by a console session or by
+         *     one of their API keys; the root identity and keys that belong to no user own nothing, and a version
+         *     uploaded before its uploader was recorded has no owner. An explicit Deny of `admin:PreviewObject`
+         *     refuses the owner as well, an API key's own policy must allow both actions, and a locked session
+         *     previews nothing. A refusal is written to the audit trail; a preview is not, and counts as a
+         *     download.
+         *
+         *     **What kind of thing it is** is decided from the type the object was stored with AND the signature
+         *     of its first bytes, never from its key: both must say the same. A stored type of
+         *     `application/octet-stream`, or none, lets the bytes decide for images and PDF only. SVG, HTML, XML,
+         *     script and every type not listed are never previewed (415).
+         *
+         *     **Bounds.** An object larger than the node's `preview-max-size` (32 MiB unless configured) is refused
+         *     with 413 before any of it is read - but for text, CSV and JSON, of which the first 1 MiB is sent and
+         *     `X-CactusFS-Preview-Truncated` says whether there is more. An image may have at most 16 384 pixels on
+         *     a side and 40 megapixels in all, read from its header (413 when it has more, 415 when its size is not
+         *     found in its first 256 KiB). A GIF frame that reaches past the GIF's screen is refused: when such a
+         *     frame begins later in the object, the transfer is cut off there, and the answer is shorter than its
+         *     `Content-Length` - an error, never a shorter image. A caller has at most 2 previews running at once and
+         *     a node 16; beyond, the answer is 429 with `Retry-After`. There is no `Range`.
+         *
+         *     An object encrypted with a customer key (SSE-C) cannot be previewed: this API never holds the key
+         *     (409, `code` `CustomerKeyRequired`).
+         */
+        get: operations["previewObject"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/search": {
         parameters: {
             query?: never;
@@ -974,6 +1024,11 @@ export interface components {
             code: string;
             request_id?: string;
         };
+        /**
+         * @description What an object is shown as by the console (`X-CactusFS-Preview-Kind`). Values are only ever added to.
+         * @enum {string}
+         */
+        PreviewKind: "png" | "jpeg" | "gif" | "webp" | "pdf" | "docx" | "xlsx" | "text" | "csv" | "json";
         SignInRequest: {
             username: string;
             /** Format: password */
@@ -2945,6 +3000,127 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ObjectAccess"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    previewObject: {
+        parameters: {
+            query: {
+                /** @description The key of the object. */
+                key: components["parameters"]["ObjectKey"];
+                /** @description The version to show - `null`, or the ID of a version. Without it, the current version. */
+                version_id?: string;
+            };
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The bytes of the version, or the first 1 MiB of them for text, CSV and JSON. */
+            200: {
+                headers: {
+                    /** @description What the object is shown as. Values are only ever added to. */
+                    "X-CactusFS-Preview-Kind": components["schemas"]["PreviewKind"];
+                    /** @description Whether the object has more bytes than were sent (text, CSV and JSON only). */
+                    "X-CactusFS-Preview-Truncated": boolean;
+                    "Content-Length": number;
+                    /** @description The entity tag of the version shown. */
+                    ETag: string;
+                    /** @description Always `attachment`. */
+                    "Content-Disposition": string;
+                    /** @description Always `sandbox; default-src 'none'`. */
+                    "Content-Security-Policy": string;
+                    /** @description Always `same-origin`. */
+                    "Cross-Origin-Resource-Policy": string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /**
+             * @description The caller may not download the object, or neither owns the version nor is allowed
+             *     `admin:PreviewObject` on it (`code` is `AccessDenied`). The refusal is written to the audit trail.
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The object is encrypted with a customer key (SSE-C), which this API never holds (`code` is
+             *     `CustomerKeyRequired`). It can be downloaded through the S3 API with its key.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The object is larger than a preview may be, or the image has more pixels than a preview may have
+             *     (`code` is `PreviewTooLarge`). Nothing of the object was sent; it can be downloaded.
+             */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The object is not of a kind the console shows, or its stored type and its bytes do not agree
+             *     (`code` is `NotPreviewable`). Nothing of the object was sent; it can be downloaded.
+             */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The session is locked (`code` is `SessionLocked`); a locked session previews nothing. */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The caller has 2 previews running already, or the node 16 (`code` is `TooManyRequests`). Nothing
+             *     was read; the same request can be sent again.
+             */
+            429: {
+                headers: {
+                    /** @description After how many seconds to send the request again. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];

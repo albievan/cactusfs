@@ -26,6 +26,7 @@ const (
 	groupKMS           = "kms"
 	groupBootstrap     = "bootstrap"
 	groupSessions      = "sessions"
+	groupPreviews      = "previews"
 	groupDelivery      = "delivery"
 	groupMaintenance   = "maintenance"
 	groupObservability = "observability"
@@ -47,6 +48,7 @@ func settingGroups() []settingGroup {
 		{Name: groupKMS, Title: "KMS: the key that wraps data keys"},
 		{Name: groupBootstrap, Title: "Bootstrap: the root credentials of a new deployment"},
 		{Name: groupSessions, Title: "Console sessions: how long one lasts, and what becomes of it while it uploads"},
+		{Name: groupPreviews, Title: "Previews: how much of an object the console is sent to show"},
 		{Name: groupDelivery, Title: "Delivery: outbound connections to notification targets and other sites"},
 		{Name: groupMaintenance, Title: "Maintenance: background work"},
 		{Name: groupObservability, Title: "Observability: log, audit export and traces"},
@@ -413,6 +415,21 @@ func serverSettings() []settingSpec {
 				"`); `0`: a session never locks, and ends at its timeout. It must be the same on every node: a gateway with a smaller value " +
 				"takes for ended what another takes for locked, and the node that leads the metadata group removes session records by its own",
 			bind: func(t *settingTargets) any { return &t.cfg.SessionLockMax },
+		},
+
+		// Previews (ADR-0028). The same on every node: a console behind a
+		// load balancer may ask any gateway.
+		{
+			Name: "preview-max-size", Env: envPreviewMaxSize, Flag: true, Default: strconv.Itoa(defaultPreviewMaxSizeMiB),
+			Group: groupPreviews, Kind: plain, Scope: all,
+			Usage: "the largest object the console is sent to preview, in MiB, " + strconv.Itoa(minPreviewMaxSizeMiB) + " to " +
+				strconv.Itoa(maxPreviewMaxSizeMiB) + "; of text, CSV and JSON the first MiB is sent whatever their size",
+			Doc: "the largest object the console is sent to preview, in MiB (`" + strconv.Itoa(minPreviewMaxSizeMiB) + "` to `" +
+				strconv.Itoa(maxPreviewMaxSizeMiB) + "`); a larger one is refused (413) before any of it is read, and can be downloaded. " +
+				"Of text, CSV and JSON the first MiB is sent whatever their size. Every preview is a read of up to this much " +
+				"from the drives; a caller has at most " + strconv.Itoa(app.PreviewsPerPrincipal) + " running at once and a node " +
+				strconv.Itoa(app.PreviewsPerNode) + ". A console may ask any gateway",
+			bind: func(t *settingTargets) any { return &t.cfg.PreviewMaxSizeMiB },
 		},
 
 		// Delivery (ADR-0023, ADR-0026). The same on every node: the node
