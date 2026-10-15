@@ -447,6 +447,91 @@ describe("a bucket's details on its page", () => {
     expect(facts()['Storage used']).toBe('< 0.01 GB (not exact)');
   });
 
+  it('folds away and unfolds, says how much the bucket holds while folded, and remembers it for the viewer', async () => {
+    signedIn({
+      ...bucketList('photos'),
+      ...fakeBucket('photos', ['a.txt'], () => json(200, { object_count: 42, total_size: 420, complete: true, exact: false })).routes,
+    });
+    await openBucket();
+    await waitFor(() => {
+      expect(facts().Objects).toBe('42 (not exact)');
+    });
+
+    const toggle = screen.getByRole('button', { name: 'Bucket details' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const body = document.getElementById(toggle.getAttribute('aria-controls') ?? '');
+    expect(body?.hidden).toBe(true);
+    expect(screen.queryAllByRole('term')).toHaveLength(0);
+    expect(screen.getByText('42 objects · < 0.01 GB (not exact)')).toBeTruthy();
+    expect(window.localStorage.getItem('cactusfs.bucketDetails.folded')).toBe('1');
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(body?.hidden).toBe(false);
+    expect(facts().Objects).toBe('42 (not exact)');
+    expect(window.localStorage.getItem('cactusfs.bucketDetails.folded')).toBe('0');
+  });
+
+  it('opens folded when the viewer folded it before', async () => {
+    window.localStorage.setItem('cactusfs.bucketDetails.folded', '1');
+    signedIn({
+      ...bucketList('photos'),
+      ...fakeBucket('photos', ['a.txt'], () => json(200, { object_count: 1, total_size: 420, complete: true, exact: true })).routes,
+    });
+    await openBucket();
+
+    const toggle = await screen.findByRole('button', { name: 'Bucket details' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(await screen.findByText('1 object · < 0.01 GB')).toBeTruthy();
+  });
+
+  it('says, folded, that a count the caller may not see is not visible', async () => {
+    window.localStorage.setItem('cactusfs.bucketDetails.folded', '1');
+    signedIn({
+      ...bucketList('photos'),
+      ...fakeBucket('photos', ['a.txt'], () => problem(403, 'Access denied')).routes,
+    });
+    await openBucket();
+
+    await waitFor(() => {
+      expect(document.querySelector('.bucket-details-summary')?.textContent).toBe('not visible to you');
+    });
+    expect(screen.getByRole('button', { name: 'Bucket details' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows the details, and folds them all the same, when the browser refuses its storage', async () => {
+    // Only the local storage is refused: the session's own storage, which
+    // holds its CSRF token, works as it does.
+    const real = Object.getOwnPropertyDescriptor(window, 'localStorage');
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('storage refused');
+      },
+    });
+    try {
+      signedIn({
+        ...bucketList('photos'),
+        ...fakeBucket('photos', ['a.txt'], () => json(200, { object_count: 3, total_size: 420, complete: true, exact: true })).routes,
+      });
+      await openBucket();
+
+      const toggle = await screen.findByRole('button', { name: 'Bucket details' });
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(await screen.findByText('3 objects · < 0.01 GB')).toBeTruthy();
+    } finally {
+      if (real === undefined) {
+        Reflect.deleteProperty(window, 'localStorage');
+      } else {
+        Object.defineProperty(window, 'localStorage', real);
+      }
+    }
+  });
+
   it('says a figure the caller may not see is not visible, never 0', async () => {
     signedIn({
       'GET /buckets': () => problem(403, 'Access denied'),

@@ -816,6 +816,8 @@ build it runs are shown under the logo.
   storage, when it was made and by whom, its policy, and the last upload and download.
   A figure counted from the index rather than kept as the bucket changes says "not
   exact", and one you may not see says so - neither is shown as 0.
+  The details fold away with a click on their heading, which then still says how many
+  objects and how much storage the bucket holds; the browser remembers the choice.
 - **Delete all.** Beside "Delete selected", a bucket's page can delete every object of
   the bucket, all pages of it. It says what will happen - how many objects, that a
   bucket keeping versions keeps them and gets delete markers, that versions under Object

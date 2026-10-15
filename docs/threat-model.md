@@ -203,7 +203,16 @@ Answered since this list was begun, and so no longer here: the module path
 dedication of `LICENSE.md`), the registry (`ghcr.io/albievan/cactusfs`) and how a
 release is signed (keyless, ADR-0021) - `CLAUDE.md` §11 and `PLAN.md` record them.
 
-Still open:
+**Answered on 2026-10-15:** the owner accepted the default of every question below -
+each stays as it is described and built, the stricter or the stated reading kept - so
+none of them blocks a step any longer (`PLAN.md`, Decisions). They are kept here as the
+record of what was chosen and why, and can be raised again. The cure of question 33
+(a precondition in the schema-5 entry) is therefore not scheduled. Goal O's questions
+were answered with them: a preview also needs `s3:GetObject`, the owner is the user who
+uploaded the version shown, and an explicit Deny of `admin:PreviewObject` stops the
+owner too.
+
+Questions, with the default that was accepted:
 
 1. **Unauthenticated probes.** `CLAUDE.md` §3 says every inbound request is
    authenticated. `/healthz` and `/readyz` are not, because kubelet and compose health
@@ -347,3 +356,8 @@ Still open:
 34. **Replaying a create returns its signing key** for the 24 hours an idempotent
     answer is kept, without authorizing the replay again - as for API keys. Accepted
     as the existing pattern; the answer is sealed in the store.
+35. **A repeated request is recognised by a slow hash** where its body may hold a
+    secret (PLAN 8.0.13): Argon2id after authentication and before authorization, in a
+    pool of its own (two at a time, one per caller), answering 429 when full. A caller
+    with any key can make other callers' idempotent user and target changes wait a
+    moment on that node; sign-in is never affected. Accepted; is the bound right?

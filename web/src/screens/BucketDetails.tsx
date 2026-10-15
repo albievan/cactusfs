@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 
 import { api, ApiError, unwrap, type Bucket, type BucketActivityEntry, type BucketUsage } from '../api/client';
 import { useDeletions } from '../deletions/context';
@@ -66,6 +66,26 @@ export function useBucketFacts(bucket: string): BucketFacts {
   return facts;
 }
 
+// Whether the details are folded away, remembered for this viewer only. It
+// is a convenience: without storage the details are simply shown.
+const FOLDED_KEY = 'cactusfs.bucketDetails.folded';
+
+function readFolded(): boolean {
+  try {
+    return window.localStorage.getItem(FOLDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function rememberFolded(folded: boolean): void {
+  try {
+    window.localStorage.setItem(FOLDED_KEY, folded ? '1' : '0');
+  } catch {
+    // Not remembered, then.
+  }
+}
+
 /** Whether the API refused to tell the caller this: 403. */
 function refused(error: unknown): boolean {
   return error instanceof ApiError && error.problem.status === 403;
@@ -86,71 +106,113 @@ export function BucketDetails({ facts }: { facts: BucketFacts }) {
   const access = details?.access_included === true ? details : undefined;
   const policy = details?.policy_included === true ? details : undefined;
   const exact = usage.data?.exact === true ? usage.data : undefined;
+  const bodyId = useId();
+  const [folded, setFolded] = useState(readFolded);
+  const toggle = () => {
+    const next = !folded;
+    rememberFolded(next);
+    setFolded(next);
+  };
 
   return (
     <section className="card card-body panel bucket-details" aria-labelledby={headingId}>
-      <h2 id={headingId}>Bucket details</h2>
-      <dl className="facts bucket-facts">
-        <Fact name="Objects">
-          <UsageFigure usage={usage} figure={(data) => data.object_count.toLocaleString('en')} />
-        </Fact>
-        <Fact name="Storage used">
-          <UsageFigure
-            usage={usage}
-            figure={(data) => formatGigabytes(data.total_size)}
-            hint={(data) => formatExactBytes(data.total_size)}
-          />
-        </Fact>
-        {exact?.versions === undefined ? null : (
-          <Fact name="Versions">
-            {exact.versions.toLocaleString('en')}{' '}
-            <span className="bucket-facts-note">current and older, delete markers among them</span>
+      <h2 id={headingId} className="bucket-details-heading">
+        <button
+          type="button"
+          className="bucket-details-toggle"
+          aria-expanded={!folded}
+          aria-controls={bodyId}
+          title={folded ? 'Show the details of this bucket' : 'Hide the details of this bucket'}
+          onClick={toggle}
+        >
+          <i className={`bi ${folded ? 'bi-chevron-right' : 'bi-chevron-down'}`} aria-hidden="true" />
+          Bucket details
+        </button>
+        {folded ? <FoldedSummary usage={usage} /> : null}
+      </h2>
+      <div id={bodyId} hidden={folded}>
+        <dl className="facts bucket-facts">
+          <Fact name="Objects">
+            <UsageFigure usage={usage} figure={(data) => data.object_count.toLocaleString('en')} />
           </Fact>
-        )}
-        {exact?.stored_bytes === undefined ? null : (
-          <Fact name="All versions">
-            <span title={formatExactBytes(exact.stored_bytes)}>{formatGigabytes(exact.stored_bytes)}</span>
+          <Fact name="Storage used">
+            <UsageFigure
+              usage={usage}
+              figure={(data) => formatGigabytes(data.total_size)}
+              hint={(data) => formatExactBytes(data.total_size)}
+            />
           </Fact>
-        )}
-        {exact?.upload_bytes === undefined ? null : (
-          <Fact name="Uploads in progress">
-            <span title={formatExactBytes(exact.upload_bytes)}>{formatGigabytes(exact.upload_bytes)}</span>{' '}
-            <span className="bucket-facts-note">in parts of multipart uploads not completed</span>
-          </Fact>
-        )}
-        {usage.data?.quota_bytes === undefined ? null : (
-          <Fact name="Quota">
-            <span title={formatExactBytes(usage.data.quota_bytes)}>{formatGigabytes(usage.data.quota_bytes)}</span>
-          </Fact>
-        )}
-        <Fact name="Created">
-          <CreatedFigure bucket={bucket} />
-        </Fact>
-        {access === undefined ? null : <Fact name="Created by">{access.created_by ?? 'not recorded'}</Fact>}
-        {policy === undefined ? null : (
-          <Fact name="Policy">
-            <PolicySummary policy={policy.policy} />
-          </Fact>
-        )}
-        {access === undefined ? null : (
-          <>
-            <Fact name="Last upload">
-              <LatestOf entries={access.activity?.uploads} />
+          {exact?.versions === undefined ? null : (
+            <Fact name="Versions">
+              {exact.versions.toLocaleString('en')}{' '}
+              <span className="bucket-facts-note">current and older, delete markers among them</span>
             </Fact>
-            <Fact name="Last download">
-              <LatestOf entries={access.activity?.downloads} />
+          )}
+          {exact?.stored_bytes === undefined ? null : (
+            <Fact name="All versions">
+              <span title={formatExactBytes(exact.stored_bytes)}>{formatGigabytes(exact.stored_bytes)}</span>
             </Fact>
-          </>
-        )}
-      </dl>
-      {usage.data !== undefined && !usage.data.exact ? (
-        <p className="form-hint">
-          These figures were counted for this request from the index, not kept as the bucket changed: they are not
-          exact
-          {usage.data.complete ? '' : ', and the count stopped at its bound before it reached the end of the bucket'}.
-        </p>
-      ) : null}
+          )}
+          {exact?.upload_bytes === undefined ? null : (
+            <Fact name="Uploads in progress">
+              <span title={formatExactBytes(exact.upload_bytes)}>{formatGigabytes(exact.upload_bytes)}</span>{' '}
+              <span className="bucket-facts-note">in parts of multipart uploads not completed</span>
+            </Fact>
+          )}
+          {usage.data?.quota_bytes === undefined ? null : (
+            <Fact name="Quota">
+              <span title={formatExactBytes(usage.data.quota_bytes)}>{formatGigabytes(usage.data.quota_bytes)}</span>
+            </Fact>
+          )}
+          <Fact name="Created">
+            <CreatedFigure bucket={bucket} />
+          </Fact>
+          {access === undefined ? null : <Fact name="Created by">{access.created_by ?? 'not recorded'}</Fact>}
+          {policy === undefined ? null : (
+            <Fact name="Policy">
+              <PolicySummary policy={policy.policy} />
+            </Fact>
+          )}
+          {access === undefined ? null : (
+            <>
+              <Fact name="Last upload">
+                <LatestOf entries={access.activity?.uploads} />
+              </Fact>
+              <Fact name="Last download">
+                <LatestOf entries={access.activity?.downloads} />
+              </Fact>
+            </>
+          )}
+        </dl>
+        {usage.data !== undefined && !usage.data.exact ? (
+          <p className="form-hint">
+            These figures were counted for this request from the index, not kept as the bucket changed: they are not
+            exact
+            {usage.data.complete ? '' : ', and the count stopped at its bound before it reached the end of the bucket'}.
+          </p>
+        ) : null}
+      </div>
     </section>
+  );
+}
+
+/** What the heading of folded details still says: how much the bucket holds. */
+function FoldedSummary({ usage }: { usage: Loaded<BucketUsage> }) {
+  const data = usage.data;
+  if (data === undefined) {
+    if (usage.error === null || usage.error === undefined) {
+      return <span className="bucket-details-summary">Counting…</span>;
+    }
+    return (
+      <span className="bucket-details-summary">{refused(usage.error) ? 'not visible to you' : 'not counted'}</span>
+    );
+  }
+  const objects = data.object_count === 1 ? '1 object' : `${data.object_count.toLocaleString('en')} objects`;
+  return (
+    <span className="bucket-details-summary">
+      {objects} · {formatGigabytes(data.total_size)}
+      {data.exact ? '' : ' (not exact)'}
+    </span>
   );
 }
 
