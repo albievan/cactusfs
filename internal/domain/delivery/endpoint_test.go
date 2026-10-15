@@ -3,6 +3,7 @@ package delivery_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,6 +214,13 @@ func TestAllowedAddress(t *testing.T) {
 		{"6to4, multicast", "2002:e000:0001::1", everything, false},
 		{"6to4, this network", "2002:0001:0203::1", everything, false},
 		{"the range after 6to4", "2003::1", nil, true},
+		{"SIIT", "::ffff:0:5db8:d822", nil, false},
+		{"SIIT, loopback of IPv4", "::ffff:0:7f00:1", nil, false},
+		{"SIIT, admitted", "::ffff:0:5db8:d822", prefixes("::ffff:0:0:0/96"), true},
+		{"SIIT, an IPv4 prefix admitted", "::ffff:0:5db8:d822", prefixes("0.0.0.0/0"), false},
+		{"SIIT, the metadata service", "::ffff:0:a9fe:a9fe", everything, false},
+		{"SIIT, multicast", "::ffff:0:e000:1", everything, false},
+		{"mapped, not SIIT: judged as IPv4", "::ffff:5db8:d822", nil, true},
 		{"the range before 6to4", "2001:ffff::1", nil, true},
 		{"loopback through NAT64", "64:ff9b::7f00:1", nil, false},
 		{"a public address through NAT64", "64:ff9b::5db8:d822", nil, true},
@@ -287,6 +295,8 @@ func naive(raw [16]byte, is4 bool, allow []netip.Prefix) bool {
 		return admitted(netip.AddrFrom16(raw))
 	case raw[0] == 0x20 && raw[1] == 0x02: // 6to4, 2002::/16
 		return !never4([4]byte(raw[2:6])) && admitted(netip.AddrFrom16(raw))
+	case [12]byte(raw[:12]) == [12]byte{8: 0xff, 9: 0xff}: // SIIT, ::ffff:0:0:0/96
+		return !never4([4]byte(raw[12:])) && admitted(netip.AddrFrom16(raw))
 	}
 	return true
 }
@@ -316,6 +326,8 @@ func FuzzAllowedAddress(f *testing.F) {
 	seed("64:ff9b:1::5db8:d822", 48, false)
 	seed("2002:5db8:d822::1", 16, false)
 	seed("2002:a9fe:a9fe::1", 16, false)
+	seed("::ffff:0:a9fe:a9fe", 96, false)
+	seed("::ffff:0:5db8:d822", 96, false)
 	f.Fuzz(func(t *testing.T, address []byte, is4 bool, prefix []byte, bits uint8) {
 		if len(address) != 16 || len(prefix) != 16 {
 			return
@@ -351,7 +363,7 @@ func FuzzAllowedAddress(f *testing.F) {
 			}
 			// An address that stands for an IPv4 one by the rule of a
 			// gateway is allowed only where a prefix names it.
-			for _, text := range []string{"::/96", "64:ff9b:1::/48", "2002::/16"} {
+			for _, text := range []string{"::/96", "64:ff9b:1::/48", "2002::/16", "::ffff:0:0:0/96"} {
 				if plain.Is6() && netip.MustParsePrefix(text).Contains(plain) && got && !slices.ContainsFunc(allow, func(p netip.Prefix) bool { return p.Contains(plain) }) {
 					t.Fatalf("%s of %s is allowed with %v, which does not name it", addr, text, allow)
 				}
@@ -360,6 +372,98 @@ func FuzzAllowedAddress(f *testing.F) {
 		// Admitting more never refuses what was allowed.
 		if delivery.AllowedAddress(addr, nil) && !delivery.AllowedAddress(addr, everything) {
 			t.Fatalf("%s is allowed, and refused when everything is admitted", addr)
+		}
+	})
+}
+
+// TestAllowAdmits: a range that could admit nothing is told apart from one
+// that could.
+func TestAllowAdmits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		prefix string
+		want   bool
+	}{
+		{"127.0.0.1/32", true},
+		{"127.0.0.0/8", true},
+		{"::1/128", true},
+		{"fe80::/10", true},
+		{"169.254.0.0/16", true},
+		{"169.254.170.2/32", true},
+		{"10.0.0.0/8", true},
+		{"0.0.0.0/0", true},
+		{"::/0", true},
+		{"::/96", true},
+		{"::/127", true},
+		{"2002::/16", true},
+		{"64:ff9b:1::/48", true},
+		{"::ffff:0:0:0/96", true},
+		{"224.0.0.0/3", true},
+		{"0.0.0.0/8", false},
+		{"0.0.0.0/32", false},
+		{"224.0.0.0/4", false},
+		{"239.255.0.0/16", false},
+		{"255.255.255.255/32", false},
+		{"ff00::/8", false},
+		{"ff02::/16", false},
+		{"::/128", false},
+		{"169.254.169.254/32", false},
+		{"100.100.100.200/32", false},
+		{"fd00:ec2::254/128", false},
+		{"::ffff:127.0.0.0/104", false},
+		{"64:ff9b::/96", false},
+		{"64:ff9b::7f00:0/120", false},
+		{"::0.0.0.0/104", true}, // holds ::1, loopback
+		{"::0.1.0.0/112", false},
+		{"::224.0.0.0/100", false},
+		{"2002:e000::/20", false},
+		{"2002:a9fe:a9fe::/48", false},
+		{"::ffff:0:e000:0/100", false},
+		{"::ffff:0:a9fe:a9fe/128", false},
+	}
+	for _, tt := range tests {
+		if got := delivery.AllowAdmits(netip.MustParsePrefix(tt.prefix)); got != tt.want {
+			t.Errorf("AllowAdmits(%s) = %v, want %v", tt.prefix, got, tt.want)
+		}
+	}
+	if delivery.AllowAdmits(netip.Prefix{}) {
+		t.Error("a prefix that is none admits")
+	}
+}
+
+// FuzzAllowAdmits: a prefix that is said to admit nothing changes nothing:
+// an address of it - its first, or one inside it - is allowed with the
+// prefix exactly when it is allowed without it.
+func FuzzAllowAdmits(f *testing.F) {
+	f.Add(netip.MustParseAddr("::ffff:0:e000:0").AsSlice(), uint8(100), uint32(7))
+	f.Add(netip.MustParseAddr("2002:e000::").AsSlice(), uint8(20), uint32(1))
+	f.Add([]byte{224, 0, 0, 0}, uint8(4), uint32(9))
+	f.Fuzz(func(t *testing.T, raw []byte, bits uint8, offset uint32) {
+		addr, ok := netip.AddrFromSlice(raw)
+		if !ok {
+			return
+		}
+		prefix, err := addr.Prefix(int(bits) % (addr.BitLen() + 1))
+		if err != nil || delivery.AllowAdmits(prefix) {
+			return
+		}
+		inside := prefix.Addr().As16()
+		var low [4]byte
+		binary.BigEndian.PutUint32(low[:], offset)
+		for i, b := range low {
+			inside[12+i] |= b
+		}
+		candidates := []netip.Addr{prefix.Addr()}
+		if prefix.Addr().Is4() {
+			candidates = append(candidates, netip.AddrFrom4([4]byte(inside[12:])))
+		} else {
+			candidates = append(candidates, netip.AddrFrom16(inside))
+		}
+		for _, candidate := range candidates {
+			if prefix.Contains(candidate) &&
+				delivery.AllowedAddress(candidate, []netip.Prefix{prefix}) != delivery.AllowedAddress(candidate, nil) {
+				t.Fatalf("%s admits nothing, and admits %s", prefix, candidate)
+			}
 		}
 	})
 }

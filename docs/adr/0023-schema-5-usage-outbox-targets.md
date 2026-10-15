@@ -687,9 +687,10 @@ an address are in the domain (`internal/domain/delivery`); the dialer is an adap
 - **An IPv6 address that stands for an IPv4 one by a rule a gateway decides is refused
   outright unless a prefix of `--egress-allow` names it**: IPv4-compatible addresses
   (`::/96`, other than `::1`, which is loopback, and `::`), the local-use NAT64 prefix
-  `64:ff9b:1::/48`, and 6to4 (`2002::/16`). What such an address reaches cannot be
-  judged from the node. Where the range fixes which IPv4 address is meant (`::/96`,
-  `2002::/16`), one that is never connected to is not connected to this way either,
+  `64:ff9b:1::/48`, 6to4 (`2002::/16`) and SIIT's IPv4-translated addresses
+  (`::ffff:0:0:0/96`, added 2026-10-15 in the review of 8.0.12). What such an address
+  reaches cannot be judged from the node. Where the range fixes which IPv4 address is
+  meant (`::/96`, `2002::/16`, `::ffff:0:0:0/96`), one that is never connected to is not connected to this way either,
   whatever was allowed.
 - `--egress-allow` (CIDRs; none by default) admits loopback, link-local and those
   ranges again - **never the metadata addresses.**

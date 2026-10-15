@@ -13,12 +13,16 @@ Usage of cactusfs server:
     	write every audit record to standard output as a JSON line with "stream":"audit" ($CACTUSFS_AUDIT_EXPORT)
   -data directory
     	drive directory; repeat the flag or separate directories with commas ($CACTUSFS_DATA)
+  -delivery-timeout duration
+    	how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_DELIVERY_TIMEOUT) (default 30s)
   -dev-plaintext
     	DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only ($CACTUSFS_DEV_PLAINTEXT)
   -drain-delay duration
     	on shutdown, keep serving this long with /readyz answering 503 before closing the listeners ($CACTUSFS_DRAIN_DELAY)
   -drive-labels labels
     	what the deployment calls the volume behind each drive directory - a compose volume, a claim - as labels separated by commas, one for each --data entry in the same order, or none; shown with the node's settings and used for nothing else ($CACTUSFS_DRIVE_LABELS)
+  -egress-allow ranges
+    	ranges (CIDRs, separated by commas) where a target may be at a loopback or link-local address - a receiver on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_EGRESS_ALLOW)
   -gc-grace duration
     	minimum age of an unreferenced shard before it is removed ($CACTUSFS_GC_GRACE) (default 24h0m0s)
   -gc-interval duration
@@ -51,6 +55,10 @@ Usage of cactusfs server:
     	listen address of the Raft transport ($CACTUSFS_RAFT_ADDR) (default ":9003")
   -region region
     	region name reported to S3 clients; default us-east-1 ($CACTUSFS_REGION)
+  -replication-rate-mib int
+    	limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_REPLICATION_RATE_MIB)
+  -replication-workers int
+    	how many versions are replicated to other sites at once, 1 to 32; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_REPLICATION_WORKERS) (default 4)
   -roles roles
     	roles of this node: gateway, meta, storage, console; default all ($CACTUSFS_ROLES)
   -rpc-addr address

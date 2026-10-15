@@ -210,6 +210,20 @@ func TestFailuresTellTheirClassAndNothingElse(t *testing.T) {
 	}
 }
 
+// TestAFailureSaysWhetherItIsATimeout: what net.Error and url.Error ask of
+// an error is answered by its class.
+func TestAFailureSaysWhetherItIsATimeout(t *testing.T) {
+	t.Parallel()
+	for class, want := range map[delivery.Class]bool{
+		delivery.ClassTimeout: true, delivery.ClassConnect: false, delivery.ClassTLS: false, delivery.ClassServer: false,
+	} {
+		var timeout interface{ Timeout() bool }
+		if err := delivery.Failed(class, errors.New("cause")); !errors.As(err, &timeout) || timeout.Timeout() != want {
+			t.Errorf("a failure of class %q: Timeout() = %v, want %v", class, timeout != nil && timeout.Timeout(), want)
+		}
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 )
 
 // Environment variables read by "cactusfs server". Each has a matching flag,
@@ -55,6 +57,10 @@ const (
 	envSessionLifetime = "CACTUSFS_SESSION_LIFETIME"
 	envSessionGrace    = "CACTUSFS_SESSION_UPLOAD_GRACE"
 	envSessionLockMax  = "CACTUSFS_SESSION_LOCK_MAX"
+	envEgressAllow     = "CACTUSFS_EGRESS_ALLOW"
+	envDeliveryTimeout = "CACTUSFS_DELIVERY_TIMEOUT"
+	envReplWorkers     = "CACTUSFS_REPLICATION_WORKERS"
+	envReplRate        = "CACTUSFS_REPLICATION_RATE_MIB"
 	envAllowReplace    = "CACTUSFS_ALLOW_DRIVE_REPLACEMENT"
 	envNodeID          = "CACTUSFS_NODE_ID"
 	envRoles           = "CACTUSFS_ROLES"
@@ -114,6 +120,20 @@ const (
 	kmsKeyFileName     = "kms-local.json"
 	kmsLocal           = "local"
 	kmsVault           = "vault"
+)
+
+// The bounds of the settings of delivery to targets (ADR-0023, ADR-0026). A
+// target has the delivery timeout to answer one request: a second at the
+// least, five minutes at the most. From 1 to 32 versions are replicated at
+// once. A rate is at most a TiB a second, so that it is a number of bytes
+// nothing overflows.
+const (
+	minDeliveryTimeout        = time.Second
+	maxDeliveryTimeout        = 5 * time.Minute
+	defaultReplicationWorkers = 4
+	minReplicationWorkers     = 1
+	maxReplicationWorkers     = 32
+	maxReplicationRateMiB     = 1 << 20
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -195,6 +215,20 @@ type serverConfig struct {
 	// (ADR-0027).
 	SessionUploadGrace time.Duration
 	SessionLockMax     time.Duration
+	// EgressAllow is where loopback, link-local and the IPv6 ranges that
+	// stand for IPv4 by a gateway's rule are connected to on behalf of a
+	// target; never the addresses of the metadata services of clouds
+	// (delivery.AllowedAddress, ADR-0023). Empty, the default, admits none
+	// of them.
+	EgressAllow []netip.Prefix
+	// DeliveryTimeout is how long a target has to answer one request of a
+	// delivery, once it is sent (ADR-0023).
+	DeliveryTimeout time.Duration
+	// ReplicationWorkers is how many versions are replicated at once, and
+	// ReplicationRateMiB bounds the bytes replication sends, in MiB per
+	// second; zero is no limit (ADR-0026).
+	ReplicationWorkers int
+	ReplicationRateMiB int
 	// AllowDriveReplacement confirms that one empty drive may take the place
 	// of one missing drive at this start.
 	AllowDriveReplacement bool
@@ -336,6 +370,9 @@ func parseServerSettings(args []string, getenv func(string) string, stderr io.Wr
 	if cfg.Peers, err = parsePeers(targets.peers); err != nil {
 		return cfg, nil, err
 	}
+	if cfg.EgressAllow, err = parseEgressAllow(targets.egressAllow); err != nil {
+		return cfg, nil, err
+	}
 	if err := cfg.LogLevel.UnmarshalText([]byte(targets.logLevel)); err != nil {
 		return cfg, nil, fmt.Errorf("log level %q: want debug, info, warn or error", targets.logLevel)
 	}
@@ -373,6 +410,57 @@ func (c *serverConfig) validateSessions() error {
 	return nil
 }
 
+// parseEgressAllow parses the ranges of --egress-allow. A range is written
+// as its first address and its length - "10.0.0.0/8", not "10.1.2.3/8" - and
+// a range of IPv4 addresses as IPv4: an IPv4 address written as IPv6 is
+// judged as IPv4, and no IPv6 range admits it. A range of everything
+// (0.0.0.0/0, ::/0) is refused: it opens loopback and link-local of every
+// host at once. So is a range that could admit nothing
+// (delivery.AllowAdmits) - 0.0.0.0/8, multicast, a metadata address - rather
+// than taken for one that does something.
+func parseEgressAllow(items []string) ([]netip.Prefix, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	prefixes := make([]netip.Prefix, 0, len(items))
+	for _, item := range items {
+		prefix, err := netip.ParsePrefix(item)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("egress-allow %q: want ranges such as 127.0.0.1/32 or fe80::/10, separated by commas", item)
+		case prefix != prefix.Masked():
+			return nil, fmt.Errorf("egress-allow %q: write the range from its first address, %s", item, prefix.Masked())
+		case prefix.Addr().Is4In6():
+			return nil, fmt.Errorf("egress-allow %q: write a range of IPv4 addresses as IPv4", item)
+		case prefix.Bits() == 0:
+			return nil, fmt.Errorf("egress-allow %q: a range of every address is not allowed; name the ranges a receiver is in", item)
+		case !delivery.AllowAdmits(prefix):
+			return nil, fmt.Errorf("egress-allow %q: addresses that are never connected to, whatever is allowed", item)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+// validateDelivery rejects a delivery timeout, a number of replication
+// workers or a replication rate that is out of its range, naming the
+// setting.
+func (c *serverConfig) validateDelivery() error {
+	if c.DeliveryTimeout < minDeliveryTimeout || c.DeliveryTimeout > maxDeliveryTimeout {
+		return fmt.Errorf("delivery-timeout %s: must be between %s and %s",
+			durationText(c.DeliveryTimeout), durationText(minDeliveryTimeout), durationText(maxDeliveryTimeout))
+	}
+	if c.ReplicationWorkers < minReplicationWorkers || c.ReplicationWorkers > maxReplicationWorkers {
+		return fmt.Errorf("replication-workers %d: must be between %d and %d",
+			c.ReplicationWorkers, minReplicationWorkers, maxReplicationWorkers)
+	}
+	if c.ReplicationRateMiB < 0 || c.ReplicationRateMiB > maxReplicationRateMiB {
+		return fmt.Errorf("replication-rate-mib %d: must be between 0, which is no limit, and %d",
+			c.ReplicationRateMiB, maxReplicationRateMiB)
+	}
+	return nil
+}
+
 // validate rejects configurations that would break a data-security rule and
 // fills in the settings that derive from others.
 func (c *serverConfig) validate() error {
@@ -396,6 +484,9 @@ func (c *serverConfig) validate() error {
 		return fmt.Errorf("garbage collection grace period %s: must be at least %s", c.GCGrace, minGCGrace)
 	}
 	if err := c.validateSessions(); err != nil {
+		return err
+	}
+	if err := c.validateDelivery(); err != nil {
 		return err
 	}
 	if err := c.validateTransport(); err != nil {

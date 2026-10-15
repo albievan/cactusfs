@@ -135,6 +135,13 @@ func (e *Error) Unwrap() error {
 	return e.Cause
 }
 
+// Timeout reports whether the failure is a timeout - of class ClassTimeout.
+// It is what net.Error and url.Error ask of an error, so that a failure
+// that is classed keeps saying whether it was one.
+func (e *Error) Timeout() bool {
+	return e.Class == ClassTimeout
+}
+
 // Failed returns a failure of the class given. A cause that is nil, and a
 // class that is none, still make a failure: ClassNone becomes
 // ClassInternal.

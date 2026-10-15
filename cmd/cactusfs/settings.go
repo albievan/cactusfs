@@ -4,11 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/egress"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
@@ -24,6 +26,7 @@ const (
 	groupKMS           = "kms"
 	groupBootstrap     = "bootstrap"
 	groupSessions      = "sessions"
+	groupDelivery      = "delivery"
 	groupMaintenance   = "maintenance"
 	groupObservability = "observability"
 )
@@ -44,6 +47,7 @@ func settingGroups() []settingGroup {
 		{Name: groupKMS, Title: "KMS: the key that wraps data keys"},
 		{Name: groupBootstrap, Title: "Bootstrap: the root credentials of a new deployment"},
 		{Name: groupSessions, Title: "Console sessions: how long one lasts, and what becomes of it while it uploads"},
+		{Name: groupDelivery, Title: "Delivery: outbound connections to notification targets and other sites"},
 		{Name: groupMaintenance, Title: "Maintenance: background work"},
 		{Name: groupObservability, Title: "Observability: log, audit export and traces"},
 	}
@@ -54,9 +58,9 @@ func settingGroups() []settingGroup {
 // been read.
 type settingTargets struct {
 	cfg *serverConfig
-	// data and driveLabels are lists; a list is taken from the variable
-	// when its flag names nothing.
-	data, driveLabels stringList
+	// data, driveLabels and egressAllow are lists; a list is taken from the
+	// variable when its flag names nothing.
+	data, driveLabels, egressAllow stringList
 	// roles, peers and logLevel are parsed after the flags, so that what is
 	// wrong with one is reported as every other error of the configuration
 	// is and not as a mistake of the command line.
@@ -411,6 +415,51 @@ func serverSettings() []settingSpec {
 			bind: func(t *settingTargets) any { return &t.cfg.SessionLockMax },
 		},
 
+		// Delivery (ADR-0023, ADR-0026). The same on every node: the node
+		// that leads the metadata group delivers, and any node may lead.
+		{
+			Name: "egress-allow", Env: envEgressAllow, Flag: true, Group: groupDelivery, Kind: plain, Scope: all,
+			DefaultNote: "none",
+			Usage: "`ranges` (CIDRs, separated by commas) where a target may be at a loopback or link-local address - a receiver " +
+				"on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+			Doc: "ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where a notification target or another site may be at " +
+				"an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 " +
+				"addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. " +
+				"A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses " +
+				"of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never " +
+				"connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one " +
+				"address a receiver has. The address a name resolves to is judged at every connect. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+			bind: func(t *settingTargets) any { return &t.egressAllow },
+		},
+		{
+			Name: "delivery-timeout", Env: envDeliveryTimeout, Flag: true, Default: durationText(egress.DefaultResponseTimeout),
+			Group: groupDelivery, Kind: plain, Scope: all,
+			Usage: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
+				"progress reading or writing; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+			Doc: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
+				"progress reading or writing (`" +
+				durationText(minDeliveryTimeout) + "` to `" + durationText(maxDeliveryTimeout) + "`); one that does not is tried " +
+				"again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+			bind: func(t *settingTargets) any { return &t.cfg.DeliveryTimeout },
+		},
+		{
+			Name: "replication-workers", Env: envReplWorkers, Flag: true, Default: strconv.Itoa(defaultReplicationWorkers),
+			Group: groupDelivery, Kind: plain, Scope: all,
+			Usage: "how many versions are replicated to other sites at once, " + strconv.Itoa(minReplicationWorkers) + " to " +
+				strconv.Itoa(maxReplicationWorkers) + "; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+			Doc: "how many versions are replicated to other sites at once (`" + strconv.Itoa(minReplicationWorkers) + "` to `" +
+				strconv.Itoa(maxReplicationWorkers) + "`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+			bind: func(t *settingTargets) any { return &t.cfg.ReplicationWorkers },
+		},
+		{
+			Name: "replication-rate-mib", Env: envReplRate, Flag: true, Default: "0",
+			Group: groupDelivery, Kind: plain, Scope: all,
+			Usage: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+			Doc: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `" +
+				strconv.Itoa(maxReplicationRateMiB) + "`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+			bind: func(t *settingTargets) any { return &t.cfg.ReplicationRateMiB },
+		},
+
 		// Maintenance.
 		{
 			Name: "scrub-interval", Env: envScrubInterval, Flag: true, Default: durationText(defaultScrubInterval),
@@ -562,7 +611,7 @@ func (s settingSpec) text(targets *settingTargets) string {
 // name, as settingSpec.text gives it.
 func settingTexts(cfg serverConfig, specs []settingSpec) map[string]string {
 	targets := settingTargets{
-		cfg: &cfg, data: cfg.Data, driveLabels: cfg.DriveLabels,
+		cfg: &cfg, data: cfg.Data, driveLabels: cfg.DriveLabels, egressAllow: prefixesText(cfg.EgressAllow),
 		roles: cfg.Roles.String(), peers: peersText(cfg.Peers), logLevel: strings.ToLower(cfg.LogLevel.String()),
 	}
 	texts := make(map[string]string, len(specs))
@@ -570,6 +619,28 @@ func settingTexts(cfg serverConfig, specs []settingSpec) map[string]string {
 		texts[spec.Name] = spec.text(&targets)
 	}
 	return texts
+}
+
+// prefixesText writes ranges as --egress-allow takes them, sorted and each
+// once: the same ranges in another order are the same setting, and two
+// nodes that list them differently do not differ.
+func prefixesText(prefixes []netip.Prefix) stringList {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(prefixes)
+	slices.SortFunc(sorted, func(a, b netip.Prefix) int {
+		if c := a.Addr().Compare(b.Addr()); c != 0 {
+			return c
+		}
+		return a.Bits() - b.Bits()
+	})
+	sorted = slices.Compact(sorted)
+	items := make(stringList, 0, len(sorted))
+	for _, prefix := range sorted {
+		items = append(items, prefix.String())
+	}
+	return items
 }
 
 // peersText writes the peers as --peers takes them, by node ID.

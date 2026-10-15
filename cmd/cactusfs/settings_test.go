@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io"
 	"io/fs"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -94,7 +95,9 @@ func TestSettingsClassification(t *testing.T) {
 		cluster.SettingPath:       {"data", "meta-dir", "node-tls-ca", "node-tls-cert", "tls-cert", "vault-ca-cert"},
 	}
 	sameEverywhere := []string{
-		"gc-grace", "kms", "lifecycle-interval", "peers", "region", "s3-domain", "scrub-interval", "scrub-rate-mib",
+		"delivery-timeout", "egress-allow",
+		"gc-grace", "kms", "lifecycle-interval", "peers", "region", "replication-rate-mib", "replication-workers",
+		"s3-domain", "scrub-interval", "scrub-rate-mib",
 		"session-lifetime", "session-lock-max", "session-upload-grace",
 		"vault-addr", "vault-key", "vault-namespace", "vault-transit-mount",
 	}
@@ -370,7 +373,7 @@ func TestShownSettings(t *testing.T) {
 	cfg, sources, err := parseServerSettings([]string{
 		"--dev-plaintext", "--data", dataDir, "--kms", "local", "--drive-labels", "vol-1", "--scrub-interval", "36h",
 		"--otlp-endpoint", "https://user:" + mark + "@collector.test:4318/v1/traces?token=" + mark + "#" + mark,
-		"--region", "eu-1",
+		"--region", "eu-1", "--egress-allow", "127.0.0.1/32,::1/128",
 	}, envMap(map[string]string{
 		envKMSPhrase: mark + "-passphrase", envRootKeyID: mark + "-ID", envRootKeyValue: mark + "-secret", envLogLevel: "warn",
 	}), io.Discard)
@@ -407,6 +410,9 @@ func TestShownSettings(t *testing.T) {
 		{Name: "kms-key-file", Env: envKMSKeyFile, Flag: "kms-key-file", Group: groupKMS, Kind: cluster.SettingSecretFile, Scope: cluster.ScopeNode, Source: cluster.SourceDerived, Set: true},
 		{Name: "kms-passphrase-file", Env: envKMSPhraseFile, Flag: "kms-passphrase-file", Group: groupKMS, Kind: cluster.SettingSecretFile, Scope: cluster.ScopeNode, Source: cluster.SourceDefault},
 		{Name: "peers", Env: envPeers, Flag: "peers", Group: groupCluster, Kind: cluster.SettingPlain, Scope: cluster.ScopeCluster, Source: cluster.SourceDefault},
+		{Name: "egress-allow", Env: envEgressAllow, Flag: "egress-allow", Group: groupDelivery, Kind: cluster.SettingPlain, Scope: cluster.ScopeCluster, Source: cluster.SourceFlag, Set: true, Value: "127.0.0.1/32,::1/128"},
+		{Name: "delivery-timeout", Env: envDeliveryTimeout, Flag: "delivery-timeout", Group: groupDelivery, Kind: cluster.SettingPlain, Scope: cluster.ScopeCluster, Source: cluster.SourceDefault, Set: true, Value: "30s"},
+		{Name: "replication-rate-mib", Env: envReplRate, Flag: "replication-rate-mib", Group: groupDelivery, Kind: cluster.SettingPlain, Scope: cluster.ScopeCluster, Source: cluster.SourceDefault, Set: true, Value: "0"},
 	}
 	for _, setting := range want {
 		if shown[setting.Name] != setting {
@@ -423,6 +429,44 @@ func TestShownSettings(t *testing.T) {
 	}
 	if got := peersText(map[string]string{"b": "h2:9002", "a": "h1:9002"}); got != "a=h1:9002,b=h2:9002" {
 		t.Errorf("peers = %q", got)
+	}
+}
+
+// TestEgressAllowShownInOneOrder: the same ranges, in any order and named
+// any number of times, are shown as one value - which is what is compared
+// between nodes - so two nodes that list them differently do not differ.
+func TestEgressAllowShownInOneOrder(t *testing.T) {
+	t.Parallel()
+	ranges := func(texts ...string) []netip.Prefix {
+		out := make([]netip.Prefix, 0, len(texts))
+		for _, text := range texts {
+			out = append(out, netip.MustParsePrefix(text))
+		}
+		return out
+	}
+	shown := func(allow []netip.Prefix) string {
+		cfg := nodeConfig(t.TempDir())
+		cfg.EgressAllow = allow
+		for _, setting := range shownSettings(cfg) {
+			if setting.Name == "egress-allow" {
+				return setting.Value
+			}
+		}
+		t.Fatal("egress-allow is not shown")
+		return ""
+	}
+	const want = "127.0.0.1/32,169.254.170.2/32,::1/128,fe80::/10"
+	for _, allow := range [][]netip.Prefix{
+		ranges("127.0.0.1/32", "169.254.170.2/32", "::1/128", "fe80::/10"),
+		ranges("fe80::/10", "::1/128", "169.254.170.2/32", "127.0.0.1/32"),
+		ranges("::1/128", "127.0.0.1/32", "fe80::/10", "127.0.0.1/32", "169.254.170.2/32", "::1/128"),
+	} {
+		if got := shown(allow); got != want {
+			t.Errorf("%v is shown as %q, want %q", allow, got, want)
+		}
+	}
+	if got := shown(nil); got != "" {
+		t.Errorf("no ranges are shown as %q", got)
 	}
 }
 

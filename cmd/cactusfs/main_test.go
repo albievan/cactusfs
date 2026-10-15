@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -173,6 +174,7 @@ func TestParseServerConfig(t *testing.T) {
 			ScrubInterval: 24 * time.Hour, ScrubRateMiB: 64, GCInterval: time.Hour, GCGrace: 24 * time.Hour,
 			LifecycleInterval: time.Hour, AccessFlushInterval: 30 * time.Second, TLSReloadInterval: time.Minute,
 			SessionLifetime: 30 * time.Minute, SessionUploadGrace: 90 * time.Second, SessionLockMax: 12 * time.Hour,
+			DeliveryTimeout: 30 * time.Second, ReplicationWorkers: 4,
 			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
@@ -305,6 +307,48 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "a session locked for too long", args: dev("--session-lock-max", "25h"), env: passphrase, wantErr: "session-lock-max 25h: must be between 0"},
 		{name: "a session locked for less than no time", args: dev("--session-lock-max", "-1s"), env: passphrase, wantErr: "session-lock-max"},
 		{name: "bad session lifetime variable", env: withPassphrase(map[string]string{envSessionLifetime: "long"}), wantErr: envSessionLifetime},
+		{
+			name: "delivery, by flag over variable",
+			args: dev("--egress-allow", "127.0.0.1/32", "--egress-allow", "fe80::/10,::1/128", "--delivery-timeout", "1s",
+				"--replication-workers", "1", "--replication-rate-mib", "0"),
+			env: withPassphrase(map[string]string{
+				envEgressAllow: "10.0.0.0/8", envDeliveryTimeout: "5m", envReplWorkers: "32", envReplRate: "1048576",
+			}),
+			want: base(func(c *serverConfig) {
+				c.EgressAllow = []netip.Prefix{
+					netip.MustParsePrefix("127.0.0.1/32"), netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("::1/128"),
+				}
+				c.DeliveryTimeout, c.ReplicationWorkers = time.Second, 1
+			}),
+		},
+		{
+			name: "delivery, by variable, at its largest", args: dev(),
+			env: withPassphrase(map[string]string{
+				envEgressAllow: "169.254.170.2/32", envDeliveryTimeout: "5m", envReplWorkers: "32", envReplRate: "1048576",
+			}),
+			want: base(func(c *serverConfig) {
+				c.EgressAllow = []netip.Prefix{netip.MustParsePrefix("169.254.170.2/32")}
+				c.DeliveryTimeout, c.ReplicationWorkers, c.ReplicationRateMiB = 5*time.Minute, 32, 1<<20
+			}),
+		},
+		{name: "a range that is none", args: dev("--egress-allow", "localhost"), env: passphrase, wantErr: `egress-allow "localhost": want ranges`},
+		{name: "a range from inside it", args: dev("--egress-allow", "10.1.2.3/8"), env: passphrase, wantErr: "write the range from its first address, 10.0.0.0/8"},
+		{name: "an IPv4 range as IPv6", args: dev("--egress-allow", "::ffff:127.0.0.0/104"), env: passphrase, wantErr: "write a range of IPv4 addresses as IPv4"},
+		{name: "the metadata service allowed", env: withPassphrase(map[string]string{envEgressAllow: "169.254.169.254/32"}), args: dev(), wantErr: "never connected to"},
+		{name: "the metadata service of Alibaba allowed", args: dev("--egress-allow", "100.100.100.200/32"), env: passphrase, wantErr: "never connected to"},
+		{name: "every IPv4 address allowed", args: dev("--egress-allow", "0.0.0.0/0"), env: passphrase, wantErr: `egress-allow "0.0.0.0/0": a range of every address`},
+		{name: "every IPv6 address allowed", env: withPassphrase(map[string]string{envEgressAllow: "127.0.0.1/32,::/0"}), args: dev(), wantErr: `egress-allow "::/0": a range of every address`},
+		{name: "this network allowed", args: dev("--egress-allow", "0.0.0.0/8"), env: passphrase, wantErr: "never connected to"},
+		{name: "multicast allowed", args: dev("--egress-allow", "224.0.0.0/4"), env: passphrase, wantErr: "never connected to"},
+		{name: "multicast of IPv6 allowed", args: dev("--egress-allow", "ff00::/8"), env: passphrase, wantErr: "never connected to"},
+		{name: "the well-known NAT64 prefix allowed", args: dev("--egress-allow", "64:ff9b::/96"), env: passphrase, wantErr: "never connected to"},
+		{name: "a delivery timeout too short", args: dev("--delivery-timeout", "999ms"), env: passphrase, wantErr: "delivery-timeout 999ms: must be between 1s and 5m"},
+		{name: "a delivery timeout too long", args: dev("--delivery-timeout", "5m1s"), env: passphrase, wantErr: "delivery-timeout"},
+		{name: "no replication workers", args: dev("--replication-workers", "0"), env: passphrase, wantErr: "replication-workers 0: must be between 1 and 32"},
+		{name: "too many replication workers", env: withPassphrase(map[string]string{envReplWorkers: "33"}), args: dev(), wantErr: "replication-workers 33"},
+		{name: "a negative replication rate", args: dev("--replication-rate-mib", "-1"), env: passphrase, wantErr: "replication-rate-mib -1: must be between 0"},
+		{name: "a replication rate too high", args: dev("--replication-rate-mib", "1048577"), env: passphrase, wantErr: "replication-rate-mib"},
+		{name: "bad replication workers variable", env: withPassphrase(map[string]string{envReplWorkers: "many"}), wantErr: envReplWorkers},
 		{
 			name: "certificates read again more often, by flag over variable", args: dev("--tls-reload-interval", "5s"),
 			env:  withPassphrase(map[string]string{envTLSReload: "10m"}),

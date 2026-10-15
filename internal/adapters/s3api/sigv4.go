@@ -1,8 +1,6 @@
 package s3api
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,36 +11,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/sigv4"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 )
 
 // AWS Signature Version 4 with the Authorization header, implemented from the
 // public AWS documentation ("Authenticating Requests: Using the Authorization
-// Header (AWS Signature Version 4)").
+// Header (AWS Signature Version 4)"). The canonical request, the signing key,
+// the signature and the chain of a signed stream are package sigv4's, which
+// is shared with what signs the requests this deployment sends; what is
+// here is how a request of a client is read and judged.
 const (
-	sigV4Algorithm   = "AWS4-HMAC-SHA256"
-	sigV4Terminator  = "aws4_request"
-	sigV4Service     = "s3"
-	amzDateFormat    = "20060102T150405Z"
-	scopeDateFormat  = "20060102"
+	sigV4Algorithm   = sigv4.Algorithm
+	sigV4Terminator  = sigv4.Terminator
+	sigV4Service     = sigv4.Service
+	amzDateFormat    = sigv4.AmzDateFormat
+	scopeDateFormat  = sigv4.ScopeDateFormat
 	maxClockSkew     = 15 * time.Minute
-	headerContentSHA = "X-Amz-Content-Sha256"
-	headerAmzDate    = "X-Amz-Date"
+	headerContentSHA = sigv4.HeaderContentSHA256
+	headerAmzDate    = sigv4.HeaderAmzDate
 
-	payloadUnsigned         = "UNSIGNED-PAYLOAD"
+	payloadUnsigned         = sigv4.UnsignedPayload
 	payloadStreamingTrailer = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 	payloadStreamingSigned  = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
 	payloadSignedTrailer    = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
-	chunkAlgorithm          = "AWS4-HMAC-SHA256-PAYLOAD"
-	trailerAlgorithm        = "AWS4-HMAC-SHA256-TRAILER"
+	chunkAlgorithm          = sigv4.ChunkAlgorithm
+	trailerAlgorithm        = sigv4.TrailerAlgorithm
 	// maxPresignedExpiry is the longest a presigned URL may be valid:
 	// seven days, as SigV4 defines.
 	maxPresignedExpiry       = 7 * 24 * time.Hour
 	payloadStreamingPrefix   = "STREAMING-"
-	emptyPayloadSHA256       = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	emptyPayloadSHA256       = sigv4.EmptyPayloadSHA256
 	maxAuthorizationHeader   = 4 << 10
 	maxSignedHeaders         = 64
-	signatureHexLength       = 2 * sha256.Size
+	signatureHexLength       = sigv4.SignatureHexLength
 	credentialScopeFieldsLen = 5
 )
 
@@ -92,17 +94,14 @@ type chunkSigner struct {
 }
 
 // check verifies the declared signature of the next link of the chain:
-// a chunk whose data hashes to digestHex, or the trailers.
+// a chunk whose data hashes to digestHex, or the trailers. The comparison is
+// sigv4.Chain.Verify's, in constant time.
 func (c *chunkSigner) check(algorithm, declared, digestHex string) error {
-	stringToSign := algorithm + "\n" + c.timestamp + "\n" + c.scope + "\n" + c.previous + "\n"
-	if algorithm == chunkAlgorithm {
-		stringToSign += emptyPayloadSHA256 + "\n"
-	}
-	want := hex.EncodeToString(hmacSHA256(c.key, stringToSign+digestHex))
-	if !iam.SecretsEqual([]byte(want), []byte(declared)) {
+	chain := sigv4.Chain{Key: c.key, Timestamp: c.timestamp, Scope: c.scope, Previous: c.previous}
+	if !chain.Verify(algorithm, declared, digestHex) {
 		return fmt.Errorf("%w: chunk signature", errAuthSignature)
 	}
-	c.previous = want
+	c.previous = chain.Previous
 	return nil
 }
 
@@ -236,58 +235,15 @@ func checkSignedHeaders(r *http.Request, sig signature) error {
 	return nil
 }
 
-// canonicalRequest builds the canonical request of the SigV4 specification.
+// canonicalRequest builds the canonical request of the SigV4 specification
+// (sigv4.CanonicalRequest) for the headers the signature names.
 func canonicalRequest(r *http.Request, sig signature, payloadHash string) string {
-	var b strings.Builder
-	b.WriteString(r.Method)
-	b.WriteByte('\n')
-	b.WriteString(uriEncode(r.URL.Path, false))
-	b.WriteByte('\n')
-	b.WriteString(canonicalQuery(r.URL.RawQuery))
-	b.WriteByte('\n')
-	for _, name := range sig.signedHeaders {
-		b.WriteString(name)
-		b.WriteByte(':')
-		switch {
-		case name == "host":
-			b.WriteString(r.Host)
-		case name == "content-length" && len(r.Header.Values(name)) == 0:
-			b.WriteString(strconv.FormatInt(r.ContentLength, 10))
-		default:
-			for i, value := range r.Header.Values(name) {
-				if i > 0 {
-					b.WriteByte(',')
-				}
-				b.WriteString(strings.Join(strings.Fields(value), " "))
-			}
-		}
-		b.WriteByte('\n')
-	}
-	b.WriteByte('\n')
-	b.WriteString(sig.signedHeadersRaw)
-	b.WriteByte('\n')
-	b.WriteString(payloadHash)
-	return b.String()
+	return sigv4.CanonicalRequest(r, sig.signedHeaders, sig.signedHeadersRaw, payloadHash)
 }
 
-// canonicalQuery re-encodes and sorts the query string. A component that is
-// not valid percent-encoding is kept as it is; the signature will then simply
-// not match what the client computed.
+// canonicalQuery re-encodes and sorts the query string (sigv4.CanonicalQuery).
 func canonicalQuery(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	parts := strings.Split(raw, "&")
-	pairs := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		name, value, _ := strings.Cut(part, "=")
-		pairs = append(pairs, uriEncode(unescape(name), true)+"="+uriEncode(unescape(value), true))
-	}
-	slices.Sort(pairs)
-	return strings.Join(pairs, "&")
+	return sigv4.CanonicalQuery(raw)
 }
 
 func unescape(s string) string {
@@ -298,57 +254,29 @@ func unescape(s string) string {
 	return decoded
 }
 
-// uriEncode percent-encodes every byte except the unreserved characters
-// A-Z a-z 0-9 - _ . ~, and '/' unless encodeSlash is set, with uppercase
-// hexadecimal digits, as the SigV4 specification defines UriEncode.
+// uriEncode is the UriEncode of the SigV4 specification (sigv4.URIEncode).
 func uriEncode(s string, encodeSlash bool) string {
-	const upperHex = "0123456789ABCDEF"
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_', c == '.', c == '~':
-			b.WriteByte(c)
-		case c == '/' && !encodeSlash:
-			b.WriteByte(c)
-		default:
-			b.WriteByte('%')
-			b.WriteByte(upperHex[c>>4])
-			b.WriteByte(upperHex[c&0x0F])
-		}
-	}
-	return b.String()
+	return sigv4.URIEncode(s, encodeSlash)
 }
 
 func hmacSHA256(key []byte, data string) []byte {
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(data))
-	return mac.Sum(nil)
+	return sigv4.HMACSHA256(key, data)
 }
 
 func scopeOf(sig signature) string {
-	return sig.scopeDate + "/" + sig.region + "/" + sigV4Service + "/" + sigV4Terminator
+	return sigv4.Scope(sig.scopeDate, sig.region)
 }
 
 // signingKey derives the key that signs the requests of one day, region and
-// service from the secret.
+// service from the secret (sigv4.SigningKey).
 func signingKey(secret []byte, sig signature) []byte {
-	seed := make([]byte, 0, len("AWS4")+len(secret))
-	seed = append(append(seed, "AWS4"...), secret...)
-	key := hmacSHA256(seed, sig.scopeDate)
-	clear(seed)
-	key = hmacSHA256(key, sig.region)
-	key = hmacSHA256(key, sigV4Service)
-	return hmacSHA256(key, sigV4Terminator)
+	return sigv4.SigningKey(secret, sig.scopeDate, sig.region)
 }
 
 // expectedSignature computes the signature a holder of secret would have
-// produced for the request.
+// produced for the request (sigv4.Expected).
 func expectedSignature(secret []byte, sig signature, timestamp, canonical string) string {
-	digest := sha256.Sum256([]byte(canonical))
-	stringToSign := sigV4Algorithm + "\n" + timestamp + "\n" + scopeOf(sig) + "\n" + hex.EncodeToString(digest[:])
-	return hex.EncodeToString(hmacSHA256(signingKey(secret, sig), stringToSign))
+	return sigv4.Expected(secret, sig.scopeDate, sig.region, timestamp, canonical)
 }
 
 // verifySignature checks a parsed signature against the request. It returns

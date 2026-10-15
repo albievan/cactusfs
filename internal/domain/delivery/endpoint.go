@@ -141,7 +141,87 @@ func translatedRanges() []translated {
 		{netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x02}), 16), func(raw [16]byte) (netip.Addr, bool) {
 			return netip.AddrFrom4([4]byte(raw[2:6])), true
 		}},
+		// IPv4-translated addresses of SIIT, ::ffff:0:a.b.c.d (RFC 2765) -
+		// not the mapped ::ffff:a.b.c.d, which is judged as IPv4.
+		{siit(), last},
 	}
+}
+
+// siit is the range of the IPv4-translated addresses of SIIT,
+// ::ffff:0:0:0/96.
+func siit() netip.Prefix {
+	return netip.PrefixFrom(netip.AddrFrom16([16]byte{8: 0xff, 9: 0xff}), 96)
+}
+
+// neverRanges are the ranges in which AllowedAddress admits no address,
+// whatever is allowed: neverAddresses, the unspecified address of IPv6,
+// 0.0.0.0/8, multicast and the IPv4 broadcast address.
+func neverRanges() []netip.Prefix {
+	ranges := []netip.Prefix{
+		netip.PrefixFrom(netip.IPv4Unspecified(), 8),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{224}), 4),
+		netip.PrefixFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), 32),
+		netip.PrefixFrom(netip.AddrFrom16([16]byte{0xff}), 8),
+		netip.PrefixFrom(netip.IPv6Unspecified(), 128),
+	}
+	for _, addr := range neverAddresses() {
+		ranges = append(ranges, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return ranges
+}
+
+// within reports whether every address of inner is in outer.
+func within(inner, outer netip.Prefix) bool {
+	return outer.Bits() <= inner.Bits() && outer.Contains(inner.Addr())
+}
+
+// AllowAdmits reports whether an allow list that holds prefix could, by
+// that prefix, admit any address AllowedAddress is asked about. It cannot
+// when the prefix is none or has a zone; when every address of it is one
+// that is never connected to (0.0.0.0/8, multicast, the broadcast address,
+// the metadata addresses); when it is a range of IPv6 addresses that are
+// judged as the IPv4 addresses they stand for - IPv4-mapped, or under the
+// well-known NAT64 prefix - which no IPv6 prefix names; and when it lies in
+// a translated range that fixes the IPv4 address meant (::/96, 2002::/16,
+// ::ffff:0:0:0/96) and every IPv4 address it stands for is never connected
+// to. The operator's setting is judged by it, so that a range that would do
+// nothing is refused rather than taken for one that does something.
+func AllowAdmits(prefix netip.Prefix) bool {
+	if !prefix.IsValid() || prefix.Addr().Zone() != "" {
+		return false
+	}
+	prefix = prefix.Masked()
+	if prefix.IsSingleIP() {
+		return AllowedAddress(prefix.Addr(), []netip.Prefix{prefix})
+	}
+	if prefix.Addr().Is4In6() || within(prefix, nat64()) {
+		return false
+	}
+	for _, never := range neverRanges() {
+		if within(prefix, never) {
+			return false
+		}
+	}
+	if prefix.Contains(netip.IPv6Loopback()) {
+		return true
+	}
+	raw := prefix.Addr().As16()
+	inner := netip.Prefix{}
+	switch {
+	case prefix.Addr().Is6() && within(prefix, netip.PrefixFrom(netip.IPv6Unspecified(), 96)),
+		within(prefix, siit()):
+		inner = netip.PrefixFrom(netip.AddrFrom4([4]byte(raw[12:])), prefix.Bits()-96)
+	case within(prefix, netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x02}), 16)):
+		inner = netip.PrefixFrom(netip.AddrFrom4([4]byte(raw[2:6])), min(prefix.Bits()-16, 32)).Masked()
+	}
+	if inner.IsValid() {
+		for _, never := range neverRanges() {
+			if within(inner, never) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // never reports whether addr is one nothing admits: an address that is
@@ -184,10 +264,11 @@ func allowed(addr netip.Addr, allow []netip.Prefix) bool {
 //     allow 169.254.0.0/16 is to allow whatever else answers there.
 //   - Only where allow names it, too: an IPv6 address that stands for an
 //     IPv4 one by a rule a gateway decides - IPv4-compatible (::/96), the
-//     local-use NAT64 prefix 64:ff9b:1::/48, and 6to4 (2002::/16). They are
+//     local-use NAT64 prefix 64:ff9b:1::/48, 6to4 (2002::/16), and the
+//     IPv4-translated addresses of SIIT (::ffff:0:0:0/96). They are
 //     refused outright otherwise; and where the range fixes which IPv4
-//     address is meant (::/96, 2002::/16), one that is never connected to is
-//     not connected to this way either.
+//     address is meant (::/96, 2002::/16, ::ffff:0:0:0/96), one that is
+//     never connected to is not connected to this way either.
 //   - Everything else is allowed, private ranges among it: on premises that
 //     is where targets are.
 //

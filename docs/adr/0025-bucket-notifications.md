@@ -70,7 +70,7 @@ connect:
 - an IPv4 address written as IPv6, mapped or under the NAT64 prefix `64:ff9b::/96`, is
   judged as the IPv4 address it reaches, and a range of IPv4 addresses is admitted by an
   IPv4 prefix and by no other; a zone is not looked at;
-- an address of `::/96`, `64:ff9b:1::/48` or `2002::/16` - an IPv4 address behind a
+- an address of `::/96`, `64:ff9b:1::/48`, `2002::/16` or `::ffff:0:0:0/96` - an IPv4 address behind a
   gateway's rule - is refused unless a prefix of `--egress-allow` names it.
 
 A webhook's path is kept and used, and shown to nobody: an answer of the API gives the
