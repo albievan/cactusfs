@@ -50,6 +50,13 @@ func TestConsoleFiles(t *testing.T) {
 		"index.html":          {Data: []byte("<!doctype html><title>console</title>")},
 		"favicon.svg":         {Data: []byte("<svg/>")},
 		"assets/index-abc.js": {Data: []byte("console.log(1)")},
+		// pdf.js's worker keeps the name it is published with (ADR-0028).
+		"assets/pdf.worker.min-abc.mjs":                 {Data: []byte("export {}")},
+		"assets/pdfjs-6.4.299/jbig2_nowasm_fallback.js": {Data: []byte("export default 1")},
+		"assets/index-abc.css":                          {Data: []byte("body{}")},
+		"assets/mark-abc.svg":                           {Data: []byte("<svg/>")},
+		"assets/icons-abc.woff2":                        {Data: []byte("wOF2")},
+		"assets/icons-abc.woff":                         {Data: []byte("wOFF")},
 	}
 	h := console.NewHandler(dist, true)
 
@@ -62,7 +69,31 @@ func TestConsoleFiles(t *testing.T) {
 		!strings.Contains(script.Header().Get("Content-Type"), "javascript") {
 		t.Errorf("GET of an asset = %d, %v", script.Code, script.Header())
 	}
-	for _, rec := range []*httptest.ResponseRecorder{index, script, get(t, h, http.MethodGet, "/nothing-here")} {
+	// Every kind of file the build emits has its type from the handler,
+	// exactly, not from the host's table of types: with nosniff a browser
+	// refuses a script, a worker or a style sheet of another type.
+	worker := get(t, h, http.MethodGet, "/assets/pdf.worker.min-abc.mjs")
+	for path, want := range map[string]string{
+		"/":                              "text/html; charset=utf-8",
+		"/favicon.svg":                   "image/svg+xml",
+		"/assets/index-abc.js":           "text/javascript; charset=utf-8",
+		"/assets/pdf.worker.min-abc.mjs": "text/javascript; charset=utf-8",
+		"/assets/pdfjs-6.4.299/jbig2_nowasm_fallback.js": "text/javascript; charset=utf-8",
+		"/assets/index-abc.css":                          "text/css; charset=utf-8",
+		"/assets/mark-abc.svg":                           "image/svg+xml",
+		"/assets/icons-abc.woff2":                        "font/woff2",
+		"/assets/icons-abc.woff":                         "font/woff",
+	} {
+		rec := get(t, h, http.MethodGet, path)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != want {
+			t.Errorf("GET %s = %d, Content-Type %q, want %q", path, rec.Code, rec.Header().Get("Content-Type"), want)
+		}
+	}
+	// A script that is not there is a plain 404, not JavaScript.
+	if rec := get(t, h, http.MethodGet, "/assets/missing.js"); rec.Code != http.StatusNotFound || strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+		t.Errorf("GET of a missing script = %d, Content-Type %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	for _, rec := range []*httptest.ResponseRecorder{index, script, worker, get(t, h, http.MethodGet, "/nothing-here")} {
 		if csp := rec.Header().Get("Content-Security-Policy"); csp != consolePolicy {
 			t.Errorf("Content-Security-Policy = %q, want %q", csp, consolePolicy)
 		}

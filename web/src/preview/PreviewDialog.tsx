@@ -7,12 +7,14 @@ import { Loading } from '../ui/Loading';
 import { reasonOf } from '../ui/reason';
 import { openPreview, PREVIEW_MAX_BYTES, PreviewTooLargeError, readBlob } from './fetch';
 import { imageTypeOf, rendererOf } from './kinds';
+import { PdfPreview } from './PdfPreview';
 import { CSV_COLUMNS, decodeText, parseCsv, type CsvTable } from './text';
 
 /** What the dialog shows. */
 type View =
   | { state: 'loading' }
   | { state: 'image'; url: string }
+  | { state: 'pdf'; blob: Blob }
   | { state: 'text'; text: string; truncated: boolean }
   | { state: 'csv'; table: CsvTable; truncated: boolean }
   // A kind the console cannot draw yet, or one it does not know.
@@ -92,8 +94,9 @@ interface PreviewDialogProps {
  * request - its body included - is given up when it closes. What they are
  * drawn as is chosen by `X-CactusFS-Preview-Kind` alone, never by the key or
  * the stored type: an image from a blob address typed as the raster kind the
- * API named (never SVG), revoked when the dialog closes; text and JSON as
- * text; CSV as a table of text. Nothing of an object is ever markup.
+ * API named (never SVG), revoked when the dialog closes; a PDF on a canvas,
+ * a page at a time (PdfPreview); text and JSON as text; CSV as a table of
+ * text. Nothing of an object is ever markup.
  *
  * Who may preview is the API's to decide: a refusal is said in words, and
  * the download is beside it whatever the answer.
@@ -158,6 +161,10 @@ export function PreviewDialog({ bucket, objectKey, onClose }: PreviewDialogProps
           // The same bytes, typed as the raster kind the API named.
           url = URL.createObjectURL(blob.slice(0, blob.size, imageTypeOf(kind) ?? 'application/octet-stream'));
           show({ state: 'image', url });
+          return;
+        case 'pdf':
+          // Drawn by pdf.js, loaded only now, from the bytes read here.
+          show({ state: 'pdf', blob });
           return;
         case 'csv': {
           const text = decodeText(await blob.arrayBuffer(), truncated);
@@ -392,6 +399,8 @@ function PreviewBody({ view, objectKey, actualSize, imageFailed, onImageFailed, 
           </pre>
         </>
       );
+    case 'pdf':
+      return <PdfPreview blob={view.blob} objectKey={objectKey} />;
     case 'csv':
       return <CsvPreview table={view.table} truncated={view.truncated} objectKey={objectKey} />;
     case 'later':

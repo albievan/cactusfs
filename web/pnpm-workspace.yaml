@@ -6,3 +6,9 @@ packages:
 # Dependency lifecycle scripts never run: nothing the console needs has one,
 # and an install must not execute code from the registry.
 ignoreScripts: true
+
+# pdfjs-dist names @napi-rs/canvas as optional: a native canvas for drawing
+# PDFs under Node. The console draws on the browser's canvas, so it is never
+# installed - nothing native in the tree, and nothing the console ships.
+ignoredOptionalDependencies:
+  - '@napi-rs/canvas'

@@ -173,7 +173,9 @@ navigated to, framed or inserted as markup.
 - **Text, JSON**: text nodes. **CSV**: a table of the first 1 000 rows, cells as text.
 - **PDF**: `pdfjs-dist` (Apache-2.0), loaded by dynamic `import()` only for a PDF, its
   worker from the same origin; `enableScripting: false`, `useWasm: false`; no bundled
-  fonts, character maps, colour profiles or wasm in `dist`; canvas only - no annotation,
+  fonts, character maps, colour profiles or wasm in `dist` - only its decoders of scanned
+  (JBIG2, CCITT) and JPEG 2000 images, compiled to plain JavaScript, which pdf.js imports
+  from the same origin when it does not use WebAssembly; canvas only - no annotation,
   form or text layer, so no link is followed and no action runs; pages on demand, at most
   16 MP a page.
 - **DOCX, XLSX**: small readers of our own on `fflate` (MIT) in a Web Worker - no OOXML
@@ -244,6 +246,13 @@ failure, which nothing between nodes depends on. The S3 API never meets them.
   make the browser that shows the preview fail or stall; the gateway and every other
   user are not affected. Walking every frame of the whole object would remove it at the
   cost of reading it twice.
+- **Residual risk: the memory of a PDF preview.** A PDF is read whole into the browser
+  before pdf.js sees it - up to `preview-max-size`, 256 MiB at most - and held once in
+  the dialog's Blob and once in pdf.js's worker. Inside it, a page may hold any number of
+  images (each at most 40 MP, `maxImageSize`) and streams compressed many thousand to one
+  (a flate bomb); pdf.js bounds neither. Such a PDF can make the worker or the tab that
+  shows it run out of memory or stall; closing the dialog ends the worker. As with the GIF,
+  the gateway and every other user are not affected.
 - Previews cover the listed kinds only; SSE-C objects cannot be previewed in the console.
 - `iam.Decide` gains a second source of an Allow besides policies. It is confined to one
   action, tested for every other action to change nothing, and a Deny still wins.

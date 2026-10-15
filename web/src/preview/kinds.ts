@@ -11,7 +11,7 @@ export const TRUNCATED_HEADER = 'X-CactusFS-Preview-Truncated';
 
 /**
  * How the console draws each kind the contract names. `later` is a kind the
- * console has no renderer for yet (PLAN O.9, O.10): it says so and offers the
+ * console has no renderer for yet (PLAN O.10): it says so and offers the
  * download. The record names every kind, so that a kind added to the contract
  * and regenerated into the schema fails the type check until it is placed.
  */
@@ -20,13 +20,13 @@ const RENDERERS = {
   jpeg: 'image',
   gif: 'image',
   webp: 'image',
-  pdf: 'later',
+  pdf: 'pdf',
   docx: 'later',
   xlsx: 'later',
   text: 'text',
   json: 'text',
   csv: 'csv',
-} as const satisfies Record<PreviewKind, 'image' | 'text' | 'csv' | 'later'>;
+} as const satisfies Record<PreviewKind, 'image' | 'pdf' | 'text' | 'csv' | 'later'>;
 
 /** How a kind is drawn. */
 export type Renderer = (typeof RENDERERS)[PreviewKind];

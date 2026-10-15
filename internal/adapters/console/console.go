@@ -19,6 +19,30 @@ import (
 const contentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
 	"connect-src 'self'; font-src 'self'; worker-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
+// contentTypeOf is the type of a file the console's build emits, by its
+// extension, or "" for another: set by the handler, not taken from the
+// host's table of types, which differs between systems (on Windows the
+// registry may call a script text/plain, and with nosniff a browser then
+// refuses to run it).
+func contentTypeOf(ext string) string {
+	switch ext {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".woff2":
+		return "font/woff2"
+	case ".woff":
+		return "font/woff"
+	default:
+		return ""
+	}
+}
+
 const stubPage = `<!doctype html>
 <html lang="en">
   <head>
@@ -65,10 +89,19 @@ func NewHandler(dist fs.FS, built bool) http.Handler {
 		}
 		// Vite names the files under assets/ after their content: they
 		// never change. Everything else is looked at again every time.
-		if strings.HasPrefix(path.Clean(r.URL.Path), "/assets/") {
+		clean := path.Clean(r.URL.Path)
+		if strings.HasPrefix(clean, "/assets/") {
 			header.Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			header.Set("Cache-Control", "no-cache")
+		}
+		// The page itself is index.html, served for "/".
+		ext := path.Ext(clean)
+		if strings.HasSuffix(clean, "/") {
+			ext = ".html"
+		}
+		if contentType := contentTypeOf(ext); contentType != "" {
+			header.Set("Content-Type", contentType)
 		}
 		files.ServeHTTP(w, r)
 	})

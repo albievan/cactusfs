@@ -255,7 +255,7 @@ describe('the preview dialog', () => {
     expect(within(dialog).getByText('Only the first 1 row is shown.')).toBeTruthy();
   });
 
-  it.each(['pdf', 'docx', 'xlsx'])('says that a %s cannot be shown here yet, and offers the download', async (kind) => {
+  it.each(['docx', 'xlsx'])('says that a %s cannot be shown here yet, and offers the download', async (kind) => {
     fakeApi({ [PREVIEW]: () => previewOf(kind, new Uint8Array([0x25, 0x50, 0x44, 0x46])) });
     renderButton(`report.${kind}`, 'application/octet-stream');
     const dialog = await openPreview(`report.${kind}`);
@@ -295,7 +295,7 @@ describe('the preview dialog', () => {
   });
 
   it('cancels the bytes of a kind it does not draw, without reading them', async () => {
-    for (const kind of ['pdf', 'docx', 'xlsx', 'pptx']) {
+    for (const kind of ['docx', 'xlsx', 'pptx']) {
       const pulled = vi.fn();
       const cancelled = vi.fn();
       const body = new ReadableStream<Uint8Array>({ pull: pulled, cancel: cancelled }, { highWaterMark: 0 });

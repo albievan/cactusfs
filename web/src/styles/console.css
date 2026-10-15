@@ -2777,6 +2777,42 @@ details[open] > summary .node-card-mark {
   margin-bottom: 0.5rem;
 }
 
+/* A PDF: a page at a time, on a canvas fitted to the dialog's width. */
+.preview-pdf {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.preview-pdf-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.preview-pdf-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-pdf-frame {
+  display: flex;
+  justify-content: center;
+  padding: 0.5rem;
+  background: var(--wash);
+  border-radius: var(--bs-border-radius);
+}
+
+.preview-pdf-page {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
 @media (max-width: 575.98px) {
   .preview-backdrop {
     padding: 0;
@@ -2800,6 +2836,7 @@ details[open] > summary .node-card-mark {
 
   .preview-foot .btn,
   .preview-head .btn,
+  .preview-pdf-pages .btn,
   .grid-detail-actions .btn {
     min-height: 44px;
   }
