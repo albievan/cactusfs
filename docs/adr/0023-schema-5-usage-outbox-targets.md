@@ -898,6 +898,15 @@ What the ports say and the text above left open (PLAN 8.0.10):
 
 ## Consequences
 
+- **A target is changed by whoever writes last** (found in the review of 8.0.13,
+  2026-10-15). A put reads the target, builds the replacement from what it read - the
+  secret, the sealed path and the signing key it keeps - and proposes it without a
+  precondition: two changes of one target made at once through two gateways can undo
+  one another, a rotated secret among them, and two creates both answer a signing key
+  of which only one is kept. One gateway serialises its own changes of a name. Closing
+  it across gateways needs a precondition in the entry - "does not exist" for a create,
+  the version read for a change - refused in apply with `ErrConflict`: a change of the
+  schema-5 entry, which is frozen, so it waits for the owner's ruling (PLAN 8.0.13a).
 - **Cost on the write path.** One usage record read and written in the transaction of
   every put, completion, part, abort and delete; and one row appended for a bucket
   with a rule that matches. Measured for the record (PLAN 8.0.7,

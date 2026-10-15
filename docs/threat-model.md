@@ -339,3 +339,11 @@ Still open:
     deletion requires - would be a contract change with an ADR. A side effect: each
     confirmation is audited as an unlock of an active session and renews its lifetime.
     Is a confirmation enough, or should the server enforce it?
+33. **Two changes of one notification target at once** (ADR-0023, "Consequences";
+    PLAN 8.0.13a). Across gateways the last writer wins, so a concurrent change can put
+    back a secret that was just rotated. A precondition in the replicated entry would
+    close it and changes the frozen schema-5 entry. Should it, before schema 5 is rolled
+    out anywhere?
+34. **Replaying a create returns its signing key** for the 24 hours an idempotent
+    answer is kept, without authorizing the replay again - as for API keys. Accepted
+    as the existing pattern; the answer is sealed in the store.
