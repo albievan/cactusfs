@@ -115,3 +115,11 @@ const UnlockAttempts = unlockAttempts
 // SignInAttempts is how many failed sign-ins and unlocks an address may make
 // before it has to wait.
 const SignInAttempts = signInAttempts
+
+// HeldTargetNames returns how many names of targets have a lock that is held
+// or waited for.
+func HeldTargetNames(s *TargetService) int {
+	s.names.mu.Lock()
+	defer s.names.mu.Unlock()
+	return len(s.names.held)
+}

@@ -1,10 +1,14 @@
 package passwords_test
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -108,5 +112,88 @@ func TestStoredHashesAreNotTrusted(t *testing.T) {
 	failing, _ := passwords.New(light(), strings.NewReader(""))
 	if _, err := failing.Hash("x"); err == nil {
 		t.Error("Hash without entropy succeeded")
+	}
+}
+
+// TestConceal: what stands for a value is Argon2id under the salt - the same
+// for the same value and salt on every hasher, whatever cost its password
+// hashes have, and different for another value or salt - and never the
+// value or a plain hash of it.
+func TestConceal(t *testing.T) {
+	t.Parallel()
+	one, err := passwords.New(light(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cost of concealing is fixed: raising the cost of passwords on
+	// one node does not make it conceal otherwise.
+	other, err := passwords.New(passwords.Params{Time: 2, MemoryKiB: 16 << 10, Threads: 2}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, salt := []byte("a value that may be a secret"), []byte("salt of the request")
+	first, err := one.Conceal(t.Context(), value, salt)
+	if err != nil || len(first) != 32 {
+		t.Fatalf("Conceal = %x, %v", first, err)
+	}
+	if again, err := other.Conceal(t.Context(), value, salt); err != nil || !bytes.Equal(again, first) {
+		t.Errorf("a hasher of another password cost concealed the value as %x, %v; want %x", again, err, first)
+	}
+	plain := sha256.Sum256(value)
+	for name, got := range map[string][]byte{"value": value, "plain hash": plain[:]} {
+		if bytes.Equal(first, got) || bytes.Contains(first, got) {
+			t.Errorf("Conceal returned the %s", name)
+		}
+	}
+	for name, args := range map[string][2][]byte{
+		"another value": {[]byte("another value"), salt},
+		"another salt":  {value, []byte("another salt")},
+	} {
+		if got, err := one.Conceal(t.Context(), args[0], args[1]); err != nil || bytes.Equal(got, first) {
+			t.Errorf("%s concealed alike: %v", name, err)
+		}
+	}
+}
+
+// TestConcealHasAPoolOfItsOwn: when every slot for concealing is taken, a
+// call is refused at once as too many requests - or as cancelled, when its
+// context ends first - and passwords are hashed and verified all the same.
+func TestConcealHasAPoolOfItsOwn(t *testing.T) {
+	t.Parallel()
+	hasher, err := passwords.New(light(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := hasher.Hash("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := passwords.HoldConceal(hasher)
+
+	begun := time.Now()
+	if _, err := hasher.Conceal(t.Context(), []byte("v"), []byte("salt")); !errors.Is(err, domain.ErrTooManyRequests) {
+		t.Errorf("Conceal with the pool taken = %v, want ErrTooManyRequests", err)
+	}
+	if waited := time.Since(begun); waited > 2*time.Second {
+		t.Errorf("Conceal waited %v for a slot: it is to fail fast", waited)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := hasher.Conceal(cancelled, []byte("v"), []byte("salt")); !errors.Is(err, context.Canceled) {
+		t.Errorf("Conceal with a context that ended = %v, want context.Canceled", err)
+	}
+	// Sign-in goes on: hashing and verifying take no slot of that pool.
+	for range 8 {
+		if ok, err := hasher.Verify(encoded, "correct horse battery staple"); err != nil || !ok {
+			t.Fatalf("Verify while concealing is flooded = %v, %v", ok, err)
+		}
+	}
+	if _, err := hasher.Hash("another password here"); err != nil {
+		t.Fatalf("Hash while concealing is flooded: %v", err)
+	}
+
+	release()
+	if _, err := hasher.Conceal(t.Context(), []byte("v"), []byte("salt")); err != nil {
+		t.Errorf("Conceal once the pool is free: %v", err)
 	}
 }

@@ -92,7 +92,11 @@ type Config struct {
 	Cluster  *app.ClusterService
 	// Settings answers how the nodes are configured. It may be nil on a
 	// node that was not given the use case: the operation then answers 501.
-	Settings    *app.SettingsService
+	Settings *app.SettingsService
+	// Targets defines the places outside the deployment that it sends
+	// to. It may be nil on a node that was not given the use case: its
+	// operations then answer 501.
+	Targets     *app.TargetService
 	Idempotency *app.IdempotencyService
 	Identities  Identities
 	Clock       ports.Clock
@@ -408,7 +412,10 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	}
 	// What makes two requests the same request. An upload is not read
 	// twice to find out: its length and type stand for its content.
-	var content string
+	var (
+		content   string
+		concealed []string
+	)
 	if upload {
 		content = "length:" + strconv.FormatInt(r.ContentLength, 10) + ";type:" + r.Header.Get("Content-Type")
 	} else {
@@ -419,12 +426,20 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 			h.fail(w, r, errors.Join(domain.ErrIncompleteBody, err))
 			return
 		}
-		sum := sha256.Sum256(body)
-		content = hex.EncodeToString(sum[:])
+		// The body of an operation that may carry a secret - a password,
+		// the secret of a target, the path of its endpoint - is taken out
+		// whole before anything is hashed, and handed to the use case to
+		// be concealed: a plain hash of a body that holds a secret, kept
+		// for a day, would be a way to test guesses of it. The bodies of
+		// other operations are hashed as they always were.
+		shown, taken := conceal(r.Pattern, body)
+		sum := sha256.Sum256(shown)
+		content, concealed = hex.EncodeToString(sum[:]), taken
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	answer, reservation, err := h.cfg.Idempotency.Begin(ctx, app.IdempotentRequest{
 		Scope: scopeOf(info), Key: key, Fingerprint: strings.Join([]string{r.Method, r.URL.Path, r.URL.RawQuery, content}, "\n"),
+		Operation: r.Method + " " + r.URL.Path, Concealed: concealed,
 		// Who asks, and whether for an upload: what follows from that is
 		// the use case's to say.
 		Principal: info.principal, Upload: upload,
@@ -480,6 +495,16 @@ const detailTooManyBuckets = "Deciding which buckets you may search took longer 
 	"If the answer stays the same, this deployment has more buckets with policies than a search can decide in its time - " +
 	"a limit of the deployment's size, not an outage. A search of one bucket, and a search by the root identity, are not subject to it."
 
+// codeEntityInUse is the code of a refusal because something else refers to
+// what was to be changed or removed. Its detail is always detailEntityInUse:
+// the error behind it may name what refers - the bucket whose configuration
+// names a target, say - which a caller who may change the one need not be
+// allowed to know of.
+const (
+	codeEntityInUse   = "EntityInUse"
+	detailEntityInUse = "Something refers to it: what refers to it must be changed or removed first."
+)
+
 // problem is a problem+json answer in the making.
 type problem struct {
 	status int
@@ -531,7 +556,7 @@ func problemOf(err error) problem {
 	case is(domain.ErrEntityExists):
 		return problem{status: http.StatusConflict, code: "EntityAlreadyExists", title: "Entity already exists"}
 	case is(domain.ErrEntityInUse):
-		return problem{status: http.StatusConflict, code: "EntityInUse", title: "Entity is in use"}
+		return problem{status: http.StatusConflict, code: codeEntityInUse, title: "Entity is in use"}
 	case is(domain.ErrRequestInProgress):
 		return problem{status: http.StatusConflict, code: "RequestInProgress", title: "Request in progress"}
 	case is(domain.ErrConflict):
@@ -609,6 +634,8 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		w.Header().Set("Retry-After", "300")
 	case p.status == http.StatusForbidden, p.status == http.StatusLocked:
 		// A refusal says nothing about what it protects.
+	case p.code == codeEntityInUse:
+		p.detail = detailEntityInUse
 	default:
 		p.detail = err.Error()
 	}

@@ -24,11 +24,13 @@ import (
 	"github.com/albievan/cactusfs/api/openapi"
 	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
+	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -94,8 +96,11 @@ type fixture struct {
 	policies *slowPolicies
 	logs     *lockedBuffer
 	root     string // bearer credential of root
-	seen     []adminapi.Observation
-	seenMu   sync.Mutex
+	// concealer is what conceals the bodies of repeated requests that may
+	// hold a secret; a test can make it busy.
+	concealer *busyHasher
+	seen      []adminapi.Observation
+	seenMu    sync.Mutex
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -182,9 +187,24 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Changes of targets carry their audit record to the trail, as the
+	// store of a deployment does in the entry that makes them.
+	meta.Audit = f.store
+	targets := app.NewTargetService(app.TargetServiceConfig{
+		Store: meta, Authz: authz, Auditor: f.auditor, KMS: kms, Clock: f.clock, Entropy: rand.Reader,
+	})
+	// What may be a secret in a repeated request is concealed with
+	// Argon2id itself, at the fixed cost of Conceal; the cost given here is
+	// that of password hashes, which the fixture does not use.
+	concealer, err := passwords.New(passwords.Params{Time: 1, MemoryKiB: 8 << 10, Threads: 1}, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.concealer = &busyHasher{PasswordHasher: concealer}
 	config := adminapi.Config{
+		Targets: targets,
 		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
-		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz),
+		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz).WithHasher(f.concealer),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
 		Observe: func(_ context.Context, o adminapi.Observation) {
@@ -1200,10 +1220,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 		{method: "PUT", path: "/buckets/some-bucket/quota", body: map[string]any{"quota_bytes": 1}},
 		{method: "DELETE", path: "/buckets/some-bucket/quota"},
 		{method: "POST", path: "/buckets/some-bucket/usage/recount", headers: map[string]string{"Content-Type": "application/json"}},
-		{method: "GET", path: "/targets"},
-		{method: "GET", path: "/targets/hook"},
-		{method: "PUT", path: "/targets/hook", body: map[string]any{"kind": "webhook", "endpoint": "https://hook.example", "buckets": []string{"*"}}},
-		{method: "DELETE", path: "/targets/hook"},
 		{method: "GET", path: "/targets/hook/status"},
 		{method: "GET", path: "/buckets/some-bucket/notifications"},
 		{method: "PUT", path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},
@@ -2328,5 +2344,275 @@ func TestARequestTheClientGaveUpIsNoErrorOfTheNode(t *testing.T) {
 		case strings.Contains(line, `"level":"ERROR"`):
 			t.Errorf("a request that was given up left an error in the log: %s", line)
 		}
+	}
+}
+
+// detailEntityInUse is the one detail of a refusal because something refers
+// to what was to be changed.
+const detailEntityInUse = "Something refers to it: what refers to it must be changed or removed first."
+
+// The marks of the secret scan of the targets: a secret, and the path of an
+// endpoint, which may be a credential of its own.
+const (
+	concealedAuthMark = "MARKED-handler-secret-0c4e1b"
+	concealedPathMark = "/incoming/MARKED-handler-path-93ad7f"
+)
+
+// TestTargets: the operations of targets as the contract has them - an
+// answer for each, a problem for each refusal - and no secret, no path and
+// no signing key in any answer but the one that made the key, nor in the
+// log or the audit trail.
+func TestTargets(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	auditor := f.userKey("auditor", iam.RoleAuditor)
+	keyed := func(key string) map[string]string { return map[string]string{"Idempotency-Key": key} }
+	hook := map[string]any{
+		"kind": "webhook", "endpoint": "https://hooks.example.com" + concealedPathMark, "buckets": []string{"photos"},
+		"auth": map[string]any{"mode": "bearer", "secret": concealedAuthMark},
+	}
+	var answers []string
+	keep := func(r reply) reply {
+		answers = append(answers, string(r.body))
+		return r
+	}
+
+	// Defined: 200, with the signing key, once. The repeat with the same
+	// idempotency key is the same answer - the only way to have the key
+	// after an answer that was lost - and makes no second target.
+	put := call{method: "PUT", path: "/targets/hook", body: hook, headers: keyed("put-hook-1")}
+	first := f.must(http.StatusOK, put)
+	second := f.must(http.StatusOK, put)
+	if !bytes.Equal(first.body, second.body) || second.header.Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("the repeat differs from the original, or is not marked:\n%s\n%s", first.body, second.body)
+	}
+	var made struct {
+		Target     map[string]any `json:"target"`
+		SigningKey string         `json:"signing_key"`
+	}
+	first.decode(t, &made)
+	if made.SigningKey == "" {
+		t.Fatalf("a new webhook was given no signing key: %s", first.body)
+	}
+	want := map[string]any{
+		"name": "hook", "kind": "webhook", "endpoint": "https://hooks.example.com", "endpoint_path_set": true,
+		"buckets": []any{"photos"}, "audit": false, "auth": map[string]any{"mode": "bearer"}, "secret_set": true,
+		"signing_key_set": true, "references": float64(0),
+		"created_at": testNow.Format(time.RFC3339), "updated_at": testNow.Format(time.RFC3339),
+	}
+	if !reflect.DeepEqual(made.Target, want) {
+		t.Errorf("PUT answered the target\n%v\nwant\n%v", made.Target, want)
+	}
+	if r := f.do(withBearer(call{method: "PUT", path: "/targets/hook", body: map[string]any{"kind": "webhook", "buckets": []string{}}, headers: keyed("put-hook-1")}, f.root)); r.status != http.StatusUnprocessableEntity {
+		t.Errorf("the idempotency key of the definition, reused for another change = %d, want 422", r.status)
+	}
+
+	// Read: 200, the same target and no key.
+	var got map[string]any
+	keep(f.must(http.StatusOK, call{method: "GET", path: "/targets/hook"})).decode(t, &got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("GET answered\n%v\nwant\n%v", got, want)
+	}
+	var listed []map[string]any
+	keep(f.must(http.StatusOK, call{method: "GET", path: "/targets", bearer: auditor})).decode(t, &listed)
+	if len(listed) != 1 || !reflect.DeepEqual(listed[0], want) {
+		t.Errorf("GET /targets answered %v", listed)
+	}
+
+	// Changed without a secret: the secret is kept, and no new key made.
+	change := map[string]any{"kind": "webhook", "buckets": []string{"photos", "logs-*"}, "auth": map[string]any{"mode": "bearer"}}
+	var changed struct {
+		Target     map[string]any `json:"target"`
+		SigningKey *string        `json:"signing_key"`
+	}
+	keep(f.must(http.StatusOK, call{method: "PUT", path: "/targets/hook", body: change})).decode(t, &changed)
+	if changed.SigningKey != nil || changed.Target["secret_set"] != true || changed.Target["endpoint_path_set"] != true {
+		t.Errorf("a change without a secret answered %v, a signing key: %v", changed.Target, changed.SigningKey != nil)
+	}
+
+	// Refusals, each a problem.
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "photos"}})
+	document, err := bucket.NotificationConfig{Rules: []bucket.NotificationRule{
+		{ID: "all", As: bucket.NotifyAsQueue, Target: "hook", On: []delivery.Event{delivery.EventPut}},
+	}}.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.meta.SetBucketConfig(t.Context(), "photos", bucket.ConfigNotification, document); err != nil {
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		c      call
+		status int
+		code   string
+	}{
+		"no credential":                   {call{method: "GET", path: "/targets/hook", bearer: "AKIDNOBODY:not-a-secret"}, http.StatusUnauthorized, "Unauthenticated"},
+		"an auditor who defines":          {call{method: "PUT", path: "/targets/hook", bearer: auditor, body: hook}, http.StatusForbidden, "AccessDenied"},
+		"an auditor who deletes":          {call{method: "DELETE", path: "/targets/hook", bearer: auditor}, http.StatusForbidden, "AccessDenied"},
+		"deleted while a bucket names it": {call{method: "DELETE", path: "/targets/hook", headers: keyed("delete-hook-1")}, http.StatusConflict, "EntityInUse"},
+		"narrowed past the bucket": {call{method: "PUT", path: "/targets/hook", body: map[string]any{
+			"kind": "webhook", "buckets": []string{"logs-*"}, "auth": map[string]any{"mode": "bearer"},
+		}}, http.StatusConflict, "EntityInUse"},
+		"its kind changed": {call{method: "PUT", path: "/targets/hook", body: map[string]any{
+			"kind": "nats", "endpoint": "tls://nats.example.com", "subject": "events", "buckets": []string{"photos"},
+		}}, http.StatusConflict, "Conflict"},
+		"an endpoint in the clear": {call{method: "PUT", path: "/targets/other", body: map[string]any{
+			"kind": "webhook", "endpoint": "http://hooks.example.com" + concealedPathMark, "buckets": []string{},
+		}}, http.StatusBadRequest, "InvalidArgument"},
+		"the metadata service": {call{method: "PUT", path: "/targets/other", body: map[string]any{
+			"kind": "webhook", "endpoint": "https://169.254.169.254" + concealedPathMark, "buckets": []string{},
+		}}, http.StatusBadRequest, "InvalidArgument"},
+		"no such target": {call{method: "GET", path: "/targets/missing"}, http.StatusNotFound, "NoSuchEntity"},
+	} {
+		if tt.c.bearer == "" {
+			tt.c.bearer = f.root
+		}
+		r := keep(f.do(tt.c))
+		if r.status != tt.status {
+			t.Errorf("%s: %s %s = %d, want %d: %s", name, tt.c.method, tt.c.path, r.status, tt.status, r.body)
+			continue
+		}
+		p := r.problem(t)
+		if p["code"] != tt.code {
+			t.Errorf("%s: problem = %s, want code %s", name, r.body, tt.code)
+		}
+		// What refers to a target is told to nobody: not the bucket
+		// whose rules name it.
+		if tt.code == "EntityInUse" && (p["detail"] != detailEntityInUse || strings.Contains(string(r.body), "photos")) {
+			t.Errorf("%s: the refusal says more than that something refers to the target: %s", name, r.body)
+		}
+		if tt.c.headers != nil {
+			// A refusal is an answer too: its repeat is the refusal.
+			if again := f.do(tt.c); again.status != tt.status || again.header.Get("Idempotent-Replayed") != "true" {
+				t.Errorf("%s: the repeat = %d, replayed %q", name, again.status, again.header.Get("Idempotent-Replayed"))
+			}
+		}
+	}
+
+	// Once nothing names it, it is deleted: 204.
+	if err := f.meta.SetBucketConfig(t.Context(), "photos", bucket.ConfigNotification, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.must(http.StatusNoContent, call{method: "DELETE", path: "/targets/hook", headers: keyed("delete-hook-2")})
+	f.must(http.StatusNoContent, call{method: "DELETE", path: "/targets/hook", headers: keyed("delete-hook-2")})
+	f.must(http.StatusNotFound, call{method: "DELETE", path: "/targets/hook"})
+
+	// Every change, and every refusal, is in the trail.
+	var defined, deleted, refused int
+	for _, r := range f.trail() {
+		switch {
+		case r.Action == string(iam.ActionPutTarget) && r.Outcome == audit.Succeeded:
+			defined++
+		case r.Action == string(iam.ActionDeleteTarget) && r.Outcome == audit.Succeeded:
+			deleted++
+		case strings.HasSuffix(r.Resource, "target/hook") && r.Outcome == audit.Denied && r.Actor == "user/auditor":
+			refused++
+		}
+	}
+	if defined != 2 || deleted != 1 || refused != 2 {
+		t.Errorf("the trail holds %d definitions, %d deletions, %d refusals of the auditor; want 2, 1, 2", defined, deleted, refused)
+	}
+
+	// The scan: the secret and the path are in no answer, the signing key
+	// in none but the one that made it; none of them is in the log or the
+	// audit trail.
+	trail, err := json.Marshal(f.trail())
+	if err != nil {
+		t.Fatal(err)
+	}
+	places := map[string]string{"the log": f.logs.String(), "the audit trail": string(trail), "an answer": strings.Join(answers, "\n")}
+	for place, text := range places {
+		for _, mark := range []string{concealedAuthMark, "MARKED", made.SigningKey} {
+			if strings.Contains(text, mark) {
+				t.Errorf("%s holds %q", place, mark)
+			}
+		}
+	}
+	if strings.Contains(string(first.body), concealedAuthMark) || strings.Contains(string(first.body), "MARKED") {
+		t.Errorf("the answer to the definition holds the secret or the path: %s", first.body)
+	}
+	// The stored answer of the definition holds the signing key: it is kept
+	// sealed.
+	if dump := fmt.Sprintf("%+v", f.store); strings.Contains(dump, made.SigningKey) {
+		t.Fatal("the signing key of a stored answer is in the store in the clear")
+	}
+}
+
+// TestTargetsWhenTheyCannotBeDefinedYet: until every member of the metadata
+// group knows targets, a change is 503 and says to try again; a node that
+// was not given the use case answers 501.
+func TestTargetsWhenTheyCannotBeDefinedYet(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.meta.FailWrites = fmt.Errorf("%w: not every member knows entry schema 5", domain.ErrUnavailable)
+	r := f.do(withBearer(call{method: "PUT", path: "/targets/hook", body: map[string]any{
+		"kind": "webhook", "endpoint": "https://hooks.example.com", "buckets": []string{},
+	}}, f.root))
+	if r.status != http.StatusServiceUnavailable || r.header.Get("Retry-After") == "" {
+		t.Errorf("PUT before schema 5 = %d, Retry-After %q: %s", r.status, r.header.Get("Retry-After"), r.body)
+	}
+	if p := r.problem(t); p["code"] != "ServiceUnavailable" || p["detail"] != nil {
+		t.Errorf("PUT before schema 5: problem = %s", r.body)
+	}
+
+	bare := newFixtureWith(t, func(c *adminapi.Config) { c.Targets = nil })
+	for _, c := range []call{
+		{method: "GET", path: "/targets"},
+		{method: "GET", path: "/targets/hook"},
+		{method: "PUT", path: "/targets/hook", body: map[string]any{"kind": "webhook", "buckets": []string{}}},
+		{method: "DELETE", path: "/targets/hook"},
+	} {
+		r := bare.must(http.StatusNotImplemented, c)
+		if p := r.problem(t); p["code"] != "NotImplemented" || p["detail"] != nil {
+			t.Errorf("%s %s on a node without the use case: problem = %s", c.method, c.path, r.body)
+		}
+	}
+}
+
+// busyHasher is a password hasher that a test can make busy concealing: it
+// then answers Conceal as the port says a hasher whose slots are all taken
+// does - at once, with domain.ErrTooManyRequests - and conceals with the
+// hasher it wraps otherwise. (The pool of passwords.Hasher is held in that
+// package's own tests; its hook is not exported to this one.)
+type busyHasher struct {
+	ports.PasswordHasher
+	busy atomic.Bool
+}
+
+// Conceal implements ports.PasswordHasher.
+func (h *busyHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, error) {
+	if h.busy.Load() {
+		return nil, fmt.Errorf("%w: every slot for concealing is taken", domain.ErrTooManyRequests)
+	}
+	return h.PasswordHasher.Conceal(ctx, value, salt)
+}
+
+// TestARepeatedRequestThatCannotBeRecognisedYet: when the body of a request
+// that may hold a secret cannot be concealed at once, the request answers
+// 429 with Retry-After, as the contract says, and reserves nothing: the same
+// request with the same key is carried out once concealing is possible.
+func TestARepeatedRequestThatCannotBeRecognisedYet(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	put := call{method: "PUT", path: "/targets/hook", headers: map[string]string{"Idempotency-Key": "busy-1"}, body: map[string]any{
+		"kind": "webhook", "endpoint": "https://hooks.example.com", "buckets": []string{},
+	}}
+	f.concealer.busy.Store(true)
+	r := f.must(http.StatusTooManyRequests, put)
+	if r.header.Get("Retry-After") != "1" {
+		t.Errorf("Retry-After = %q, want 1", r.header.Get("Retry-After"))
+	}
+	if p := r.problem(t); p["code"] != "TooManyRequests" {
+		t.Errorf("problem = %s", r.body)
+	}
+	f.must(http.StatusNotFound, call{method: "GET", path: "/targets/hook"})
+
+	f.concealer.busy.Store(false)
+	first := f.must(http.StatusOK, put)
+	if first.header.Get("Idempotent-Replayed") != "" {
+		t.Error("the request after the refusal was given a kept answer: the refusal reserved its key")
+	}
+	if again := f.must(http.StatusOK, put); again.header.Get("Idempotent-Replayed") != "true" || !bytes.Equal(again.body, first.body) {
+		t.Errorf("the repeat of the request that was carried out: replayed %q", again.header.Get("Idempotent-Replayed"))
 	}
 }

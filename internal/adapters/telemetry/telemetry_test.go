@@ -22,7 +22,9 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -672,4 +674,68 @@ func TestMetricsCarryNoTenantData(t *testing.T) {
 			}
 		}
 	}
+}
+
+// instrumentedTargets is the in-memory stores of schema 5 as one, with the
+// targets reached through their decorator: the rest of the contract is the
+// store's own.
+type instrumentedTargets struct {
+	*porttest.MemMetadata
+	*porttest.MemIAM
+	targets ports.TargetStore
+}
+
+// PutTarget implements ports.TargetStore through the decorator.
+func (s instrumentedTargets) PutTarget(ctx context.Context, t delivery.Target, record audit.Record) error {
+	return s.targets.PutTarget(ctx, t, record)
+}
+
+// DeleteTarget implements ports.TargetStore through the decorator.
+func (s instrumentedTargets) DeleteTarget(ctx context.Context, name string, record audit.Record) error {
+	return s.targets.DeleteTarget(ctx, name, record)
+}
+
+// GetTarget implements ports.TargetStore through the decorator.
+func (s instrumentedTargets) GetTarget(ctx context.Context, name string) (delivery.Target, error) {
+	return s.targets.GetTarget(ctx, name)
+}
+
+// ListTargets implements ports.TargetStore through the decorator.
+func (s instrumentedTargets) ListTargets(ctx context.Context) ([]delivery.Target, error) {
+	return s.targets.ListTargets(ctx)
+}
+
+// TestTargetsAreCountedAndTraced: the store of targets keeps the contract of
+// schema 5 through its decorator, every method is counted under its own
+// name, a refusal is counted as an error - and nothing of a target, its
+// name, its endpoint or what is sealed in it, is in a metric or a span.
+func TestTargetsAreCountedAndTraced(t *testing.T) {
+	t.Parallel()
+	recorder := tracetest.NewSpanRecorder()
+	tel := newTelemetry(t, recorder)
+	t.Run("contract", func(t *testing.T) {
+		porttest.Schema5Contract(t, func(*testing.T) porttest.Schema5 {
+			mem := porttest.NewMemMetadata()
+			trail := porttest.NewMemIAM()
+			mem.Audit = trail
+			return instrumentedTargets{MemMetadata: mem, MemIAM: trail, targets: tel.InstrumentTargets(mem)}
+		})
+	})
+
+	metrics := scrape(t, tel)
+	wantEveryMethod(t, metrics, "targets", methodsOf[ports.TargetStore]())
+	for _, want := range []string{
+		"cactusfs_port_calls_total method=PutTarget port=targets result=ok",
+		"cactusfs_port_calls_total method=PutTarget port=targets result=error",
+		"cactusfs_port_calls_total method=DeleteTarget port=targets result=error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Errorf("metrics lack %q", want)
+		}
+	}
+	if !contains(spanNames(recorder), "targets.PutTarget") {
+		t.Errorf("no span named targets.PutTarget among %v", spanNames(recorder))
+	}
+	sample := porttest.SampleTarget("hook", delivery.KindWebhook)
+	wantNothingOf(t, tel, recorder, "hook", sample.Endpoint, "hooks.example", "sealed-", "wrapped-", "site-b.example", "nats.example")
 }

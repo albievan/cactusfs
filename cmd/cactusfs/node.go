@@ -89,6 +89,8 @@ type node struct {
 	local       *localSettings
 	settings    *app.SettingsService
 	idempotency *app.IdempotencyService
+	// targets defines the places outside the deployment that it sends to.
+	targets     *app.TargetService
 	maintenance *app.Maintenance
 	clock       ports.Clock
 	telemetry   *telemetry.Telemetry
@@ -276,7 +278,21 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		Provider: n.telemetry.InstrumentIdentityProvider(provider), Auditor: n.auditor, Clock: n.clock, Entropy: rand.Reader,
 		Lifetime: cfg.SessionLifetime, UploadGrace: cfg.SessionUploadGrace, LockMax: lockMax,
 	})
-	n.idempotency = app.NewIdempotencyService(n.telemetry.InstrumentIdempotency(n.meta), kms, n.clock, rand.Reader).WithAuthorizer(n.authorizer)
+	// The body of a repeated request that may hold a secret - a password,
+	// the secret of a target - is fingerprinted as Argon2id at the fixed
+	// cost of passwords.Hasher.Conceal, which is the same on every node
+	// whatever the cost of password hashes is: a repeat is recognised
+	// wherever it arrives.
+	n.idempotency = app.NewIdempotencyService(n.telemetry.InstrumentIdempotency(n.meta), kms, n.clock, rand.Reader).
+		WithAuthorizer(n.authorizer).WithHasher(hasher)
+	// Targets: their secrets, signing keys and the paths of their
+	// endpoints are sealed through the KMS before they are proposed
+	// (ADR-0023). Until every member knows entry schema 5 the store
+	// refuses a change as unavailable.
+	n.targets = app.NewTargetService(app.TargetServiceConfig{
+		Store: n.telemetry.InstrumentTargets(n.meta), Authz: n.authorizer, Auditor: n.auditor, KMS: kms,
+		Clock: n.clock, Entropy: rand.Reader,
+	})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
 		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },

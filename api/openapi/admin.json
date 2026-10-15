@@ -3,7 +3,7 @@
   "info": {
     "title": "CactusFS management API",
     "version": "1.0.0",
-    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever.\n"
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever. A request whose body may hold a secret\n(`createUser`, `updateUser`, `putTarget`) is recognised again by a slow\nhash of the body, never by the body or a plain hash of it; when that hash\ncannot be made at once the request is answered 429 with `Retry-After`,\nand nothing is reserved.\n"
   },
   "servers": [
     {
@@ -1357,6 +1357,25 @@
               }
             }
           },
+          "429": {
+            "description": "A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of\nthe body, of which a node computes few at a time and one at a time for a caller; none could be\ncomputed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,\nwith the same key, can be sent again.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "default": {
             "$ref": "#/components/responses/Problem"
           }
@@ -1428,6 +1447,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of\nthe body, of which a node computes few at a time and one at a time for a caller; none could be\ncomputed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,\nwith the same key, can be sent again.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -2243,7 +2281,7 @@
           "targets"
         ],
         "summary": "Define a target, or change it",
-        "description": "A target is the only way an address outside the deployment is named: the rules of a bucket name a\ntarget, never an address. So whoever may define targets decides where the deployment connects to, and\n`buckets` decides which buckets may use each.\n\n**The endpoint** is refused with 400 unless it is `https://` for the kinds `webhook` and `s3`, or\n`tls://` for `nats`; it may carry no userinfo, no query\nand no fragment. Where it leads is checked again each time a connection is made: an address that is\nloopback, link-local, unspecified or multicast is refused unless the nodes were started with a range\nthat admits it (`--egress-allow`), and the addresses of cloud metadata services are refused whatever\nwas admitted. No redirect is followed, no proxy is used, and the certificate is verified against\n`ca_pem` or the system's roots: there is no way to turn that off.\n\n**The path of the endpoint is write-only.** The URL of a webhook often carries a token in its path,\nso no answer of this API gives the path back - not to whoever defined the target either: a target is\nshown with the scheme, the host and the port of its endpoint, and with `endpoint_path_set`. The whole\nURL is sent here. Changing a target without `endpoint` keeps the endpoint it has, path and all; to\nchange any part of the endpoint - the host, the port or the path - the whole URL is sent again. A\ntarget that is new needs one (400 without).\n\n**Secrets are write-only.** `auth.secret` is sealed through the key service and is in no answer of\nthis API, in no log line, audit record or event. Changing a target without `auth.secret` keeps the\none it has, as long as `auth.mode` stays what it was. A target of kind `webhook` is given a signing\nkey, made here and returned once, in the answer to the request that made it or that asked for a new\none with `rotate_signing_key`.\n\nThe kind of a target cannot be changed (409); delete it and define it again. Nothing is connected to\nby this request: whether the target can be reached is told by its status.\n\nAnswers 503 until every member of the metadata group is of a release that knows targets.\n",
+        "description": "A target is the only way an address outside the deployment is named: the rules of a bucket name a\ntarget, never an address. So whoever may define targets decides where the deployment connects to, and\n`buckets` decides which buckets may use each.\n\n**The endpoint** is refused with 400 unless it is `https://` for the kinds `webhook` and `s3`, or\n`tls://` for `nats`; it may carry no userinfo, no query\nand no fragment. Where it leads is checked again each time a connection is made: an address that is\nloopback, link-local, unspecified or multicast is refused unless the nodes were started with a range\nthat admits it (`--egress-allow`), and the addresses of cloud metadata services are refused whatever\nwas admitted. No redirect is followed, no proxy is used, and the certificate is verified against\n`ca_pem` or the system's roots: there is no way to turn that off.\n\n**The path of the endpoint is write-only.** The URL of a webhook often carries a token in its path,\nso no answer of this API gives the path back - not to whoever defined the target either: a target is\nshown with the scheme, the host and the port of its endpoint, and with `endpoint_path_set`. The whole\nURL is sent here. Changing a target without `endpoint` keeps the endpoint it has, path and all; to\nchange any part of the endpoint - the host, the port or the path - the whole URL is sent again. A\ntarget that is new needs one (400 without).\n\n**Secrets are write-only.** `auth.secret` is sealed through the key service and is in no answer of\nthis API, in no log line, audit record or event. Changing a target without `auth.secret` keeps the\none it has, as long as `auth.mode` stays what it was. A target of kind `webhook` is given a signing\nkey, made here and returned once, in the answer to the request that made it or that asked for a new\none with `rotate_signing_key`. A request that defines a target and is answered 503 may have defined it\nall the same, with a signing key nobody was shown: repeat it with the same `Idempotency-Key`, and when\nthe target turns out to exist without the key having been shown, obtain one with `rotate_signing_key`.\n\nThe kind of a target cannot be changed (409); delete it and define it again. Nothing is connected to\nby this request: whether the target can be reached is told by its status.\n\nAnswers 503 until every member of the metadata group is of a release that knows targets.\n",
         "x-cactusfs-action": "admin:PutTarget",
         "parameters": [
           {
@@ -2273,6 +2311,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TargetPutResult"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of\nthe body, of which a node computes few at a time and one at a time for a caller; none could be\ncomputed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,\nwith the same key, can be sent again.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }

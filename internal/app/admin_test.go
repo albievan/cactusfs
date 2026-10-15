@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -462,5 +464,152 @@ func TestIdempotencyOfALockedSession(t *testing.T) {
 				t.Errorf("the log: %s", logs.String())
 			}
 		})
+	}
+}
+
+// TestIdempotencyConcealsSecrets: the values of a request that may be
+// secrets are recognised again - the same request with the same key is
+// answered as before, the same key with another secret is refused - and are
+// kept neither as they are nor as a plain hash.
+func TestIdempotencyConcealsSecrets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+	kms, err := porttest.NewKMS("test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const concealed = "a-password-of-the-request"
+	request := app.IdempotentRequest{
+		Scope: "key:AKID", Key: "k-1", Operation: "PUT /api/v1/targets/hook",
+		Fingerprint: "PUT /api/v1/targets/hook {redacted}", Concealed: []string{"auth.secret=" + concealed},
+	}
+
+	// When the secrets cannot be concealed the request is refused, says
+	// why, and reserves nothing: the same request is taken afterwards.
+	for name, tt := range map[string]struct {
+		hasher ports.PasswordHasher
+		want   error
+	}{
+		"no hasher":            {nil, nil},
+		"a hasher unavailable": {&failingHasher{err: domain.ErrUnavailable}, domain.ErrUnavailable},
+		"a hasher overloaded":  {&failingHasher{err: domain.ErrTooManyRequests}, domain.ErrTooManyRequests},
+	} {
+		refusing := app.NewIdempotencyService(store, kms, clock, rand.Reader)
+		if tt.hasher != nil {
+			refusing.WithHasher(tt.hasher)
+		}
+		_, _, err := refusing.Begin(ctx, request)
+		if err == nil || (tt.want != nil && !errors.Is(err, tt.want)) || !strings.Contains(err.Error(), "idempotency.fingerprint") {
+			t.Errorf("%s: Begin = %v, want %v from idempotency.fingerprint", name, err, tt.want)
+		}
+	}
+
+	s := app.NewIdempotencyService(store, kms, clock, rand.Reader).WithHasher(&porttest.Hasher{})
+	_, reservation, err := s.Begin(ctx, request)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := s.Complete(ctx, reservation, app.IdempotentAnswer{Status: 200, Body: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if replay, _, err := s.Begin(ctx, request); err != nil || replay == nil {
+		t.Fatalf("the same request again = %v, %v; want the answer", replay, err)
+	}
+	for name, change := range map[string]func(r *app.IdempotentRequest){
+		"another secret":    func(r *app.IdempotentRequest) { r.Concealed = []string{"auth.secret=another"} },
+		"no secret":         func(r *app.IdempotentRequest) { r.Concealed = nil },
+		"another operation": func(r *app.IdempotentRequest) { r.Operation = "PUT /api/v1/targets/other" },
+	} {
+		other := request
+		change(&other)
+		if _, _, err := s.Begin(ctx, other); !errors.Is(err, domain.ErrIdempotencyKeyReused) {
+			t.Errorf("%s with the same key = %v, want ErrIdempotencyKeyReused", name, err)
+		}
+	}
+
+	plain := sha256.Sum256([]byte(concealed))
+	plainField := sha256.Sum256([]byte("auth.secret=" + concealed))
+	dump := fmt.Sprintf("%+v", store)
+	for name, mark := range map[string]string{
+		"the secret": concealed, "its plain SHA-256": hex.EncodeToString(plain[:]), "the plain SHA-256 of the field": hex.EncodeToString(plainField[:]),
+	} {
+		if strings.Contains(dump, mark) {
+			t.Errorf("the stored record holds %s", name)
+		}
+	}
+}
+
+// failingHasher conceals nothing: it answers err.
+type failingHasher struct {
+	porttest.Hasher
+	err error
+}
+
+// Conceal implements ports.PasswordHasher.
+func (h *failingHasher) Conceal(context.Context, []byte, []byte) ([]byte, error) {
+	return nil, h.err
+}
+
+// blockingHasher conceals as the fake does, but holds every value that
+// holds "hold" until it is let go.
+type blockingHasher struct {
+	porttest.Hasher
+	entered chan struct{}
+	release chan struct{}
+}
+
+// Conceal implements ports.PasswordHasher.
+func (h *blockingHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, error) {
+	if bytes.Contains(value, []byte("hold")) {
+		h.entered <- struct{}{}
+		<-h.release
+	}
+	return h.Hasher.Conceal(ctx, value, salt)
+}
+
+// TestOneConcealedRequestAtATimeForACaller: while a request of a caller is
+// being concealed, a second of the same caller is refused at once as too
+// many and reserves nothing; another caller is not held up by it; once the
+// first is done, the caller is taken again.
+func TestOneConcealedRequestAtATimeForACaller(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+	kms, err := porttest.NewKMS("test:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher := &blockingHasher{entered: make(chan struct{}), release: make(chan struct{})}
+	s := app.NewIdempotencyService(store, kms, clock, rand.Reader).WithHasher(hasher)
+	request := func(scope, key, body string) app.IdempotentRequest {
+		return app.IdempotentRequest{Scope: scope, Key: key, Operation: "PUT /api/v1/targets/hook", Fingerprint: "f", Concealed: []string{"body=" + body}}
+	}
+
+	first := make(chan error, 1)
+	go func() {
+		_, _, err := s.Begin(ctx, request("key:AKID", "k-1", "hold"))
+		first <- err
+	}()
+	<-hasher.entered
+
+	begun := time.Now()
+	if _, _, err := s.Begin(ctx, request("key:AKID", "k-2", "another")); !errors.Is(err, domain.ErrTooManyRequests) {
+		t.Errorf("a second concealed request of the caller = %v, want ErrTooManyRequests", err)
+	}
+	if waited := time.Since(begun); waited > time.Second {
+		t.Errorf("the refusal took %v: it is to be at once", waited)
+	}
+	if _, reservation, err := s.Begin(ctx, request("key:OTHER", "k-2", "another")); err != nil || reservation == (app.Reservation{}) {
+		t.Errorf("another caller, while the first is concealed = %v", err)
+	}
+
+	hasher.release <- struct{}{}
+	if err := <-first; err != nil {
+		t.Fatalf("the first request: %v", err)
+	}
+	// Nothing was reserved by the refusal: the key is taken now.
+	if _, reservation, err := s.Begin(ctx, request("key:AKID", "k-2", "another")); err != nil || reservation == (app.Reservation{}) {
+		t.Errorf("the refused request, sent again = %v", err)
 	}
 }

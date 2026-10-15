@@ -11,6 +11,7 @@
 package passwords
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 
@@ -67,6 +69,8 @@ type Hasher struct {
 	slots chan struct{}
 	// waiting counts the hashes that wait for a slot.
 	waiting atomic.Int32
+	// concealSlots is the pool of Conceal, apart from slots.
+	concealSlots chan struct{}
 }
 
 // maxConcurrent is the number of hashes computed at the same time.
@@ -94,7 +98,10 @@ func New(params Params, entropy io.Reader) (*Hasher, error) {
 	if !params.valid() {
 		return nil, fmt.Errorf("passwords.New: %w: Argon2id parameters out of range", domain.ErrInvalidArgument)
 	}
-	return &Hasher{params: params, entropy: entropy, slots: make(chan struct{}, maxConcurrent)}, nil
+	return &Hasher{
+		params: params, entropy: entropy, slots: make(chan struct{}, maxConcurrent),
+		concealSlots: make(chan struct{}, maxConcurrentConceal),
+	}, nil
 }
 
 // Hash implements ports.PasswordHasher.
@@ -126,6 +133,46 @@ func (h *Hasher) Verify(encoded, password string) (bool, error) {
 	defer release()
 	got := argon2.IDKey([]byte(password), salt, params.Time, params.MemoryKiB, params.Threads, hashSize)
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
+}
+
+// The cost of Conceal. It is fixed, and not the cost of password hashes,
+// which an operator may raise: every node of a deployment must conceal a
+// value alike, or a request repeated through another node is taken for
+// another request. Argon2id with 19 MiB, two passes and one lane is the
+// least that OWASP's Password Storage Cheat Sheet recommends; what is
+// concealed is kept for a day (app.IdempotencyTTL), and is the body of a
+// request, of which a password is one part.
+const (
+	concealTime      = 2
+	concealMemoryKiB = 19 << 10
+	concealThreads   = 1
+	// maxConcurrentConceal bounds how many values are concealed at once,
+	// in a pool of their own: concealing is asked for before anybody is
+	// authorized to anything, by whoever repeats a request, and must
+	// never take a slot that a sign-in needs.
+	maxConcurrentConceal = 2
+	// concealWait is the longest a call waits for a slot of that pool.
+	// There is no queue beyond it: a node that is busy concealing says so
+	// at once, and the caller tries again in a moment.
+	concealWait = 250 * time.Millisecond
+)
+
+// Conceal implements ports.PasswordHasher: Argon2id of value under salt,
+// at the fixed cost above, in a pool of its own. When no slot of the pool
+// is free within concealWait the error wraps domain.ErrTooManyRequests;
+// when ctx ends first, it wraps the error of ctx.
+func (h *Hasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, error) {
+	timer := time.NewTimer(concealWait)
+	defer timer.Stop()
+	select {
+	case h.concealSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("passwords.Conceal: %w", ctx.Err())
+	case <-timer.C:
+		return nil, fmt.Errorf("passwords.Conceal: %w: every slot for concealing is taken", domain.ErrTooManyRequests)
+	}
+	defer func() { <-h.concealSlots }()
+	return argon2.IDKey(value, salt, concealTime, concealMemoryKiB, concealThreads, hashSize), nil
 }
 
 // parse reads a PHC string. The error wraps domain.ErrIntegrity: a stored

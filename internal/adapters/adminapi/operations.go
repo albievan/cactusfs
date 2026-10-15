@@ -20,6 +20,7 @@ import (
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -1090,9 +1091,10 @@ func (o *operations) ListAudit(ctx context.Context, request api.ListAuditRequest
 
 // --- quotas, targets, notifications, replication (PLAN 8.0.3) ---
 //
-// The operations below are in the contract and have no use case yet: the
-// contract comes first, and each is written with the step of PLAN.md that
-// names it. Until then a caller that has authenticated is told 501, as for
+// The operations below that answer notYet are in the contract and have no
+// use case yet: the contract comes first, and each is written with the step
+// of PLAN.md that names it (targets were, with PLAN 8.0.13; their status
+// comes with 8.0.14). Until then a caller that has authenticated is told 501, as for
 // any operation this node was not given the use case for - which says
 // nothing of any bucket or target, so it is said before anybody is asked
 // what the caller may do.
@@ -1122,24 +1124,104 @@ func (o *operations) RecountBucketUsage(context.Context, api.RecountBucketUsageR
 	return nil, notYet("usage recount")
 }
 
-// ListTargets implements api.StrictServerInterface (PLAN 8.0.13).
-func (o *operations) ListTargets(context.Context, api.ListTargetsRequestObject) (api.ListTargetsResponseObject, error) {
-	return nil, notYet("targets")
+// --- targets ---
+
+// targetOf maps a target, as the use case shows it, to the contract. There
+// is nothing in a delivery.ShownTarget that is a credential or the path of
+// an endpoint to leave out.
+func targetOf(t delivery.ShownTarget) api.Target {
+	out := api.Target{
+		Name: t.Name, Kind: api.TargetKind(t.Kind), Endpoint: t.Origin, EndpointPathSet: t.PathSet,
+		Region: stringOrNil(t.Region), Subject: stringOrNil(t.Subject), Buckets: stringsOf(t.Buckets), Audit: t.Audit,
+		Auth:      api.TargetAuth{Mode: api.TargetAuthMode(t.Auth.Mode), Id: stringOrNil(t.Auth.ID)},
+		SecretSet: t.SecretSet, SigningKeySet: t.SignKeySet, References: t.Refs, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+	}
+	if len(t.CAPEM) > 0 {
+		ca := string(t.CAPEM)
+		out.CaPem = &ca
+	}
+	return out
 }
 
-// GetTarget implements api.StrictServerInterface (PLAN 8.0.13).
-func (o *operations) GetTarget(context.Context, api.GetTargetRequestObject) (api.GetTargetResponseObject, error) {
-	return nil, notYet("targets")
+// targets is the use case of targets, or the answer of a node that was not
+// given it.
+func (o *operations) targets() (*app.TargetService, error) {
+	if o.h.cfg.Targets == nil {
+		return nil, notYet("targets")
+	}
+	return o.h.cfg.Targets, nil
 }
 
-// PutTarget implements api.StrictServerInterface (PLAN 8.0.13).
-func (o *operations) PutTarget(context.Context, api.PutTargetRequestObject) (api.PutTargetResponseObject, error) {
-	return nil, notYet("targets")
+// ListTargets implements api.StrictServerInterface.
+func (o *operations) ListTargets(ctx context.Context, _ api.ListTargetsRequestObject) (api.ListTargetsResponseObject, error) {
+	targets, err := o.targets()
+	if err != nil {
+		return nil, err
+	}
+	shown, err := targets.List(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	out := make(api.ListTargets200JSONResponse, len(shown))
+	for i, t := range shown {
+		out[i] = targetOf(t)
+	}
+	return out, nil
 }
 
-// DeleteTarget implements api.StrictServerInterface (PLAN 8.0.13).
-func (o *operations) DeleteTarget(context.Context, api.DeleteTargetRequestObject) (api.DeleteTargetResponseObject, error) {
-	return nil, notYet("targets")
+// GetTarget implements api.StrictServerInterface.
+func (o *operations) GetTarget(ctx context.Context, request api.GetTargetRequestObject) (api.GetTargetResponseObject, error) {
+	targets, err := o.targets()
+	if err != nil {
+		return nil, err
+	}
+	shown, err := targets.Get(ctx, who(ctx), request.Name)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetTarget200JSONResponse(targetOf(shown)), nil
+}
+
+// PutTarget implements api.StrictServerInterface. What is kept of a target
+// that a change does not name, how the endpoint is judged and what is
+// sealed, are the use case's; this carries the fields.
+func (o *operations) PutTarget(ctx context.Context, request api.PutTargetRequestObject) (api.PutTargetResponseObject, error) {
+	targets, err := o.targets()
+	if err != nil {
+		return nil, err
+	}
+	b := request.Body
+	if b == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	in := app.TargetInput{
+		Name: request.Name, Kind: delivery.Kind(b.Kind), Endpoint: optional(b.Endpoint), Region: optional(b.Region),
+		Subject: optional(b.Subject), Buckets: b.Buckets, Audit: optional(b.Audit), RotateSigningKey: optional(b.RotateSigningKey),
+	}
+	if b.CaPem != nil {
+		in.CAPEM = []byte(*b.CaPem)
+	}
+	if b.Auth != nil {
+		in.Auth = delivery.Auth{Mode: delivery.AuthMode(b.Auth.Mode), ID: optional(b.Auth.Id)}
+		in.Secret = optional(b.Auth.Secret)
+	}
+	result, err := targets.Put(ctx, who(ctx), in)
+	if err != nil {
+		return nil, err
+	}
+	return api.PutTarget200JSONResponse{Target: targetOf(result.Target), SigningKey: stringOrNil(result.SigningKey)}, nil
+}
+
+// DeleteTarget implements api.StrictServerInterface.
+func (o *operations) DeleteTarget(ctx context.Context, request api.DeleteTargetRequestObject) (api.DeleteTargetResponseObject, error) {
+	targets, err := o.targets()
+	if err != nil {
+		return nil, err
+	}
+	if err := targets.Delete(ctx, who(ctx), request.Name); err != nil {
+		return nil, err
+	}
+	return api.DeleteTarget204Response{}, nil
 }
 
 // GetTargetStatus implements api.StrictServerInterface (PLAN 8.0.14).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -144,6 +145,13 @@ func (fixedHasher) Verify(encoded, password string) (bool, error) {
 	return encoded == "hash-of-"+password, nil
 }
 
+func (fixedHasher) Conceal(_ context.Context, value, salt []byte) ([]byte, error) {
+	if len(salt) == 0 {
+		return nil, domain.ErrInvalidArgument
+	}
+	return append(append([]byte("concealed-"), salt...), strconv.Itoa(len(value))...), nil
+}
+
 // collecting keeps what was published; refusing delivers nothing.
 type collecting struct{ events []ports.Event }
 
@@ -205,6 +213,13 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 	if _, err := hasher.Verify("garbage", "password-sentinel"); !errors.Is(err, domain.ErrUnsupportedFormat) {
 		t.Fatalf("error not passed through: %v", err)
 	}
+	// "password-sentinel" is 17 bytes long: the fake appends the length.
+	if concealed, err := hasher.Conceal(ctx, []byte("password-sentinel"), []byte("salt")); err != nil || string(concealed) != "concealed-salt17" {
+		t.Fatalf("Conceal = %q, %v", concealed, err)
+	}
+	if _, err := hasher.Conceal(ctx, []byte("password-sentinel"), nil); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("error not passed through: %v", err)
+	}
 
 	mem := porttest.NewMemMetadata()
 	if err := mem.CreateBucket(ctx, bucket.Bucket{Name: "bucket-sentinel"}); err != nil {
@@ -263,11 +278,15 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 			t.Errorf("no span named %q among %v", want, names)
 		}
 	}
-	// The hasher takes no context: its calls are counted and are no spans.
+	// Hash and Verify take no context: their calls are counted and are no
+	// spans. Conceal takes one, and is a span of the request that asked.
 	for _, name := range names {
-		if strings.HasPrefix(name, "passwords.") {
+		if strings.HasPrefix(name, "passwords.") && name != "passwords.Conceal" {
 			t.Errorf("a call of the password hasher is the span %q, which belongs to no trace", name)
 		}
+	}
+	if !contains(names, "passwords.Conceal") {
+		t.Errorf("no span named passwords.Conceal among %v", names)
 	}
 	wantNothingOf(t, tel, recorder, "sentinel", "hash-of-", "garbage")
 }

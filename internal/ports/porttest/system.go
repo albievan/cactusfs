@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -191,6 +193,15 @@ func (h *Hasher) Verify(encoded, password string) (bool, error) {
 	h.Verified++
 	h.mu.Unlock()
 	return encoded == "test-hash:"+password, nil
+}
+
+// Conceal implements ports.PasswordHasher: HMAC-SHA256 under salt, which
+// is fast and deterministic and, like the real thing, no plain hash of the
+// value.
+func (h *Hasher) Conceal(_ context.Context, value, salt []byte) ([]byte, error) {
+	mac := hmac.New(sha256.New, salt)
+	_, _ = mac.Write(value)
+	return mac.Sum(nil), nil
 }
 
 // Verifications returns how often Verify was called.

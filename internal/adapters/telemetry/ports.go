@@ -3,8 +3,10 @@ package telemetry
 import (
 	"context"
 
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -539,4 +541,53 @@ func (s *nodeSettings) NodeSettings(ctx context.Context, nodeID string) (cluster
 	settings, err := s.next.NodeSettings(ctx, nodeID)
 	done(err)
 	return settings, err
+}
+
+// InstrumentTargets returns next wrapped so that every call is traced and
+// counted. The target is neither a label nor an attribute: its name is
+// chosen by somebody, and nothing else of it - an endpoint, a sealed
+// secret - has a place in a metric or a span (ADR-0023).
+func (t *Telemetry) InstrumentTargets(next ports.TargetStore) ports.TargetStore {
+	return &targetStore{t: t, next: next}
+}
+
+type targetStore struct {
+	t    *Telemetry
+	next ports.TargetStore
+}
+
+const portTargets = "targets"
+
+func (*targetStore) instrumented() {}
+
+// PutTarget implements ports.TargetStore.
+func (s *targetStore) PutTarget(ctx context.Context, target delivery.Target, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portTargets, "PutTarget")
+	err := s.next.PutTarget(ctx, target, record)
+	done(err)
+	return err
+}
+
+// DeleteTarget implements ports.TargetStore.
+func (s *targetStore) DeleteTarget(ctx context.Context, name string, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portTargets, "DeleteTarget")
+	err := s.next.DeleteTarget(ctx, name, record)
+	done(err)
+	return err
+}
+
+// GetTarget implements ports.TargetStore.
+func (s *targetStore) GetTarget(ctx context.Context, name string) (delivery.Target, error) {
+	ctx, done := s.t.call(ctx, portTargets, "GetTarget")
+	target, err := s.next.GetTarget(ctx, name)
+	done(err)
+	return target, err
+}
+
+// ListTargets implements ports.TargetStore.
+func (s *targetStore) ListTargets(ctx context.Context) ([]delivery.Target, error) {
+	ctx, done := s.t.call(ctx, portTargets, "ListTargets")
+	targets, err := s.next.ListTargets(ctx)
+	done(err)
+	return targets, err
 }

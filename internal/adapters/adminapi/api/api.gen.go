@@ -7864,6 +7864,29 @@ func (response PutTarget200JSONResponse) VisitPutTargetResponse(w http.ResponseW
 	return err
 }
 
+type PutTarget429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type PutTarget429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers PutTarget429ResponseHeaders
+}
+
+func (response PutTarget429ApplicationProblemPlusJSONResponse) VisitPutTargetResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type PutTargetdefaultApplicationProblemPlusJSONResponse struct {
 	Body       Problem
 	StatusCode int
@@ -7974,6 +7997,29 @@ func (response CreateUser201JSONResponse) VisitCreateUserResponse(w http.Respons
 	return err
 }
 
+type CreateUser429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type CreateUser429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers CreateUser429ResponseHeaders
+}
+
+func (response CreateUser429ApplicationProblemPlusJSONResponse) VisitCreateUserResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type CreateUserdefaultApplicationProblemPlusJSONResponse struct {
 	Body       Problem
 	StatusCode int
@@ -8078,6 +8124,29 @@ func (response UpdateUser200JSONResponse) VisitUpdateUserResponse(w http.Respons
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateUser429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type UpdateUser429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers UpdateUser429ResponseHeaders
+}
+
+func (response UpdateUser429ApplicationProblemPlusJSONResponse) VisitUpdateUserResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
 	_, err := buf.WriteTo(w)
 	return err
 }

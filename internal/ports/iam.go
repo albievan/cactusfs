@@ -114,6 +114,15 @@ type PasswordHasher interface {
 	// takes as long for a wrong password as for the right one. An encoded
 	// hash it cannot read is an error.
 	Verify(encoded, password string) (bool, error)
+	// Conceal returns what stands for value where a request has to be
+	// recognised again and the value - a password, a secret - must not be
+	// kept: a hash of it under salt, slow to guess from, at a cost fixed by
+	// the implementation and not by its configuration. The same value and
+	// salt give the same result, every time and on every node. It never
+	// waits long, and never for what Hash and Verify need: when it is busy
+	// the error wraps domain.ErrTooManyRequests, and when ctx ends, the
+	// error of ctx.
+	Conceal(ctx context.Context, value, salt []byte) ([]byte, error)
 }
 
 // IdentityProvider says who somebody is from what they present at sign-in.

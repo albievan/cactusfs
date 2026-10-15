@@ -35,6 +35,29 @@ type watchedStore struct {
 	// it has been read: the session a request was authenticated with is
 	// gone when its operation looks for it.
 	endAfterReading atomic.Bool
+	// kept are the records of repeated requests the store was given.
+	keptMu sync.Mutex
+	kept   []ports.IdempotencyRecord
+}
+
+// keep notes a record of a repeated request.
+func (w *watchedStore) keep(r ports.IdempotencyRecord) {
+	w.keptMu.Lock()
+	defer w.keptMu.Unlock()
+	w.kept = append(w.kept, r)
+}
+
+// Kept returns the records of repeated requests the store was given.
+func (w *watchedStore) Kept() []ports.IdempotencyRecord {
+	w.keptMu.Lock()
+	defer w.keptMu.Unlock()
+	return slices.Clone(w.kept)
+}
+
+// CompleteIdempotent implements ports.IdempotencyStore.
+func (w *watchedStore) CompleteIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
+	w.keep(r)
+	return w.MemIAM.CompleteIdempotent(ctx, r)
 }
 
 func (w *watchedStore) GetSession(ctx context.Context, tokenHash string) (ports.Session, error) {
@@ -49,6 +72,7 @@ func (w *watchedStore) GetSession(ctx context.Context, tokenHash string) (ports.
 
 func (w *watchedStore) BeginIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
 	w.idempotent.Add(1)
+	w.keep(r)
 	return w.MemIAM.BeginIdempotent(ctx, r)
 }
 
@@ -404,7 +428,7 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	// written is taken from this list, and must then answer 423.
 	notWritten := []string{
 		"getBucketQuota", "putBucketQuota", "deleteBucketQuota", "recountBucketUsage",
-		"listTargets", "getTarget", "putTarget", "deleteTarget", "getTargetStatus",
+		"getTargetStatus",
 		"getBucketNotifications", "putBucketNotifications", "deleteBucketNotifications",
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",

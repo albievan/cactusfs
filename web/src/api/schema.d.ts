@@ -860,7 +860,9 @@ export interface paths {
          *     this API, in no log line, audit record or event. Changing a target without `auth.secret` keeps the
          *     one it has, as long as `auth.mode` stays what it was. A target of kind `webhook` is given a signing
          *     key, made here and returned once, in the answer to the request that made it or that asked for a new
-         *     one with `rotate_signing_key`.
+         *     one with `rotate_signing_key`. A request that defines a target and is answered 503 may have defined it
+         *     all the same, with a signing key nobody was shown: repeat it with the same `Idempotency-Key`, and when
+         *     the target turns out to exist without the key having been shown, obtain one with `rotate_signing_key`.
          *
          *     The kind of a target cannot be changed (409); delete it and define it again. Nothing is connected to
          *     by this request: whether the target can be reached is told by its status.
@@ -3040,6 +3042,22 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
+            /**
+             * @description A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of
+             *     the body, of which a node computes few at a time and one at a time for a caller; none could be
+             *     computed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,
+             *     with the same key, can be sent again.
+             */
+            429: {
+                headers: {
+                    /** @description After how many seconds to send the request again. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             default: components["responses"]["Problem"];
         };
     };
@@ -3093,6 +3111,22 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"];
+                };
+            };
+            /**
+             * @description A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of
+             *     the body, of which a node computes few at a time and one at a time for a caller; none could be
+             *     computed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,
+             *     with the same key, can be sent again.
+             */
+            429: {
+                headers: {
+                    /** @description After how many seconds to send the request again. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];
@@ -3744,6 +3778,22 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TargetPutResult"];
+                };
+            };
+            /**
+             * @description A request with `Idempotency-Key` whose body may hold a secret is recognised again by a slow hash of
+             *     the body, of which a node computes few at a time and one at a time for a caller; none could be
+             *     computed at once (`code` is `TooManyRequests`). Nothing was reserved or changed; the same request,
+             *     with the same key, can be sent again.
+             */
+            429: {
+                headers: {
+                    /** @description After how many seconds to send the request again. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];

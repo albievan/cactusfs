@@ -452,3 +452,12 @@ func (h *passwordHasher) Verify(encoded, password string) (bool, error) {
 	done(err)
 	return ok, err
 }
+
+// Conceal implements ports.PasswordHasher. Unlike Hash and Verify it has a
+// context, and is a span.
+func (h *passwordHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, error) {
+	ctx, done := h.t.call(ctx, portHasher, "Conceal")
+	concealed, err := h.next.Conceal(ctx, value, salt)
+	done(err)
+	return concealed, err
+}

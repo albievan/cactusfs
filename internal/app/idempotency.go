@@ -37,8 +37,18 @@ type IdempotentRequest struct {
 	// Key is the idempotency key as sent.
 	Key string
 	// Fingerprint describes the request, so that the same key with
-	// another request is recognised.
+	// another request is recognised. It holds none of Concealed.
 	Fingerprint string
+	// Operation names what is asked for - the method and the path - and,
+	// with the scope and the key, salts what stands for each of Concealed.
+	Operation string
+	// Concealed are the values of the request that may be secrets - a
+	// password, the secret of a target, the path of an endpoint - taken out
+	// of Fingerprint. None of them is kept, nor a plain hash of one: each
+	// is stood for by the hasher's Conceal of it, under a salt of the key
+	// and the operation, so that what is kept for a day in the replicated
+	// state is no quick way to try guesses of it.
+	Concealed []string
 	// Principal is who makes the request, as it was authenticated.
 	Principal iam.Principal
 	// Upload says that the request stores an object - the one request a
@@ -85,6 +95,14 @@ type IdempotencyService struct {
 	// authz refuses a locked session; nil, the domain's decision is taken
 	// as it is and nothing is recorded.
 	authz ports.Authorizer
+	// hasher conceals the values of a request that may be secrets; nil,
+	// a request with such values is refused.
+	hasher ports.PasswordHasher
+	// concealing holds the scopes whose request is being concealed on this
+	// node right now: one at a time for a caller, as a search is, so that
+	// nobody holds every slot of the hasher.
+	concealingMu sync.Mutex
+	concealing   map[string]struct{}
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
@@ -102,6 +120,69 @@ func NewIdempotencyService(store ports.IdempotencyStore, kms ports.KMS, clock po
 func (s *IdempotencyService) WithAuthorizer(authz ports.Authorizer) *IdempotencyService {
 	s.authz = authz
 	return s
+}
+
+// WithHasher gives the service what conceals the values of a request that
+// may be secrets (IdempotentRequest.Concealed). Every node of a deployment
+// must conceal alike - the same hasher, at the same cost - or a request
+// repeated through another node is taken for another request.
+func (s *IdempotencyService) WithHasher(hasher ports.PasswordHasher) *IdempotencyService {
+	s.hasher = hasher
+	return s
+}
+
+// fingerprint returns what is kept to recognise the request: a hash of its
+// fingerprint and, for each value that may be a secret, of what stands for
+// it - the hasher's Conceal under a salt of the scope, the key and the
+// operation. A request with no value in Concealed is fingerprinted from
+// Fingerprint alone, as every request was before values were concealed;
+// what the caller puts in Concealed, and so which requests are
+// fingerprinted otherwise, is the caller's to say.
+func (s *IdempotencyService) fingerprint(ctx context.Context, req IdempotentRequest) (string, error) {
+	if len(req.Concealed) == 0 {
+		return hashHex(req.Fingerprint), nil
+	}
+	if s.hasher == nil {
+		return "", errors.New("idempotency.fingerprint: no hasher to conceal the secrets of a request with")
+	}
+	done, err := s.admitConcealing(req.Scope)
+	if err != nil {
+		return "", fmt.Errorf("idempotency.fingerprint: %w", err)
+	}
+	defer done()
+	salt, err := hex.DecodeString(hashHex(req.Scope, req.Key, req.Operation))
+	if err != nil {
+		return "", fmt.Errorf("idempotency.fingerprint: %w", err)
+	}
+	parts := []string{req.Fingerprint, "concealed"}
+	for _, value := range req.Concealed {
+		concealed, err := s.hasher.Conceal(ctx, []byte(value), salt)
+		if err != nil {
+			return "", fmt.Errorf("idempotency.fingerprint: %w", err)
+		}
+		parts = append(parts, hex.EncodeToString(concealed))
+	}
+	return hashHex(parts...), nil
+}
+
+// admitConcealing lets the request of a scope be concealed, or says that
+// one of the same scope is being concealed already; the error then wraps
+// domain.ErrTooManyRequests, at once. The returned function ends it.
+func (s *IdempotencyService) admitConcealing(scope string) (func(), error) {
+	s.concealingMu.Lock()
+	defer s.concealingMu.Unlock()
+	if s.concealing == nil {
+		s.concealing = map[string]struct{}{}
+	}
+	if _, busy := s.concealing[scope]; busy {
+		return nil, fmt.Errorf("%w: a request of yours is being recognised already", domain.ErrTooManyRequests)
+	}
+	s.concealing[scope] = struct{}{}
+	return func() {
+		s.concealingMu.Lock()
+		defer s.concealingMu.Unlock()
+		delete(s.concealing, scope)
+	}, nil
 }
 
 // locked refuses a locked console session everything but the repeat of an
@@ -153,7 +234,11 @@ func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (
 	if err := s.locked(ctx, req); err != nil {
 		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
 	}
-	reservation := Reservation{id: hashHex(req.Scope, req.Key), fingerprint: hashHex(req.Fingerprint)}
+	fingerprint, err := s.fingerprint(ctx, req)
+	if err != nil {
+		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
+	}
+	reservation := Reservation{id: hashHex(req.Scope, req.Key), fingerprint: fingerprint}
 	// A stale record is removed and the key reserved again: twice at
 	// most, then somebody else is quicker and the caller is told to wait.
 	for range 2 {

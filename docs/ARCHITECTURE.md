@@ -450,7 +450,7 @@ Prometheus client and are not listed.
 
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
-`identity_provider`, `passwords`, `cluster_view`, `node_settings`.
+`identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
