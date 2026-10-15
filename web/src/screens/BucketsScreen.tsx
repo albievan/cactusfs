@@ -264,7 +264,7 @@ function UsageCells({ usage }: { usage: Loaded<BucketUsage> }) {
 }
 
 /** Marks a figure of a count that stopped at its bound: the sign for the eye, the words for whoever has it read. */
-function AtLeast() {
+export function AtLeast() {
   return (
     <>
       <span aria-hidden="true">≥ </span>
@@ -274,7 +274,7 @@ function AtLeast() {
 }
 
 /** What the policy of a bucket is, as the API sums it up; undefined is a bucket without one. */
-function PolicySummary({ policy }: { policy: { statements: number; open_to_anyone: boolean } | undefined }) {
+export function PolicySummary({ policy }: { policy: { statements: number; open_to_anyone: boolean } | undefined }) {
   if (policy === undefined) {
     return <>none</>;
   }
@@ -342,7 +342,7 @@ function ActivityCell({ label, entries }: { label: string; entries: BucketActivi
 }
 
 /** One upload or download: when and who, and under it the object, when the API names it. */
-function ActivityLine({ entry }: { entry: BucketActivityEntry }) {
+export function ActivityLine({ entry }: { entry: BucketActivityEntry }) {
   return (
     <span className="activity-line">
       <span>

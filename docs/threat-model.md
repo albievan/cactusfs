@@ -329,3 +329,13 @@ Still open:
     taken back alone ends the way back at the first bucket created. No guard is built.
     Whether a later release should hold the level by a finalising step is open
     (ADR-0023, "Rollback").
+32. **"Delete all" asks for the password; that is a guard against mistakes, not an
+    access control** (PLAN Goal M). The server checks the password
+    (`POST /session/unlock`, with its throttle, audit and the end of the session at the
+    fifth wrong one), but the deletions that follow are each judged by the authorizer
+    as any `DELETE` is: whoever holds the session could delete the same objects one by
+    one without it. A control that binds the password to the deletions - a server-side
+    "delete every object" operation, or a short-lived re-authentication that bulk
+    deletion requires - would be a contract change with an ADR. A side effect: each
+    confirmation is audited as an unlock of an active session and renews its lifetime.
+    Is a confirmation enough, or should the server enforce it?

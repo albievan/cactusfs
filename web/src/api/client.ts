@@ -90,12 +90,21 @@ export class ApiError extends Error {
    * tells: no other call of the console is made twice with one key.
    */
   readonly replayed: boolean;
+  /**
+   * Whether this is a 401 to a request that was sent with tokens an unlock
+   * has replaced since - sent before the unlock, answered after it. It says
+   * only that those tokens are refused now, not that the session ended: the
+   * request never reached the authorizer, and the same request sent again
+   * carries the new tokens. Only the calls made with `api` tell.
+   */
+  readonly staleTokens: boolean;
 
-  constructor(problem: Problem, replayed = false) {
+  constructor(problem: Problem, replayed = false, staleTokens = false) {
     super(problem.title);
     this.name = 'ApiError';
     this.problem = problem;
     this.replayed = replayed;
+    this.staleTokens = staleTokens;
   }
 }
 
@@ -163,6 +172,15 @@ export const UNLOCK_ATTEMPTS = 5;
 // last unlocked or ended.
 let wrongPasswords = 0;
 
+/**
+ * How many passwords unlocking was answered "wrong" since the session was
+ * last unlocked or ended: the API ends the session at UNLOCK_ATTEMPTS. It is
+ * for saying so, and decides nothing.
+ */
+export function wrongPasswordCount(): number {
+  return wrongPasswords;
+}
+
 function tellUnauthorized(path: string, method: string): void {
   const cause: Unauthorized = { path, method, wrongPasswords };
   // The session is gone: what was counted of it is of no use any more.
@@ -216,6 +234,9 @@ let generation = 0;
 // The stamps of the requests of `api` that have been sent and not answered,
 // by the id the client gives each.
 const sentWith = new Map<string, number>();
+// The answers of `api` that were a 401 to tokens an unlock has replaced
+// since: unwrap marks the error it makes of one (`staleTokens`).
+const staleAnswers = new WeakSet<Response>();
 
 const IDEMPOTENT_METHODS = new Set(['POST', 'PUT', 'DELETE']);
 
@@ -259,9 +280,23 @@ const sessionMiddleware: Middleware = {
     const sent = sentWith.get(id);
     sentWith.delete(id);
     if (response.status === 401) {
-      if (sent === undefined || sent === generation) {
-        tellUnauthorized(schemaPath, request.method);
+      const judge = () => {
+        if (sent === undefined || sent === generation) {
+          tellUnauthorized(schemaPath, request.method);
+        } else {
+          staleAnswers.add(response);
+        }
+      };
+      // A 401 that comes while an unlock is on its way may be to the tokens
+      // that unlock has just replaced at the API, before the console has the
+      // new ones: it is judged once the unlock is over. The unlock's own 401
+      // is judged at once - it is the end of the session - and so is the
+      // sign-out's, which never waits for an unlock.
+      const signingOut = schemaPath === '/session' && request.method === 'DELETE';
+      if (unlocking !== null && schemaPath !== UNLOCK_PATH && !signingOut) {
+        return unlocking.then(judge).then(() => undefined);
       }
+      judge();
     } else if (response.status === 423) {
       // A copy is read, so that the answer itself is left for whoever asked.
       return response
@@ -307,15 +342,20 @@ export async function unwrap<T>(
   if (response.ok) {
     return data as T;
   }
+  const stale = staleAnswers.has(response);
   if (isProblem(error)) {
-    throw new ApiError(error);
+    throw new ApiError(error, false, stale);
   }
-  throw new ApiError({
-    type: 'about:blank',
-    title: `The server answered ${response.status} ${response.statusText}`.trim(),
-    status: response.status,
-    code: 'UnexpectedResponse',
-  });
+  throw new ApiError(
+    {
+      type: 'about:blank',
+      title: `The server answered ${response.status} ${response.statusText}`.trim(),
+      status: response.status,
+      code: 'UnexpectedResponse',
+    },
+    false,
+    stale,
+  );
 }
 
 /**
@@ -333,12 +373,16 @@ export async function unwrap<T>(
  * password is sent once and kept nowhere.
  */
 export function unlock(password: string): Promise<Session> {
-  const attempt = { abandoned: false };
+  // `abandoned`: the user signed out while it was on its way. `late`: it was
+  // given up at UNLOCK_TIMEOUT_MS. Either way its answer, should it still
+  // come, renews nothing here.
+  const attempt = { abandoned: false, late: false };
   pendingUnlock = attempt;
   const stop = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      attempt.late = true;
       stop.abort();
       reject(
         new ApiError({
@@ -352,14 +396,21 @@ export function unlock(password: string): Promise<Session> {
   });
   const answered = unwrap(api.POST(UNLOCK_PATH, { body: { password }, signal: stop.signal })).then(
     (session) => {
-      if (attempt.abandoned) {
-        // The user signed out while this was on its way, and the API
-        // carried it out all the same: the session lives on under the
-        // tokens of this answer, which the sign-out did not carry. It is
-        // ended with them, and they are kept nowhere.
-        void unwrap(api.DELETE('/session', { headers: { 'X-CSRF-Token': session.csrf_token } })).catch(
-          () => undefined,
-        );
+      if (attempt.abandoned || attempt.late) {
+        // The user signed out while this was on its way, or the console gave
+        // it up and said the server could not be reached - and the API
+        // carried it out all the same: the session lives on under the tokens
+        // of this answer, which nothing here holds. It is ended with them,
+        // and they are kept nowhere. Of one that was given up the console is
+        // then told that the session ended: the tokens it has were replaced.
+        const late = attempt.late && !attempt.abandoned;
+        void unwrap(api.DELETE('/session', { headers: { 'X-CSRF-Token': session.csrf_token } }))
+          .catch(() => undefined)
+          .then(() => {
+            if (late) {
+              tellUnauthorized('/session', 'DELETE');
+            }
+          });
         throw new ApiError({ type: 'about:blank', title: 'Signed out', status: 401, code: 'SignedOut' });
       }
       storeCsrfToken(session.csrf_token);
@@ -463,7 +514,10 @@ export type UploadProgress = (sent: number, total: number) => void;
  * and answered after it: the API refused those tokens, not the session, and
  * the upload engine makes such an attempt again - with the same
  * Idempotency-Key, which nothing was stored under, and the new tokens - as
- * it does one whose connection failed. It is not told as a 401.
+ * it does one whose connection failed. It is not told as a 401, and its
+ * error has `staleTokens` set. A 401 that comes while an unlock is on its
+ * way is judged once the unlock is over: one of these if the unlock gave
+ * new tokens, the end of the session if it did not.
  *
  * An upload whose `signal` is aborted is given up: the request is aborted and
  * the promise rejects with an ApiError of status 0, "The upload was stopped".
@@ -533,15 +587,20 @@ function sendObject(
     request.onabort = () => {
       reject(unexpected('The upload was stopped'));
     };
-    request.onload = () => {
+    // What the answer is taken for, once it can be judged.
+    const loaded = () => {
       if (request.status === 401 && sent !== generation) {
         reject(
-          new ApiError({
-            type: 'about:blank',
-            title: 'The upload was sent before the session was unlocked',
-            status: 0,
-            code: 'UnexpectedResponse',
-          }),
+          new ApiError(
+            {
+              type: 'about:blank',
+              title: 'The upload was sent before the session was unlocked',
+              status: 0,
+              code: 'UnexpectedResponse',
+            },
+            false,
+            true,
+          ),
         );
         return;
       }
@@ -569,6 +628,17 @@ function sendObject(
       } else {
         reject(unexpected(`The server answered ${String(request.status)} ${request.statusText}`.trim()));
       }
+    };
+    request.onload = () => {
+      // A 401 while an unlock is on its way may be to the tokens it has just
+      // replaced at the API: it is judged once the unlock is over, as the
+      // middleware judges the 401s of `api`. Should the unlock fail, it is
+      // the end of the session after all.
+      if (request.status === 401 && unlocking !== null) {
+        void unlocking.then(loaded);
+        return;
+      }
+      loaded();
     };
     request.send(file);
   });

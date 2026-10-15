@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import type { Identity, ServerVersion } from './api/client';
 import logo from './assets/brand/cactusfs-logo-reversed.svg';
 import mark from './assets/brand/cactusfs-mark.svg';
+import { useDeletions } from './deletions/context';
 import { navigate, routeHref, useRoute } from './router';
 import { ActivityBar } from './ui/ActivityBar';
 import { useUploads } from './uploads/context';
@@ -94,6 +95,7 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
     }
   }
   const uploads = useUploads();
+  const deletions = useDeletions();
   // Whether the question "sign out and stop the uploads?" is being asked.
   const [leaving, setLeaving] = useState(false);
   // The control that asked it: the keyboard is back on it when the answer is "stay".
@@ -127,8 +129,10 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
   }, [folded]);
 
   // Signing out with nothing on its way is done at once, as it always was.
+  // Uploads and deletions end with the session: with either on its way it
+  // asks first.
   const signOut = () => {
-    if (uploads.busy()) {
+    if (uploads.busy() || deletions.busy()) {
       setLeaving(true);
     } else {
       onSignOut();
@@ -249,6 +253,7 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
                   onLeave: () => {
                     setLeaving(false);
                     uploads.cancelAll();
+                    deletions.cancelAll();
                     onSignOut();
                   },
                   onStay: () => {

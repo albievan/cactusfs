@@ -12,8 +12,17 @@ import { SettingsScreen } from './SettingsScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
 
+interface ScreensProps {
+  /**
+   * Whether the session was signed in to with a password, as the API says:
+   * only then is a password asked for again before every object of a bucket
+   * is deleted. The API decides; this only chooses what is offered.
+   */
+  passwordSession?: boolean;
+}
+
 /** Chooses the screen that belongs to the place in the address. */
-export function Screens() {
+export function Screens({ passwordSession = false }: ScreensProps) {
   const route = useRoute();
   const [section = 'buckets', item] = route.segments;
 
@@ -24,7 +33,9 @@ export function Screens() {
       }
       const prefix = route.query.get('prefix') ?? '';
       // The key makes a fresh browser, back on its first page, for every prefix.
-      return <ObjectsScreen key={`${item}\n${prefix}`} bucket={item} prefix={prefix} />;
+      return (
+        <ObjectsScreen key={`${item}\n${prefix}`} bucket={item} prefix={prefix} passwordSession={passwordSession} />
+      );
     }
     case 'search': {
       const query = route.query.get('q') ?? '';

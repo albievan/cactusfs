@@ -14,6 +14,7 @@ import {
   type Unauthorized,
 } from './api/client';
 import { dropCsrfToken, readCsrfToken, storeCsrfToken } from './api/csrf';
+import { DeletionsProvider } from './deletions/DeletionsProvider';
 import { Layout } from './Layout';
 import { NoticesProvider } from './notices/NoticesProvider';
 import { LockScreen } from './screens/LockScreen';
@@ -285,25 +286,32 @@ export function App() {
     case 'signed-out':
       return <SignIn onSignedIn={signedIn} signOutError={session.error} ended={session.ended} />;
     case 'signed-in':
-      // Uploads and notices are the console's, not a screen's: they stand
-      // above the screens, so that an upload goes on whichever is shown, and
-      // within the signed-in part, so that they end with the session. They
-      // stand above the lock as well: a locked session has not ended, and
-      // its uploads go on. Nothing of a screen is there while it is locked.
+      // Uploads, deletions and notices are the console's, not a screen's:
+      // they stand above the screens, so that an upload or a deletion goes on
+      // whichever is shown, and within the signed-in part, so that they end
+      // with the session. They stand above the lock as well: a locked session
+      // has not ended, and its uploads go on. Nothing of a screen is there
+      // while it is locked.
+      //
+      // Whether the session was signed in to with a password is what the API
+      // says of it (`via`); only such a session is offered what asks for the
+      // password again.
       return (
         <NoticesProvider>
           <UploadsProvider tally={tally}>
-            {session.locked ? (
-              <LockScreen
-                user={session.identity.user ?? session.identity.kind}
-                onUnlocked={unlocked}
-                onSignOut={signOut}
-              />
-            ) : (
-              <Layout identity={session.identity} onSignOut={signOut}>
-                <Screens />
-              </Layout>
-            )}
+            <DeletionsProvider>
+              {session.locked ? (
+                <LockScreen
+                  user={session.identity.user ?? session.identity.kind}
+                  onUnlocked={unlocked}
+                  onSignOut={signOut}
+                />
+              ) : (
+                <Layout identity={session.identity} onSignOut={signOut}>
+                  <Screens passwordSession={session.identity.via === 'session'} />
+                </Layout>
+              )}
+            </DeletionsProvider>
           </UploadsProvider>
         </NoticesProvider>
       );

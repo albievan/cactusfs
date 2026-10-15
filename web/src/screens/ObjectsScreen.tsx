@@ -9,7 +9,8 @@ import {
   type ObjectList,
   type ObjectMetadata,
 } from '../api/client';
-import { useNoticeActions } from '../notices/context';
+import { useDeleting, useDeletionList, useDeletions } from '../deletions/context';
+import { doneOf, outcomeOf, progressLineOf, totalOf } from '../deletions/state';
 import { routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatBytes, formatTime } from '../ui/format';
@@ -21,6 +22,8 @@ import { useUploadList, useUploads } from '../uploads/context';
 import { UPLOADS_AT_ONCE } from '../uploads/engine';
 import { totalsOf } from '../uploads/state';
 import { UploadTile } from '../uploads/UploadTile';
+import { BucketDetails, useBucketFacts } from './BucketDetails';
+import { DeleteAll } from './DeleteAll';
 
 const DELIMITER = '/';
 
@@ -29,6 +32,11 @@ interface ObjectsScreenProps {
   bucket: string;
   /** The prefix to list; empty for the top of the bucket. */
   prefix: string;
+  /**
+   * Whether the session was signed in to with a password, as the API says:
+   * only then is "Delete all" offered, which asks for it again.
+   */
+  passwordSession?: boolean;
 }
 
 /**
@@ -112,8 +120,13 @@ interface KnownDetails {
  * The uploads are the console's, not this screen's: the form hands the files
  * over, and they go on when another screen is shown. What is shown here of
  * them is how the uploads into this bucket stand - the same on coming back.
+ * So are the deletions of several objects - of those ticked, and of every
+ * object of the bucket - and so is what is shown of them.
+ *
+ * Above it all, the details of the bucket, read again when an upload into
+ * it or a deletion of its objects is over.
  */
-export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
+export function ObjectsScreen({ bucket, prefix, passwordSession = false }: ObjectsScreenProps) {
   // The continuation tokens of the pages before this one and of this one; the
   // first page has none.
   const [tokens, setTokens] = useState<string[]>([]);
@@ -151,7 +164,17 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   // of the place of the row, never of the key: a key holds any character.
   const detailsId = useId();
   const uploads = useUploads();
-  const { notify } = useNoticeActions();
+  const deletions = useDeletions();
+  const deleting = useDeleting(bucket);
+  const facts = useBucketFacts(bucket);
+  // Whether the password of "Delete all" is being checked: nothing else is
+  // deleted meanwhile from here.
+  const [checkingPassword, setCheckingPassword] = useState(false);
+  // The deletion "Delete all" just began: the keyboard goes to its progress.
+  const [focusDeletion, setFocusDeletion] = useState<string | null>(null);
+  const focused = useCallback(() => {
+    setFocusDeletion(null);
+  }, []);
   const uploadForm = useRef<HTMLFormElement>(null);
   // The files chosen for upload. One file can be given any key; several go
   // under a prefix, each by its own name.
@@ -227,6 +250,44 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
     };
   }, [uploads, bucket, prefix, reload]);
 
+  // What the deletions tell this screen. An object that was deleted is no
+  // longer ticked and its details close; the list is read again a moment
+  // after objects under the prefix shown were deleted - once for all that
+  // were deleted in that moment - and when a deletion of the bucket is over.
+  useEffect(() => {
+    let behind = false;
+    let later: ReturnType<typeof setTimeout> | undefined;
+    const catchUp = () => {
+      clearTimeout(later);
+      later = undefined;
+      if (behind) {
+        behind = false;
+        reload();
+      }
+    };
+    const stopListening = deletions.listen((event) => {
+      if (event.bucket !== bucket) {
+        return;
+      }
+      if (event.type === 'deleted') {
+        setChosen((left) => left.filter((k) => k !== event.key));
+        setOpen((keys) => keys.filter((k) => k !== event.key));
+        setKnown((old) => new Map([...old].filter(([k]) => k !== event.key)));
+        if (event.key.startsWith(prefix)) {
+          behind = true;
+          later ??= setTimeout(catchUp, RELOAD_EVERY_MS);
+        }
+        return;
+      }
+      behind = true;
+      catchUp();
+    });
+    return () => {
+      stopListening();
+      clearTimeout(later);
+    };
+  }, [deletions, bucket, prefix, reload]);
+
   // Hands the files over to the console's uploads: they are sent a few at a
   // time, and go on whatever screen is shown.
   const upload = (event: FormEvent<HTMLFormElement>) => {
@@ -277,39 +338,12 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   };
 
   // Deletes what is ticked on the page shown - the keys the count and the
-  // question name, and no others - one request an object, as the API has it.
-  // It stops at the first refusal; what was deleted until then stays deleted.
-  // It goes on when another screen is shown, and this one is then no longer
-  // there to say how it ended: so that is said as a notice, here or not.
+  // question name, and no others - one request an object, as the API has it,
+  // several at once through the console's deletions. A refusal is counted
+  // with its reason and the others go on. It goes on when another screen is
+  // shown, and how it ended is said as a notice, here or not.
   const removeChosen = (keys: string[]) => {
-    const link = { href: routeHref(['buckets', bucket]), label: `Open ${bucket}` };
-    const count = (n: number) => (n === 1 ? '1 object' : `${String(n)} objects`);
-    void action
-      .run(async () => {
-        let deleted = 0;
-        try {
-          for (const objectKey of keys) {
-            await unwrap(
-              api.DELETE('/buckets/{bucket}/object', { params: { path: { bucket }, query: { key: objectKey } } }),
-            );
-            deleted += 1;
-            setChosen((left) => left.filter((k) => k !== objectKey));
-            forget(objectKey);
-          }
-        } catch (error) {
-          notify({
-            kind: 'error',
-            title: `Deleted ${String(deleted)} of ${count(keys.length)} from ${bucket}, and stopped`,
-            detail: reasonOf(error, 'The request failed'),
-            link,
-          });
-          throw error;
-        }
-        notify({ kind: 'success', title: `Deleted ${count(keys.length)} from ${bucket}`, link });
-      })
-      .then(() => {
-        listing.reload();
-      });
+    deletions.deleteKeys(bucket, keys);
   };
 
   const toggleDetails = useCallback((objectKey: string) => {
@@ -337,6 +371,11 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
   }
   const nextToken = page?.truncated === true ? page.next_continuation_token : undefined;
   const empty = page !== undefined && page.objects.length === 0 && page.common_prefixes.length === 0;
+  // Whether the bucket holds nothing to delete, as far as is known: its usage
+  // counted no object to the end, or the top of it lists nothing.
+  const bucketEmpty =
+    (facts.usage.data?.complete === true && facts.usage.data.object_count === 0) || (prefix === '' && empty);
+  const withDeleteAll = passwordSession && page !== undefined && !bucketEmpty;
   const pageKeys = page?.objects.map((object) => object.key) ?? [];
   // Only what is still on the page counts as chosen.
   const selected = chosen.filter((k) => pageKeys.includes(k));
@@ -352,6 +391,7 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
       <h1>{bucket}</h1>
       <Breadcrumbs bucket={bucket} prefix={prefix} />
       <ProblemNotice error={action.error ?? listing.error} />
+      <BucketDetails facts={facts} />
 
       <section className="card card-body panel" aria-labelledby="upload-object">
         <h2 id="upload-object">Upload an object</h2>
@@ -415,30 +455,52 @@ export function ObjectsScreen({ bucket, prefix }: ObjectsScreenProps) {
           </p>
         ) : null}
         {empty && listing.error === null ? <p>There is nothing here.</p> : null}
-        {page !== undefined && pageKeys.length > 0 ? (
+        <BucketDeletions
+          bucket={bucket}
+          focusId={focusDeletion}
+          onFocused={focused}
+        />
+        {page !== undefined && (pageKeys.length > 0 || withDeleteAll) ? (
           <div className="toolbar">
-            <label className="check">
-              <input
-                className="form-check-input"
-                type="checkbox"
-                checked={allChosen}
-                onChange={(event) => {
-                  setChosen(event.target.checked ? pageKeys : []);
+            {pageKeys.length > 0 ? (
+              <>
+                <label className="check">
+                  <input
+                    className="form-check-input"
+                    type="checkbox"
+                    checked={allChosen}
+                    onChange={(event) => {
+                      setChosen(event.target.checked ? pageKeys : []);
+                    }}
+                  />
+                  <span>Select all on this page</span>
+                </label>
+                <span className="toolbar-count" aria-live="polite">
+                  {selected.length} selected
+                </span>
+                <ConfirmButton
+                  label="Delete selected"
+                  question={`Delete ${String(selected.length)} ${selected.length === 1 ? 'object' : 'objects'}?`}
+                  disabled={action.busy || deleting || checkingPassword || selected.length === 0}
+                  onConfirm={() => {
+                    removeChosen(selected);
+                  }}
+                />
+              </>
+            ) : (
+              <span className="toolbar-count" />
+            )}
+            {withDeleteAll ? (
+              <DeleteAll
+                bucket={bucket}
+                usage={facts.usage}
+                disabled={deleting}
+                onChecking={setCheckingPassword}
+                onConfirmed={(expected) => {
+                  setFocusDeletion(deletions.deleteAll(bucket, expected));
                 }}
               />
-              <span>Select all on this page</span>
-            </label>
-            <span className="toolbar-count" aria-live="polite">
-              {selected.length} selected
-            </span>
-            <ConfirmButton
-              label="Delete selected"
-              question={`Delete ${String(selected.length)} ${selected.length === 1 ? 'object' : 'objects'}?`}
-              disabled={action.busy || selected.length === 0}
-              onConfirm={() => {
-                removeChosen(selected);
-              }}
-            />
+            ) : null}
           </div>
         ) : null}
         {page !== undefined && !empty ? (
@@ -596,6 +658,104 @@ function BucketUploads({ bucket }: { bucket: string }) {
         ))}
       </ul>
     </>
+  );
+}
+
+/**
+ * How the deletions of objects of one bucket stand, whichever screen they
+ * were begun from: while one is on its way, how many of how many with a bar
+ * and a button that cancels what has not begun; once it is over, what was
+ * deleted, what was not and why, until that is cleared. It is a part of its
+ * own, so that the progress draws this again and not the whole screen.
+ */
+interface BucketDeletionsProps {
+  bucket: string;
+  /** A deletion whose "Cancel deletion" is to have the keyboard, once it is shown. */
+  focusId: string | null;
+  /** Told once the keyboard was put there. */
+  onFocused: () => void;
+}
+
+function BucketDeletions({ bucket, focusId, onFocused }: BucketDeletionsProps) {
+  const deletions = useDeletions();
+  const mine = useDeletionList().filter((deletion) => deletion.bucket === bucket);
+  const cancelButtons = useRef(new Map<string, HTMLButtonElement>());
+  useEffect(() => {
+    if (focusId !== null) {
+      cancelButtons.current.get(focusId)?.focus();
+      onFocused();
+    }
+  }, [focusId, onFocused]);
+  if (mine.length === 0) {
+    return null;
+  }
+  const running = mine.filter((deletion) => deletion.running);
+  const over = mine.filter((deletion) => !deletion.running);
+  return (
+    <div className="deletions">
+      {/* What is read out: that objects are being deleted, and none of the
+          figures that change as they are - those are for the eye. */}
+      <p className="visually-hidden" aria-live="polite">
+        {running.length > 0 ? `Deleting objects from ${bucket}.` : ''}
+      </p>
+      {running.map((deletion) => {
+        const total = totalOf(deletion);
+        return (
+          <p key={deletion.id} className="uploads-summary">
+            <strong>{progressLineOf(deletion, false)}</strong>
+            <progress
+              className="upload-bar deletions-bar"
+              aria-label={`Deletion from ${bucket}`}
+              value={total.count === 0 ? 0 : Math.min(1, doneOf(deletion) / total.count)}
+              max={1}
+            />
+            <button
+              ref={(button) => {
+                if (button === null) {
+                  cancelButtons.current.delete(deletion.id);
+                } else {
+                  cancelButtons.current.set(deletion.id, button);
+                }
+              }}
+              type="button"
+              className="btn btn-outline-danger btn-sm"
+              disabled={deletion.cancelled}
+              onClick={() => {
+                deletions.cancel(deletion.id);
+              }}
+              title="Stop deleting: what has not begun is not sent, what is on its way is answered and counted"
+            >
+              <i className="bi bi-stop-circle" aria-hidden="true" /> <span className="btn-text">Cancel deletion</span>
+            </button>
+          </p>
+        );
+      })}
+      {over.map((deletion) => {
+        const outcome = outcomeOf(deletion);
+        return (
+          <div
+            key={deletion.id}
+            className={`alert notice ${outcome.kind === 'error' ? 'alert-danger' : outcome.kind === 'success' ? 'alert-success' : 'alert-info'}`}
+            role={outcome.kind === 'error' ? 'alert' : 'status'}
+          >
+            <p className="notice-title">{outcome.title}</p>
+            {outcome.detail === undefined ? null : <p>{outcome.detail}</p>}
+          </div>
+        );
+      })}
+      {over.length > 0 ? (
+        <button
+          type="button"
+          className="btn btn-outline-secondary btn-sm"
+          onClick={() => {
+            deletions.dismissFinished(bucket);
+          }}
+          title="Clear what is said of the deletions that are over"
+        >
+          <i className="bi bi-x-lg" aria-hidden="true" /> <span className="btn-text">Clear</span>
+        </button>
+      ) : null}
+    </div>
   );
 }
 

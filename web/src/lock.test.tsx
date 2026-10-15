@@ -107,6 +107,38 @@ function holdUnlock() {
   };
 }
 
+/**
+ * Holds the answer to the next unlock on its way back: the API has carried
+ * it out - the session's tokens are replaced - and the console does not know
+ * yet. The unlocks after it pass.
+ */
+function holdUnlockAnswer() {
+  const answer = globalThis.fetch;
+  let first = true;
+  let reached = false;
+  let letGo: () => void = () => undefined;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (first && new URL(request.url).pathname.endsWith('/session/unlock')) {
+      first = false;
+      const response = await answer(request);
+      reached = true;
+      await new Promise<void>((resolve) => {
+        letGo = resolve;
+      });
+      return response;
+    }
+    return answer(request);
+  });
+  return {
+    /** Whether the API has carried the unlock out. */
+    reached: () => reached,
+    release: () => {
+      letGo();
+    },
+  };
+}
+
 /** Waits until the console has set itself to ask this often, in all. */
 async function untilSet(count: () => number, times: number) {
   await waitFor(() => {
@@ -656,6 +688,97 @@ describe('a session that reaches its timeout while objects are being uploaded', 
     expect(api.callsTo('POST', '/session/unlock')).toHaveLength(0);
     expect(api.callsTo('DELETE', '/session')).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Sign in' })).toBeDefined();
+  });
+
+  it('signs out at once while an unlock hangs, even when the sign-out itself is answered 401', async () => {
+    const { api } = await lockedWhileUploading(['a.txt']);
+    api.on({ 'DELETE /session': () => refusal(401, 'InvalidCredentials', 'Not signed in') });
+    const held = holdUnlock();
+    unlockWith(UNLOCK);
+    await waitFor(() => {
+      expect(held.signals).toHaveLength(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, sign out' }));
+
+    // No time passes: neither the sign-out nor its 401 waits for the unlock.
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    expect(api.callsTo('DELETE', '/session')).toHaveLength(1);
+    expect(held.signals[0]?.aborted).toBe(false);
+    // The unlock is given up in its time, and keeps nothing.
+    await pass(UNLOCK_TIMEOUT_MS);
+    expect(held.signals[0]?.aborted).toBe(true);
+  });
+
+  it('is not signed out by a 401 to an upload answered while the unlock that replaced its token is still on its way', async () => {
+    const { api, session, uploads } = await lockedWhileUploading(['f1.txt']);
+    api.on({
+      'PUT /buckets/photos/object': (call) =>
+        call.headers.get('X-CSRF-Token') === session.csrfToken
+          ? json(200, {
+              bucket: 'photos',
+              key: call.query.get('key') ?? '',
+              size: call.body.length,
+              etag: '"e"',
+              last_modified: CREATED,
+              content_type: 'text/plain',
+              encryption: 'SSE-S3',
+            })
+          : refusal(401, 'InvalidCredentials', 'Not signed in'),
+    });
+    const check = holdUnlockAnswer();
+
+    unlockWith(UNLOCK);
+    await waitFor(() => {
+      expect(check.reached()).toBe(true);
+    });
+    // The API has the new token; the console not yet. The upload is answered 401 now.
+    uploads.release('photos/f1.txt');
+    await waitFor(() => {
+      expect(stored(api, 'f1.txt')).toHaveLength(1);
+    });
+    await pass(50);
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Session locked' })).toBeDefined();
+
+    check.release();
+    expect(await screen.findByRole('heading', { name: 'Users', level: 1 })).toBeDefined();
+    await pass(UPLOAD_RETRY_MS);
+    await waitFor(() => {
+      expect(stored(api, 'f1.txt')).toHaveLength(2);
+    });
+    expect(stored(api, 'f1.txt').map((call) => call.headers.get('X-CSRF-Token'))).toEqual([
+      CSRF_TOKEN,
+      'csrf-after-unlock-1',
+    ]);
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull();
+  });
+
+  it('keeps nothing of an unlock answered after it was given up: the session it renewed is ended with its own token', async () => {
+    const { api } = await lockedWhileUploading(['a.txt']);
+    const check = holdUnlockAnswer();
+    unlockWith(UNLOCK);
+    await waitFor(() => {
+      expect(check.reached()).toBe(true);
+    });
+    // The API replaced the session's token: the one the console holds is refused.
+    api.on({ 'GET /session': () => refusal(401, 'InvalidCredentials', 'Not signed in') });
+    await pass(UNLOCK_TIMEOUT_MS);
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    expect(api.callsTo('DELETE', '/session')).toHaveLength(0);
+
+    // The answer comes after all: 200, with new tokens. They are not kept,
+    // and the session they renewed is ended with them.
+    check.release();
+    await waitFor(() => {
+      expect(api.callsTo('DELETE', '/session')).toHaveLength(1);
+    });
+    expect(screen.getByRole('heading', { name: 'Sign in' })).toBeDefined();
+    const ends = api.callsTo('DELETE', '/session');
+    expect(ends).toHaveLength(1);
+    expect(ends[0]?.headers.get('X-CSRF-Token')).toBe('csrf-after-unlock-1');
+    expect(kept()).not.toContain('csrf-after-unlock-1');
   });
 
   it('is not signed out by a 401 to an upload sent before the unlock and answered after it: the upload is sent again, with the new token', async () => {

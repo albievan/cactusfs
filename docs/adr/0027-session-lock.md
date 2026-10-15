@@ -335,6 +335,22 @@ refuses the old. So, in `web/src/api/client.ts`:
   session has ended": the caller gets its error. An upload of that kind fails as one
   whose connection failed (status 0), and the upload engine makes it again with the
   same `Idempotency-Key` - nothing was stored under it - and the new tokens;
+- a 401 answered **while an unlock is still on its way** - the server has rotated the
+  tokens, the console has not heard yet - is judged when the unlock is over, by the
+  same rule: if the unlock kept new tokens it was a 401 of the old ones, otherwise the
+  session has ended. The unlock's own 401 and the sign-out's are judged at once, so
+  signing out still never waits. An unlock answered after its 20 seconds is treated as
+  abandoned: its tokens are not kept and the session it renewed is ended (Goal M,
+  2026-10-15, where "Delete all" asks for the password through this unlock while other
+  requests are on their way);
+- an `api` call answered a 401 of the old tokens is marked so (`ApiError.staleTokens`);
+  the deletions of Goal M send such a `DELETE`, or such a page of the listing, once more
+  with the new tokens - it never reached the authorizer - and never a third time: a
+  second answer of that kind counts the object as not deleted, or stops the walk, with
+  a reason that says the password was checked again meanwhile, not that the session
+  ended. An upload whose 401 waited for an unlock that then failed, and an unlock
+  answered after its 20 seconds, are told to the console as the end of the session,
+  which signs out;
 - the sign-in screen says why a session ended as far as the console can tell, which
   the API does not say: "your session timed out" for a 401 to its own question of how
   the session stands (at the timeout, or while locked); "the password was wrong too

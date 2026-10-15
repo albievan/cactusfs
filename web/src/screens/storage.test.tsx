@@ -5,6 +5,7 @@ import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
+import { DeletionsProvider } from '../deletions/DeletionsProvider';
 import { fakeApi, json, noContent, problem, signedIn } from '../test/fakeApi';
 import { UploadsProvider } from '../uploads/UploadsProvider';
 import { BucketsScreen } from './BucketsScreen';
@@ -14,10 +15,15 @@ const CREATED = '2026-10-01T00:00:00Z';
 
 /**
  * Shows the object browser as the console does: beneath the uploads of the
- * console, which the screen hands its files to and reads its tiles from.
+ * console, which the screen hands its files to and reads its tiles from, and
+ * beneath its deletions, which it hands what is to be deleted to.
  */
 function renderObjects(screenOfABucket: ReactElement) {
-  return render(<UploadsProvider>{screenOfABucket}</UploadsProvider>);
+  return render(
+    <UploadsProvider>
+      <DeletionsProvider>{screenOfABucket}</DeletionsProvider>
+    </UploadsProvider>,
+  );
 }
 
 function object(key: string, size = 10) {
@@ -1058,7 +1064,7 @@ describe('object browser', () => {
     expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(1);
   });
 
-  it('ticks every object of the page at once, and stops at a refusal', async () => {
+  it('ticks every object of the page at once, and counts a refusal with its reason while the rest go on', async () => {
     const objects = [object('a.txt'), object('b.txt')];
     const api = fakeApi({
       'GET /buckets/photos/objects': () => json(200, { objects, common_prefixes: [], truncated: false, access_included: false }),
@@ -1073,7 +1079,9 @@ describe('object browser', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }));
     fireEvent.click(screen.getByRole('button', { name: 'Yes, delete selected' }));
 
-    expect((await screen.findByRole('alert')).textContent).toContain('Access denied');
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Deleted 1 of 2 objects from photos: 1 not deleted');
+    expect(alert.textContent).toContain('Access denied');
     expect(api.callsTo('DELETE', '/buckets/photos/object')).toHaveLength(2);
   });
 
@@ -1483,9 +1491,12 @@ describe('object browser', () => {
     expect(within(table).getByRole('columnheader', { name: 'Copies' }).className).toContain('grid-number');
     expect(within(table).getByRole('columnheader', { name: 'Uploaded by' }).className).not.toContain('grid-number');
 
-    // All of it came with the one listing: no question an object.
-    expect(api.calls).toHaveLength(1);
-    expect(api.calls[0]?.query.get('access')).toBe('true');
+    // All of it came with the one listing: no question an object. The page's
+    // other questions are of the bucket - its details and its usage - and of
+    // no object.
+    const ofObjects = api.calls.filter((call) => call.path !== '/buckets' && call.path !== '/buckets/photos/usage');
+    expect(ofObjects).toHaveLength(1);
+    expect(ofObjects[0]?.query.get('access')).toBe('true');
     expect(api.callsTo('GET', '/buckets/photos/object/access')).toHaveLength(0);
   });
 
