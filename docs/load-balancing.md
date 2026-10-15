@@ -41,12 +41,13 @@ Gateways hold no state a balancer has to respect:
 
 | What | Where it lives | Consequence |
 |---|---|---|
-| Console sessions and their CSRF tokens | The replicated metadata (Raft); reads are linearizable on every node ([ADR-0005](adr/0005-cluster.md)) | **No sticky sessions.** A cookie issued through one node is accepted by every other, at once |
+| Console sessions and their CSRF tokens; the upload lease that keeps a session locked rather than ended, and the mark a changed password leaves | The replicated metadata (Raft); reads are linearizable on every node ([ADR-0005](adr/0005-cluster.md), [ADR-0027](adr/0027-session-lock.md)) | **No sticky sessions.** A cookie issued through one node is accepted by every other, at once; a session is locked, unlocked or ended alike on every node |
 | `Idempotency-Key` records of the management API | The replicated metadata | A repeated request may land on another node |
 | Multipart uploads: the upload and its parts | The replicated metadata ([ADR-0012](adr/0012-multipart-uploads.md)) | Parts of one upload may go to different nodes, and so may its completion |
 | Download counters | Each node's memory, written to the metadata every `--access-flush-interval` (30 s) | Nothing to do; the counts add up |
 | Bucket usage figures of the console | Each node's memory, for 30 s | Two reloads through a balancer can show counts up to 30 s apart |
-| The limit on failed console sign-ins | Each node's memory, **by source address** | See [the source address](#the-source-address-the-nodes-see) |
+| The limit on failed console sign-ins and unlocks (one count for both) | Each node's memory, **by source address** | See [the source address](#the-source-address-the-nodes-see) |
+| The count of wrong passwords at the unlock of one session (the fifth ends it) | Each node's memory | A session can be tried five times on each node |
 
 ### The checklist
 
@@ -111,7 +112,7 @@ balancer. That address is used in four places:
 |---|---|
 | Audit records (failed authentication, denials, admin changes) | Every record names the balancer. Keep the balancer's own log, with timestamps, to tell clients apart |
 | `aws:SourceIp` conditions in policies | They test the balancer's address: a policy that allows a client network no longer matches, and one that allows the balancer allows everybody behind it |
-| The limit on failed console sign-ins (10 in 5 minutes per address, per node) | All users share one allowance: a few people mistyping, or one person guessing, makes everybody wait (`429`). It also means the limit does not tell attackers apart |
+| The limit on failed console sign-ins and unlocks of locked sessions, counted together (10 in 5 minutes per address, per node) | All users share one allowance: a few people mistyping, or one person guessing, makes everybody wait (`429`). It also means the limit does not tell attackers apart |
 | The node's log (`remote` of a failed authentication) | The balancer |
 
 Do not enable the PROXY protocol towards the nodes (`send-proxy` in HAProxy,
@@ -690,7 +691,7 @@ What this guide works around, said plainly. None of it is hidden by the examples
 |---|---|---|
 | No PROXY protocol on the listeners | A TCP balancer cannot hand the client's address on | Use a balancer that preserves the address at layer 4, or accept the balancer's address |
 | No trusted-proxy setting; `X-Forwarded-For` and `Forwarded` are not read | Behind any balancer that opens its own connections, audit records, `aws:SourceIp` and the log name the balancer | Keep the balancer's logs; do not write `aws:SourceIp` policies for clients behind such a balancer |
-| The sign-in limit counts by source address, in each node's memory | Behind such a balancer all console users share one allowance of failed attempts, and the allowance is multiplied by the number of gateways | Restrict who reaches the admin endpoint; watch the audit trail for failed sign-ins |
+| The sign-in limit, which counts failed unlocks too, counts by source address, in each node's memory | Behind such a balancer all console users share one allowance of failed attempts, and the allowance is multiplied by the number of gateways | Restrict who reaches the admin endpoint; watch the audit trail for failed sign-ins |
 | `/readyz` is on port 9001 only | A health check of the S3 port must be pointed at another port; balancers that cannot do that fall back to a TCP check, which a starting node passes | Use a balancer that can (`check port` in HAProxy, a health check port in cloud balancers) |
 | `--drain-delay` defaults to `0s` in the binary | A node on a virtual machine stops with no warning to the balancer unless the operator sets it | Set it; compose and the chart do |
 | No plaintext listener for a trusted network | A balancer that ends TLS must begin it again; some appliances make that awkward | By design: encryption in transit is not optional. Use passthrough |

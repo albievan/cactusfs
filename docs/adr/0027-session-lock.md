@@ -1,8 +1,9 @@
 # ADR-0027: A console session that locks while it uploads
 
-- **Status:** proposed (2026-10-13). The server side is written (PLAN L.0 to L.8); it
-  becomes accepted when the console (PLAN L.9, L.10) has landed and the gates have seen
-  both (PLAN L.11)
+- **Status:** accepted (2026-10-15, PLAN L.11): the server side (PLAN L.0 to L.8) and
+  the console (PLAN L.9, L.10) have landed in commit edf32af, and the gates have seen
+  both - `make check` and `make test-rolling`, the rolling case below included. Proposed
+  on 2026-10-13
 - **Date:** 2026-10-13
 - **Revised:** 2026-10-13, to the findings of the first review: a locked session is
   given no stored answer; the keeper writes at every tick; a change of password ends
@@ -402,13 +403,14 @@ them and the records that were kept past their timeout.
 `TestRollingUpgradeFromSchema3ToSchema4SessionLock` (`test/integration`, with the
 rolling harness) holds this with the binaries: three voters of the release before and a
 node of this release; a session locked through the one is ended through the others and
-gets nothing there; the leader's sweep ends it for all; nothing stops. It has not run
-yet (it needs the container harness). It does **not** cover a change of password in the
-mixed deployment (the mark, which the previous release does not read - argued above),
-nor a leader of this release with gateways of the previous one. It runs with `make
-test-rolling` as the Makefile selects tests today (`-run` with a prefix); once PLAN
-8.0.11 selects by exact name it must be named (`ROLLING_TEST=...SessionLock`) - its
-comment says how.
+gets nothing there; the leader's sweep ends it for all; nothing stops. It passed in the
+gate of PLAN L.10. It does **not** cover a change of password in the mixed deployment
+(the mark, which the previous release does not read - argued above), nor a leader of
+this release with gateways of the previous one. `make test-rolling` takes `ROLLING_TEST`
+as the beginning of a test's name, so it runs with the upgrade from schema 3 to 4, as CI
+runs it (`make test-rolling ROLLING_FROM_COMMIT=0b7d825
+ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4`), or by itself with its full name -
+its comment says how.
 
 Why not extend `ExpiresAt` while an upload runs: a member of the previous release would
 read that as a session with full authority.
@@ -505,11 +507,11 @@ read that as a session with full authority.
 | A sign-in or an unlock whose check straddles the change is ended; the margin, both ways; the mark written after the password; a mark that cannot be read refuses; one that cannot be written is audited | `TestAPasswordChangeRaces` (`internal/app`) |
 | The node gives the IAM use case the store of sessions, and the idempotency use case the authorizer | `TestANodeWiresWhatEndsAndRefusesSessions` (`cmd/cactusfs`) |
 | Ended records are removed by the node that made them, one an unlock renewed included | `TestEndedSessionsAreRemoved` |
-| The console: an unlock given up after 20 s; sign-out never held back; a 401 of an older generation; why a session ended | `web/src/api/client.test.ts`, `web/src/lock.test.tsx` (written; vitest does not start where they were written: owed a run of `pnpm -C web test`) |
+| The console: an unlock given up after 20 s; sign-out never held back; a 401 of an older generation; why a session ended | `web/src/api/client.test.ts`, `web/src/lock.test.tsx` |
 | A locked session is given no stored answer and reserves no key; an upload is repeated | `TestIdempotencyOfALockedSession` (`internal/app`), `TestALockedSessionOnlyUploads` |
 | Unlock: rotation, the limiter, five failures, the audit trail, no password in log or trail | `TestSessionUnlock` |
 | Every operation of the contract answers a locked session 423 and leaves a record; uploads; an API key is never locked | `TestALockedSessionOnlyUploads`, `TestALockedSessionWithoutTheRight` (`internal/adapters/adminapi`) |
 | The cookie; CSRF; no idempotency record; 403, 429, 401 | `TestUnlockSession`, `TestUnlockAttemptsAreLimited` (`internal/adapters/adminapi`) |
 | The settings and their ranges | `TestParseServerConfig`, `TestSettingsDocumentsInSync` (`cmd/cactusfs`) |
 | The binary: a timeout of ten seconds and an upload slower than that | `TestSessionLock` (`test/integration`) |
-| A member of the previous release | argued above from its code, and `TestRollingUpgradeFromSchema3ToSchema4SessionLock` (written, not yet run; it runs only on the gate host, with `make test-rolling`; not a change of password in a mixed deployment, nor a leader of this release with old gateways) |
+| A member of the previous release | argued above from its code, and `TestRollingUpgradeFromSchema3ToSchema4SessionLock` (with `make test-rolling`, outside `make check`; not a change of password in a mixed deployment, nor a leader of this release with old gateways) |

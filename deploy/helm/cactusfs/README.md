@@ -264,12 +264,21 @@ two together. There is no `preStop` hook: the node does this itself.
 writes a metadata entry newer than the oldest of them understands, and a node can be
 taken back to the release before. When the last node runs a release that raises the
 entry schema, the cluster begins to write the new schema by itself, and the first such
-write - in practice the first upload, the first flushed count of downloads or the first
-bucket created - ends the way back: nodes of the release before refuse that state and
-do not start. Nothing is lost, but it is an outage until they are rolled forward again
+write ends the way back: nodes of the release before refuse that state and do not
+start. From schema 3 that write is, in practice, the first upload, the first flushed
+count of downloads or the first bucket created; from schema 4 to 5 (this release) it is
+the first bucket created after the last node was upgraded. Nothing is lost, but it is an
+outage until they are rolled forward again
 ([ADR-0016](../../../docs/adr/0016-object-access-and-schema-3.md),
-[ADR-0019](../../../docs/adr/0019-bucket-activity-and-schema-4.md)). To keep a way
+[ADR-0019](../../../docs/adr/0019-bucket-activity-and-schema-4.md),
+[ADR-0023](../../../docs/adr/0023-schema-5-usage-outbox-targets.md)). To keep a way
 back, hold one node at the release before until you are sure, and take a backup first.
+Once every node runs this release, go back - while no bucket has been created since -
+only by stopping **every** node first and then starting all of them on the release
+before: never a node at a time. A node taken back alone is still counted at schema 5
+until it registers again, and one bucket created meanwhile stops it at that entry and
+ends the way back for the whole cluster; it recovers when it is started on this release
+again. The [README](../../../README.md#on-kubernetes) says more.
 `kubectl -n <namespace> get pods -L app.kubernetes.io/version` shows which node runs
 what; the alert `CactusFSMetadataUpgradeUnfinished` fires when, for six hours, the
 cluster has written an older schema than its nodes support - an upgrade that was begun

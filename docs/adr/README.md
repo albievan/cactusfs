@@ -41,7 +41,7 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0003](0003-metadata.md) | Metadata: embedded Raft with a bbolt state machine | accepted; implemented; the single voter is superseded by 0005 |
 | [0004](0004-erasure-and-topology.md) | Erasure coding, drive topology and self-healing | accepted; implemented; the one-node topology is superseded by 0005 |
 | [0005](0005-cluster.md) | Cluster: replicated metadata, node RPC and distributed erasure sets | accepted; implemented |
-| [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted; implemented |
+| [0006](0006-iam.md) | Identity and access: policies, API keys, audit trail, Vault | accepted; implemented; what it says of the length of sessions and of a changed password is superseded by 0027 |
 | [0007](0007-admin-api.md) | Management API, its documentation and the console | accepted; implemented |
 | [0008](0008-object-versions.md) | Entry schema 2, the leader's time, and object versions in the metadata state | accepted; implemented |
 | [0009](0009-object-lock.md) | Object Lock - where it is enforced, and the clock that decides | accepted; implemented |
@@ -62,8 +62,8 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0024](0024-quotas.md) | Quotas | proposed; **not implemented** beyond the contract (PLAN 8A) |
 | [0025](0025-bucket-notifications.md) | Bucket notifications and the export of the audit trail | proposed; **not implemented** beyond the contracts (PLAN 8B) |
 | [0026](0026-replication-between-sites.md) | Replication between sites, and the conflict rule | proposed; **not implemented** beyond the contracts (PLAN 8C) |
-| [0027](0027-session-lock.md) | A console session that locks while it uploads | proposed; the server side is written (PLAN L.0 to L.8), the console is not (PLAN L.9, L.10) |
+| [0027](0027-session-lock.md) | A console session that locks while it uploads | accepted; implemented, the server and the console (PLAN L.0 to L.11) |
 
-"Implemented" is the state of the code on 2026-10-13; `PLAN.md` has the step behind each.
+"Implemented" is the state of the code on 2026-10-15; `PLAN.md` has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a
 list at the top; the format above is that of the first six.

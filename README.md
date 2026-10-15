@@ -6,13 +6,13 @@ TLS on every listener, checksums verified on every read, self-healing, role-base
 control and a hash-chained audit trail.
 
 > **Status: pre-release, version 0.7.0. No release has been published yet.**
-> Milestones 0 to 6 of [`PLAN.md`](PLAN.md) are done: the standalone store, erasure
-> coding, the cluster, identities and policies, the management API with its console, and
-> the S3 depth listed below. Milestone 7 (deployment hardening: the Helm chart,
-> certificate rotation, the observability pack, SBOMs, signatures and the release
-> workflow) is built, and its last step - final verification and review - is still open.
-> Milestone 8 (replication between sites, bucket notifications, quotas) has not been
-> started. [What is not there yet](#what-is-not-there-yet) says the rest plainly.
+> Milestones 0 to 7 of [`PLAN.md`](PLAN.md) are done: the standalone store, erasure
+> coding, the cluster, identities and policies, the management API with its console, the
+> S3 depth listed below, and deployment hardening (the Helm chart, certificate rotation,
+> the observability pack, SBOMs, signatures and the release workflow). Milestone 8
+> (replication between sites, bucket notifications, quotas) is begun: its metadata
+> schema (entry schema 5) and its contracts exist, and none of its features does yet.
+> [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
 
@@ -75,9 +75,12 @@ control and a hash-chained audit trail.
   default deny; a hash-chained audit trail.
 - **Management API** (REST/JSON, designed first in OpenAPI) with Swagger UI, and a **web
   console** embedded in the binary: buckets as a grid with their creator, policy and
-  latest use; an object browser with upload, download, and who uploaded and how often an
-  object was downloaded; search; users, groups, roles, policies and API keys; the
-  cluster; the settings of every node; the audit log.
+  latest use; an object browser with upload, download, an object's details opened in
+  its own row, and who uploaded and how often an object was downloaded; uploads that go
+  on while you use other screens, with a bar at the top of every screen that shows them
+  and what the console did; search; users, groups, roles, policies and API keys; the
+  cluster; the settings of every node; the audit log. A session that times out while it
+  uploads is locked, not ended, until your password unlocks it.
 - **Deployment.** A distroless, non-root container image; a four-node compose cluster
   for development (Docker or rootless Podman); a Helm chart for Kubernetes and k3s with
   a default-deny NetworkPolicy under the `restricted` Pod Security Standard.
@@ -97,9 +100,16 @@ Said plainly, so that nobody finds out by trying:
 - **No release has been published.** There is no image at `ghcr.io/albievan/cactusfs`
   and no chart at `oci://ghcr.io/albievan/charts` yet; the commands that name them apply
   from the first release. Until then, build the image yourself.
-- **Milestone 8: replication between sites, bucket notifications, quotas.** None of it
-  exists. Events are published inside the process only; there is no NATS or webhook
-  delivery. Nothing limits how much a bucket or a tenant stores.
+- **Milestone 8: replication between sites, bucket notifications, quotas.** None of the
+  three works. Their paths are in the contract of the management API - a bucket's
+  quota, notifications, replication and replica mode, and targets - and every one of
+  them answers `501 Not Implemented`. Events are published inside the process only;
+  there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
+  stores.
+- **Planned, not built:** a bucket's details at the top of its page, and "Delete all"
+  objects behind the user's password ([`PLAN.md`](PLAN.md), Goal M); a visual builder
+  of policies in the console (milestone 9). Today a policy is edited as JSON, and a
+  bucket's policy through the S3 API only.
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
   the port and the replicated store exist. No use case, no API and no console screen
   does: the authorizer does not read a sub-bucket's policy, and nothing can create one.
@@ -209,10 +219,11 @@ A new deployment has two kinds of credentials, and they are not the same thing:
   port** (console → Users). The node says so on standard error and in its log at the
   first start. The user is made once: after you change or delete it, it never comes
   back, and `admin` cannot be set as a password again. Deleting is the surer of the two:
-  it ends the user's sessions and removes its API keys, while a changed password leaves
-  a session that is already open valid until it expires (30 minutes) and leaves in
-  place whatever was made through it. The audit trail shows whether anybody signed in
-  first. The compose cluster publishes the admin port on `127.0.0.1` only for this
+  it ends the user's sessions and removes its API keys. A changed password ends every
+  session of the user too, on every node ([ADR-0027](docs/adr/0027-session-lock.md);
+  during a rolling upgrade a node of the release before does not, and keeps a session
+  to its timeout), but leaves in place whatever was made through them - API keys,
+  users, policies. The audit trail shows whether anybody signed in first. The compose cluster publishes the admin port on `127.0.0.1` only for this
   reason, and the chart opens it to nobody until you say who.
 - **API: the root key.** Generated and printed once at the first start, or the pair you
   set in `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY` (with the chart: the
@@ -754,7 +765,7 @@ What the API has, under `/api/v1` (the contract is
 
 | Path | For |
 |---|---|
-| `/session` | sign in, the session, sign out |
+| `/session`, `/session/unlock` | sign in, the session, sign out; unlock a locked session with the user's password |
 | `/buckets`, `/buckets/{bucket}`, `/buckets/{bucket}/usage` | list, create, read and delete buckets; how many objects a bucket holds and their size |
 | `/buckets/{bucket}/objects`, `/buckets/{bucket}/object`, `/object/metadata`, `/object/access` | list objects; upload, download and delete one; its metadata; who uploaded it and how often it was downloaded |
 | `/search` | buckets by name and objects by key |
@@ -763,12 +774,36 @@ What the API has, under `/api/v1` (the contract is
 | `/cluster`, `/cluster/maintenance` | nodes, drives and erasure sets; healing, scrubbing and collection |
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
+| `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`, `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets` (with `/{name}` and `/{name}/status`) | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
 API keys), **Groups**, **Roles**, **Policies**, **Cluster**, **Settings** and **Audit
 log**. It talks only to the management API and decides nothing itself. The version and
 build it runs are shown under the logo.
+
+- **Uploads go on across screens.** Files dropped on a bucket are sent while you use
+  any other screen. A bar at the top of every screen, on a phone too, shows how many
+  files are on their way and how far they are, and when they are done what was stored
+  and what was not, until you dismiss it. The same bar keeps notices of what the
+  console did - newest first, for the visit, not stored. Leaving or reloading the page
+  while files are being sent asks first.
+- **An object's details in its row.** In the object browser a click on an object's
+  name opens its details - key, size, ETag, last modified, content type, encryption,
+  and its uploads and downloads where you may see them - directly under its row.
+- **A session that locks while it uploads.** A console session lasts
+  `--session-lifetime` (30 minutes) from sign-in, and nothing extends it. If it reaches
+  that time while files are still being uploaded with it, it is **locked**, not ended:
+  the console shows nothing of its screens, only how many files are left and one bar,
+  and asks for your password; the uploads go on. The server lets a locked session store
+  objects, read its own state, unlock and sign out, and answers everything else `423`
+  with the code `SessionLocked`. The right password unlocks it and gives it a new
+  session token and CSRF token and a new `--session-lifetime`. A locked session ends
+  `--session-upload-grace` (90 seconds) after its last upload, and at
+  `--session-lock-max` (12 hours) after the timeout at the latest; five wrong passwords
+  end it at once. `--session-lock-max 0` turns locking off. Without an upload the
+  session ends at its timeout, as before
+  ([ADR-0027](docs/adr/0027-session-lock.md)).
 
 ### Who uploaded an object, and who downloaded it
 
@@ -845,8 +880,14 @@ An API key is an access key ID and a secret. The secret is shown once, when the 
 made, and stored encrypted through the KMS. A key can expire, can carry an inline policy
 that narrows it, and stops working for every node as soon as it is deleted.
 
-Console users are local accounts; passwords are stored as Argon2id hashes, sessions last
-30 minutes, and failed sign-ins are limited per address.
+Console users are local accounts; passwords are stored as Argon2id hashes, and sessions
+last `--session-lifetime` (30 minutes) and are locked, not ended, while they upload
+([above](#management-api-documentation-and-console)). A change of a user's password -
+by the user or by an administrator - ends every session of that user at once, locked
+ones too. Failed sign-ins and failed unlocks count together, per address and per node:
+ten in five minutes, then `429`. Behind a balancer that opens its own connections every
+user has the balancer's address and shares that count
+([load balancing](docs/load-balancing.md#the-source-address-the-nodes-see)).
 
 Every change to identities, every refusal and every failed sign-in is written to a
 hash-chained audit trail (`GET /api/v1/audit`, the console's Audit log);
@@ -972,7 +1013,7 @@ Suites outside `make check`:
 | Target | What it does |
 |---|---|
 | `make test-chaos` | fault injection: against the built binary (corruption, lost shards, replaced drives, kill during writes) and against a cluster of four containers (nodes killed during writes, the leader killed, the network partitioned, two nodes away, shards corrupted and deleted on other nodes) |
-| `make test-rolling` | a rolling upgrade with the binaries themselves: three voters of the release before this entry schema, built from the history of the repository (so not possible in a clean export), and a fourth node of this tree, upgraded one at a time. From schema 4 to 5 when told nothing; `ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4` runs the one from schema 3 to 4 |
+| `make test-rolling` | a rolling upgrade with the binaries themselves: three voters of the release before this entry schema, built from the history of the repository (so not possible in a clean export), and a fourth node of this tree, upgraded one at a time. From schema 4 to 5 when told nothing; `ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4` runs the one from schema 3 to 4. `ROLLING_TEST` is taken as the beginning of a test's name, so the second also runs the case of a locked console session with nodes of the release before (`TestRollingUpgradeFromSchema3ToSchema4SessionLock`) |
 | `make test-k8s` | the chart installed on k3s in one container, with the image this tree builds, under the `restricted` Pod Security Standard: an S3 round trip, a pod away, the NetworkPolicy enforced. Needs a privileged container |
 
 Everything else:
