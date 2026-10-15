@@ -193,6 +193,23 @@ const (
 	ActionPutBucketReplicaMode Action = "admin:PutBucketReplicaMode"
 )
 
+// ActionPreviewObject allows having an object shown in the console: its
+// bytes, checked and capped by the server, for the console to draw
+// (ADR-0028). It is asked on the object, together with s3:GetObject (or
+// s3:GetObjectVersion), which the caller must hold as well: a preview is
+// never more than a download.
+//
+// It is an admin action, and not an S3 one, so that "s3:*" - and a bucket
+// policy, which names S3 actions only and can open them to anyone - does not
+// give it. And it does not begin with Get, although it reads: "admin:Get*"
+// is what the built-in auditor holds, to look at how the deployment is run
+// without reading any object, and a preview is the content of one.
+//
+// The user who committed the version shown may preview it without being
+// allowed the action, unless a policy denies it to them: Decide says so,
+// with Request.ObjectCreator.
+const ActionPreviewObject Action = "admin:PreviewObject"
+
 // ARN prefixes of the two kinds of resource a policy can name.
 const (
 	s3ARNPrefix    = "arn:aws:s3:::"
@@ -349,6 +366,14 @@ type Request struct {
 	// BucketPolicy is the policy of the bucket the resource is in, if it
 	// has one.
 	BucketPolicy *BucketPolicy
+	// ObjectCreator is who committed the object version the request is
+	// about, as the version records it ("user/alice", "key/…", "root"),
+	// or empty when it is not known. Only ActionPreviewObject looks at it:
+	// the user it names owns the version, and may preview it unless a
+	// policy denies it (ADR-0028). It is set by the use case from the
+	// version it has resolved, never from what a caller sent, and is
+	// never stored or sent anywhere.
+	ObjectCreator string
 }
 
 // Decide answers an authorization request. The rule is default deny.
@@ -367,6 +392,11 @@ type Request struct {
 //     explicit Deny wins over every Allow.
 //   - An API key with an inline policy may do what its owner may do AND the
 //     inline policy allows: a key never exceeds its owner.
+//   - The user who committed an object version (Request.ObjectCreator is
+//     "user/<their name>") may preview it - ActionPreviewObject - when no
+//     policy speaks of it: for that action and that user, silence counts
+//     as an Allow. A Deny still refuses them, an API key's inline policy
+//     must still allow the action, and no other action asks who made what.
 //   - A locked session (Principal.LockedSession) may store objects, and
 //     nothing else, whatever its user is allowed: every other action is
 //     refused before a policy is read. Storing an object is then decided as
@@ -430,13 +460,26 @@ func Decide(req Request) error {
 	if req.BucketPolicy != nil {
 		bucket = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx)
 	}
-	if own == denied || bucket == denied || (own != allowed && bucket != allowed) {
+	if own == denied || bucket == denied {
+		return refused
+	}
+	if own != allowed && bucket != allowed && !owns(req) {
 		return refused
 	}
 	if boundary := req.Principal.Boundary; boundary != nil && judge([]Document{*boundary}, req.Action, resource, ctx) != allowed {
 		return fmt.Errorf("%w: the API key's own policy does not allow %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
 	return nil
+}
+
+// owns reports whether the request is the preview of an object version by
+// the user who committed it: what makes a policy's silence an Allow
+// (ADR-0028). Nothing but a user owns a version - a version committed with
+// the root identity or by a node names no user - and nothing but a preview
+// is decided by ownership.
+func owns(req Request) bool {
+	return req.Action == ActionPreviewObject && req.Principal.User != "" &&
+		req.ObjectCreator == "user/"+req.Principal.User
 }
 
 // RootCredential is the deployment's root API key as it is stored: the secret

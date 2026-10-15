@@ -23,8 +23,9 @@ func BuiltInPolicies() map[string]Document {
 		// Everything a user can be allowed: all of S3 and all of
 		// administration. (Node RPC is not something a policy can grant.)
 		RoleClusterAdmin: statement([]string{"s3:*", "admin:*"}, everything),
-		// All of S3 on every bucket, and nothing of administration.
-		RoleBucketAdmin: statement([]string{"s3:*"}, everything),
+		// All of S3 on every bucket, and of administration only the
+		// preview of objects it may read anyway (ADR-0028).
+		RoleBucketAdmin: statement([]string{"s3:*", string(ActionPreviewObject)}, everything),
 		// Read and write objects; buckets can be listed, not made or removed.
 		RoleReadWrite: statement([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation",
@@ -37,12 +38,17 @@ func BuiltInPolicies() map[string]Document {
 			// what it began: an interrupted transfer is cleaned up by
 			// the client that made it.
 			"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+			// What it may download, it may see in the console.
+			string(ActionPreviewObject),
 		}, everything),
 		RoleReadOnly: statement([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject",
 			"s3:GetObjectVersion", "s3:ListBucketVersions", "s3:GetBucketVersioning",
+			string(ActionPreviewObject),
 		}, everything),
-		// Look at how the deployment is run, change nothing, read no object.
+		// Look at how the deployment is run, change nothing, read no object
+		// - and preview none: admin:PreviewObject begins with neither Get
+		// nor List.
 		RoleAuditor: statement([]string{"admin:Get*", "admin:List*"}, everything),
 	}
 }

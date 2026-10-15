@@ -75,6 +75,8 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrTooManyRequests:       {429, "TooManyRequests"},
 		domain.ErrTooManyBuckets:        {500, "InternalError"},
 		domain.ErrQuotaExceeded:         {403, "QuotaExceeded"},
+		domain.ErrNotPreviewable:        {415, "NotPreviewable"},
+		domain.ErrPreviewTooLarge:       {413, "PreviewTooLarge"},
 	}
 	// The sentinels without a wire name, as they are answered today.
 	local := map[error]answer{

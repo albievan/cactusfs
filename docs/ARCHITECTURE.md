@@ -882,7 +882,11 @@ The full analysis is in `docs/threat-model.md`. In brief:
   transport **(implemented; certificates are replaced without a restart, ADR-0020)**.
 - Every inbound request is authenticated and passes through the single
   `ports.Authorizer` **(implemented, ADR-0006)**: users, groups, roles and IAM-style
-  policies; default deny; explicit deny wins; a key never exceeds its owner. The key,
+  policies; default deny; explicit deny wins; a key never exceeds its owner. One
+  exception to default deny, for one action (ADR-0028): the user who committed an object
+  version may preview it (`admin:PreviewObject`) when no policy speaks of it - a preview
+  also needs `s3:GetObject`, a Deny still refuses and a key's inline policy must allow
+  it; decided in `iam.Decide` like everything else. The key,
   its owner and every policy that applies are resolved in one consistent read when a
   request is authenticated. The probe endpoints are the one exception and disclose
   nothing.

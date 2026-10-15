@@ -75,6 +75,9 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrTooManyRequests:       {500, "InternalError"},
 		domain.ErrTooManyBuckets:        {500, "InternalError"},
 		domain.ErrQuotaExceeded:         {403, "QuotaExceeded"},
+		// A preview is the management API's (ADR-0028); S3 never meets one.
+		domain.ErrNotPreviewable:  {500, "InternalError"},
+		domain.ErrPreviewTooLarge: {500, "InternalError"},
 	}
 	// The sentinels without a wire name, as they are answered today.
 	local := map[error]answer{

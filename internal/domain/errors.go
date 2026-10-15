@@ -148,6 +148,19 @@ var (
 	ErrInvalidID = errors.New("invalid identifier")
 )
 
+// Errors of the preview of objects (ADR-0028). Neither is a denial: whoever
+// is told one may preview, and may download what they cannot preview.
+var (
+	// ErrNotPreviewable means that an object is not of a kind the console
+	// shows: its stored type is none of the kinds a preview has, or its
+	// bytes do not carry the signature of the kind its type names, or its
+	// size cannot be told from its first bytes.
+	ErrNotPreviewable = errors.New("the object cannot be previewed")
+	// ErrPreviewTooLarge means that an object is larger than a preview may
+	// be, or that it is an image of more pixels than one may have.
+	ErrPreviewTooLarge = errors.New("the object is too large to preview")
+)
+
 // Data-safety errors.
 var (
 	// ErrIntegrity reports stored bytes that failed checksum or
@@ -284,6 +297,8 @@ func wireCodes() []struct {
 		{"too_many_requests", ErrTooManyRequests},
 		{"too_many_buckets", ErrTooManyBuckets},
 		{"quota_exceeded", ErrQuotaExceeded},
+		{"not_previewable", ErrNotPreviewable},
+		{"preview_too_large", ErrPreviewTooLarge},
 	}
 }
 

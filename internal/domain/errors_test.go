@@ -26,7 +26,8 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 		domain.ErrInsufficientDrives, domain.ErrShardNotFound, domain.ErrUnsupportedFormat, domain.ErrUnavailable,
 		domain.ErrDriveOffline, domain.ErrEntityNotFound, domain.ErrEntityExists, domain.ErrEntityInUse,
 		domain.ErrCredentialNotFound, domain.ErrSubBucketNotFound, domain.ErrTooManySubBuckets, domain.ErrSubBucketNotEmpty,
-		domain.ErrTooManyRequests, domain.ErrTooManyBuckets, domain.ErrQuotaExceeded,
+		domain.ErrTooManyRequests, domain.ErrTooManyBuckets, domain.ErrQuotaExceeded, domain.ErrNotPreviewable,
+		domain.ErrPreviewTooLarge,
 	}
 	seen := map[string]bool{}
 	for i, sentinel := range sentinels {
@@ -110,7 +111,8 @@ func TestSentinelsAreThoseWithAWireName(t *testing.T) {
 	for name, sentinel := range map[string]error{
 		"conflict": domain.ErrConflict, "access_denied": domain.ErrAccessDenied, "invalid_bucket_state": domain.ErrInvalidBucketState,
 		"entity_in_use": domain.ErrEntityInUse, "unavailable": domain.ErrUnavailable, "bucket_not_empty": domain.ErrBucketNotEmpty,
-		"quota_exceeded": domain.ErrQuotaExceeded,
+		"quota_exceeded": domain.ErrQuotaExceeded, "not_previewable": domain.ErrNotPreviewable,
+		"preview_too_large": domain.ErrPreviewTooLarge,
 	} {
 		if !errors.Is(names[name], sentinel) {
 			t.Errorf("the wire name %s is of %v, want %v", name, names[name], sentinel)

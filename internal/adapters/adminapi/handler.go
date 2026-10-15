@@ -547,6 +547,12 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusNotFound, code: "NoSuchVersion", title: "No such version"}
 	case is(domain.ErrEntityNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchEntity", title: "No such entity"}
+	case is(domain.ErrNotPreviewable):
+		// The object is there and may be downloaded; it is not of a kind
+		// the console shows (ADR-0028).
+		return problem{status: http.StatusUnsupportedMediaType, code: "NotPreviewable", title: "The object cannot be previewed"}
+	case is(domain.ErrPreviewTooLarge):
+		return problem{status: http.StatusRequestEntityTooLarge, code: "PreviewTooLarge", title: "The object is too large to preview"}
 	case is(domain.ErrMethodNotAllowed):
 		return problem{status: http.StatusMethodNotAllowed, code: "MethodNotAllowed", title: "Not possible for this resource"}
 	case is(domain.ErrBucketAlreadyExists):

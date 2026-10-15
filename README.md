@@ -901,7 +901,10 @@ Access is decided by IAM-style policies (Effect, Action, Resource, Condition; `s
 `admin:*` actions): users belong to groups, users and groups hold roles, roles are sets
 of policies, and an API key belongs to a user and can never do more than its owner. Five
 roles are built in: `cluster-admin`, `bucket-admin`, `read-write`, `read-only` and
-`auditor`. Nothing is allowed unless a policy allows it, and an explicit deny wins.
+`auditor`. Nothing is allowed unless a policy allows it, and an explicit deny wins - with
+one exception (ADR-0028): the user who uploaded a version of an object may preview it in
+the console without being given `admin:PreviewObject`, when they may also read the
+object, and unless a policy denies them the preview.
 
 An API key is an access key ID and a secret. The secret is shown once, when the key is
 made, and stored encrypted through the KMS. A key can expire, can carry an inline policy

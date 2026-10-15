@@ -313,6 +313,9 @@ func TestBuiltInRoles(t *testing.T) {
 		{iam.ActionPutBucketNotification, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
 		{iam.ActionGetReplication, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
 		{iam.ActionPutReplication, bucket, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin}},
+		// The preview of objects (ADR-0028): every role that may read an
+		// object, and not the auditor, which reads none.
+		{iam.ActionPreviewObject, object, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin, iam.RoleReadWrite, iam.RoleReadOnly}},
 	}
 	for _, tt := range hybrid {
 		for role := range policies {
