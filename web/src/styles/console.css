@@ -2813,6 +2813,99 @@ details[open] > summary .node-card-mark {
   box-shadow: var(--shadow);
 }
 
+/* A DOCX: its text on paper, as elements; spaces and tabs as written. */
+.preview-docx {
+  padding: 1rem 1.25rem;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--bs-border-radius);
+  overflow-wrap: anywhere;
+}
+
+.preview-docx-paragraph,
+.preview-docx-heading,
+.preview-docx-list li {
+  white-space: pre-wrap;
+}
+
+.preview-docx-paragraph {
+  min-height: 1em;
+  margin: 0 0 0.5rem;
+}
+
+.preview-docx-heading {
+  margin: 1rem 0 0.5rem;
+  color: var(--night-green);
+}
+
+.preview-docx-list {
+  margin: 0 0 0.5rem;
+}
+
+/* A level of a list the document skipped: no marker of its own. */
+.preview-docx-skipped {
+  list-style: none;
+}
+
+.preview-docx-table {
+  width: auto;
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.preview-docx-table .preview-docx-paragraph {
+  margin: 0;
+}
+
+.preview-docx-image {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
+  vertical-align: bottom;
+}
+
+.preview-docx-omitted {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* An XLSX: a sheet at a time, its column letters and row numbers aside. */
+.preview-xlsx-sheets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.preview-xlsx-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.preview-xlsx {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.preview-xlsx td {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-xlsx th {
+  color: var(--muted);
+  background: var(--wash);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-xlsx-corner {
+  background: var(--wash);
+}
+
 @media (max-width: 575.98px) {
   .preview-backdrop {
     padding: 0;
@@ -2837,6 +2930,7 @@ details[open] > summary .node-card-mark {
   .preview-foot .btn,
   .preview-head .btn,
   .preview-pdf-pages .btn,
+  .preview-xlsx-sheets .btn,
   .grid-detail-actions .btn {
     min-height: 44px;
   }

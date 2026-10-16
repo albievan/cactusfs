@@ -91,6 +91,11 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: false,
   },
+  // The document reader's worker is made with { type: 'module' }
+  // (web/src/preview/office.ts): it is built as one, too.
+  worker: {
+    format: 'es',
+  },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],

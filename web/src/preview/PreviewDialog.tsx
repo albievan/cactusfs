@@ -7,6 +7,7 @@ import { Loading } from '../ui/Loading';
 import { reasonOf } from '../ui/reason';
 import { openPreview, PREVIEW_MAX_BYTES, PreviewTooLargeError, readBlob } from './fetch';
 import { imageTypeOf, rendererOf } from './kinds';
+import { OfficePreview } from './OfficePreview';
 import { PdfPreview } from './PdfPreview';
 import { CSV_COLUMNS, decodeText, parseCsv, type CsvTable } from './text';
 
@@ -15,9 +16,10 @@ type View =
   | { state: 'loading' }
   | { state: 'image'; url: string }
   | { state: 'pdf'; blob: Blob }
+  | { state: 'office'; kind: 'docx' | 'xlsx'; blob: Blob }
   | { state: 'text'; text: string; truncated: boolean }
   | { state: 'csv'; table: CsvTable; truncated: boolean }
-  // A kind the console cannot draw yet, or one it does not know.
+  // A kind the console does not know: one a later release of the API added.
   | { state: 'later' }
   // More bytes than the console takes for a preview.
   | { state: 'too-large' }
@@ -95,8 +97,9 @@ interface PreviewDialogProps {
  * drawn as is chosen by `X-CactusFS-Preview-Kind` alone, never by the key or
  * the stored type: an image from a blob address typed as the raster kind the
  * API named (never SVG), revoked when the dialog closes; a PDF on a canvas,
- * a page at a time (PdfPreview); text and JSON as text; CSV as a table of
- * text. Nothing of an object is ever markup.
+ * a page at a time (PdfPreview); a DOCX or XLSX read in a worker into a
+ * plain model and drawn as elements (OfficePreview); text and JSON as text;
+ * CSV as a table of text. Nothing of an object is ever markup.
  *
  * Who may preview is the API's to decide: a refusal is said in words, and
  * the download is beside it whatever the answer.
@@ -135,7 +138,7 @@ export function PreviewDialog({ bucket, objectKey, onClose }: PreviewDialogProps
         return;
       }
       const { kind, truncated, length, body } = answer;
-      if (kind === null || rendererOf(kind) === 'later') {
+      if (kind === null) {
         // Not read: the download is offered instead.
         void body?.cancel().catch(() => undefined);
         show({ state: 'later' });
@@ -165,6 +168,10 @@ export function PreviewDialog({ bucket, objectKey, onClose }: PreviewDialogProps
         case 'pdf':
           // Drawn by pdf.js, loaded only now, from the bytes read here.
           show({ state: 'pdf', blob });
+          return;
+        case 'office':
+          // Read in a worker of its own, from the bytes read here.
+          show({ state: 'office', kind: kind === 'docx' ? 'docx' : 'xlsx', blob });
           return;
         case 'csv': {
           const text = decodeText(await blob.arrayBuffer(), truncated);
@@ -401,6 +408,8 @@ function PreviewBody({ view, objectKey, actualSize, imageFailed, onImageFailed, 
       );
     case 'pdf':
       return <PdfPreview blob={view.blob} objectKey={objectKey} />;
+    case 'office':
+      return <OfficePreview blob={view.blob} kind={view.kind} objectKey={objectKey} />;
     case 'csv':
       return <CsvPreview table={view.table} truncated={view.truncated} objectKey={objectKey} />;
     case 'later':
