@@ -830,6 +830,24 @@ build it runs are shown under the logo.
   exact", and one you may not see says so - neither is shown as 0.
   The details fold away with a click on their heading, which then still says how many
   objects and how much storage the bucket holds; the browser remembers the choice.
+- **Previews** ([ADR-0028](docs/adr/0028-object-preview.md)). "Preview" in an object's
+  opened row shows its current version in a dialog: PNG, JPEG, GIF and WebP images;
+  PDF (with pdf.js, one page at a time, as pictures - no links, forms or scripts);
+  DOCX (paragraphs, headings, lists, tables, emphasis and embedded PNG, JPEG and GIF -
+  no page layout, styles or charts); XLSX (up to 20 sheets of 1 000 rows by 100
+  columns, the values saved with the file - formulas are never evaluated); and the
+  first MiB of text and JSON, and of CSV as a table of up to 1 000 rows. Never
+  previewed: SVG, HTML, XML, anything with script, PPTX, `.doc`, `.xls`, HEIC, TIFF,
+  AVIF, audio, video, objects under SSE-C, and - but for text, CSV and JSON - objects
+  over `--preview-max-size` (32 MiB); what an object is shown as is decided by the
+  server from its stored type and its bytes together, never from its name. **Who may:** whoever may download the
+  object (`s3:GetObject`) and either uploaded the version shown or is allowed
+  `admin:PreviewObject` on it - which the built-in roles `bucket-admin`, `read-write`
+  and `read-only` hold, `cluster-admin` through `admin:*`, and `auditor` does not. An
+  explicit Deny of `admin:PreviewObject` stops the uploader too. A preview counts as a
+  download; a refused one is in the audit trail. The console draws every preview
+  itself and never opens the object as a page; DOCX and XLSX are read in a worker that
+  stops at 64 MiB unpacked or after 10 seconds, and refuses DTDs and entities.
 - **Delete all.** Beside "Delete selected", a bucket's page can delete every object of
   the bucket, all pages of it. It says what will happen - how many objects, that a
   bucket keeping versions keeps them and gets delete markers, that versions under Object
@@ -913,7 +931,10 @@ roles are built in: `cluster-admin`, `bucket-admin`, `read-write`, `read-only` a
 `auditor`. Nothing is allowed unless a policy allows it, and an explicit deny wins - with
 one exception (ADR-0028): the user who uploaded a version of an object may preview it in
 the console without being given `admin:PreviewObject`, when they may also read the
-object, and unless a policy denies them the preview.
+object, and unless a policy denies them the preview. Of the built-in roles,
+`bucket-admin`, `read-write` and `read-only` hold `admin:PreviewObject` and
+`cluster-admin` holds it through `admin:*`; `auditor`, which reads how the deployment
+is run and no object, does not.
 
 An API key is an access key ID and a secret. The secret is shown once, when the key is
 made, and stored encrypted through the KMS. A key can expire, can carry an inline policy

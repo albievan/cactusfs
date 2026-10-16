@@ -84,10 +84,12 @@ Conventions that follow from it:
 | `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement; a node's settings and their redaction (ADR-0022) |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
 | `internal/domain/search` | the language of the search field: text, wildcard, `rx:` regular expression |
+| `internal/domain/preview` | what kind of thing an object is shown as in a preview, from its stored type and the signature of its bytes; the size of an image from its header; the walk of a GIF's frames as its bytes stream (ADR-0028) |
+| `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
 | `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018: rules only, used by no use case yet) |
 | `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`; `SubBucketStore` and `TagDefinitionStore`, and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object, multipart, lifecycle, search, settings and identity use cases; sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
+| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
 | `internal/buildinfo` | the version, build and commit of the binary (section 8) |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
 | `internal/adapters/adminapi` | in: the management API (`api/`: the server generated from the contract) and Swagger UI (`swaggerui/`) (ADR-0007) |
@@ -687,8 +689,9 @@ four at a time.
   `/session/unlock`; `/buckets`,
   `/buckets/{bucket}` and `/buckets/{bucket}/usage` (with, when asked, who created each
   bucket, what its policy is and who used it last); `/buckets/{bucket}/objects` (list),
-  `/buckets/{bucket}/object` (upload, download, delete), `/buckets/{bucket}/object/metadata`
-  and `/buckets/{bucket}/object/access` (who uploaded and who downloaded); `/search`;
+  `/buckets/{bucket}/object` (upload, download, delete), `/buckets/{bucket}/object/metadata`,
+  `/buckets/{bucket}/object/access` (who uploaded and who downloaded) and
+  `/buckets/{bucket}/object/preview` (an object's bytes for the console to show, below); `/search`;
   `/users`, `/users/{name}`, `/users/{name}/keys` and `/keys/{access_key_id}`; `/groups`,
   `/roles` and `/policies`, each with `/{name}`; `/cluster` and `/cluster/maintenance`;
   `/settings`; `/audit`. The paths of milestone 8 are in the contract and have no use
@@ -807,6 +810,71 @@ four at a time.
   five columns only when the answer includes them.
   The figures are counts kept as well as can be, **not an audit trail**: a crash
   loses up to an interval of them.
+- **Previews of objects (implemented, ADR-0028).** The console shows an image (PNG,
+  JPEG, GIF, WebP), a PDF, a DOCX, an XLSX, or text, CSV and JSON, without the object
+  ever being rendered by the browser on the console's origin, and without anything of
+  it being parsed or rendered on the server beyond what decides its kind and size. The
+  flow:
+
+  ```
+  console (ObjectsScreen: "Preview" in an object's opened row)
+    | GET /api/v1/buckets/{b}/object/preview?key=   (generated client, read as a stream)
+    v
+  adminapi: authenticate -> ObjectService.Preview -> 200 octet-stream attachment
+            (each write taken within 2 min)           or problem+json
+    v
+  app.ObjectService.Preview                           internal/app/preview.go
+    1 Authorize s3:GetObject (s3:GetObjectVersion), resolve the version
+    2 Authorize admin:PreviewObject, ObjectCreator = version.CreatedBy
+    3 SSE-C -> 409; preview.Expected(stored type) -> 415; size > cap -> 413
+                                              (no shard read yet)
+    4 take a place: 2 per caller, 16 per node, else 429
+    5 open exactly that version (as a download: decrypt, verify, decode)
+    6 first 4 KiB -> preview.Classify(stored type, bytes) -> kind, or 415
+      image: up to 256 KiB -> preview.ImageBounds -> 413 / 415
+      GIF: every byte through preview.GIFFrames (fails the body at a bad frame)
+      text kinds: the first 1 MiB, Truncated
+    7 Close of the body: place given back, counted as a download (ADR-0016)
+    v
+  console PreviewDialog: renderer by X-CactusFS-Preview-Kind only; <= 256 MiB, one Blob
+    image      -> Blob re-typed image/png|jpeg|gif|webp -> blob: address in an <img>
+    text, json -> text nodes;  csv -> our RFC 4180 reader -> a table (1 000 x 100)
+    pdf        -> pdf.js 6.4 in a module worker of the console's origin -> a canvas
+    docx, xlsx -> ooxml.worker (our zip reader + fflate Inflate, our XML reader,
+                  bounded, ended after 10 s) -> plain model -> ooxml-check -> React
+  ```
+
+  **Who may** is decided by the one `ports.Authorizer`: `s3:GetObject` (or
+  `s3:GetObjectVersion`) on the object - a preview is never more than a download - and
+  either `admin:PreviewObject` on it or ownership of the version shown.
+  `iam.Request.ObjectCreator`, set by the use case from the version it resolved and
+  never from the request, lets `iam.Decide` count the policies' silence as an Allow
+  when it is `user/<the caller>`, for that one action. An explicit Deny refuses the
+  owner; an API key's inline policy must allow both actions; a locked session previews
+  nothing; root may; an anonymous caller never reaches the management API. Built-in
+  roles: `bucket-admin`, `read-write` and `read-only` hold the action, `cluster-admin`
+  through `admin:*`, `auditor` not. A refusal of either action is audited like every
+  denial; an allowed preview is not, as a download is not; a 409, 413 or 415 is no
+  denial. **What kind** is decided from the stored type AND the bytes' signature, never
+  from the key: SVG, HTML, XML, script and every type not listed are never previewable,
+  and `application/octet-stream` or no type lets the bytes decide for images and PDF
+  only. **The answer** is always `application/octet-stream` with
+  `Content-Disposition: attachment`, `nosniff`,
+  `Content-Security-Policy: sandbox; default-src 'none'`,
+  `Cross-Origin-Resource-Policy: same-origin` and `no-store`, and
+  `X-CactusFS-Preview-Kind` and `X-CactusFS-Preview-Truncated`; no `Range`; `HEAD` is
+  405. A transfer cut off after it began (a GIF frame past its screen, a stalled client)
+  is ended short of its `Content-Length` and logged at Warn; the browser's fetch fails
+  the broken body, and the dialog shows the preview as cut off. **The console** draws what
+  it is given itself - React elements, text nodes, an `<img>` of a blob address, a
+  canvas - never markup, a frame or a navigation; its CSP gains only `img-src blob:` and
+  an explicit `worker-src 'self'`, and an eslint rule refuses the markup sinks in its
+  code. It previews the current version; the API also takes `version_id`. The cap is
+  the setting `--preview-max-size` (section 3). No entry, state, on-disk format or
+  crypto design changed: `ObjectCreator` lives in memory and `CreatedBy` exists since
+  entry schema 3, so a version from before has no owner and is previewed by assignment
+  only. A node of the release before answers the path 404 `NotFound`. The threats and
+  their tests are in the threat model ("Previews of objects").
 - **Console (implemented, ADR-0007).** `web/`, embedded with `-tags console` and served
   at `/` by nodes with the console role. It calls only the admin API, through the client
   generated from the contract. Uploads belong to the console, not to a screen: they go
