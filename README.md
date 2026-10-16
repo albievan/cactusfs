@@ -80,7 +80,9 @@ control and a hash-chained audit trail.
   on while you use other screens, with a bar at the top of every screen that shows them
   and what the console did; search; users, groups, roles, policies and API keys; the
   cluster; the settings of every node; the audit log. A bucket's page shows its details
-  and can delete every object, after asking for your password. A session that times out
+  and can delete every object, after asking for your password. An object you may read and either uploaded
+  or may preview opens in a preview - images, text, CSV, JSON, PDF, DOCX and XLSX - drawn
+  by the console itself, never served inline (ADR-0028). A session that times out
   while it uploads is locked, not ended, until your password unlocks it.
 - **Deployment.** A distroless, non-root container image; a four-node compose cluster
   for development (Docker or rootless Podman); a Helm chart for Kubernetes and k3s with
