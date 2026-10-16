@@ -19,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/domain/preview"
+	"github.com/albievan/cactusfs/internal/domain/preview/previewtest"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -652,5 +653,37 @@ func TestPreviewJudgesAgainWhatReplacedTheVersion(t *testing.T) {
 	}
 	if len(creators) != 2 || creators[0] != "user/alice" || creators[1] != "user/bob" {
 		t.Fatalf("the previews were asked with the makers %q, want alice's and then bob's", creators)
+	}
+}
+
+// TestPreviewOfMaliciousFiles: every file of the malicious-file suite (PLAN
+// O.11) is refused with its error - before any shard is read when its type
+// alone refuses it - or shown, whole, as the kind its bytes prove; and an
+// object one byte over the cap is refused by its size, unread.
+func TestPreviewOfMaliciousFiles(t *testing.T) {
+	t.Parallel()
+	cases := append(previewtest.Cases(), previewtest.Case{
+		Name: "one byte over the cap", StoredType: "image/png", Data: previewtest.OneByteOver(app.MinPreviewMaxSize),
+		Refusal: domain.ErrPreviewTooLarge, ByType: true,
+	})
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			t.Parallel()
+			f := newPreviewFixture(t, app.MinPreviewMaxSize)
+			f.store(t, porttest.Root(), "k", c.StoredType, c.Data)
+			out, got, err := f.look(porttest.Root(), app.PreviewInput{Bucket: "b", Key: "k"})
+			if c.Refusal != nil {
+				if !errors.Is(err, c.Refusal) || out.Body != nil {
+					t.Fatalf("Preview = kind %q, %d bytes, %v; want %v", out.Kind, len(got), err, c.Refusal)
+				}
+				if c.ByType && f.opens.Load() != 0 {
+					t.Fatalf("refused by its type or size, and %d shards were opened", f.opens.Load())
+				}
+				return
+			}
+			if err != nil || out.Kind != c.Kind || out.Truncated || out.Length != int64(len(c.Data)) || !bytes.Equal(got, c.Data) {
+				t.Fatalf("Preview = kind %s, length %d, %d bytes, %v; want %s and every byte", out.Kind, out.Length, len(got), err, c.Kind)
+			}
+		})
 	}
 }

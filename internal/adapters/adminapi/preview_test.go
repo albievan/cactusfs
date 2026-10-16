@@ -418,10 +418,17 @@ func TestAnAbortedDownloadIsAnError(t *testing.T) {
 
 // TestASlowPreviewIsNoStalledOne: the stall bounds each write, not the
 // transfer: a client that takes longer than it in all, and keeps taking
-// bytes, gets every one of them.
+// bytes, gets every one of them. It takes a little at a time and pauses
+// for a twentieth of the stall: 32 pauses, about 1.6 stalls in all, while
+// no write waits for more than a pause and a read - a margin of the
+// timing, wide enough for the race detector on a busy machine.
 func TestASlowPreviewIsNoStalledOne(t *testing.T) {
 	t.Parallel()
-	const stall = 500 * time.Millisecond
+	const (
+		stall = 2 * time.Second
+		pause = stall / 20
+		step  = 256 << 10
+	)
 	f := newPreviewFixtureWith(t, func(c *adminapi.Config) { c.PreviewStall = stall })
 	image := pngOf(10, 10, 8<<20)
 	f.store(f.root, "big.png", "image/png", image)
@@ -439,14 +446,14 @@ func TestASlowPreviewIsNoStalledOne(t *testing.T) {
 	begun := time.Now()
 	var got bytes.Buffer
 	for {
-		n, err := io.CopyN(&got, resp.Body, 1<<20)
+		n, err := io.CopyN(&got, resp.Body, step)
 		if errors.Is(err, io.EOF) || (err == nil && n == 0) {
 			break
 		}
 		if err != nil {
 			t.Fatalf("after %d bytes: %v", got.Len(), err)
 		}
-		time.Sleep(stall / 4)
+		time.Sleep(pause)
 	}
 	if !bytes.Equal(got.Bytes(), image) || time.Since(begun) <= stall {
 		t.Fatalf("read %d of %d bytes in %s", got.Len(), len(image), time.Since(begun))

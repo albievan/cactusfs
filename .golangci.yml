@@ -103,6 +103,18 @@ linters:
           deny:
             - pkg: github.com/albievan/cactusfs/cmd
               desc: only cmd/cactusfs wires adapters together
+        # Helpers of tests are for tests: no code that is built into the
+        # binary imports them.
+        test-helpers:
+          list-mode: lax
+          files:
+            - $all
+            - "!$test"
+          deny:
+            - pkg: github.com/albievan/cactusfs/internal/ports/porttest
+              desc: porttest holds fakes for tests; production code uses the real adapters
+            - pkg: github.com/albievan/cactusfs/internal/domain/preview/previewtest
+              desc: previewtest makes malicious files for tests only
   exclusions:
     rules:
       # Black-box tests exist to start the binary they have just built.
