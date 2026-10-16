@@ -325,13 +325,15 @@ failure, which nothing between nodes depends on. The S3 API never meets them.
   it does not know, and the console says that previews are not available there. Everything else
   works as before on both releases. *Amended 2026-10-16, as built:* the path it does not
   know is answered `404` with the `code` `NotFound` ("No such endpoint"), and the
-  console's preview dialog words every 404 alike - "The object is not there any more:
-  it was deleted, or its bucket was." - which is wrong for this case. During a rolling
-  upgrade behind a balancer, a preview that reaches a node of the previous release says
-  that, and asking again may reach a new node. Not changed in O.13, which changes no
-  behaviour; the cure (a 404 whose `code` is `NotFound` worded as "previews are not
-  available on the node that answered (an older release); try again") is part of
-  O.14's criterion, to be done before its roll-out.
+  console's preview dialog words that 404 - and only that one - as "Previews are not
+  available on the node that answered (an older release); try again.", with a button
+  to ask again, which behind a balancer may reach a node of the new release (built in
+  O.14; until then every 404 was worded as an object that is gone). A gone object,
+  version or bucket is answered `NoSuchObject`, `NoSuchVersion` or `NoSuchBucket` and
+  keeps the words "The object is not there any more: it was deleted, or its bucket
+  was."; so does a 404 with no problem body the console can read (a proxy's page),
+  which names no code to tell an older node by (`refusalOf`,
+  `web/src/preview/PreviewDialog.tsx`; tested in `web/src/preview/preview.test.tsx`).
 - A policy that names `admin:PreviewObject` is readable by the previous release - it
   accepts any `admin:<name>` - and grants nothing there.
 - The built-in roles differ between the releases for one action that only the new

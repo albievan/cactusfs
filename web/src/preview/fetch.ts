@@ -38,9 +38,9 @@ function wholeNumberOf(header: string | null): number | null {
  * Asks the API for the preview of the current version of an object
  * (`previewObject`) with the generated client. The bytes are not read here:
  * whoever asked reads them when the kind is one it draws, and cancels them
- * when it is not, so that a PDF the console cannot show yet is not
- * downloaded for nothing. Aborting `signal` gives the request up, its body
- * included.
+ * when it is not - a kind a later release of the API added - so that bytes
+ * the console will not show are not downloaded for nothing. Aborting
+ * `signal` gives the request up, its body included.
  *
  * Rejects only when `signal` was aborted; every other failure is an answer.
  */

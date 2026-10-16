@@ -34,6 +34,12 @@ interface Refusal {
 }
 
 /**
+ * The code of the problem the API answers a path it does not know with
+ * (`internal/adapters/adminapi/handler.go`, "No such endpoint").
+ */
+const NO_SUCH_ENDPOINT = 'NotFound';
+
+/**
  * Words the API's answer. It decides nothing: whether the object may be
  * previewed, and as what, is what the API said.
  */
@@ -47,6 +53,18 @@ function refusalOf(error: unknown, retryAfter: number | null): Refusal {
     case 403:
       return { message: 'You neither own this object nor may preview it.', retry: false };
     case 404:
+      // `NotFound` is the API's answer to a path it does not know - a node
+      // of a release before previews, met during a rolling upgrade; a gone
+      // object or bucket is `NoSuchObject`, `NoSuchBucket` or
+      // `NoSuchVersion`. Asking again may reach a node that has the route.
+      // A 404 with any other code, or with no problem the console can read,
+      // is told as before.
+      if (error.problem.code === NO_SUCH_ENDPOINT) {
+        return {
+          message: 'Previews are not available on the node that answered (an older release); try again.',
+          retry: true,
+        };
+      }
       return { message: 'The object is not there any more: it was deleted, or its bucket was.', retry: false };
     case 409:
       return {

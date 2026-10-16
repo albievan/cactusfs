@@ -269,6 +269,8 @@ describe('the preview dialog', () => {
   it.each([
     [403, 'AccessDenied', 'You neither own this object nor may preview it.'],
     [404, 'NoSuchObject', 'The object is not there any more: it was deleted, or its bucket was.'],
+    [404, 'NoSuchBucket', 'The object is not there any more: it was deleted, or its bucket was.'],
+    [404, 'NoSuchVersion', 'The object is not there any more: it was deleted, or its bucket was.'],
     [413, 'PreviewTooLarge', 'This object is too large to preview.'],
     [415, 'NotPreviewable', 'This object is not of a kind the console can show, or its type and its contents do not agree.'],
   ])('says what a %i means, offers the download and no retry', async (status, code, message) => {
@@ -281,6 +283,42 @@ describe('the preview dialog', () => {
     );
     expect(within(dialog).queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(dialog.querySelector('img')).toBeNull();
+  });
+
+  it('says that a node of an older release, which has no preview route, answered - not that the object is gone - and offers to ask again', async () => {
+    // What a node of a release before previews answers the path: the
+    // catch-all of adminapi's BasePath.
+    let answers = 0;
+    const api = fakeApi({
+      [PREVIEW]: () => {
+        answers += 1;
+        return answers === 1 ? refusal(404, 'NotFound', 'No such endpoint') : previewOf('png', PNG);
+      },
+    });
+    renderButton();
+    const dialog = await openPreview();
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(
+      'Previews are not available on the node that answered (an older release); try again.',
+    );
+    expect(within(dialog).getByRole('link', { name: 'Download' }).getAttribute('href')).toBe(
+      objectDownloadUrl('photos', 'cat.png'),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Try again' }));
+    expect(await within(dialog).findByRole('img')).toBeTruthy();
+    expect(api.callsTo('GET', '/buckets/photos/object/preview')).toHaveLength(2);
+  });
+
+  it('tells a 404 whose body is no problem it can read as an object that is gone, and offers no retry', async () => {
+    // A proxy's page, say: no code to tell a node of an older release by.
+    fakeApi({
+      [PREVIEW]: () => new Response('<html>Not Found</html>', { status: 404, headers: { 'Content-Type': 'text/html' } }),
+    });
+    renderButton();
+    const dialog = await openPreview();
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(
+      'The object is not there any more: it was deleted, or its bucket was.',
+    );
+    expect(within(dialog).queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
   it('says that an object with a customer key needs an S3 client with it, and offers no download', async () => {
