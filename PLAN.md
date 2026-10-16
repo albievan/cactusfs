@@ -32,7 +32,7 @@ A step is `done` only when its acceptance criterion holds **and** `make check` i
 | Goal L | A session that locks, not ends, while objects are uploaded (ADR-0027) | done - on k3s as 0.7.0-76 |
 | Goal M | A bucket's details; "Delete all" behind the password | done - on k3s as 0.7.0-77 (without schema 5); M.5 (edges of an unlock that times out) todo |
 | Goal N | The dunes of the sign-in page move | done - on k3s as 0.7.0-77 |
-| Goal O | Bucket details that fold; previews of objects their viewer owns or may preview (ADR-0028) | in_progress - O.0 to O.11 done (images, text, PDF, DOCX and XLSX previewed in the console; the malicious-file suites); O.12 done; O.13 done (the documents written, gates to come); O.14 todo |
+| Goal O | Bucket details that fold; previews of objects their viewer owns or may preview (ADR-0028) | in_progress - O.0 to O.13 done (images, text, PDF, DOCX and XLSX previewed in the console; the malicious-file suites; four-node test; the documents); O.14 todo |
 
 As of 2026-10-16.
 
