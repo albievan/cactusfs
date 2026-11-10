@@ -112,6 +112,10 @@ func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
 	}
 	logger := slog.New(slog.NewJSONHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	clock := porttest.NewClock(serverNow)
+	// The store judges Object Lock on its own time, as the real one does on
+	// the time its leader stamps entries with: it is the server's clock, so
+	// that no answer depends on the day the test is run.
+	s.meta.Now = clock.Now
 	s.iamStore = porttest.NewMemIAM()
 	s.auditor = app.NewAuditor(s.iamStore, clock, logger)
 	authz := app.NewAuthorizer(logger, clock, s.auditor).WithBucketPolicies(s.meta)
