@@ -321,7 +321,10 @@ var sourceSeries = map[string][]string{
 // its series are back.
 func TestASourceThatHangsDoesNotHoldUpTheScrape(t *testing.T) {
 	t.Parallel()
-	const timeout = 100 * time.Millisecond
+	// Long enough that a source that answers is never cut off by a busy
+	// machine (the race detector, every package at once); the source that
+	// hangs is held forever, so the test tells them apart all the same.
+	const timeout = time.Second
 	for kind := range sourceSeries {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
