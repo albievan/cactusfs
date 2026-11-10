@@ -1,8 +1,8 @@
-//go:build integration
+//go:build integration || k8s
 
 // Package releasemirror is a mirror of the releases of CactusFS for the
-// integration tests of updates and upgrades (PLAN P.11, ADR-0029): a local
-// TLS server that answers GitHub's releases JSON at
+// end-to-end tests of updates and upgrades (PLAN P.11, ADR-0029) - those of
+// test/integration and of test/k8s: a local TLS server that answers GitHub's releases JSON at
 // /repos/albievan/cactusfs/releases and serves the files of each release -
 // the binaries, SHA256SUMS, digests.txt and their Sigstore bundles - as
 // GitHub does, behind a redirect from the address the JSON names.
@@ -12,13 +12,15 @@
 // when a test asks for that) and GitHub's OIDC issuer, so that a node
 // verifies them with its production rule and only its trusted root swapped
 // (update-trusted-root). The server's certificate is issued by a CA of the
-// mirror's own, which a node is given as update-ca.
+// mirror's own, which a node is given as update-ca. It listens on the
+// loopback address, or - for nodes in containers - where Options say.
 //
 // It is for tests only and holds nothing secret: its keys are made when it
 // starts and are gone when it stops.
 package releasemirror
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -71,6 +73,20 @@ type Release struct {
 	// empty for Version. Another version is a bundle of another release
 	// passed off as this one.
 	SignedAs string
+	// ListDigest is the digest digests.txt gives the release's image list
+	// ("sha256:<hex>"): an image a cluster has. Empty: one made up from the
+	// version, which no cluster has.
+	ListDigest string
+}
+
+// Options say where a mirror listens and at which address it is reached.
+type Options struct {
+	// Listen is the address the mirror listens on; 127.0.0.1:0 when empty.
+	Listen string
+	// Host is the IP address the mirror is reached at: its certificate
+	// names it, and so do the addresses of the releases JSON. 127.0.0.1
+	// when empty.
+	Host string
 }
 
 // Request is a request the mirror was sent, as far as a test asks about it.
@@ -87,6 +103,9 @@ type Request struct {
 // Mirror is a running mirror. It is safe for concurrent use.
 type Mirror struct {
 	server *httptest.Server
+	// base is https://<host>:<port>, where the mirror is reached.
+	base   string
+	port   int
 	signer *sigstoretest.Sigstore
 	caPEM  []byte
 
@@ -117,17 +136,45 @@ type file struct {
 // signer must be new: its timestamp authority signs for a few minutes only,
 // and a release is signed when it is published.
 func New(signer *sigstoretest.Sigstore) (*Mirror, error) {
+	return NewWith(signer, Options{})
+}
+
+// NewWith starts a mirror as New does, listening and reached where opts
+// say.
+func NewWith(signer *sigstoretest.Sigstore, opts Options) (*Mirror, error) {
 	if signer == nil {
 		return nil, errors.New("releasemirror.New: no signer")
 	}
-	caPEM, leaf, err := certificates()
+	if opts.Listen == "" {
+		opts.Listen = "127.0.0.1:0"
+	}
+	if opts.Host == "" {
+		opts.Host = "127.0.0.1"
+	}
+	host := net.ParseIP(opts.Host)
+	if host == nil {
+		return nil, fmt.Errorf("releasemirror.New: the host %q is not an IP address", opts.Host)
+	}
+	caPEM, leaf, err := certificates(host)
 	if err != nil {
 		return nil, fmt.Errorf("releasemirror.New: %w", err)
 	}
-	m := &Mirror{signer: signer, caPEM: caPEM, assets: map[string][]byte{}, downloads: map[string]string{}}
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", opts.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("releasemirror.New: %w", err)
+	}
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return nil, fmt.Errorf("releasemirror.New: %s is not a TCP address", listener.Addr())
+	}
+	m := &Mirror{signer: signer, caPEM: caPEM, port: addr.Port, assets: map[string][]byte{}, downloads: map[string]string{}}
 	m.server = httptest.NewUnstartedServer(http.HandlerFunc(m.serve))
+	_ = m.server.Listener.Close()
+	m.server.Listener = listener
 	m.server.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
 	m.server.StartTLS()
+	m.base = "https://" + net.JoinHostPort(host.String(), strconv.Itoa(addr.Port))
 	return m, nil
 }
 
@@ -135,7 +182,10 @@ func New(signer *sigstoretest.Sigstore) (*Mirror, error) {
 func (m *Mirror) Close() { m.server.Close() }
 
 // URL is the address of the releases JSON: the setting update-source.
-func (m *Mirror) URL() string { return m.server.URL + ListPath }
+func (m *Mirror) URL() string { return m.base + ListPath }
+
+// Port is the port the mirror listens on.
+func (m *Mirror) Port() int { return m.port }
 
 // CA is the PEM certificate of the CA that issued the mirror's
 // certificate: the content of the file of the setting update-ca.
@@ -179,7 +229,7 @@ func (m *Mirror) Publish(r Release) error {
 		}
 	}
 	contents[release.SumsAsset] = []byte(sums.String())
-	contents[release.DigestsAsset] = digests(r.Version)
+	contents[release.DigestsAsset] = digests(r.Version, r.ListDigest)
 	for list, bundle := range map[string]string{release.SumsAsset: release.SumsBundleAsset, release.DigestsAsset: release.DigestsBundleAsset} {
 		signed, err := m.signer.Sign(identity, sigstore.DefaultIssuer, contents[list])
 		if err != nil {
@@ -200,22 +250,26 @@ func (m *Mirror) Publish(r Release) error {
 		}
 		m.assets[id] = contents[name]
 		m.downloads[path] = id
-		p.files = append(p.files, file{name: name, url: m.server.URL + path, size: len(contents[name])})
+		p.files = append(p.files, file{name: name, url: m.base + path, size: len(contents[name])})
 	}
 	m.releases = append([]published{p}, m.releases...)
 	return nil
 }
 
 // digests is a digests.txt of a release as scripts/release.sh writes it:
-// the image's list and the image of each platform, by digests made up from
-// the version - no image is pulled in these tests.
-func digests(version string) []byte {
+// the image's list - by list when it is given - and the image of each
+// platform, by digests made up from the version: the platforms' are never
+// pulled, and neither is the list unless a test gives one a cluster has.
+func digests(version, list string) []byte {
 	digest := func(what string) string {
 		sum := sha256.Sum256([]byte(version + " " + what))
 		return "sha256:" + hex.EncodeToString(sum[:])
 	}
+	if list == "" {
+		list = digest("list")
+	}
 	ref := "ghcr.io/albievan/cactusfs:" + version
-	return []byte(ref + " " + digest("list") + "\n" +
+	return []byte(ref + " " + list + "\n" +
 		ref + " linux/amd64 " + digest("linux/amd64") + "\n" +
 		ref + " linux/arm64 " + digest("linux/arm64") + "\n")
 }
@@ -265,7 +319,7 @@ func (m *Mirror) serve(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		http.Redirect(w, r, m.server.URL+"/assets/"+id, http.StatusFound)
+		http.Redirect(w, r, m.base+"/assets/"+id, http.StatusFound)
 	case strings.HasPrefix(r.URL.Path, "/assets/"):
 		m.mu.Lock()
 		data, ok := m.assets[strings.TrimPrefix(r.URL.Path, "/assets/")]
@@ -290,7 +344,7 @@ func (m *Mirror) serveList(w http.ResponseWriter) {
 		g := githubRelease{
 			TagName: "v" + p.version, Name: "v" + p.version, Prerelease: p.prerelease,
 			PublishedAt: p.published.Format(time.RFC3339),
-			HTMLURL:     m.server.URL + "/albievan/cactusfs/releases/tag/v" + p.version,
+			HTMLURL:     m.base + "/albievan/cactusfs/releases/tag/v" + p.version,
 			Assets:      make([]githubAsset, 0, len(p.files)),
 		}
 		for _, f := range p.files {
@@ -309,10 +363,10 @@ func (m *Mirror) serveList(w http.ResponseWriter) {
 	_, _ = w.Write(data)
 }
 
-// certificates makes a CA and a certificate of the loopback address it
-// issued, and returns the CA's certificate as PEM and the server's
-// certificate with its key.
-func certificates() ([]byte, tls.Certificate, error) {
+// certificates makes a CA and a certificate it issued of the loopback
+// address and host, and returns the CA's certificate as PEM and the
+// server's certificate with its key.
+func certificates(host net.IP) ([]byte, tls.Certificate, error) {
 	now := time.Now()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -348,7 +402,7 @@ func certificates() ([]byte, tls.Certificate, error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"localhost"},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback, host},
 	}, ca, key.Public(), caKey)
 	if err != nil {
 		return nil, tls.Certificate{}, err

@@ -70,21 +70,37 @@ func (n *node) openUpdates(lifetime context.Context, cfg serverConfig, view port
 	if err != nil {
 		return err
 	}
-	upgrader, err := n.openUpgrader(lifetime, cfg, source, view, others, build, logger)
+	// The end of a run that another process ran is audited by the use
+	// case, which exists once the upgrader does: until then nothing can
+	// end one (the settling below starts after it).
+	var service *app.UpdateService
+	onEnded := func(end release.RunEnd) {
+		if service != nil {
+			service.RunEnded(end)
+		}
+	}
+	upgrader, err := n.openUpgrader(lifetime, cfg, source, view, others, build, current, onEnded, logger)
 	if err != nil {
 		return err
 	}
-	n.updates, err = app.NewUpdateService(app.UpdateServiceConfig{
+	service, err = app.NewUpdateService(app.UpdateServiceConfig{
 		Source: source, Verifier: n.telemetry.InstrumentReleaseVerifier(verifier), Upgrader: n.telemetry.InstrumentUpgrader(upgrader),
 		Authz: n.authorizer, Auditor: n.auditor, Clock: n.clock, Sessions: n.sessions,
 		Current: current, Build: build.Build, Commit: build.Commit, Channel: channel,
 		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Interval: cfg.UpdateCheckInterval,
 		Classify: func(err error) string { return string(github.ClassOf(err)) },
 		Entropy:  rand.Reader, Lifetime: lifetime, Logger: logger,
-		OnCheck: n.telemetry.ObserveUpdateCheck,
+		OnCheck: n.telemetry.ObserveUpdateCheck, NodeID: n.id,
 	})
 	if err != nil {
 		return fmt.Errorf("updates: %w", err)
+	}
+	n.updates = service
+	if settler, ok := upgrader.(*kubernetes.Upgrader); ok {
+		// A run whose holder moved itself last is done once every node
+		// runs its target: its lock is replaced by its result, and its end
+		// audited.
+		go settler.Settle(lifetime)
 	}
 	if source == nil {
 		logger.InfoContext(lifetime, "releases are not checked for: no update source is configured")
@@ -113,10 +129,12 @@ func openVerifier(cfg serverConfig) (*sigstore.ReleaseVerifier, error) {
 	return sigstore.NewReleaseVerifier(verifier), nil
 }
 
-// openUpgrader returns the upgrader of upgrade-mode, undecorated.
+// openUpgrader returns the upgrader of upgrade-mode, undecorated. current
+// is the version this node runs; onEnded is told the end of a run another
+// process ran (kubernetes.Config.OnEnded).
 func (n *node) openUpgrader(
 	ctx context.Context, cfg serverConfig, source ports.ReleaseSource, view ports.ClusterView, others ports.NodeSettingsReader, build buildinfo.Info,
-	logger *slog.Logger,
+	current release.Version, onEnded func(release.RunEnd), logger *slog.Logger,
 ) (ports.Upgrader, error) {
 	switch release.Mode(cfg.UpgradeMode) {
 	case release.ModeBinary:
@@ -154,18 +172,16 @@ func (n *node) openUpgrader(
 		}
 		made, err := kubernetes.New(kubernetes.Config{
 			APIBase: kubernetes.APIBaseFromEnv(os.LookupEnv), TokenDir: dir, Self: n.id,
-			Nodes: func(ctx context.Context) ([]string, error) { return upgradeOrder(ctx, view, n.id) },
+			Nodes: func(ctx context.Context) ([]string, error) { return upgradeOrder(ctx, view) },
 			NodeBuild: func(ctx context.Context, id string) (cluster.Build, error) {
 				return n.nodeBuild(ctx, id, others)
 			},
-			Ready: n.ready, Clock: n.clock, Logger: logger,
+			Ready: n.ready, Clock: n.clock, Logger: logger, Current: current, OnEnded: onEnded,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("upgrade-mode kubernetes: %w", err)
 		}
-		// A run whose holder moved itself last is done once every node
-		// runs its target: its lock is replaced by its result.
-		go made.Settle(ctx)
+		// Settled by openUpdates once the use case is there.
 		return made, nil
 	default:
 		return off.New(offInstructions(cfg)), nil
@@ -188,21 +204,19 @@ func offInstructions(cfg serverConfig) []string {
 
 // upgradeOrder returns the nodes of the cluster in the order an upgrade
 // moves them: those that are no voters of the metadata group first, then
-// the voters, and this node last, each group by ID.
-func upgradeOrder(ctx context.Context, view ports.ClusterView, self string) ([]string, error) {
+// the voters, each group by ID. The upgrader moves the node that runs the
+// upgrade last; the order is the same whichever node asks, so that every
+// node shows the progress of a run in the order the run follows.
+func upgradeOrder(ctx context.Context, view ports.ClusterView) ([]string, error) {
 	nodes, err := view.Nodes(ctx)
 	if err != nil {
 		return nil, err
 	}
 	rank := func(node cluster.Node) int {
-		switch {
-		case node.ID == self:
-			return 2
-		case node.Roles.Has(cluster.RoleMeta):
+		if node.Roles.Has(cluster.RoleMeta) {
 			return 1
-		default:
-			return 0
 		}
+		return 0
 	}
 	slices.SortStableFunc(nodes, func(a, b cluster.Node) int {
 		if d := rank(a) - rank(b); d != 0 {

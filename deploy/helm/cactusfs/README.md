@@ -328,12 +328,15 @@ files are fetched from `github.com` and redirected to GitHub's storage, on addre
 GitHub changes, so a rule for it is a wide range that must be kept current
 (`https://api.github.com/meta` publishes GitHub's ranges). A mirror inside the network,
 with `update-ca` if its certificate is of a private CA, is the dependable choice (the
-[README](../../../README.md#checking-for-releases-and-upgrading) says how).
-`ci/upgrade-values.yaml` is such a set of values, and `helm-assert` holds that the
-source's port has a rule.
+[README](../../../README.md#checking-for-releases-and-upgrading) says how): put the
+CA's certificate in a Secret under the key `ca.crt` and name it in
+`updates.caSecret`. `ci/upgrade-values.yaml` is such a set of values, and
+`helm-assert` holds that the source's port has a rule.
 
 | Value | |
 |---|---|
+| `updates.caSecret` | A Secret with the key `ca.crt`: the CAs the source's certificate is verified against (`update-ca`), mounted read-only into the cactusfs container. Empty: the system's CAs. Only with `CACTUSFS_UPDATE_SOURCE` in `extraEnv`; the chart refuses to render without, as a node would refuse to start, and refuses `CACTUSFS_UPDATE_CA` in `extraEnv` beside it |
+| `updates.trustedRootSecret` | A Secret with the key `trusted_root.json`: the Sigstore trusted root releases are verified against instead of the binary's (`update-trusted-root`), for a deployment that was offline across a rotation of Sigstore's keys. Empty: the binary's. Only with `CACTUSFS_UPDATE_SOURCE`, as above, and not beside `CACTUSFS_UPDATE_TRUSTED_ROOT` in `extraEnv` |
 | `upgrade.fromConsole.enabled` | `false`. Renders what follows, and sets `CACTUSFS_UPGRADE_MODE=kubernetes` on every node |
 | `upgrade.fromConsole.apiServer.cidrs` | The addresses at which the pods reach the API server, for the NetworkPolicy: the endpoints of the Service `kubernetes` in the namespace `default`, as `kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes` lists them, each as `<address>/32`. A NetworkPolicy sees the address after the Service's translation, so the Service's own address does not do. Required when `networkPolicy.enabled`; the chart refuses to render without |
 | `upgrade.fromConsole.apiServer.port` | Their port: `6443` (k3s, kubeadm) |
@@ -425,5 +428,7 @@ value set or without a refusal to ask for, the gate fails.
 
 `make test-k8s` (`test/k8s`) installs the chart on k3s in one privileged container, with
 `ci/single-machine-values.yaml` and the image the tree builds, in a namespace that enforces
-the `restricted` standard, and holds the running cluster to this document. It is a CI job of
-its own and no part of `make check`.
+the `restricted` standard, and holds the running cluster to this document - an upgrade from
+the console included: turned on with `helm upgrade`, four nodes moved to a second image one
+at a time, and an image that cannot be pulled put back. It is a CI job of its own and no
+part of `make check`.

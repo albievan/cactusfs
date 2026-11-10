@@ -155,23 +155,21 @@ func (f fixedNodes) Nodes(context.Context) ([]cluster.Node, error) {
 }
 
 // TestUpgradeOrder: the nodes are moved those that hold no vote first, then
-// the voters, and the node that runs the upgrade last.
+// the voters, each by ID - whichever node asks, so that the progress read
+// on any node lists the run's order (the upgrader moves the node that runs
+// the upgrade last; an order that put the asking node last listed, on every
+// other node, that node out of its place).
 func TestUpgradeOrder(t *testing.T) {
 	t.Parallel()
 	voter, storage := cluster.Roles{cluster.RoleMeta, cluster.RoleGateway}, cluster.Roles{cluster.RoleStorage}
 	view := fixedNodes{nodes: []cluster.Node{
 		{ID: "n1", Roles: voter}, {ID: "n2", Roles: storage}, {ID: "n3", Roles: voter}, {ID: "n4", Roles: storage}, {ID: "n5", Roles: voter},
 	}}
-	for self, want := range map[string][]string{
-		"n1": {"n2", "n4", "n3", "n5", "n1"},
-		"n4": {"n2", "n1", "n3", "n5", "n4"},
-	} {
-		got, err := upgradeOrder(t.Context(), view, self)
-		if err != nil || !slices.Equal(got, want) {
-			t.Errorf("from %s: %v, %v; want %v", self, got, err, want)
-		}
+	got, err := upgradeOrder(t.Context(), view)
+	if want := []string{"n2", "n4", "n1", "n3", "n5"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("upgradeOrder = %v, %v; want %v", got, err, want)
 	}
-	if _, err := upgradeOrder(t.Context(), fixedNodes{err: domain.ErrUnavailable}, "n1"); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := upgradeOrder(t.Context(), fixedNodes{err: domain.ErrUnavailable}); !errors.Is(err, domain.ErrUnavailable) {
 		t.Errorf("a view that cannot be read: %v", err)
 	}
 }

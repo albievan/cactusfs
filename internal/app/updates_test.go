@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -604,6 +605,33 @@ func TestUpdatesStart(t *testing.T) {
 				}
 			},
 		},
+		"an end another node recorded is not audited again": {
+			mode: release.ModeKubernetes, want: outcome{started: true},
+			tune: func(c *app.UpdateServiceConfig) {
+				c.Upgrader = endedElsewhere{Upgrader: c.Upgrader, reported: make(chan struct{})}
+			},
+			then: func(t *testing.T, f *updateFixture, _ release.Progress) {
+				f.upgrader.Finish()
+				reported := f.reported(t, 3)
+				if last := reported[len(reported)-1]; last.State != release.StateDone || !last.EndedElsewhere {
+					t.Fatalf("reported = %+v", reported)
+				}
+				// Once the report of the end has returned, a record it
+				// made would be queued.
+				elsewhere, ok := f.cfg.Upgrader.(endedElsewhere)
+				if !ok {
+					t.Fatalf("the upgrader is a %T", f.cfg.Upgrader)
+				}
+				select {
+				case <-elsewhere.reported:
+				case <-time.After(10 * time.Second):
+					t.Fatal("the end was not reported")
+				}
+				if records := f.records(t, iam.ActionUpgradeCluster); len(records) != 1 || records[0].Details["mode"] != "kubernetes" {
+					t.Errorf("records = %+v, want the start alone", records)
+				}
+			},
+		},
 		"no source": {
 			mode: release.ModeBinary, tune: func(c *app.UpdateServiceConfig) { c.Source = nil }, noCheck: true,
 			want: outcome{err: domain.ErrUpdatesOff},
@@ -954,6 +982,116 @@ func TestUpdatesActionsAreAskedOfTheUpdatesResource(t *testing.T) {
 			}
 			if tt.method == "Start" && tt.want != nil && f.upgrader.Starts() != 0 {
 				t.Error("the upgrader was started")
+			}
+		})
+	}
+}
+
+// endedElsewhere is an upgrader whose run's end another node recorded: its
+// last report says so.
+type endedElsewhere struct {
+	ports.Upgrader
+	// reported is closed once the report of the end has returned.
+	reported chan struct{}
+}
+
+func (u endedElsewhere) Start(ctx context.Context, target release.Verified, startedBy string, report func(release.Progress)) error {
+	return u.Upgrader.Start(ctx, target, startedBy, func(p release.Progress) {
+		p.EndedElsewhere = p.State.Ended()
+		report(p)
+		if p.EndedElsewhere {
+			close(u.reported)
+		}
+	})
+}
+
+// TestUpdatesRunEnded: the end of a run that another process ran, told by
+// the upgrader of the node that recorded it, is audited as the reporter of
+// Start audits an end - the action, the resource, from, to, the digest and
+// the state - with the reason of a failure, this node and where the actor
+// was read from. The actor is the one who started the run when the lock
+// names a console user, and system otherwise (an annotation can be written
+// by whoever may patch the StatefulSet). Recorded once per run, of the last
+// 64; an end that names no run or no target is not recorded.
+func TestUpdatesRunEnded(t *testing.T) {
+	t.Parallel()
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	done := release.RunEnd{
+		Run: "aaaa", From: mustVersion(t, "0.7.0"), Target: mustVersion(t, "0.7.1"), Digest: digest,
+		StartedBy: "user/bob", State: release.StateDone,
+	}
+	with := func(change func(*release.RunEnd)) release.RunEnd {
+		e := done
+		change(&e)
+		return e
+	}
+	details := func(extra map[string]string, drop ...string) map[string]string {
+		d := map[string]string{
+			"from": "0.7.0", "to": "0.7.1", "digest": digest, "state": "done",
+			"recorded_by": "node-2", "actor_source": "kubernetes lock annotation",
+		}
+		maps.Copy(d, extra)
+		for _, k := range drop {
+			delete(d, k)
+		}
+		return d
+	}
+	// runs names 65 runs, r0 to r64.
+	var runs []release.RunEnd
+	for i := range 65 {
+		runs = append(runs, with(func(e *release.RunEnd) { e.Run = fmt.Sprintf("r%d", i) }))
+	}
+	tests := map[string]struct {
+		ends []release.RunEnd
+		// count is how many records are written; the first is checked.
+		count   int
+		outcome audit.Outcome
+		actor   string
+		details map[string]string
+	}{
+		"done": {ends: []release.RunEnd{done}, count: 1, outcome: audit.Succeeded, actor: "user/bob", details: details(nil)},
+		"failed, with its reason": {
+			ends:  []release.RunEnd{with(func(e *release.RunEnd) { e.State, e.Reason = release.StateFailed, "the node stopped answering" })},
+			count: 1, outcome: audit.Failed, actor: "user/bob",
+			details: details(map[string]string{"state": "failed", "reason": "the node stopped answering"}),
+		},
+		"a lock that did not say where it started from": {
+			ends:  []release.RunEnd{with(func(e *release.RunEnd) { e.From = release.Version{} })},
+			count: 1, outcome: audit.Succeeded, actor: "user/bob", details: details(nil, "from"),
+		},
+		"told twice, recorded once": {ends: []release.RunEnd{done, done}, count: 1, outcome: audit.Succeeded, actor: "user/bob", details: details(nil)},
+		"nobody named":              {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.StartedBy = "" })}, count: 1, outcome: audit.Succeeded, actor: "system", details: details(nil)},
+		"root named":                {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.StartedBy = "root" })}, count: 1, outcome: audit.Succeeded, actor: "system", details: details(nil)},
+		"an API key named":          {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.StartedBy = "key/AKIAEXAMPLE" })}, count: 1, outcome: audit.Succeeded, actor: "system", details: details(nil)},
+		"a user that cannot be":     {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.StartedBy = "user/al ice\nforged" })}, count: 1, outcome: audit.Succeeded, actor: "system", details: details(nil)},
+		"a user with no name":       {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.StartedBy = "user/" })}, count: 1, outcome: audit.Succeeded, actor: "system", details: details(nil)},
+		"a run that has not ended":  {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.State = release.StateRunning })}},
+		"no run":                    {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.Run = "" })}},
+		"no target":                 {ends: []release.RunEnd{with(func(e *release.RunEnd) { e.Target = release.Version{} })}},
+		"the last 64 runs are remembered": {
+			// r1 is among the last 64 and is not recorded again; r0 is
+			// not, and is.
+			ends:  append(slices.Clone(runs), runs[1], runs[0]),
+			count: 66, outcome: audit.Succeeded, actor: "user/bob", details: details(nil),
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newUpdateFixture(t, release.ModeKubernetes, nil, func(c *app.UpdateServiceConfig) { c.NodeID = "node-2" })
+			for _, end := range tt.ends {
+				f.updates.RunEnded(end)
+			}
+			records := f.records(t, iam.ActionUpgradeCluster)
+			if len(records) != tt.count {
+				t.Fatalf("%d records, want %d: %+v", len(records), tt.count, records)
+			}
+			if tt.count == 0 {
+				return
+			}
+			r := records[0]
+			if r.Outcome != tt.outcome || r.Actor != tt.actor || r.AccessKeyID != "" || r.Resource != "arn:cactusfs:admin:::updates" || !maps.Equal(r.Details, tt.details) {
+				t.Errorf("record = %+v, want %s by %s with %v", r, tt.outcome, tt.actor, tt.details)
 			}
 		})
 	}

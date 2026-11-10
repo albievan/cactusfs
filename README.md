@@ -1080,7 +1080,8 @@ system trusts (there is no way to skip verification), and a mirror on loopback o
 link-local address needs `egress-allow`. Signatures are verified offline against the
 Sigstore trusted root embedded in the binary; a site that has been offline across a
 rotation of Sigstore's keys copies a current `trusted_root.json` across the gap and names
-it with `update-trusted-root`.
+it with `update-trusted-root`. With the Helm chart both files come from Secrets,
+`updates.caSecret` and `updates.trustedRootSecret` (the chart's README).
 
 **What is verified before anything is installed**, on the node, offline:
 

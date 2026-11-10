@@ -5,8 +5,9 @@
   defaults taken by the session on 2026-11-09, pending Albie's review"); each is listed
   under [Open, for the owner](#open-for-the-owner) with the default that was taken.
   **Built** (PLAN P.1 to P.11) and described here as built, after the review of
-  2026-11-09 (PLAN P.12); the Kubernetes mode is tested against a fake API server, and
-  `make test-k8s` on a real cluster is still to run.
+  2026-11-09 (PLAN P.12); the Kubernetes mode is tested against a fake API server and,
+  by `make test-k8s` (`TestUpgradeOnK3s`, 2026-11-10), on k3s: four nodes moved from one
+  image of this tree to another, and an image the cluster cannot pull put back.
 - **Date:** 2026-11-09
 - **Builds on:** ADR-0006 (identity and access, the audit trail), ADR-0007 (management
   API and console), ADR-0015 (the Helm chart: a StatefulSet for every node), ADR-0021
@@ -232,8 +233,10 @@ install**, whatever its policy says: a bearer credential has no password to type
 console holds no rule of who may; it shows the button to a session that the API says is
 allowed, and the API decides again.
 
-One upgrade at a time (`domain.ErrUpgradeRunning`). Every check and every start is
-audited: the actor, from, to, the digest installed and the outcome.
+One upgrade at a time (`domain.ErrUpgradeRunning`). Every check, every start and the end
+of every run are audited: the actor, from, to, the digest installed and the outcome
+(the end: the state, and why it failed). How the end of a Kubernetes run that its own
+process did not see is audited is below (amended 2026-11-10).
 
 ### The management API (PLAN P.2)
 
@@ -286,12 +289,51 @@ Lease by name. How a run ends, as built:
   (`GET /upgrade`, which the auditor may call) says `done` and writes nothing: a holder
   that is alive may still be waiting for the cluster to be ready, and ends its run
   itself. A run still under way whose lock was replaced by its own result ends `done`.
+- **Stale** (amended 2026-11-10): a lock whose heartbeat is older than twice a node's
+  time, of a run not done, is replaced by the result `failed` - the first node not done,
+  "the node that ran it stopped answering" - by any node that reads the progress, under
+  `resourceVersion`. (It was left until a new start took it over, and its end was then
+  in no record.) Staleness compares the heartbeat, written by the holder's clock, with
+  the reader's clock: the nodes' clocks are assumed to agree to well within twice a
+  node's time (20 minutes by default), as NTP keeps them. A reader whose clock runs that
+  far ahead could end a live run as `failed`; the run then stops at its next heartbeat
+  and touches nothing more.
 - **Takeover**: a lock is taken over by a new start when its heartbeat is older than
   twice a node's time, when its holder is the starting node (whose process holds no
   run), when it does not parse, or when every node is already at its target. A run that
   finds its lock taken - at a heartbeat, or before it puts a node back - stops,
   `failed`, and touches nothing more; the new run resumes, skipping nodes already at
   the target and putting back from `cactusfs.io/upgrade-previous`.
+
+**The end of every run is audited once (amended 2026-11-10).** A run's process audits
+the end it sees, through the progress the upgrader reports - the failure a holder
+writes. A run whose lock another node wrote over is audited by *that* node: the one whose
+patch under `resourceVersion` succeeded - with the result `done` (settled) or `failed`
+(stale), or with the lock of the new run (taken over: `done` when every node is at the
+old target, otherwise `failed`, "restarted" or "stopped answering") - tells the use case
+(`kubernetes.Config.OnEnded` → `app.UpdateService.RunEnded`, wired in `cmd/cactusfs`;
+the adapter audits nothing), which records `admin:UpgradeCluster` on `updates` as
+Succeeded or Failed with from, to, the digest, the state and the reason of a failure.
+Its actor is the lock's `startedBy`, the name the trail gave the user who started the
+run, when it is a console user's (`user/<name>`, a valid IAM name - only a console user
+can start a run) and `system` otherwise; no principal is made for them. The lock is an
+annotation, so whoever may patch the StatefulSet can write any `startedBy` into it: the
+record says where its actor came from (`actor_source: kubernetes lock annotation`) and
+which node recorded it (`recorded_by`), and the threat model accepts the forgery as
+bounded by that right, which already allows running any pod. A run's end that names no
+run or no target is not recorded, and a lock that does not parse is never replaced by a
+result (it would name no run, over the last run's result); the next start takes it over. One write over a lock succeeds, so the end is told
+once across the deployment; the use case audits a run told twice once (by its ID); a
+process never tells the end of a run it ran (it reported it), and a run still going that
+finds its lock replaced reports its end with `EndedElsewhere`, which its reporter does
+not record again. So the successful run, whose holder moved itself last, is audited by
+the restarted holder as it settles. The lock now carries `from` (the version its holder
+ran, `omitempty`): a lock written before says no `from`, and its end is recorded without
+it. Not covered: a lock removed by hand (its end is whoever removed it's doing, in the
+Kubernetes audit log), and a holder whose release of its own lock failed five times and
+whose lock another node then replaced - that end is recorded twice, by both. A marker
+in the lock was considered for the second and deferred: the release fails because
+writes to that StatefulSet fail, so a marker written the same way would fail with it.
 
 ### The amendment to ADR-0023
 
@@ -387,10 +429,11 @@ zero values keep the rules of ADR-0023 for every other client, PLAN P.5):
 | The ports' promises | `ReleaseSourceContract`, `ReleaseVerifierContract`, `UpgraderContract`, `UnavailableUpgraderContract` (`internal/ports/porttest`) |
 | The verifier, every refusal against a VirtualSigstore | `TestVerify`, `FuzzVerifyBundle`, `TestReleaseSignsWhatTheVerifierReads`, `TestDefault` (`internal/adapters/releases/sigstore`) |
 | The source, redirects, bounds, only the source's host | `TestFetchRedirects`, `TestFetchBounds`, `TestStall`, `TestRefusedBeforeAsking`, `TestFetchOnlyFromTheSourcesHost`, `TestTheAssetHostsOfGitHub` (`internal/adapters/releases/github`); `TestRedirectsFollowed`, `TestRedirectsRefused` (`egress`) |
-| The use case, the password, the audit, the one resource | `TestUpdatesGet`, `TestUpdatesCheck`, `TestUpdatesStart`, `TestUpdatesActionsAreAskedOfTheUpdatesResource`, `TestUpdatesRun` (`internal/app`); `TestUpdatesThroughTheAPI` (`adminapi`) |
+| The use case, the password, the audit, the one resource | `TestUpdatesGet`, `TestUpdatesCheck`, `TestUpdatesStart`, `TestUpdatesRunEnded`, `TestUpdatesActionsAreAskedOfTheUpdatesResource`, `TestUpdatesRun` (`internal/app`); `TestUpdatesThroughTheAPI` (`adminapi`) |
 | The binary upgrader: crash at every step, the node stopping before and during the swap | `TestACrashLeavesAWholeBinary`, `TestTheNodeStoppingEndsARunUntilTheSwapBegins`, `TestTheBinaryIsReplaced` (`internal/adapters/upgrade/binary`) |
-| The Kubernetes upgrader: order, lock, takeover, put back, success settled | `TestAnUpgradeMovesEveryNodeInOrderThisNodeLast`, `TestALockHeldByAnotherNode`, `TestANodeThatDoesNotComeUpIsPutBackAndTheRunStops`, `TestTimeRunningOutAfterTheLockWasTakenOverPutsNothingBack`, `TestARunSeenDoneByAnotherNodeEndsDone`, `TestSettleAtStart`, `TestProgress` (`internal/adapters/upgrade/kubernetes`, against a fake API server; `make test-k8s` still to run) |
+| The Kubernetes upgrader: order, lock, takeover, put back, success settled | `TestAnUpgradeMovesEveryNodeInOrderThisNodeLast`, `TestALockHeldByAnotherNode`, `TestANodeThatDoesNotComeUpIsPutBackAndTheRunStops`, `TestTimeRunningOutAfterTheLockWasTakenOverPutsNothingBack`, `TestARunSeenDoneByAnotherNodeEndsDone`, `TestSettleAtStart`, `TestProgress`, `TestTheEndOfARunIsToldOnce`, `TestARunOfThisProcessIsNeverTold` (`internal/adapters/upgrade/kubernetes`, against a fake API server); `TestUpgradeOrder` (`cmd/cactusfs`) |
 | End to end: a standalone binary upgraded and restarted; tampered and mis-tagged releases refused | `TestUpdates` (`test/integration`, a TLS mirror signed with `sigstoretest`) |
+| End to end on k3s: four nodes with `upgrade-mode` off answer 501; the chart's opt-in turned on; four nodes moved one at a time, this node last, an object read throughout; the end of that run audited once, as the user who started it; an image that cannot be pulled put back | `TestUpgradeOnK3s` (`test/k8s`, `make test-k8s`, the same mirror) |
 
 ## Open, for the owner
 

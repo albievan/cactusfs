@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,7 +121,10 @@ type UpdateServiceConfig struct {
 	// the source answered) and whether a release may be installed now, by
 	// what the node knows then.
 	OnCheck func(class string, installable bool)
-	Logger  *slog.Logger
+	// NodeID names this node in the record of the end of a run it
+	// recorded for another process (RunEnded).
+	NodeID string
+	Logger *slog.Logger
 }
 
 // AvailableRelease is a release the source listed, and whether it may be
@@ -196,7 +200,14 @@ type UpdateService struct {
 	lastError string
 	// starting is set while an upgrade is being verified and started.
 	starting bool
+	// endsAudited are the last maxEndsAudited runs whose end RunEnded
+	// audited, oldest first, so that one told twice is audited once.
+	endsAudited []string
 }
+
+// maxEndsAudited bounds the runs RunEnded remembers: a run is told again,
+// if at all, within moments of the first time.
+const maxEndsAudited = 64
 
 // NewUpdateService returns an UpdateService. The error wraps
 // domain.ErrInvalidArgument when a dependency other than Source, Classify,
@@ -622,7 +633,12 @@ func (s *UpdateService) reporter(p iam.Principal, verified release.Verified) fun
 			}
 			ctx := s.cfg.Lifetime
 			s.cfg.Logger.InfoContext(ctx, "the upgrade has ended",
-				slog.String("to", verified.Version().String()), slog.String("state", string(progress.State)))
+				slog.String("to", verified.Version().String()), slog.String("state", string(progress.State)),
+				slog.Bool("recorded_elsewhere", progress.EndedElsewhere))
+			if progress.EndedElsewhere {
+				// The node that recorded the end audits it (RunEnded).
+				return
+			}
 			record := s.cfg.Auditor.Record(p, iam.ActionUpgradeCluster, updatesResource, outcome, map[string]string{
 				"from": s.cfg.Current.String(), "to": verified.Version().String(), "digest": verified.Digest(),
 				"state": string(progress.State),
@@ -630,6 +646,71 @@ func (s *UpdateService) reporter(p iam.Principal, verified release.Verified) fun
 			s.cfg.Auditor.Succeeded(ctx, record)
 		})
 	}
+}
+
+// RunEnded audits the end of a run of an upgrade that the upgrader recorded
+// on behalf of the process that ran it - the holder that moved itself last
+// and was stopped by it before it could report, or one that stopped
+// answering or was restarted - as the reporter of Start audits an end it
+// sees: the action admin:UpgradeCluster on updates, Succeeded or Failed,
+// with from (when known), to, the digest and the state, and the reason of a
+// failure, this node (recorded_by) and where the actor was read from
+// (actor_source). The actor is the one who started the run as the run's
+// lock names them - only a console user starts one, so only user/<name> is
+// taken, and anything else is recorded as system. The lock is an annotation
+// that whoever may patch the StatefulSet can write: the record says so, and
+// no principal is made for the actor, nobody is given a right by it. An end
+// that names no run or no target is not recorded; a run told twice is
+// recorded once.
+func (s *UpdateService) RunEnded(end release.RunEnd) {
+	if !end.State.Ended() || end.Run == "" || end.Target.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	if slices.Contains(s.endsAudited, end.Run) {
+		s.mu.Unlock()
+		return
+	}
+	s.endsAudited = append(s.endsAudited, end.Run)
+	if len(s.endsAudited) > maxEndsAudited {
+		s.endsAudited = slices.Delete(s.endsAudited, 0, len(s.endsAudited)-maxEndsAudited)
+	}
+	s.mu.Unlock()
+	outcome := audit.Succeeded
+	if end.State != release.StateDone {
+		outcome = audit.Failed
+	}
+	details := map[string]string{"to": end.Target.String(), "state": string(end.State)}
+	if !end.From.IsZero() {
+		details["from"] = end.From.String()
+	}
+	if end.Digest != "" {
+		details["digest"] = end.Digest
+	}
+	if end.Reason != "" {
+		details["reason"] = end.Reason
+	}
+	details["actor_source"] = "kubernetes lock annotation"
+	if s.cfg.NodeID != "" {
+		details["recorded_by"] = s.cfg.NodeID
+	}
+	ctx := s.cfg.Lifetime
+	s.cfg.Logger.InfoContext(ctx, "the upgrade has ended, as this node recorded it",
+		slog.String("to", end.Target.String()), slog.String("state", string(end.State)))
+	record := s.cfg.Auditor.Record(iam.Principal{}, iam.ActionUpgradeCluster, updatesResource, outcome, details)
+	record.Actor = lockActor(end.StartedBy)
+	s.cfg.Auditor.Succeeded(ctx, record)
+}
+
+// lockActor returns the actor a run's lock names when it is one that can
+// start a run - "user/<name>", as actorOf names a console user - and
+// "system" otherwise.
+func lockActor(startedBy string) string {
+	name, ok := strings.CutPrefix(startedBy, "user/")
+	if !ok || iam.ValidateName(name) != nil {
+		return "system"
+	}
+	return startedBy
 }
 
 // audit records a start of an upgrade, or its refusal.

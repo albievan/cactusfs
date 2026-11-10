@@ -2,7 +2,9 @@
 # a ServiceAccount, its Role and RoleBinding, the token on the cactusfs
 # container only, and the API server reachable through the NetworkPolicy.
 # The nodes check a mirror of the releases (CACTUSFS_UPDATE_SOURCE, through
-# extraEnv), which the NetworkPolicy lets them reach on 443.
+# extraEnv), which the NetworkPolicy lets them reach on 443, and whose
+# certificate is of a CA of its own (updates.caSecret), with a Sigstore
+# trusted root of its own (updates.trustedRootSecret).
 secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
 kms:
   type: vault
@@ -15,6 +17,7 @@ networkPolicy:
       ports: [8200]
     - to: [{ipBlock: {cidr: 192.0.2.30/32}}]
       ports: [443]
+updates: {caSecret: cactusfs-update-ca, trustedRootSecret: cactusfs-update-root}
 upgrade:
   fromConsole:
     enabled: true

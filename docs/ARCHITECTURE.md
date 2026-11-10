@@ -1167,4 +1167,7 @@ each one fails on.
   its own, because k3s needs a privileged container: the chart installed on k3s with the
   image built here - pods admitted as `restricted` and ready, an S3 round trip, an object
   read with a node away and after a pod was deleted, ports 9001-9003 closed to a pod that
-  is not of the release.
+  is not of the release; and an upgrade from the console (`TestUpgradeOnK3s`, ADR-0029):
+  `upgrade-mode` off answering 501 on four nodes, the opt-in turned on, the nodes moved
+  to a second image of this tree one at a time and the node that runs it last, an image
+  that cannot be pulled put back.

@@ -222,6 +222,21 @@ networkPolicy:
   #     ports: [8200]
   egressTo: []
 
+# --- checking for releases (ADR-0029) --------------------------------------
+# The nodes check for releases once extraEnv sets CACTUSFS_UPDATE_SOURCE
+# (README, "Upgrading from the console"). These give the check the files it
+# may need, each from a Secret mounted as a file; both only with the source.
+updates:
+  # A Secret with the key ca.crt: the CA certificates the source's
+  # certificate is verified against (update-ca) - the CA of a mirror of your
+  # own. Empty: the system's CAs.
+  caSecret: ""
+  # A Secret with the key trusted_root.json: the Sigstore trusted root that
+  # releases are verified against instead of the one in the binary
+  # (update-trusted-root), after a rotation of Sigstore's keys that the
+  # binary has not seen. Empty: the binary's.
+  trustedRootSecret: ""
+
 # --- upgrading from the console (ADR-0029): off ----------------------------
 upgrade:
   fromConsole:

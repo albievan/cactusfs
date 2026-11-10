@@ -97,6 +97,27 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $port := int (dig "upgrade" "fromConsole" "apiServer" "port" 6443 .Values.AsMap) -}}
 {{- if or (lt $port 1) (gt $port 65535) -}}{{- fail "upgrade.fromConsole.apiServer.port is a port, 1 to 65535" -}}{{- end -}}
 {{- end -}}
+{{- if or (include "cactusfs.updateCA" .) (include "cactusfs.updateTrustedRoot" .) -}}
+{{- $ca := include "cactusfs.updateCA" . -}}
+{{- $root := include "cactusfs.updateTrustedRoot" . -}}
+{{- range .Values.extraEnv -}}
+{{- if and $ca (eq (toString .name) "CACTUSFS_UPDATE_CA") -}}{{- fail "extraEnv sets CACTUSFS_UPDATE_CA, and updates.caSecret sets it too: name the file one way only" -}}{{- end -}}
+{{- if and $root (eq (toString .name) "CACTUSFS_UPDATE_TRUSTED_ROOT") -}}{{- fail "extraEnv sets CACTUSFS_UPDATE_TRUSTED_ROOT, and updates.trustedRootSecret sets it too: name the file one way only" -}}{{- end -}}
+{{- end -}}
+{{- $source := false -}}
+{{- range .Values.extraEnv -}}{{- if eq (toString .name) "CACTUSFS_UPDATE_SOURCE" -}}{{- $source = true -}}{{- end -}}{{- end -}}
+{{- if not $source -}}{{- fail "updates.caSecret and updates.trustedRootSecret are files of the update source, and a node with either and no source does not start: set CACTUSFS_UPDATE_SOURCE through extraEnv" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The Secrets of the files of the update source (ADR-0029): their names,
+     or empty. Read with dig, so that the values of a release installed
+     before the settings existed read as none. */}}
+{{- define "cactusfs.updateCA" -}}
+{{- dig "updates" "caSecret" "" .Values.AsMap -}}
+{{- end -}}
+{{- define "cactusfs.updateTrustedRoot" -}}
+{{- dig "updates" "trustedRootSecret" "" .Values.AsMap -}}
 {{- end -}}
 
 {{/* Whether the console may upgrade the nodes (ADR-0029): "true" or empty.

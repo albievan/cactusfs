@@ -31,7 +31,12 @@
 // starting it again: a node already at the target is skipped. The lock of
 // a run seen done is replaced by its result "done" under the
 // resourceVersion - by the restarted holder (Settle as it starts, or
-// Progress), or by any node once the lock is stale.
+// Progress), or by any node once the lock is stale; the lock of a stale run
+// not done is replaced by its result "failed" (Progress). The node whose
+// write replaced the lock of a run its process did not run - by a result,
+// or by the lock of a new run that takes it over - tells Config.OnEnded, so
+// that the end is audited once; the run itself, if it is still going and
+// finds this, reports its end with EndedElsewhere.
 package kubernetes
 
 import (
@@ -45,6 +50,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,6 +115,19 @@ type Config struct {
 	Clock ports.Clock
 	// Logger receives what the upgrader does; nothing when nil.
 	Logger *slog.Logger
+	// Current is the version this node runs: written into the lock of a
+	// run it starts as the version the run started from. Zero: not
+	// written.
+	Current release.Version
+	// OnEnded, when not nil, is told the end of a run that this process
+	// did not run: that of a lock this node replaced - by the run's result
+	// (done once every node is at its target, failed once its holder has
+	// been silent for twice a node's time) or by the lock of a run it
+	// started (taken over). Only the node whose write under the
+	// StatefulSet's resourceVersion succeeded tells it, so a run's end is
+	// told once across the deployment; the process that ran a run reports
+	// its end through the run's report instead, and is never told it here.
+	OnEnded func(release.RunEnd)
 }
 
 // systemClock is the clock of the system.
@@ -123,9 +142,11 @@ type Upgrader struct {
 	api *api
 	log *slog.Logger
 
-	// mu guards running: whether a run of this process is under way.
+	// mu guards running - whether a run of this process is under way -
+	// and own, the runs this process ran, whose end it reported itself.
 	mu      sync.Mutex
 	running bool
+	own     map[string]bool
 }
 
 var _ ports.Upgrader = (*Upgrader)(nil)
@@ -173,6 +194,7 @@ func New(cfg Config) (*Upgrader, error) {
 		cfg: cfg,
 		api: &api{base: cfg.APIBase, tokenDir: cfg.TokenDir, fixed: cfg.HTTPClient},
 		log: logger.With("component", "upgrade", "mode", string(release.ModeKubernetes)),
+		own: map[string]bool{},
 	}, nil
 }
 
@@ -341,9 +363,17 @@ func (u *Upgrader) begin(ctx context.Context, target release.Verified, digest, s
 		return nil, fmt.Errorf("%w: the StatefulSet %s has no container %s", domain.ErrUpgradeUnavailable, lockNode, u.cfg.Container)
 	}
 	now := u.cfg.Clock.Now().UTC()
+	// taken is the run whose lock is taken over, and how it ended; none
+	// for a lock that does not parse, which names no run.
+	var taken *lockRecord
+	var takenEnd ending
 	if held, found, perr := parseLock(sts.Metadata.Annotations); found {
-		if perr == nil && !u.abandoned(ctx, ns, order, held, now) {
-			return nil, fmt.Errorf("%w: run %s of %s holds the lock", domain.ErrUpgradeRunning, held.Run, held.Target)
+		if perr == nil {
+			end, over := u.abandoned(ctx, ns, order, held, now)
+			if !over {
+				return nil, fmt.Errorf("%w: run %s of %s holds the lock", domain.ErrUpgradeRunning, held.Run, held.Target)
+			}
+			taken, takenEnd = &held, end
 		}
 		u.log.WarnContext(ctx, "upgrade: a lock whose run has ended is taken over", "node", lockNode)
 	}
@@ -354,6 +384,7 @@ func (u *Upgrader) begin(ctx context.Context, target release.Verified, digest, s
 	lock := lockRecord{
 		Run:       id,
 		Target:    target.Version().String(),
+		From:      fromOf(u.cfg.Current),
 		Image:     repositoryOf(current) + "@" + digest,
 		Holder:    u.cfg.Self,
 		StartedBy: startedBy,
@@ -371,6 +402,10 @@ func (u *Upgrader) begin(ctx context.Context, target release.Verified, digest, s
 	}
 	if err != nil {
 		return nil, err
+	}
+	u.owned(id)
+	if taken != nil {
+		u.ended(*taken, takenEnd)
 	}
 	r := &run{
 		u: u, ns: ns, lockNode: lockNode, order: order, lock: lock, target: target.Version(),
@@ -391,28 +426,50 @@ func (u *Upgrader) stale(lock lockRecord, now time.Time) bool {
 	return now.Sub(lock.Heartbeat) > 2*u.cfg.NodeTimeout
 }
 
-// abandoned reports whether a lock that is there no longer holds a run:
-// its holder has not said it was alive for twice the time of a node; or
-// its holder is this node, whose process holds no run (it was restarted -
-// moved last, or cut off); or every node already runs its target, which
-// is how the run of a holder that moved itself ends.
-func (u *Upgrader) abandoned(ctx context.Context, ns string, order []string, lock lockRecord, now time.Time) bool {
-	if u.stale(lock, now) || lock.Holder == u.cfg.Self {
+// abandoned reports whether a lock that is there no longer holds a run,
+// and how that run ended: done when every node already runs its target,
+// which is how the run of a holder that moved itself ends; failed when its
+// holder has not said it was alive for twice the time of a node, or is
+// this node, whose process holds no run (it was restarted - cut off).
+func (u *Upgrader) abandoned(ctx context.Context, ns string, order []string, lock lockRecord, now time.Time) (ending, bool) {
+	if u.firstNotDone(ctx, ns, order, lock) == "" {
+		return ending{state: release.StateDone}, true
+	}
+	switch {
+	case u.stale(lock, now):
+		return ending{state: release.StateFailed, reason: "the run stopped: the node that ran it stopped answering; a new run took it over"}, true
+	case lock.Holder == u.cfg.Self:
 		// Start has marked a run of this process as under way, and
 		// refused before coming here if one was.
-		return true
+		return ending{state: release.StateFailed, reason: "the run stopped: the node that ran it was restarted before it ended; a new run took it over"}, true
 	}
+	return ending{}, false
+}
+
+// firstNotDone returns the first node of order that is not done against
+// lock, "" when every node is. A node that cannot be read is not done, and
+// neither is any node of a lock whose target does not parse.
+func (u *Upgrader) firstNotDone(ctx context.Context, ns string, order []string, lock lockRecord) string {
 	target, err := release.ParseVersion(lock.Target)
-	if err != nil {
-		return true
+	if err != nil && len(order) > 0 {
+		return order[0]
 	}
 	for _, node := range order {
 		np, err := u.nodeProgress(ctx, ns, node, lock.Image, target)
 		if err != nil || np.State != release.NodeDone {
-			return false
+			return node
 		}
 	}
-	return true
+	return ""
+}
+
+// fromOf is the version a lock says a run started from: empty when it is
+// not known.
+func fromOf(v release.Version) string {
+	if v.IsZero() {
+		return ""
+	}
+	return v.String()
 }
 
 // runID returns a new name of a run.
@@ -450,11 +507,15 @@ func (u *Upgrader) Progress(ctx context.Context) (release.Progress, error) {
 		return release.Progress{}, fmt.Errorf("kubernetes.Progress: %w", err)
 	}
 	lock, locked, lockErr := parseLock(sts.Metadata.Annotations)
+	// held: a lock that names a run. One that does not parse is never
+	// replaced here - it would be by a result that names no run, over the
+	// last run's - and is taken over by the next start.
+	held := locked && lockErr == nil
 	result, ended := parseResult(sts.Metadata.Annotations)
 	var p release.Progress
 	var holder, image string
 	switch {
-	case locked && lockErr == nil:
+	case held:
 		holder, image = lock.Holder, lock.Image
 		p = release.Progress{State: release.StateRunning, StartedBy: lock.StartedBy, StartedAt: lock.StartedAt}
 		p.Target, _ = release.ParseVersion(lock.Target)
@@ -481,24 +542,30 @@ func (u *Upgrader) Progress(ctx context.Context) (release.Progress, error) {
 		p.Nodes = append(p.Nodes, np)
 	}
 	switch {
-	case locked && done == len(p.Nodes):
+	case held && done == len(p.Nodes):
 		// The holder moved itself last and was stopped by it: its run
 		// is done once its pod is up, whatever the lock still says. The
 		// lock is replaced by the run's result, so that it is not left
 		// behind - by the restarted holder, or once the lock is stale;
 		// a holder that is alive ends its run itself.
 		p.State = release.StateDone
-		u.settle(ctx, ns, lockNode, sts, lock)
-	case locked && u.stale(lock, u.cfg.Clock.Now()):
+		u.settle(ctx, ns, lockNode, sts, lock, ending{state: release.StateDone})
+	case held && u.stale(lock, u.cfg.Clock.Now()):
+		// The holder stopped answering: the run has ended, failed at the
+		// first node not done. The lock is replaced by that result, so
+		// that the end is recorded - and audited - once.
 		p.State = release.StateFailed
 		for i := range p.Nodes {
 			if p.Nodes[i].State != release.NodeDone {
 				p.Nodes[i].State = release.NodeFailed
-				p.Nodes[i].Reason = "the run stopped: the node that ran it stopped answering; start the upgrade again to resume it"
+				p.Nodes[i].Reason = staleReason
+				u.settle(ctx, ns, lockNode, sts, lock, ending{
+					state: release.StateFailed, node: p.Nodes[i].ID, nodeState: release.NodeFailed, reason: staleReason,
+				})
 				break
 			}
 		}
-	case !locked && result.Node != "":
+	case !held && result.Node != "":
 		for i := range p.Nodes {
 			if p.Nodes[i].ID == result.Node {
 				p.Nodes[i].State, p.Nodes[i].Reason = result.NodeState, result.Reason
@@ -508,26 +575,41 @@ func (u *Upgrader) Progress(ctx context.Context) (release.Progress, error) {
 	return p.Normalized(), nil
 }
 
-// settle replaces lock, read from the StatefulSet sts of lockNode and whose
-// every node was seen done, with the run's result "done": one merge patch
-// under sts's resourceVersion, so that it changes nothing if the lock moved
-// meanwhile. Only a lock whose run no live process holds is replaced: one
-// whose holder is this node - restarted, for a run of this process is left
-// to end itself - or whose heartbeat is stale. A holder that is alive may
-// still be waiting for the cluster to be ready, and ends its run itself. It
-// reports whether the lock was replaced; a failure is logged and tried
-// again by the next caller.
-func (u *Upgrader) settle(ctx context.Context, ns, lockNode string, sts *statefulSet, lock lockRecord) bool {
+// staleReason is why a run whose holder stopped answering failed.
+const staleReason = "the run stopped: the node that ran it stopped answering; start the upgrade again to resume it"
+
+// ending is how a run whose lock is replaced ended: done, or failed at a
+// node and why.
+type ending struct {
+	state     release.State
+	node      string
+	nodeState release.NodeState
+	reason    string
+}
+
+// settle replaces lock, read from the StatefulSet sts of lockNode, with the
+// run's result end: done once every node was seen done, failed once its
+// heartbeat is stale. One merge patch under sts's resourceVersion, so that
+// it changes nothing if the lock moved meanwhile. Only a lock whose run no
+// live process holds is replaced: one whose holder is this node -
+// restarted, for a run of this process is left to end itself - or whose
+// heartbeat is stale; a run is ended failed only once it is stale. A holder
+// that is alive may still be waiting for the cluster to be ready, and ends
+// its run itself. The node whose patch succeeded tells OnEnded. It reports
+// whether the lock was replaced; a failure is logged and tried again by the
+// next caller.
+func (u *Upgrader) settle(ctx context.Context, ns, lockNode string, sts *statefulSet, lock lockRecord, end ending) bool {
 	u.mu.Lock()
 	running := u.running
 	u.mu.Unlock()
-	if running || (lock.Holder != u.cfg.Self && !u.stale(lock, u.cfg.Clock.Now())) {
+	stale := u.stale(lock, u.cfg.Clock.Now())
+	if running || (lock.Holder != u.cfg.Self && !stale) || (end.state != release.StateDone && !stale) {
 		return false
 	}
 	result := resultRecord{
-		Run: lock.Run, Target: lock.Target, Image: lock.Image, Holder: lock.Holder,
+		Run: lock.Run, Target: lock.Target, From: lock.From, Image: lock.Image, Holder: lock.Holder,
 		StartedBy: lock.StartedBy, StartedAt: lock.StartedAt, EndedAt: u.cfg.Clock.Now().UTC(),
-		State: release.StateDone,
+		State: end.state, Node: end.node, NodeState: end.nodeState, Reason: end.reason,
 	}
 	err := u.api.patchStatefulSet(ctx, ns, lockNode, mergePatch, map[string]any{
 		"metadata": map[string]any{
@@ -536,11 +618,55 @@ func (u *Upgrader) settle(ctx context.Context, ns, lockNode string, sts *statefu
 		},
 	})
 	if err != nil {
-		u.log.WarnContext(ctx, "upgrade: the lock of a run that is done could not be replaced by its result", "run", lock.Run, "error", describe(err))
+		u.log.WarnContext(ctx, "upgrade: the lock of a run that has ended could not be replaced by its result", "run", lock.Run, "state", string(end.state), "error", describe(err))
 		return false
 	}
-	u.log.InfoContext(ctx, "upgrade done: every node runs the target; the lock was replaced by the result", "run", lock.Run, "target", lock.Target)
+	if end.state == release.StateDone {
+		u.log.InfoContext(ctx, "upgrade done: every node runs the target; the lock was replaced by the result", "run", lock.Run, "target", lock.Target)
+	} else {
+		u.log.WarnContext(ctx, "upgrade failed: the node that ran it stopped answering; the lock was replaced by the result", "run", lock.Run, "target", lock.Target, "node", end.node)
+	}
+	u.ended(lock, end)
 	return true
+}
+
+// owned records that a run is this process's: it reports its own end, and
+// OnEnded is never told it.
+func (u *Upgrader) owned(run string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.own[run] = true
+}
+
+// ended tells OnEnded how the run of lock ended, unless it is a run of this
+// process.
+func (u *Upgrader) ended(lock lockRecord, end ending) {
+	if u.cfg.OnEnded == nil {
+		return
+	}
+	u.mu.Lock()
+	own := u.own[lock.Run]
+	u.mu.Unlock()
+	if own {
+		return
+	}
+	target, err := release.ParseVersion(lock.Target)
+	if err != nil || lock.Run == "" {
+		// parseLock lets no such lock through; nothing is told of one.
+		return
+	}
+	var from release.Version
+	if v, err := release.ParseVersion(lock.From); err == nil {
+		from = v
+	}
+	digest := ""
+	if at := strings.IndexByte(lock.Image, '@'); at >= 0 {
+		digest = lock.Image[at+1:]
+	}
+	u.cfg.OnEnded(release.RunEnd{
+		Run: lock.Run, From: from, Target: target, Digest: digest, StartedBy: lock.StartedBy,
+		State: end.state, Reason: end.reason,
+	})
 }
 
 // Settle is called once as the service starts, on every node of the mode
@@ -548,10 +674,10 @@ func (u *Upgrader) settle(ctx context.Context, ns, lockNode string, sts *statefu
 // target - the run of a holder that was restarted by moving itself last -
 // it replaces the lock with the run's result "done", as Progress does, and
 // under the same rule: only on the holder's own node, or once the lock is
-// stale. It
-// looks again every Poll until that is done, there is no lock, or twice a
-// node's time has passed (the nodes may still be coming up), and returns
-// when ctx ends. It asks nothing when the API is not known here.
+// stale; the node whose write succeeded tells OnEnded. It looks again
+// every Poll until that is done, there is no lock, or twice a node's time
+// has passed (the nodes may still be coming up), and returns when ctx
+// ends. It asks nothing when the API is not known here.
 func (u *Upgrader) Settle(ctx context.Context) {
 	if u.cfg.APIBase == "" {
 		return
@@ -592,21 +718,14 @@ func (u *Upgrader) settleOnce(ctx context.Context) bool {
 	if !locked || perr != nil {
 		return true
 	}
-	target, err := release.ParseVersion(lock.Target)
-	if err != nil {
-		return true
-	}
 	order, _, err := u.nodes(ctx, lock.Holder)
 	if err != nil {
 		return false
 	}
-	for _, node := range order {
-		np, err := u.nodeProgress(ctx, ns, node, lock.Image, target)
-		if err != nil || np.State != release.NodeDone {
-			return false
-		}
+	if u.firstNotDone(ctx, ns, order, lock) != "" {
+		return false
 	}
-	return u.settle(ctx, ns, lockNode, sts, lock)
+	return u.settle(ctx, ns, lockNode, sts, lock, ending{state: release.StateDone})
 }
 
 // nodeProgress reads where a node stands against image and target: done

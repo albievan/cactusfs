@@ -310,10 +310,13 @@ test-rolling:
 # installed with the image this tree builds, in a namespace that enforces the
 # restricted Pod Security Standard. No part of `make check`: k3s needs a
 # privileged container, which a rootless engine does not give. The image is
-# built first and four nodes start on one machine: 45 minutes, and the CI job
-# is given 60.
+# built first and four nodes start on one machine; the upgrade from the
+# console (TestUpgradeOnK3s) builds a second image and waits out the
+# upgrader's ten minutes for a node that does not come up: 100 minutes, and
+# the CI job is given 120. Verbose: what each step saw and how long it took
+# is the record of a run.
 test-k8s:
-	go test -count=1 -tags=k8s -timeout 45m ./test/k8s/...
+	go test -v -count=1 -tags=k8s -timeout 100m ./test/k8s/...
 	@echo "test-k8s: PASS"
 
 vuln:

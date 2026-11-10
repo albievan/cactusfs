@@ -165,7 +165,7 @@ func (b *bench) loadProductImage() string {
 	defer func() { _ = engine.Close() }()
 	// Only the name this run gives the image is removed, never the image.
 	t.Cleanup(b.untag)
-	if err := b.importImage(ctx, engine, image); err != nil {
+	if err := b.importImage(ctx, engine, image, b.loaded(), false); err != nil {
 		t.Fatal(err)
 	}
 	return image
@@ -173,7 +173,10 @@ func (b *bench) loadProductImage() string {
 
 // untag removes the name of this run from the product image. Nothing is
 // forced and nothing is pruned: the image keeps the name it came with.
-func (b *bench) untag() {
+func (b *bench) untag() { b.untagName(b.loaded()) }
+
+// untagName removes a name this run gave an image in the engine.
+func (b *bench) untagName(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	engine, err := testcontainers.NewDockerClientWithOpts(ctx)
@@ -181,7 +184,7 @@ func (b *bench) untag() {
 		return
 	}
 	defer func() { _ = engine.Close() }()
-	_, _ = engine.ImageRemove(ctx, b.loaded(), client.ImageRemoveOptions{})
+	_, _ = engine.ImageRemove(ctx, name, client.ImageRemoveOptions{})
 }
 
 // provision makes what the chart does not: the namespaces, the Secrets the
@@ -252,23 +255,27 @@ func (b *bench) provision(image string) {
 }
 
 // install installs the chart with helm, from here, and waits until every
-// node's pod is ready.
-func (b *bench) install() {
+// node's pod is ready. extra are further arguments of helm install, laid
+// over the test's values.
+func (b *bench) install(extra ...string) {
 	t := b.t
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 
 	chart := filepath.Join(b.root, "deploy", "helm", "cactusfs")
-	install := exec.CommandContext(ctx, "helm", "install", release, chart,
+	args := []string{
+		"install", release, chart,
 		"--namespace", namespace, "--kubeconfig", b.kubeconfig,
 		"-f", filepath.Join(chart, "ci", "single-machine-values.yaml"),
 		"-f", filepath.Join(b.root, "test", "k8s", "testdata", "values.yaml"),
-		"--set-string", "image.repository="+loadedImage,
-		"--set-string", "image.tag="+b.run,
-		"--set-string", "localVolumes.nodeName="+machine,
-		"--set-string", "localVolumes.basePath="+volumeBase,
-		"--wait", "--timeout", "8m")
+		"--set-string", "image.repository=" + loadedImage,
+		"--set-string", "image.tag=" + b.run,
+		"--set-string", "localVolumes.nodeName=" + machine,
+		"--set-string", "localVolumes.basePath=" + volumeBase,
+		"--wait", "--timeout", "8m",
+	}
+	install := exec.CommandContext(ctx, "helm", append(args, extra...)...)
 	if out, err := install.CombinedOutput(); err != nil {
 		t.Fatalf("helm install: %v\n%s", err, tail(string(out), 6000))
 	}

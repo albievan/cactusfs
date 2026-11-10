@@ -100,6 +100,35 @@ type Progress struct {
 	StartedAt time.Time
 	// Nodes are the nodes of the deployment, in the order they are moved.
 	Nodes []NodeProgress
+	// EndedElsewhere is set on the last progress a run reports when its
+	// end was recorded by another node - which found it done or stale, or
+	// took its run over - and is told to that node's use case as a RunEnd:
+	// the process that ran it does not record that end again.
+	EndedElsewhere bool
+}
+
+// RunEnd is the end of a run of an upgrade as recorded by a node other than
+// the process that ran it: the node whose write replaced the run's lock,
+// once per run across the deployment (ADR-0029). A process that ran the
+// run and saw its end reports it through its own Progress instead.
+type RunEnd struct {
+	// Run names the run.
+	Run string
+	// From is the version the run started from; zero when its lock did
+	// not say (a lock written before it did).
+	From Version
+	// Target is the version the run installed.
+	Target Version
+	// Digest is the digest of the image the run installed.
+	Digest string
+	// StartedBy is the actor who started the run, as the audit trail names
+	// actors ("user/alice").
+	StartedBy string
+	// State is how it ended: StateDone or StateFailed.
+	State State
+	// Reason says why it failed, in words of the upgrader that name no
+	// secret; empty when it was done.
+	Reason string
 }
 
 // Normalized returns a copy of p that shares nothing with it, with an

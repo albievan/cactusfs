@@ -105,8 +105,8 @@ linters:
               desc: only cmd/cactusfs wires adapters together
         # Helpers of tests are for tests: no code that is built into the
         # binary imports them. The helpers of the black-box tests under
-        # test/integration (releasemirror, built with the tag integration)
-        # are tests themselves and may use the others.
+        # test/integration (releasemirror, built with the tags integration
+        # and k8s) are tests themselves and may use the others.
         test-helpers:
           list-mode: lax
           files:

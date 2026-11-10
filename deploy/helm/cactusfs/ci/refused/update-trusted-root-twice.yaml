@@ -1,0 +1,6 @@
+# expect: extraEnv sets CACTUSFS_UPDATE_TRUSTED_ROOT, and updates.trustedRootSecret sets it too
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+updates: {trustedRootSecret: cactusfs-update-trusted-root}
+extraEnv:
+  - {name: CACTUSFS_UPDATE_SOURCE, value: "https://mirror.example/releases"}
+  - {name: CACTUSFS_UPDATE_TRUSTED_ROOT, value: /etc/other/trusted_root.json}

@@ -70,6 +70,10 @@ const (
 	apiPort = "6443/tcp"
 	// s3NodePort is service.nodePort of ci/single-machine-values.yaml.
 	s3NodePort = "30900/tcp"
+	// adminForwardBase is the first of the ports of the k3s container at
+	// which kubectl port-forward reaches the admin port of a node's pod:
+	// one a node, in the order of nodeIDs (upgrade_test.go). No NodePort.
+	adminForwardBase = 31901
 
 	// What the pods run as (the chart's securityContext).
 	podUser = 65532
@@ -88,6 +92,10 @@ func nodeIDs() []string {
 // podOf returns the pod of a node: the one pod of its StatefulSet.
 func podOf(id string) string { return id + "-0" }
 
+// forwardPort is the port of the k3s container at which the admin port of
+// the pod of node i of nodeIDs is reached (forwardAdmin).
+func forwardPort(i int) string { return fmt.Sprintf("%d/tcp", adminForwardBase+i) }
+
 // bench is one k3s with the chart on it.
 type bench struct {
 	t    *testing.T
@@ -102,6 +110,10 @@ type bench struct {
 	accessKey string
 	secretKey string
 	roots     *x509.CertPool
+
+	// admins are the addresses, as reached from here, of the admin port of
+	// each node's pod (forwardAdmin), by node ID.
+	admins map[string]string
 
 	files int
 }
@@ -214,38 +226,59 @@ func (b *bench) productImage(ctx context.Context) (string, error) {
 		return name, nil
 	}
 	const name = "cactusfs:test"
-	build := exec.CommandContext(ctx, "docker", "build", "--quiet", "-t", name, b.root)
-	if out, err := build.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("docker build: %w\n%s", err, tail(string(out), 4000))
+	return name, b.buildImage(ctx, name)
+}
+
+// buildImage builds this tree as the image name, with the Dockerfile's
+// build arguments given ("VERSION=0.7.1").
+func (b *bench) buildImage(ctx context.Context, name string, args ...string) error {
+	command := []string{"build", "--quiet", "-t", name}
+	for _, arg := range args {
+		command = append(command, "--build-arg", arg)
 	}
-	return name, nil
+	build := exec.CommandContext(ctx, "docker", append(command, b.root)...)
+	if out, err := build.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker build %s: %w\n%s", strings.Join(args, " "), err, tail(string(out), 4000))
+	}
+	return nil
 }
 
 // loaded is the name this run gives the product image: in the engine, to
 // save it under, and so in the cluster.
 func (b *bench) loaded() string { return loadedImage + ":" + b.run }
 
-// importImage gives the image the name of this run, takes it out of the
-// engine as an archive and imports that into the containerd of k3s.
-func (b *bench) importImage(ctx context.Context, engine *testcontainers.DockerClient, image string) error {
-	if _, err := engine.ImageTag(ctx, client.ImageTagOptions{Source: image, Target: b.loaded()}); err != nil {
-		return fmt.Errorf("name %s %s: %w", image, b.loaded(), err)
+// inContainerd is the name containerd gives an image the chart names
+// <loadedImage>:<tag> or <loadedImage>@<digest>.
+func inContainerd(ref string) string { return "docker.io/library/" + ref }
+
+// importImage gives the image a name, takes it out of the engine as an
+// archive and imports that into the containerd of k3s. byDigest names it
+// in containerd by the digest of what was imported as well
+// (<loadedImage>@sha256:...), which a pod that names the image by that
+// digest needs: no registry resolves it.
+func (b *bench) importImage(ctx context.Context, engine *testcontainers.DockerClient, image, name string, byDigest bool) error {
+	if _, err := engine.ImageTag(ctx, client.ImageTagOptions{Source: image, Target: name}); err != nil {
+		return fmt.Errorf("name %s %s: %w", image, name, err)
 	}
-	saved, err := engine.ImageSave(ctx, []string{b.loaded()})
+	saved, err := engine.ImageSave(ctx, []string{name})
 	if err != nil {
-		return fmt.Errorf("save %s: %w", b.loaded(), err)
+		return fmt.Errorf("save %s: %w", name, err)
 	}
 	defer func() { _ = saved.Close() }()
 	// The image is smaller than 60 MB (make image holds it to that).
 	archive, err := io.ReadAll(saved)
 	if err != nil {
-		return fmt.Errorf("save %s: %w", b.loaded(), err)
+		return fmt.Errorf("save %s: %w", name, err)
 	}
 	const inside = "/tmp/cactusfs-test-product.tar"
 	if err := b.k3s.CopyToContainer(ctx, archive, inside, 0o600); err != nil {
 		return fmt.Errorf("copy the image into the k3s container: %w", err)
 	}
-	if _, err := b.exec(ctx, "ctr", "-n", "k8s.io", "images", "import", inside); err != nil {
+	command := []string{"ctr", "-n", "k8s.io", "images", "import"}
+	if byDigest {
+		command = append(command, "--digests", "--base-name", inContainerd(loadedImage))
+	}
+	if _, err := b.exec(ctx, append(command, inside)...); err != nil {
 		return fmt.Errorf("import the image: %w", err)
 	}
 	if _, err := b.exec(ctx, "rm", "-f", inside); err != nil {
@@ -257,8 +290,8 @@ func (b *bench) importImage(ctx context.Context, engine *testcontainers.DockerCl
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(names, "/"+b.loaded()) {
-		return fmt.Errorf("the image was imported, but not as %s; containerd has:\n%s", b.loaded(), names)
+	if !strings.Contains(names, "/"+name) {
+		return fmt.Errorf("the image was imported, but not as %s; containerd has:\n%s", name, names)
 	}
 	return nil
 }
@@ -301,6 +334,10 @@ func fileOf(ctx context.Context, ctr *testcontainers.DockerContainer, path strin
 // Left out is what the chart must not depend on, and does not: an ingress
 // controller, a load balancer, a storage driver.
 func runK3s(ctx context.Context, name, host string) (*testcontainers.DockerContainer, error) {
+	ports := []string{apiPort, s3NodePort}
+	for i := range nodeIDs() {
+		ports = append(ports, forwardPort(i))
+	}
 	return testcontainers.Run(ctx, k3sImage,
 		testcontainers.WithName(name),
 		testcontainers.WithCmd("server",
@@ -316,8 +353,12 @@ func runK3s(ctx context.Context, name, host string) (*testcontainers.DockerConta
 			// must not evict the pods under test for that.
 			"--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%",
 			"--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%",
+			// Nor remove an image no pod runs yet: the image an upgrade
+			// moves to was imported, and cannot be pulled again.
+			"--kubelet-arg=image-gc-high-threshold=100",
+			"--kubelet-arg=image-gc-low-threshold=99",
 		),
-		testcontainers.WithExposedPorts(apiPort, s3NodePort),
+		testcontainers.WithExposedPorts(ports...),
 		testcontainers.WithTmpfs(map[string]string{"/run": "", "/var/run": ""}),
 		testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
 			hostConfig.Privileged = true

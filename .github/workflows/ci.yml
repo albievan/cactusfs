@@ -64,14 +64,16 @@ jobs:
         run: make test-rolling ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4
 
   # The Helm chart on k3s, with the image built here: admitted as restricted,
-  # ready, read with a node away, closed to pods that are not its own. A job
-  # of its own, and no part of make check: k3s needs a privileged container.
+  # ready, read with a node away, closed to pods that are not its own; and an
+  # upgrade from the console to a second image, and one that is put back. A
+  # job of its own, and no part of make check: k3s needs a privileged
+  # container.
   k8s:
     name: make test-k8s
     runs-on: ubuntu-latest
-    # The test itself is given 45 minutes (Makefile), after the builder image
-    # is built.
-    timeout-minutes: 60
+    # The test itself is given 100 minutes (Makefile), after the builder
+    # image is built.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -9,6 +9,8 @@
 {{- $drain := include "cactusfs.drainSeconds" . | int -}}
 {{- $class := include "cactusfs.storageClass" . -}}
 {{- $upgrade := include "cactusfs.upgradeFromConsole" . -}}
+{{- $updateCA := include "cactusfs.updateCA" . -}}
+{{- $updateRoot := include "cactusfs.updateTrustedRoot" . -}}
 {{- range $nodes }}
 {{- $id := .id -}}
 {{- $pool := index $root.Values.pools (int .pool) -}}
@@ -195,6 +197,12 @@ spec:
             {{- with $root.Values.otlpEndpoint }}
             - {name: CACTUSFS_OTLP_ENDPOINT, value: {{ . | quote }}}
             {{- end }}
+            {{- if $updateCA }}
+            - {name: CACTUSFS_UPDATE_CA, value: /etc/cactusfs/update-ca/ca.crt}
+            {{- end }}
+            {{- if $updateRoot }}
+            - {name: CACTUSFS_UPDATE_TRUSTED_ROOT, value: /etc/cactusfs/update-trusted-root/trusted_root.json}
+            {{- end }}
             {{- if $upgrade }}
             - {name: CACTUSFS_UPGRADE_MODE, value: kubernetes}
             {{- end }}
@@ -240,6 +248,12 @@ spec:
             - {name: kms, mountPath: /etc/cactusfs/kms, readOnly: true}
             - {name: kms-passphrase, mountPath: /etc/cactusfs/kms-passphrase, readOnly: true}
             {{- end }}
+            {{- if $updateCA }}
+            - {name: update-ca, mountPath: /etc/cactusfs/update-ca, readOnly: true}
+            {{- end }}
+            {{- if $updateRoot }}
+            - {name: update-trusted-root, mountPath: /etc/cactusfs/update-trusted-root, readOnly: true}
+            {{- end }}
             {{- if $upgrade }}
             - {name: kube-api, mountPath: {{ include "cactusfs.upgradeDir" $root }}, readOnly: true}
             {{- end }}
@@ -265,6 +279,14 @@ spec:
           secret: {secretName: {{ $root.Values.kms.local.keyFileSecret | quote }}, defaultMode: 0440, items: [{key: kms.json, path: kms.json}]}
         - name: kms-passphrase
           secret: {secretName: {{ $root.Values.kms.local.passphraseSecret | quote }}, defaultMode: 0440, items: [{key: passphrase, path: passphrase}]}
+        {{- end }}
+        {{- if $updateCA }}
+        - name: update-ca
+          secret: {secretName: {{ $updateCA | quote }}, defaultMode: 0440, items: [{key: ca.crt, path: ca.crt}]}
+        {{- end }}
+        {{- if $updateRoot }}
+        - name: update-trusted-root
+          secret: {secretName: {{ $updateRoot | quote }}, defaultMode: 0440, items: [{key: trusted_root.json, path: trusted_root.json}]}
         {{- end }}
         {{- if $upgrade }}
         # A token of an hour, renewed by the kubelet; the CA of the API

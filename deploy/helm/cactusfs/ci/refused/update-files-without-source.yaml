@@ -1,0 +1,3 @@
+# expect: updates.caSecret and updates.trustedRootSecret are files of the update source
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+updates: {caSecret: cactusfs-update-ca}

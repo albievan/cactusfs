@@ -139,6 +139,20 @@ policy=$(q "$V" '.networkPolicy.enabled // false')
 upgrade=$(q "$V" '.upgrade.fromConsole.enabled // false')
 upgrade_account=$RELEASE-upgrade
 upgrade_dir=/var/run/secrets/cactusfs.io/kubernetes
+# The files of the update source (ADR-0029), each from a Secret of its own.
+update_ca=$(q "$V" '.updates.caSecret // ""')
+update_root=$(q "$V" '.updates.trustedRootSecret // ""')
+# update_file <resource> <document> <volume> <variable> <key> <Secret or "">
+update_file() {
+	if [ -n "$6" ]; then
+		want "$1" "$4 names the file of the Secret $6" "$2" "$C | .env[] | select(.name == \"$4\") | .value" "/etc/cactusfs/$3/$5"
+		want "$1" "the volume $3 is the key $5 of the Secret $6 and nothing else" "$2" "$P.volumes[] | select(.name == \"$3\") | .secret | [.secretName, (.items | length), .items[0].key, .items[0].path] | join(\",\")" "$6,1,$5,$5"
+		want "$1" "$3 mounted read-only into the cactusfs container" "$2" "$C | .volumeMounts[] | select(.name == \"$3\") | [.mountPath, .readOnly] | join(\",\")" "/etc/cactusfs/$3,true"
+	else
+		want "$1" "no $4 without updates' Secret of it" "$2" "[$C | .env[] | select(.name == \"$4\")] | length" "0"
+		want "$1" "no volume $3 without updates' Secret of it" "$2" "[$P.volumes[] | select(.name == \"$3\")] | length" "0"
+	fi
+}
 # The image a node runs: image.repository by image.digest, or else by
 # image.tag, or else by the chart's appVersion. And the version its pod says
 # it runs, as the helper cactusfs.version gives it: the tag, or the appVersion
@@ -400,6 +414,11 @@ while read -r id voter stores gateway <&4; do
 		want "$R" "no CACTUSFS_UPGRADE_MODE: upgrades from the console are off" "$D" "[$C | .env[] | select(.name == \"CACTUSFS_UPGRADE_MODE\")] | length" "0"
 		want "$R" "no projected volume: no token of the cluster" "$D" "[$P.volumes[] | select(has(\"projected\"))] | length" "0"
 	fi
+
+	# The files of the update source: a Secret's one key, read-only, where
+	# the setting names it; without the value, neither.
+	update_file "$R" "$D" update-ca CACTUSFS_UPDATE_CA ca.crt "$update_ca"
+	update_file "$R" "$D" update-trusted-root CACTUSFS_UPDATE_TRUSTED_ROOT trusted_root.json "$update_root"
 
 	# Every container.
 	want "$R" "the container cactusfs" "$D" "[$C | .name] | join(\",\")" "cactusfs"

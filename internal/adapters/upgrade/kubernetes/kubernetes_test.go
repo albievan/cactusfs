@@ -774,7 +774,7 @@ func TestTheHeartbeatKeepsTheLockAndALostLockStopsTheRun(t *testing.T) {
 	lockOf(f, lock)
 	clock.Advance(6 * time.Second)
 	last := rec.last(t)
-	if last.State != release.StateFailed || last.Nodes[0].State != release.NodeFailed || !strings.Contains(last.Nodes[0].Reason, "another node took it over") {
+	if last.State != release.StateFailed || !last.EndedElsewhere || last.Nodes[0].State != release.NodeFailed || !strings.Contains(last.Nodes[0].Reason, "another node took it over") {
 		t.Errorf("last = %+v", last)
 	}
 	held, _, _ := parseLock(f.set("store-data-0").annotations)
@@ -881,9 +881,11 @@ func TestARunSeenDoneByAnotherNodeEndsDone(t *testing.T) {
 	var ready sync.Mutex
 	notReady := false
 	clock := porttest.NewClock(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC))
+	toldHolder, toldRestarted := &endings{}, &endings{}
 	u := newUpgrader(t, f, fourNodes, func(c *Config) {
 		c.NodeTimeout = 20 * time.Second
 		c.Clock = clock
+		c.OnEnded = toldHolder.onEnded
 		c.Ready = func(context.Context) error {
 			ready.Lock()
 			defer ready.Unlock()
@@ -923,6 +925,7 @@ func TestARunSeenDoneByAnotherNodeEndsDone(t *testing.T) {
 	restarted := newUpgrader(t, f, fourNodes, func(c *Config) {
 		c.NodeTimeout = 20 * time.Second
 		c.Clock = clock
+		c.OnEnded = toldRestarted.onEnded
 	})
 	if p, err := restarted.Progress(t.Context()); err != nil || p.State != release.StateDone {
 		t.Fatalf("Progress of the holder's node = %+v, %v", p, err)
@@ -930,8 +933,16 @@ func TestARunSeenDoneByAnotherNodeEndsDone(t *testing.T) {
 	patches = len(f.requestsOf(http.MethodPatch, ""))
 	clock.Advance(6 * time.Second)
 	last := rec.last(t)
-	if last.State != release.StateDone {
+	if last.State != release.StateDone || !last.EndedElsewhere {
 		t.Fatalf("last = %+v", last)
+	}
+	// The node that replaced the lock is told the end; the run's own
+	// process reports it as recorded elsewhere, and is told nothing.
+	if got := toldRestarted.all(); len(got) != 1 || got[0].State != release.StateDone || got[0].StartedBy != "user/alice" || got[0].Digest != v.Digest() {
+		t.Errorf("the restarted holder was told %+v", got)
+	}
+	if got := toldHolder.all(); len(got) != 0 {
+		t.Errorf("the run's process was told %+v", got)
 	}
 	for _, n := range last.Nodes {
 		if n.State != release.NodeDone {
@@ -1269,4 +1280,340 @@ func TestRecords(t *testing.T) {
 	if describe(fmt.Errorf("x: %w", domain.ErrUnavailable)) != "it could not be reached" {
 		t.Error("describe of an unreachable API")
 	}
+}
+
+// endings keeps what an upgrader's OnEnded was told.
+type endings struct {
+	mu   sync.Mutex
+	told []release.RunEnd
+}
+
+func (e *endings) onEnded(end release.RunEnd) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.told = append(e.told, end)
+}
+
+func (e *endings) all() []release.RunEnd {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.told)
+}
+
+// TestTheEndOfARunIsToldOnce: the node whose write replaced the lock of a
+// run its process did not run tells OnEnded how it ended, once - by the
+// result "done" (Progress or Settle on the restarted holder, or any node
+// once stale), by the result "failed" (a stale run not done), or by the
+// lock of a new run (taken over) - with the version it started from when
+// the lock says it, the digest, the actor and why it failed. A write that
+// lost the race, a lock that names no run, a live holder's lock and a lock
+// left alone tell nothing.
+func TestTheEndOfARunIsToldOnce(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	old := now.Add(-time.Hour)
+	const (
+		stopped   = "the run stopped: the node that ran it stopped answering; start the upgrade again to resume it"
+		takenOver = "the run stopped: the node that ran it stopped answering; a new run took it over"
+		restarted = "the run stopped: the node that ran it was restarted before it ended; a new run took it over"
+	)
+	tests := []struct {
+		name string
+		// lock is the lock there, of the fake's image; nil writes one that
+		// does not parse.
+		lock func(image string) *lockRecord
+		// atTarget puts every node at the image first.
+		atTarget bool
+		conflict bool
+		// act is what the upgrader does: progress, settle or start.
+		act string
+		// from says that the lock says the run started from 0.7.0.
+		from bool
+		// before is a result of an earlier run, there before the lock.
+		before *resultRecord
+		want   []release.RunEnd // Target and Digest filled in by the test
+		result release.State    // the result written; "" none
+	}{
+		{
+			name: "the restarted holder reads the progress of its run, done",
+			from: true,
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, act: "progress",
+			want:   []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateDone}},
+			result: release.StateDone,
+		},
+		{
+			name: "the restarted holder settles as it starts",
+			from: true,
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, act: "settle",
+			want:   []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateDone}},
+			result: release.StateDone,
+		},
+		{
+			name: "a lock written before it said where it started from",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, act: "progress",
+			want:   []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateDone}},
+			result: release.StateDone,
+		},
+		{
+			name: "a stale lock of a run that is done, by any node",
+			from: true,
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
+			},
+			atTarget: true, act: "progress",
+			want:   []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateDone}},
+			result: release.StateDone,
+		},
+		{
+			name: "a stale lock of a run not done is replaced by the result failed",
+			from: true,
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
+			},
+			act:    "progress",
+			want:   []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateFailed, Reason: stopped}},
+			result: release.StateFailed,
+		},
+		{
+			name: "a replacement that lost the race",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, conflict: true, act: "progress",
+		},
+		{
+			name: "a live holder's run, done, read by another node",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, act: "progress",
+		},
+		{
+			name: "a live holder's run under way",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			act: "progress",
+		},
+		{
+			name: "a stale lock taken over by a new run",
+			from: true,
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
+			},
+			act:  "start",
+			want: []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateFailed, Reason: takenOver}},
+		},
+		{
+			name: "a lock of this node, cut off, taken over by a new run",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			act:  "start",
+			want: []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateFailed, Reason: restarted}},
+		},
+		{
+			name: "a live holder's lock of a run done, taken over by a new run",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
+			},
+			atTarget: true, act: "start",
+			want: []release.RunEnd{{Run: "aaaa", StartedBy: "user/bob", State: release.StateDone}},
+		},
+		{
+			// Every node is done against the earlier run's result: a lock
+			// read as a zero record would be settled over it.
+			name: "a lock that does not parse, over a result",
+			lock: func(string) *lockRecord { return nil },
+			act:  "progress",
+			before: &resultRecord{
+				Run: "zzzz", Target: "0.7.0", Image: oldImage, Holder: "store-meta-0", StartedBy: "user/carol",
+				StartedAt: old, EndedAt: old, State: release.StateDone,
+			},
+		},
+		{
+			name: "a lock that names no run, taken over",
+			lock: func(string) *lockRecord { return nil },
+			act:  "start",
+		},
+		{
+			name: "a take-over that lost the race",
+			lock: func(image string) *lockRecord {
+				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
+			},
+			conflict: true, act: "start",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeAPI(t, fourNodes...)
+			told := &endings{}
+			u := newUpgrader(t, f, fourNodes, func(c *Config) {
+				c.OnEnded = told.onEnded
+				c.Current = mustVersion(t, "0.7.0")
+			})
+			v, image := target(t, f)
+			if lock := tt.lock(image); lock != nil {
+				lockOf(f, *lock)
+			} else {
+				f.do(func() { f.sets["store-data-0"].annotations[LockAnnotation] = `{"run":""}` })
+			}
+			if tt.before != nil {
+				f.do(func() { f.sets["store-data-0"].annotations[ResultAnnotation] = encode(*tt.before) })
+			}
+			if tt.atTarget {
+				f.do(func() {
+					for _, n := range fourNodes {
+						f.sets[n].images["cactusfs"] = image
+						f.pods[n+"-0"].image = image
+					}
+				})
+			}
+			f.do(func() { f.conflictOnLock = tt.conflict })
+			switch tt.act {
+			case "progress":
+				if _, err := u.Progress(t.Context()); err != nil {
+					t.Fatalf("Progress: %v", err)
+				}
+				// Read again: the end is told once. (After a race lost,
+				// the next reader replaces the lock and is told.)
+				if !tt.conflict {
+					if _, err := u.Progress(t.Context()); err != nil {
+						t.Fatalf("Progress: %v", err)
+					}
+				}
+			case "settle":
+				u.Settle(t.Context())
+				u.Settle(t.Context())
+			case "start":
+				rec := newRecorder()
+				err := u.Start(t.Context(), v, "user/alice", rec.report)
+				if tt.conflict {
+					if !errors.Is(err, domain.ErrUpgradeRunning) {
+						t.Fatalf("Start = %v, want ErrUpgradeRunning", err)
+					}
+					break
+				}
+				if err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				if last := rec.last(t); last.State != release.StateDone || last.EndedElsewhere {
+					t.Errorf("last = %+v", last)
+				}
+				// The new run is this process's: its end is its report's.
+				if _, err := u.Progress(t.Context()); err != nil {
+					t.Fatalf("Progress: %v", err)
+				}
+				lock, _, _ := parseLock(f.set("store-data-0").annotations)
+				result, _ := parseResult(f.set("store-data-0").annotations)
+				if lock.Run != "" || result.From != "0.7.0" || result.StartedBy != "user/alice" {
+					t.Errorf("the new run's lock %+v, result %+v", lock, result)
+				}
+			}
+			want := slices.Clone(tt.want)
+			for i := range want {
+				want[i].Target = mustVersion(t, "0.7.1")
+				if tt.from {
+					want[i].From = mustVersion(t, "0.7.0")
+				}
+				want[i].Digest = v.Digest()
+			}
+			if got := told.all(); !slices.Equal(got, want) {
+				t.Errorf("told %+v, want %+v", got, want)
+			}
+			if tt.act == "start" {
+				return
+			}
+			s := f.set("store-data-0")
+			result, ok := parseResult(s.annotations)
+			_, locked := s.annotations[LockAnnotation]
+			switch {
+			case tt.before != nil:
+				if !locked || s.annotations[ResultAnnotation] != encode(*tt.before) {
+					t.Errorf("annotations = %v, want the lock and the earlier result left", s.annotations)
+				}
+			case tt.result == "" && (ok || !locked):
+				t.Errorf("annotations = %v, want the lock left", s.annotations)
+			case tt.result != "" && (!ok || locked || result.State != tt.result || result.Run != "aaaa"):
+				t.Errorf("annotations = %v, want the result %s", s.annotations, tt.result)
+			case tt.result == release.StateFailed && (result.Node != "store-meta-0" || result.NodeState != release.NodeFailed || result.Reason != stopped || result.From != "0.7.0"):
+				t.Errorf("result = %+v", result)
+			}
+		})
+	}
+}
+
+// TestARunOfThisProcessIsNeverTold: the end of a run this process ran is
+// its report's, even when this process replaces its lock afterwards (the
+// lock could not be released at its end); and a run still going whose lock
+// another node replaced with its result reports its end with
+// EndedElsewhere, while that node is told it.
+func TestARunOfThisProcessIsNeverTold(t *testing.T) {
+	t.Parallel()
+	t.Run("a lock this process could not release", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeAPI(t, fourNodes...)
+		told := &endings{}
+		clock := porttest.NewClock(time.Now().UTC())
+		u := newUpgrader(t, f, fourNodes, func(c *Config) {
+			c.OnEnded = told.onEnded
+			c.Clock = clock
+		})
+		v, _ := target(t, f)
+		// Every patch of the lock at the end is refused.
+		f.onRequest = func(r recorded) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if r.Method == http.MethodPatch && r.ContentType == mergePatch && strings.HasSuffix(r.Path, "/store-data-0") &&
+				len(f.requestsOfLocked(http.MethodPost, "/eviction")) == len(fourNodes) {
+				f.conflictOnLock = true
+			}
+		}
+		rec := newRecorder()
+		if err := u.Start(t.Context(), v, "user/alice", rec.report); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if last := rec.last(t); last.State != release.StateDone || last.EndedElsewhere {
+			t.Fatalf("last = %+v", last)
+		}
+		waitFor(t, "the run to stop", func() bool {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			return !u.running
+		})
+		f.do(func() { f.onRequest = nil })
+		if _, locked, _ := parseLock(f.set("store-data-0").annotations); !locked {
+			t.Fatal("the lock was released")
+		}
+		// This process settles its own lock: nobody is told.
+		if p, err := u.Progress(t.Context()); err != nil || p.State != release.StateDone {
+			t.Fatalf("Progress = %+v, %v", p, err)
+		}
+		if _, ok := parseResult(f.set("store-data-0").annotations); !ok {
+			t.Error("the lock was not replaced")
+		}
+		if got := told.all(); len(got) != 0 {
+			t.Errorf("told %+v", got)
+		}
+	})
+}
+
+// mustVersion parses a version of a test.
+func mustVersion(t *testing.T, s string) release.Version {
+	t.Helper()
+	v, err := release.ParseVersion(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

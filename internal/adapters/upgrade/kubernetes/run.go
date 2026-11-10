@@ -15,8 +15,10 @@ import (
 // run gives up and leaves it to be taken over.
 const releaseAttempts = 5
 
-// errLost is a run whose lock was taken by another: it stops, and touches
-// nothing more.
+// errLost is a run whose lock was taken by another, or replaced by the
+// result "failed" once it was stale: it stops, and touches nothing more.
+// The node that wrote over the lock recorded the end (OnEnded); a lock
+// removed by hand is the doing of whoever removed it.
 var errLost = errors.New("another node took the lock of the run")
 
 // errSettled is a run whose lock another node replaced with the run's own
@@ -78,7 +80,7 @@ func (r *run) execute(ctx context.Context) {
 			continue
 		case errors.Is(err, errSettled):
 			r.u.log.InfoContext(ctx, "upgrade done, as another node saw it", "run", r.lock.Run, "target", r.lock.Target)
-			r.progress.State = release.StateDone
+			r.progress.State, r.progress.EndedElsewhere = release.StateDone, true
 			for j := i; j < len(r.order); j++ {
 				r.progress.Nodes[j].State, r.progress.Nodes[j].Reason = release.NodeDone, ""
 			}
@@ -86,7 +88,7 @@ func (r *run) execute(ctx context.Context) {
 			return
 		case errors.Is(err, errLost):
 			r.u.log.WarnContext(ctx, "upgrade stopped: another node took its lock", "run", r.lock.Run, "node", node)
-			r.progress.State = release.StateFailed
+			r.progress.State, r.progress.EndedElsewhere = release.StateFailed, true
 			r.setNode(i, release.NodeFailed, "the run stopped: another node took it over", nil)
 			return
 		case errors.As(err, &failed):
@@ -356,7 +358,7 @@ func (r *run) tick(ctx context.Context) error {
 // longer this run's is left alone.
 func (r *run) finish(ctx context.Context, state release.State, node string, failed *nodeFailure) {
 	result := resultRecord{
-		Run: r.lock.Run, Target: r.lock.Target, Image: r.lock.Image, Holder: r.lock.Holder,
+		Run: r.lock.Run, Target: r.lock.Target, From: r.lock.From, Image: r.lock.Image, Holder: r.lock.Holder,
 		StartedBy: r.lock.StartedBy, StartedAt: r.lock.StartedAt, EndedAt: r.u.cfg.Clock.Now().UTC(),
 		State: state, Node: node,
 	}

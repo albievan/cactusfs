@@ -35,6 +35,9 @@ type lockRecord struct {
 	Run string `json:"run"`
 	// Target is the version being installed.
 	Target string `json:"target"`
+	// From is the version the holder ran when it started the run; empty
+	// in a lock written before it was recorded.
+	From string `json:"from,omitempty"`
 	// Image is the image every node is moved to: <repository>@<digest>.
 	Image string `json:"image"`
 	// Holder is the node that runs it, which moves itself last.
@@ -51,6 +54,7 @@ type lockRecord struct {
 type resultRecord struct {
 	Run       string        `json:"run"`
 	Target    string        `json:"target"`
+	From      string        `json:"from,omitempty"`
 	Image     string        `json:"image"`
 	Holder    string        `json:"holder"`
 	StartedBy string        `json:"startedBy"`

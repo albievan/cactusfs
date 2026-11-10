@@ -68,7 +68,8 @@ type Upgrader interface {
 	// on after Start has returned and whatever becomes of ctx, which
 	// bounds the start only; report is called, from another goroutine,
 	// with the progress every time it changes, the last time with a state
-	// that has ended.
+	// that has ended - and EndedElsewhere when another node recorded that
+	// end (release.RunEnd), which its caller then does not record again.
 	Start(ctx context.Context, target release.Verified, startedBy string, report func(release.Progress)) error
 	// Progress returns how far the latest upgrade has come, normalized;
 	// release.StateIdle when none was started.
