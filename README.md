@@ -40,6 +40,7 @@ control and a hash-chained audit trail.
 - [Users, keys and the audit trail](#users-keys-and-the-audit-trail)
 - [Operations](#operations)
 - [Versions and builds](#versions-and-builds)
+- [Checking for releases and upgrading](#checking-for-releases-and-upgrading)
 - [Develop](#develop)
 - [Verifying an image](#verifying-an-image)
 - [Releases](#releases)
@@ -93,8 +94,12 @@ control and a hash-chained audit trail.
 - **Supply chain.** Base images pinned by digest, a licence allow-list, SPDX SBOMs, and
   images signed by digest - proved offline in the gate; a release workflow that signs
   keyless, written and not yet run.
+- **Updates from the console, off by default.** Told where releases are, a node checks
+  for newer ones and the console shows them; told it may, it installs one - only a
+  release the project's release workflow signed for that version, verified offline
+  ([below](#checking-for-releases-and-upgrading)).
 - **Air-gap safe.** The binary calls nothing on the internet, sends no telemetry and
-  serves no asset from a CDN.
+  serves no asset from a CDN. Checking for releases is off until you name the place.
 
 ## What is not there yet
 
@@ -102,7 +107,8 @@ Said plainly, so that nobody finds out by trying:
 
 - **No release has been published.** There is no image at `ghcr.io/albievan/cactusfs`
   and no chart at `oci://ghcr.io/albievan/charts` yet; the commands that name them apply
-  from the first release. Until then, build the image yourself.
+  from the first release. Until then, build the image yourself - and a check for
+  releases finds none.
 - **Milestone 8: replication between sites, bucket notifications, quotas.** None of the
   three works. Notification targets can be defined, read, listed and deleted
   (`/targets`, with their secrets sealed and never shown) - nothing sends to them yet,
@@ -419,7 +425,7 @@ there as "set" or "not set" and nothing else.
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
+| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C. The same on every node |
 | `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
 | `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
 | `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
@@ -434,6 +440,17 @@ there as "set" or "not set" and nothing else.
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between two passes of the garbage collector for unreferenced shards; 0 disables it |
 | `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`). The same on every node |
 | `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads this node counted are recorded with the objects, at least 5s; a node that crashes loses up to this much of the count |
+
+**Updates: checking for releases, and installing one from the console**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--update-source` | `CACTUSFS_UPDATE_SOURCE` | none: nothing is asked | address of the releases JSON - `https://api.github.com/repos/albievan/cactusfs/releases`, or a mirror of it that answers as it does - which the node asks what releases exist. `https` only, with no user information, query or fragment. Nothing is asked of anyone while it is empty, the default. Who answers it decides what is offered, never what is installed: a release is installed only when its signed lists verify against the trusted root, for its version. The same on every node |
+| `--update-check-interval` | `CACTUSFS_UPDATE_CHECK_INTERVAL` | `24h` | how often the node asks the update source by itself, give or take a tenth, the first time within 5 minutes of its start (at least `1m`; `0` only when asked to from the console). A node asks at most once a minute, however it is asked. The same on every node |
+| `--update-channel` | `CACTUSFS_UPDATE_CHANNEL` | `stable` | which releases are offered: stable, or prerelease for pre-releases too. The same on every node |
+| `--update-ca` | `CACTUSFS_UPDATE_CA` | the system's CAs | path of a PEM file of the CA certificates the update source's certificate is verified against; default the system's CAs |
+| `--update-trusted-root` | `CACTUSFS_UPDATE_TRUSTED_ROOT` | the root embedded in the binary | path of a Sigstore `trusted_root.json` that the signatures of releases are verified against, instead of the one embedded in the binary: for a node that has been offline across a rotation of Sigstore's keys. A file that does not parse stops the node at start |
+| `--upgrade-mode` | `CACTUSFS_UPGRADE_MODE` | `off` | how a release is installed from the console: `off` installs nothing and shows the commands to run instead; `binary` replaces the binary of a node on its own and restarts it (needs `--update-source`; refused by the binary of the container image); `kubernetes` moves the nodes of a chart to the release's image one at a time, this node last (set by the chart's `upgrade.fromConsole.enabled`, which mounts the token it needs; refused without it) |
 
 **Observability: log, audit export and traces**
 
@@ -1027,6 +1044,82 @@ cactusfs 0.7.0 local build (commit 330028134523-dirty, go1.27.2 darwin/arm64)
 `GET /cluster` says the build of the node that answered. During a rolling upgrade, ask
 each node, read the Settings screen, or read the label:
 `kubectl -n cactusfs get pods -L app.kubernetes.io/version`.
+
+## Checking for releases and upgrading
+
+Off by default, and two separate opt-ins ([ADR-0029](docs/adr/0029-updates-and-upgrades.md)):
+a node asks for releases only once `update-source` is set, and installs one from the
+console only with `upgrade-mode`. Until then it asks nobody anything.
+
+**Turning checks on.** Point every node at the project's releases:
+
+```sh
+CACTUSFS_UPDATE_SOURCE=https://api.github.com/repos/albievan/cactusfs/releases cactusfs server ...
+```
+
+The node asks within 5 minutes of its start and then once a day (`update-check-interval`,
+`0` for only when asked), at most once a minute however it is asked, and sends nothing but
+a `User-Agent` naming its version: no token, no cookie, nothing of the deployment. Files
+of a release are fetched only from the source's host - for GitHub's API, from
+`github.com`, which redirects to GitHub's storage; up to three redirects are followed,
+each https and each address judged as `egress-allow` says. `update-channel prerelease`
+offers pre-releases too.
+
+**A mirror, for an air gap.** Any https server that answers as GitHub does will do:
+
+- at the address you set, a JSON array of releases, each with `tag_name` (`v<version>`),
+  `draft`, `prerelease`, `published_at`, `html_url` and `assets`, each asset with `name`,
+  `browser_download_url` and `size`;
+- the files at those addresses, **on the mirror's own host and port** - an address on
+  any other host is refused and not asked: the six binaries, `SHA256SUMS`,
+  `SHA256SUMS.sigstore.json`, `digests.txt` and `digests.txt.sigstore.json`, copied
+  unchanged from the GitHub Release.
+
+Give the nodes the mirror's CA with `update-ca` when its certificate is not of a CA the
+system trusts (there is no way to skip verification), and a mirror on loopback or a
+link-local address needs `egress-allow`. Signatures are verified offline against the
+Sigstore trusted root embedded in the binary; a site that has been offline across a
+rotation of Sigstore's keys copies a current `trusted_root.json` across the gap and names
+it with `update-trusted-root`.
+
+**What is verified before anything is installed**, on the node, offline:
+
+1. the release's `SHA256SUMS` (binary) or `digests.txt` (image) against its Sigstore
+   bundle and the trusted root: certificate chain, transparency-log entry, timestamps;
+2. that the certificate names exactly this project's release workflow at the tag of the
+   version being installed - so an older signed release cannot pass for a newer one;
+3. the binary's SHA-256 against `SHA256SUMS`, or the image by the digest `digests.txt`
+   gives it;
+4. that the version may be installed from the running one: a newer patch of the same
+   minor, or the newest patch of the next minor - never a downgrade, a skipped minor or
+   a new major. From 0.7.x to 0.9 goes through 0.8.
+
+What the source lists decides what is offered, never what is installed. A release that
+fails any check is refused (`412 ReleaseNotVerified`) and nothing changes; the node's log
+says why.
+
+**The Updates screen.** In the console, **Updates** (after Settings) shows the running
+build, whether checks are on, when the node last asked and, as a class only, why it could
+not; the newer releases with whether each may be installed and why not, and links to
+their notes (never fetched); and how to install the next step yourself. A badge under the
+version line says when there is one. Reading it needs `admin:GetUpdates`
+(`cluster-admin`, `auditor`); "Check now" needs `admin:CheckForUpdates` and installing
+`admin:UpgradeCluster` (`cluster-admin` only), all on `arn:cactusfs:admin:::updates`.
+Installing is offered only to a console session, asks for your password again, and shows
+the progress until the deployment answers on the new release. An API key cannot install.
+
+**Installing: `upgrade-mode`.**
+
+| Mode | Where | What it does |
+|---|---|---|
+| `off` (default) | any | Installs nothing; the screen shows the commands of your own way: the binary to download and check, or `helm upgrade … --set image.digest=sha256:…` |
+| `binary` | a node on its own, run from a binary (not the container image) in a directory it may write | Downloads the binary beside the executable, checks it, keeps the old one as `cactusfs.previous`, moves the new one into place and restarts into it. **On Windows** a running executable is replaced but not restarted: the screen says `restart-required`, and whoever runs the service restarts it |
+| `kubernetes` | the Helm chart with `upgrade.fromConsole.enabled` | Moves the nodes to the release's image one at a time, this node last, each by eviction under the PodDisruptionBudget; a node that does not come up is put back and the upgrade stops. Read the chart's [Upgrading from the console](deploy/helm/cactusfs/README.md#upgrading-from-the-console) first: the token it needs reaches more than it looks, and the next `helm upgrade` must name the installed digest or a newer one |
+
+**A cluster of binaries on several machines, and compose, get the commands only**:
+restarting machines the node does not control is not attempted. Replace the binary or
+the image of one node at a time, and let each be ready before the next, as
+[On Kubernetes](#on-kubernetes) describes for the chart.
 
 ## Develop
 

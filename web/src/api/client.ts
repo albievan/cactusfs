@@ -73,6 +73,22 @@ export type SettingsMismatch = Schemas['SettingsMismatch'];
 export type AuditRecord = Schemas['AuditRecord'];
 /** One page of the audit trail. */
 export type AuditPage = Schemas['AuditPage'];
+/** What the answering node knows of releases, and how this deployment installs one. */
+export type UpdatesView = Schemas['UpdatesView'];
+/** A release the update source listed, and whether it may be installed. */
+export type AvailableRelease = Schemas['AvailableRelease'];
+/** Why a release may not be installed from the running one. */
+export type UpgradeRefusal = Schemas['UpgradeRefusal'];
+/** Why the last check for updates could not be read, as a class. */
+export type UpdateCheckError = Schemas['UpdateCheckError'];
+/** How this deployment installs a release. */
+export type UpgradeMode = Schemas['UpgradeMode'];
+/** Where the latest upgrade stands, as read from the deployment. */
+export type UpgradeProgress = Schemas['UpgradeProgress'];
+/** Where an upgrade stands, in one word. */
+export type UpgradeState = Schemas['UpgradeState'];
+/** One node in an upgrade. */
+export type UpgradeNode = Schemas['UpgradeNode'];
 
 /**
  * The header the API sets on an answer it did not make now but kept: the
@@ -98,14 +114,45 @@ export class ApiError extends Error {
    * carries the new tokens. Only the calls made with `api` tell.
    */
   readonly staleTokens: boolean;
+  /**
+   * After how many seconds the API said to send the request again
+   * (`Retry-After`), when it said so. Only the calls made with `api` tell.
+   */
+  readonly retryAfter: number | undefined;
 
-  constructor(problem: Problem, replayed = false, staleTokens = false) {
+  constructor(problem: Problem, replayed = false, staleTokens = false, retryAfter?: number) {
     super(problem.title);
     this.name = 'ApiError';
     this.problem = problem;
     this.replayed = replayed;
     this.staleTokens = staleTokens;
+    this.retryAfter = retryAfter;
   }
+}
+
+/**
+ * Reads `Retry-After` as a number of whole seconds from now: given as
+ * seconds, or as an HTTP date (`Mon, 09 Nov 2026 12:01:30 GMT`). Undefined when there is none, or none that
+ * reads.
+ */
+export function readRetryAfter(value: string | null, now: number = Date.now()): number | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  const text = value.trim();
+  if (/^\d+$/.test(text)) {
+    const seconds = Number(text);
+    return Number.isSafeInteger(seconds) ? seconds : undefined;
+  }
+  // Only the date of HTTP (IMF-fixdate): Date.parse reads "-5" and "1.5" as dates too.
+  if (!/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(text)) {
+    return undefined;
+  }
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) {
+    return undefined;
+  }
+  return Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 /**
@@ -163,8 +210,9 @@ export function onLocked(listener: () => void): () => void {
 
 /**
  * How many wrong passwords end a session that is being unlocked, as the API
- * has it (`unlockAttempts` in internal/app/sessions.go). The console only
- * uses it to say why a session ended.
+ * has it (`unlockAttempts` in internal/app/sessions.go). The API counts the
+ * passwords of unlocking and of installing a release (`POST /upgrade`)
+ * together. The console only uses it to say why a session ended.
  */
 export const UNLOCK_ATTEMPTS = 5;
 
@@ -173,9 +221,9 @@ export const UNLOCK_ATTEMPTS = 5;
 let wrongPasswords = 0;
 
 /**
- * How many passwords unlocking was answered "wrong" since the session was
- * last unlocked or ended: the API ends the session at UNLOCK_ATTEMPTS. It is
- * for saying so, and decides nothing.
+ * How many passwords unlocking or installing a release was answered "wrong"
+ * since the session was last unlocked or ended: the API ends the session at
+ * UNLOCK_ATTEMPTS. It is for saying so, and decides nothing.
  */
 export function wrongPasswordCount(): number {
   return wrongPasswords;
@@ -202,6 +250,19 @@ function tellIfLocked(body: unknown): void {
 
 /** The path of unlocking, as the contract names it. */
 export const UNLOCK_PATH = '/session/unlock';
+
+/** The path of installing a release, as the contract names it: `POST` asks for the password again. */
+export const UPGRADE_PATH = '/upgrade';
+
+/**
+ * Whether a 401 answered a request that carried the session user's password
+ * - an unlock, or installing a release - so that the session may have been
+ * ended by the API for too many wrong ones. The API says not why in the 401
+ * (`Unauthenticated` either way); the count of wrong passwords tells.
+ */
+export function answeredPassword(cause: Unauthorized): boolean {
+  return cause.path === UNLOCK_PATH || (cause.path === UPGRADE_PATH && cause.method === 'POST');
+}
 
 /**
  * How long an unlock is waited for. A server that has not answered by then
@@ -343,8 +404,9 @@ export async function unwrap<T>(
     return data as T;
   }
   const stale = staleAnswers.has(response);
+  const retryAfter = readRetryAfter(response.headers.get('Retry-After'));
   if (isProblem(error)) {
-    throw new ApiError(error, false, stale);
+    throw new ApiError(error, false, stale, retryAfter);
   }
   throw new ApiError(
     {
@@ -355,7 +417,41 @@ export async function unwrap<T>(
     },
     false,
     stale,
+    retryAfter,
   );
+}
+
+/**
+ * Asks the answering node to ask its update source for releases now
+ * (`POST /updates/check`), and returns what it knows then. The request has
+ * no body, and says `Content-Type: application/json` all the same, as every
+ * POST of the API must. A deployment without an update source answers 409
+ * (`UpdatesOff`); a node that asked less than a minute ago 429, with
+ * `Retry-After` in the error's `retryAfter`.
+ */
+export function checkForUpdates(): Promise<UpdatesView> {
+  return unwrap(api.POST('/updates/check', { headers: { 'Content-Type': 'application/json' } }));
+}
+
+/**
+ * Asks the deployment to install a release (`POST /upgrade`), with the
+ * password of the session's user typed again: the SERVER judges it, in this
+ * very request, and decides whether the caller may. Resolves to the progress
+ * once the upgrade has begun (202). The password is sent once and kept
+ * nowhere: not here, not in the error of a refusal.
+ */
+export function startUpgrade(version: string, password: string): Promise<UpgradeProgress> {
+  return unwrap(api.POST(UPGRADE_PATH, { body: { version, password } })).catch((error: unknown) => {
+    // The API counts a wrong password here with those of unlocking, and ends
+    // the session at UNLOCK_ATTEMPTS: so does the console's count. A 403 is
+    // also the answer to a caller who may not install - the API asks that
+    // first, and then does not look at the password - and is counted all the
+    // same: it is only ever said, never decided on.
+    if (error instanceof ApiError && error.problem.status === 403 && error.problem.code === 'AccessDenied') {
+      wrongPasswords += 1;
+    }
+    throw error;
+  });
 }
 
 /**

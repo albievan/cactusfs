@@ -25,6 +25,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
+	"github.com/albievan/cactusfs/internal/adapters/upgrade/off"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
@@ -101,8 +102,13 @@ type fixture struct {
 	// concealer is what conceals the bodies of repeated requests that may
 	// hold a secret; a test can make it busy.
 	concealer *busyHasher
-	seen      []adminapi.Observation
-	seenMu    sync.Mutex
+	// authz is the one authorizer of the use cases; updates is the use
+	// case of releases, with no source and the upgrader of mode off unless
+	// a test made it otherwise (newUpdatesFixture).
+	authz   *app.Authorizer
+	updates *app.UpdateService
+	seen    []adminapi.Observation
+	seenMu  sync.Mutex
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -114,6 +120,13 @@ func newFixture(t *testing.T) *fixture {
 // completes.
 func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	t.Helper()
+	return newFixtureOf(t, nil, tune)
+}
+
+// newFixtureOf is newFixtureWith with the use case of releases made by
+// updates, when it is not nil, from what the fixture has made so far.
+func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune func(*adminapi.Config)) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &fixture{t: t, store: porttest.NewMemIAM(), clock: porttest.NewClock(testNow), logs: &lockedBuffer{}}
 	logger := slog.New(slog.NewJSONHandler(f.logs, nil))
@@ -124,6 +137,7 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 	meta := porttest.NewMemMetadata()
 	f.auditor = app.NewAuditor(f.store, f.clock, logger)
 	authz := app.NewAuthorizer(logger, f.clock, f.auditor).WithBucketPolicies(meta)
+	f.authz = authz
 	f.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: f.store, Trail: f.store, Authz: authz, Auditor: f.auditor, KMS: kms, Hasher: &porttest.Hasher{},
 		Clock: f.clock, Entropy: rand.Reader, Sessions: f.store,
@@ -203,7 +217,12 @@ func newFixtureWith(t *testing.T, tune func(*adminapi.Config)) *fixture {
 		t.Fatal(err)
 	}
 	f.concealer = &busyHasher{PasswordHasher: concealer}
+	if updates == nil {
+		updates = func(f *fixture) *app.UpdateService { return f.newUpdates(nil, off.New([]string{"helm upgrade ..."})) }
+	}
+	f.updates = updates(f)
 	config := adminapi.Config{
+		Updates: f.updates,
 		Targets: targets,
 		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz).WithHasher(f.concealer),
@@ -1256,6 +1275,44 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 		if p := r.problem(t); p["code"] != "NotImplemented" || p["detail"] != nil {
 			t.Errorf("%s %s: problem = %s", c.method, c.path, r.body)
 		}
+	}
+}
+
+// TestAnUpgradeKeepsNoKey: starting an upgrade takes Idempotency-Key and
+// does nothing with it, as unlocking does (ADR-0029). Its body holds a
+// password, of which not even a hash is kept, and an upgrade is never
+// started from a stored answer: the same request with the same key is
+// carried out again, and nothing of it is reserved, logged or audited.
+func TestAnUpgradeKeepsNoKey(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	const password = "MARKED-upgrade-password-5d1f"
+	records := f.watched.idempotent.Load()
+	upgrade := call{
+		method: "POST", path: "/upgrade", body: map[string]any{"version": "0.7.1", "password": password},
+		headers: map[string]string{"Idempotency-Key": "upgrade-once"},
+	}
+	for range 2 {
+		// An API key never installs: refused by the use case, each time.
+		r := f.must(http.StatusForbidden, upgrade)
+		if r.header.Get("Idempotent-Replayed") != "" {
+			t.Error("an upgrade was answered from a stored answer")
+		}
+	}
+	if n := f.watched.idempotent.Load(); n != records {
+		t.Errorf("starting an upgrade wrote %d idempotency records", n-records)
+	}
+	if strings.Contains(f.logs.String(), password) || strings.Contains(fmt.Sprint(f.trail()), password) {
+		t.Fatal("the password of an upgrade is in the log or the audit trail")
+	}
+	// The check for updates is an ordinary request that changes
+	// something: its key is kept, and the same request answered again.
+	check := call{method: "POST", path: "/updates/check", headers: map[string]string{"Content-Type": "application/json", "Idempotency-Key": "check-once"}}
+	// No source is configured: the check is refused, after its key was
+	// reserved.
+	f.must(http.StatusConflict, check)
+	if n := f.watched.idempotent.Load(); n == records {
+		t.Error("a check for updates with a key reserved nothing")
 	}
 }
 

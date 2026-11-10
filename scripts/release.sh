@@ -28,7 +28,8 @@
 # Rekor. Besides the above it gives the list the tag <version> once it is
 # signed and verified, packages the chart as the release, pushes it to
 # oci://$RELEASE_REGISTRY/$RELEASE_CHARTS and signs its digest, signs
-# SHA256SUMS into SHA256SUMS.sigstore.json, and writes NOTES.md for the
+# SHA256SUMS into SHA256SUMS.sigstore.json and digests.txt into
+# digests.txt.sigstore.json, and writes NOTES.md for the
 # GitHub Release (which the workflow creates: `gh` is on the runner, not in
 # the builder). It never writes the tag `latest`.
 #
@@ -344,6 +345,12 @@ fi
 echo "$name:$VERSION $list" >>"$out/digests.txt"
 sc_say "$name:$VERSION is the list $list"
 
+# digests.txt is complete now, and signed as SHA256SUMS is: a node that
+# upgrades its image from the console (PLAN P.4, ADR-0029) reads the digest it
+# installs from this file, and believes it only for its bundle.
+sc_must "digests.txt is signed" sc_sign_blob "$out/digests.txt" "$out/digests.txt.sigstore.json"
+sc_must "the signature of digests.txt verifies" sc_verify_blob "$out/digests.txt" "$out/digests.txt.sigstore.json"
+
 cat >"$out/NOTES.md" <<EOF
 CactusFS $VERSION, build $BUILD, commit \`$COMMIT\`.
 
@@ -377,17 +384,22 @@ cosign verify --certificate-identity "\$IDENTITY" --certificate-oidc-issuer "\$I
 cosign verify-blob $SC_KEYLESS_BUNDLE_FLAGS --bundle SHA256SUMS.sigstore.json \\
   --certificate-identity "\$IDENTITY" --certificate-oidc-issuer "\$ISSUER" SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
+
+# the list of digests
+cosign verify-blob $SC_KEYLESS_BUNDLE_FLAGS --bundle digests.txt.sigstore.json \\
+  --certificate-identity "\$IDENTITY" --certificate-oidc-issuer "\$ISSUER" digests.txt
 \`\`\`
 
-\`digests.txt\` repeats the digests above; it is a convenience and is not signed - what
-is signed is each digest itself. The \`*.spdx.json\` files are the SBOMs of the two
-images and of the console's packages.
+\`digests.txt\` repeats the digests above, and is signed as well, into
+\`digests.txt.sigstore.json\`: it is what a node that upgrades its image from the
+console reads the digest from. Each digest is also signed itself. The \`*.spdx.json\`
+files are the SBOMs of the two images and of the console's packages.
 EOF
 
 cat <<EOF
 release: published $name:$VERSION and :$release ($list),
 release: the chart $RELEASE_REGISTRY/$chart_repo:$VERSION ($chart), signed as
 release:   $identity
-release: wrote $out/ - digests.txt, sbom/, SHA256SUMS, SHA256SUMS.sigstore.json, NOTES.md
+release: wrote $out/ - digests.txt, digests.txt.sigstore.json, sbom/, SHA256SUMS, SHA256SUMS.sigstore.json, NOTES.md
 EOF
 echo "release: PASS"

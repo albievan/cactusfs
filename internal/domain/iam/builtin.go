@@ -48,7 +48,8 @@ func BuiltInPolicies() map[string]Document {
 		}, everything),
 		// Look at how the deployment is run, change nothing, read no object
 		// - and preview none: admin:PreviewObject begins with neither Get
-		// nor List.
+		// nor List. Of releases (ADR-0029) it reads what the node knows,
+		// admin:GetUpdates, and neither asks the source nor upgrades.
 		RoleAuditor: statement([]string{"admin:Get*", "admin:List*"}, everything),
 	}
 }

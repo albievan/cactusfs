@@ -83,6 +83,9 @@ const (
 	ActionSignOut       iam.Action = "auth:SignOut"
 	ActionUnlockSession iam.Action = "auth:UnlockSession"
 	ActionEndSessions   iam.Action = "auth:EndSessions"
+	// ActionConfirmPassword names a password typed again into a session
+	// for one request that asks for it (SessionService.Confirm).
+	ActionConfirmPassword iam.Action = "auth:ConfirmPassword"
 )
 
 // LocalIdentityProvider checks console passwords against the hashes stored
@@ -599,6 +602,102 @@ func (u *unlockFailures) forget(tokenHash string) {
 	delete(u.failed, tokenHash)
 }
 
+// judgedSession is a session whose user has just typed the right password.
+type judgedSession struct {
+	stored ports.Session
+	state  sessionState
+	hash   string
+}
+
+// judgePassword is the path a password typed into a session takes, at an
+// unlock and at a confirmation alike: the session is looked up, the address
+// is counted by the limiter of sign-in, the password goes to the same
+// provider, and a wrong one is audited as action and counted for the session
+// - the unlockAttempts-th ends it. op begins every error. Nothing of the
+// password is kept or logged. The errors are those of Unlock.
+func (s *SessionService) judgePassword(ctx context.Context, op string, action iam.Action, token, password string, session iam.Session) (judgedSession, error) {
+	ended := fmt.Errorf("%s: %w: not signed in", op, domain.ErrCredentialNotFound)
+	if token == "" || len(token) > 4*sessionTokenSize {
+		return judgedSession{}, ended
+	}
+	hash := hashToken(token)
+	stored, err := s.sessions.GetSession(ctx, hash)
+	if errors.Is(err, domain.ErrEntityNotFound) {
+		return judgedSession{}, ended
+	}
+	if err != nil {
+		return judgedSession{}, fmt.Errorf("%s: %w", op, err)
+	}
+	state, err := s.stateOf(ctx, stored, s.clock.Now())
+	if err != nil {
+		return judgedSession{}, fmt.Errorf("%s: %w", op, err)
+	}
+	if state == sessionEnded {
+		return judgedSession{}, ended
+	}
+	from := session.SourceIP.String()
+	// Counted before the password is looked at, and by the counter of
+	// sign-in: an address has one budget of guesses, not two.
+	if !s.attempts.reserve(from, s.clock.Now()) {
+		s.auditor.AuthenticationFailed(ctx, string(action), stored.User, session, "too many failed attempts from this address")
+		return judgedSession{}, fmt.Errorf("%s: %w", op, domain.ErrTooManyAttempts)
+	}
+	failed := false
+	defer func() {
+		if !failed {
+			// Only a wrong guess counts against an address.
+			s.attempts.forgive(from)
+		}
+	}()
+	if _, err := s.provider.Authenticate(ctx, stored.User, password); err != nil {
+		if !errors.Is(err, domain.ErrAccessDenied) {
+			return judgedSession{}, fmt.Errorf("%s: %w", op, err)
+		}
+		failed = true
+		s.auditor.AuthenticationFailed(ctx, string(action), stored.User, session, "credentials not accepted")
+		if s.unlocks.add(hash) < unlockAttempts {
+			return judgedSession{}, fmt.Errorf("%s: %w", op, err)
+		}
+		// Too many for this session: it ends. Whoever is guessing loses
+		// what they held, and the user signs in again.
+		principal := iam.Principal{User: stored.User, Session: session}
+		record := s.auditor.Record(principal, action, iam.Resource{Admin: "user/" + stored.User}, audit.Failed,
+			map[string]string{"reason": "too many wrong passwords: the session is ended"})
+		if err := s.sessions.DeleteSession(ctx, hash, record); err != nil {
+			return judgedSession{}, fmt.Errorf("%s: %w", op, err)
+		}
+		s.unlocks.forget(hash)
+		s.leases.forgetMade(hash)
+		return judgedSession{}, fmt.Errorf("%s: %w: not signed in any more: %w", op, domain.ErrCredentialNotFound, domain.ErrTooManyAttempts)
+	}
+	return judgedSession{stored: stored, state: state, hash: hash}, nil
+}
+
+// Confirm judges a password typed again into a session for one request that
+// asks for it - installing a release (ADR-0029) - and returns the user the
+// session belongs to when it is that user's password. It is the path of
+// Unlock without what follows it: the session keeps its tokens, its
+// timeout and its state, locked or not; what a locked session may do is the
+// authorizer's to say, and the caller asks it first.
+//
+// The password goes where it goes at sign-in and at an unlock - the same
+// provider, the same limiter of the caller's address, the same count of
+// wrong passwords for the session - and nowhere else: it is not logged and
+// not stored. Wrong passwords are audited as ActionConfirmPassword. The
+// errors are those of Unlock: domain.ErrAccessDenied for a password that is
+// not accepted, domain.ErrTooManyAttempts for an address that must wait,
+// domain.ErrCredentialNotFound for a session that has ended, and both of the
+// last two when this wrong password was the one that ended it. The right
+// password gives the session its count of attempts back.
+func (s *SessionService) Confirm(ctx context.Context, token, password string, session iam.Session) (string, error) {
+	judged, err := s.judgePassword(ctx, "session.Confirm", ActionConfirmPassword, token, password, session)
+	if err != nil {
+		return "", err
+	}
+	s.unlocks.forget(judged.hash)
+	return judged.stored.User, nil
+}
+
 // Unlock gives a session its full authority back, for another lifetime, when
 // password is the password of the session's own user (ADR-0027). It is asked
 // of a locked session, and accepted of one that is not: either way the
@@ -620,61 +719,13 @@ func (u *unlockFailures) forget(tokenHash string) {
 // second alone it is told from a session that had ended before - which may
 // be this very session, unlocked a moment ago by a request sent twice.
 func (s *SessionService) Unlock(ctx context.Context, token, password string, session iam.Session) (SignedIn, error) {
-	ended := fmt.Errorf("session.Unlock: %w: not signed in", domain.ErrCredentialNotFound)
-	if token == "" || len(token) > 4*sessionTokenSize {
-		return SignedIn{}, ended
-	}
-	hash := hashToken(token)
-	stored, err := s.sessions.GetSession(ctx, hash)
-	if errors.Is(err, domain.ErrEntityNotFound) {
-		return SignedIn{}, ended
-	}
+	judged, err := s.judgePassword(ctx, "session.Unlock", ActionUnlockSession, token, password, session)
 	if err != nil {
-		return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
+		return SignedIn{}, err
 	}
-	state, err := s.stateOf(ctx, stored, s.clock.Now())
-	if err != nil {
-		return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
-	}
-	if state == sessionEnded {
-		return SignedIn{}, ended
-	}
-	from := session.SourceIP.String()
-	// Counted before the password is looked at, and by the counter of
-	// sign-in: an address has one budget of guesses, not two.
-	if !s.attempts.reserve(from, s.clock.Now()) {
-		s.auditor.AuthenticationFailed(ctx, string(ActionUnlockSession), stored.User, session, "too many failed attempts from this address")
-		return SignedIn{}, fmt.Errorf("session.Unlock: %w", domain.ErrTooManyAttempts)
-	}
-	failed := false
-	defer func() {
-		if !failed {
-			// Only a wrong guess counts against an address.
-			s.attempts.forgive(from)
-		}
-	}()
+	stored, state, hash := judged.stored, judged.state, judged.hash
 	principal := iam.Principal{User: stored.User, Session: session}
 	resource := iam.Resource{Admin: "user/" + stored.User}
-	if _, err := s.provider.Authenticate(ctx, stored.User, password); err != nil {
-		if !errors.Is(err, domain.ErrAccessDenied) {
-			return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
-		}
-		failed = true
-		s.auditor.AuthenticationFailed(ctx, string(ActionUnlockSession), stored.User, session, "credentials not accepted")
-		if s.unlocks.add(hash) < unlockAttempts {
-			return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
-		}
-		// Too many for this session: it ends. Whoever is guessing loses
-		// what they held, and the user signs in again.
-		record := s.auditor.Record(principal, ActionUnlockSession, resource, audit.Failed,
-			map[string]string{"reason": "too many wrong passwords: the session is ended"})
-		if err := s.sessions.DeleteSession(ctx, hash, record); err != nil {
-			return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
-		}
-		s.unlocks.forget(hash)
-		s.leases.forgetMade(hash)
-		return SignedIn{}, fmt.Errorf("session.Unlock: %w: not signed in any more: %w", domain.ErrCredentialNotFound, domain.ErrTooManyAttempts)
-	}
 	fresh, err := s.newToken()
 	if err != nil {
 		return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)

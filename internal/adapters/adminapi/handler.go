@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"net/netip"
@@ -106,6 +107,11 @@ func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter 
 // password, and nothing of it is kept: not a fingerprint either.
 const patternUnlock = "POST " + BasePath + "/session/unlock"
 
+// patternUpgrade is the operation that starts an upgrade. Its body holds the
+// password of the session's user, and nothing of it is kept either: an
+// upgrade is never started from a stored answer (ADR-0029).
+const patternUpgrade = "POST " + BasePath + "/upgrade"
+
 // Identities resolves API keys. It is implemented by app.IdentityService.
 type Identities interface {
 	// SecretFor returns the secret of an access key and the principal it
@@ -141,7 +147,11 @@ type Config struct {
 	// Targets defines the places outside the deployment that it sends
 	// to. It may be nil on a node that was not given the use case: its
 	// operations then answer 501.
-	Targets     *app.TargetService
+	Targets *app.TargetService
+	// Updates checks for releases and installs one (ADR-0029). It may be
+	// nil on a node that was not given the use case: its operations then
+	// answer 501.
+	Updates     *app.UpdateService
 	Idempotency *app.IdempotencyService
 	Identities  Identities
 	Clock       ports.Clock
@@ -353,11 +363,13 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 			defer h.cfg.Sessions.UploadBegun(ctx, info.token)()
 		}
 		key := r.Header.Get(headerIdempotency)
-		if key == "" || public || !httpsession.Mutating(r) || r.Pattern == patternUnlock {
+		if key == "" || public || !httpsession.Mutating(r) || r.Pattern == patternUnlock || r.Pattern == patternUpgrade {
 			// Unlocking takes the header and does nothing with it, as
 			// signing in does: its body holds a password, of which not
 			// even a hash is kept, and its answer holds a session, which
-			// is never given twice.
+			// is never given twice. Starting an upgrade is the same: its
+			// body holds a password, and its password is judged again
+			// every time it is sent.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -563,6 +575,15 @@ const (
 	detailEntityInUse = "Something refers to it: what refers to it must be changed or removed first."
 )
 
+// codeReleaseNotVerified is the code of an upgrade refused because the
+// release did not verify. Its detail is always detailReleaseNotVerified:
+// what failed - the verifier's words, a certificate's identity, a digest -
+// is for the node's log, not for the caller (ADR-0029).
+const (
+	codeReleaseNotVerified   = "ReleaseNotVerified"
+	detailReleaseNotVerified = "The release could not be verified against its signature; nothing was installed. The node's log says why."
+)
+
 // problem is a problem+json answer in the making.
 type problem struct {
 	status int
@@ -611,6 +632,18 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusUnsupportedMediaType, code: "NotPreviewable", title: "The object cannot be previewed"}
 	case is(domain.ErrPreviewTooLarge):
 		return problem{status: http.StatusRequestEntityTooLarge, code: "PreviewTooLarge", title: "The object is too large to preview"}
+	case is(domain.ErrUpdatesOff):
+		// None of the answers of updates is a denial (ADR-0029): the
+		// caller was allowed to ask.
+		return problem{status: http.StatusConflict, code: "UpdatesOff", title: "Checking for updates is off"}
+	case is(domain.ErrUpgradeNotAllowed):
+		return problem{status: http.StatusConflict, code: "UpgradeNotAllowed", title: "The upgrade to this version is not allowed"}
+	case is(domain.ErrUpgradeRunning):
+		return problem{status: http.StatusConflict, code: "UpgradeRunning", title: "An upgrade is already running"}
+	case is(domain.ErrReleaseNotVerified):
+		return problem{status: http.StatusPreconditionFailed, code: codeReleaseNotVerified, title: "The release did not verify"}
+	case is(domain.ErrUpgradeUnavailable):
+		return problem{status: http.StatusNotImplemented, code: "UpgradeUnavailable", title: "Upgrading from the console is not available"}
 	case is(errPreviewNeedsCustomerKey):
 		return problem{status: http.StatusConflict, code: "CustomerKeyRequired", title: "The object is encrypted with a customer key"}
 	case is(domain.ErrMethodNotAllowed):
@@ -681,6 +714,9 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 			// A fault that only happens to meet a caller who left is
 			// still a fault, and is logged as one below.
 			h.cfg.Logger.InfoContext(ctx, "request cancelled by the client", slog.String("request_id", info.id), slog.Any("error", err))
+		case errors.Is(err, domain.ErrUpgradeUnavailable):
+			// How the deployment was set up, not a fault (ADR-0029).
+			h.cfg.Logger.InfoContext(ctx, "request refused", slog.String("request_id", info.id), slog.Any("error", err))
 		case errors.Is(err, domain.ErrTooManyBuckets):
 			// A limit of the size of the deployment, not an outage.
 			h.cfg.Logger.WarnContext(ctx, "request refused", slog.String("request_id", info.id), slog.Any("error", err))
@@ -700,8 +736,14 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="cactusfs"`)
 	case p.code == codeTooManyRequests:
 		// The node is busy with this caller's own work, or with as much
-		// as it does at a time: a moment later there is room again.
-		w.Header().Set("Retry-After", "1")
+		// as it does at a time: a moment later there is room again. A
+		// check for releases says when it may be asked again.
+		retry := "1"
+		var throttled *app.CheckThrottledError
+		if errors.As(err, &throttled) {
+			retry = strconv.Itoa(int(math.Ceil(throttled.RetryAfter.Seconds())))
+		}
+		w.Header().Set("Retry-After", retry)
 		p.detail = err.Error()
 	case p.status == http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "300")
@@ -709,6 +751,11 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		// A refusal says nothing about what it protects.
 	case p.code == codeEntityInUse:
 		p.detail = detailEntityInUse
+	case p.code == codeReleaseNotVerified:
+		// The whole chain to the log: it names no secret - the source's
+		// origin at most, never a path, a token or a password.
+		h.cfg.Logger.WarnContext(ctx, "upgrade refused: the release did not verify", slog.String("request_id", info.id), slog.Any("error", err))
+		p.detail = detailReleaseNotVerified
 	default:
 		p.detail = err.Error()
 	}

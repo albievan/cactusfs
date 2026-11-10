@@ -111,8 +111,8 @@ jobs:
       - run: make build-all image sbom
       # scripts/release.sh --publish, in the builder: pushes the images, makes
       # the manifest list, signs and attests by digest, verifies what it
-      # published, pushes and signs the chart, signs SHA256SUMS. It refuses
-      # unless this is this workflow, on the tag of the tree's release.
+      # published, pushes and signs the chart, signs SHA256SUMS and digests.txt.
+      # It refuses unless this is this workflow, on the tag of the tree's release.
       - name: make release
         run: make release
         env:
@@ -130,6 +130,7 @@ jobs:
             --title "CactusFS ${GITHUB_REF_NAME#v}" --notes-file dist/release/NOTES.md \
             dist/cactusfs-* \
             dist/release/SHA256SUMS dist/release/SHA256SUMS.sigstore.json \
-            dist/release/digests.txt dist/release/sbom/*.spdx.json
+            dist/release/digests.txt dist/release/digests.txt.sigstore.json \
+            dist/release/sbom/*.spdx.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

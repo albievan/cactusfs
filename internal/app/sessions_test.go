@@ -1724,3 +1724,135 @@ func TestUploadLeaseKeeperPassHasADeadline(t *testing.T) {
 		t.Fatal("a pass of the keeper still waits for a write that does not end: it has no deadline")
 	}
 }
+
+// TestSessionConfirm: a password typed again into a session is judged as at
+// an unlock - the same provider, limiter and count of wrong passwords - and
+// changes nothing of the session.
+func TestSessionConfirm(t *testing.T) {
+	t.Parallel()
+	confirms := func(t *testing.T, f *lockFixture) (n int) {
+		t.Helper()
+		for _, r := range f.trail(t) {
+			if r.Action == string(app.ActionConfirmPassword) && r.Outcome == audit.Failed {
+				n++
+			}
+		}
+		return n
+	}
+	tests := map[string]func(t *testing.T, f *lockFixture){
+		"the right password": func(t *testing.T, f *lockFixture) {
+			checks := f.hasher.Verifications()
+			user, err := f.sessions.Confirm(t.Context(), f.signed.Token, f.password, f.where)
+			if err != nil || user != "alice" {
+				t.Fatalf("Confirm = %q, %v", user, err)
+			}
+			if f.hasher.Verifications() != checks+1 {
+				t.Errorf("confirming made %d password checks, want 1", f.hasher.Verifications()-checks)
+			}
+			// Nothing of the session changed: the same tokens work, and
+			// it has as long as it had.
+			if _, err := f.sessions.Authenticate(t.Context(), f.signed.Token, f.signed.CSRFToken, true, f.where); err != nil {
+				t.Errorf("the session after a confirmation: %v", err)
+			}
+			status, err := f.sessions.Status(t.Context(), f.signed.Token)
+			if err != nil || !status.ExpiresAt.Equal(f.signed.ExpiresAt) {
+				t.Errorf("Status = %+v, %v", status, err)
+			}
+			if confirms(t, f) != 0 {
+				t.Error("a right password was audited as a failure")
+			}
+		},
+		"a wrong password": func(t *testing.T, f *lockFixture) {
+			for _, password := range []string{"wrong", "", strings.Repeat("p", 2000), f.signed.Token} {
+				if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, password, f.where); !errors.Is(err, domain.ErrAccessDenied) || errors.Is(err, domain.ErrCredentialNotFound) {
+					t.Fatalf("Confirm = %v, want a denial", err)
+				}
+			}
+			f.expect(t, "active", "after wrong passwords")
+			if confirms(t, f) == 0 {
+				t.Error("wrong passwords left nothing in the audit trail")
+			}
+			// The right one still passes, and gives the attempts back.
+			if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, f.password, f.where); err != nil {
+				t.Fatalf("the right password after four wrong ones: %v", err)
+			}
+			if f.sessions.UnlockFailuresCounted() != 0 {
+				t.Errorf("wrong passwords are still counted for %d sessions", f.sessions.UnlockFailuresCounted())
+			}
+		},
+		"the fifth wrong password ends the session, counted with unlocks": func(t *testing.T, f *lockFixture) {
+			for i := 1; i < app.UnlockAttempts; i++ {
+				var err error
+				if i%2 == 0 {
+					_, err = f.sessions.Unlock(t.Context(), f.signed.Token, fmt.Sprintf("guess %d", i), f.where)
+				} else {
+					_, err = f.sessions.Confirm(t.Context(), f.signed.Token, fmt.Sprintf("guess %d", i), f.where)
+				}
+				if !errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("guess %d = %v", i, err)
+				}
+			}
+			_, err := f.sessions.Confirm(t.Context(), f.signed.Token, "the fifth guess", f.where)
+			if !errors.Is(err, domain.ErrCredentialNotFound) || !errors.Is(err, domain.ErrTooManyAttempts) || errors.Is(err, domain.ErrAccessDenied) {
+				t.Fatalf("the fifth wrong password = %v", err)
+			}
+			f.expect(t, "ended", "after five wrong passwords")
+			var end audit.Record
+			for _, r := range f.trail(t) {
+				if r.Action == string(app.ActionConfirmPassword) && r.Actor == "user/alice" {
+					end = r
+				}
+			}
+			if end.Outcome != audit.Failed || !strings.Contains(end.Details["reason"], "the session is ended") {
+				t.Errorf("the record of the end = %+v", end)
+			}
+			if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, f.password, f.where); !errors.Is(err, domain.ErrCredentialNotFound) || errors.Is(err, domain.ErrTooManyAttempts) {
+				t.Errorf("the right password for an ended session = %v", err)
+			}
+		},
+		"an address that keeps failing is made to wait": func(t *testing.T, f *lockFixture) {
+			for i := range app.SignInAttempts - 1 {
+				if _, err := f.sessions.SignIn(t.Context(), "alice", fmt.Sprintf("guess %d", i), f.where); !errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("guess %d = %v", i, err)
+				}
+			}
+			if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, "one more guess", f.where); !errors.Is(err, domain.ErrAccessDenied) {
+				t.Fatalf("the last guess = %v", err)
+			}
+			checks := f.hasher.Verifications()
+			if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, f.password, f.where); !errors.Is(err, domain.ErrTooManyAttempts) {
+				t.Fatalf("the right password from an address that must wait = %v", err)
+			}
+			if f.hasher.Verifications() != checks {
+				t.Error("the password of an address that must wait was looked at")
+			}
+			f.expect(t, "active", "its address made to wait,")
+		},
+		"no session": func(t *testing.T, f *lockFixture) {
+			for _, token := range []string{"", strings.Repeat("t", 500), "no-such-token"} {
+				if _, err := f.sessions.Confirm(t.Context(), token, f.password, f.where); !errors.Is(err, domain.ErrCredentialNotFound) {
+					t.Errorf("Confirm(%.10q) = %v", token, err)
+				}
+			}
+			f.pass(t, lockLifetime)
+			if _, err := f.sessions.Confirm(t.Context(), f.signed.Token, f.password, f.where); !errors.Is(err, domain.ErrCredentialNotFound) {
+				t.Errorf("confirming in an ended session = %v", err)
+			}
+		},
+	}
+	for name, run := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newLockFixture(t, nil)
+			run(t, f)
+			for _, r := range f.trail(t) {
+				if strings.Contains(fmt.Sprint(r), f.password) {
+					t.Fatal("a password is in the audit trail")
+				}
+			}
+			if strings.Contains(f.logs.String(), f.password) {
+				t.Fatal("a password is in the log")
+			}
+		})
+	}
+}

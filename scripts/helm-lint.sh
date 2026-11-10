@@ -56,8 +56,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 # The chart renders nothing without the Secrets it is told to use, so it is
 # linted and rendered with each of the value sets in ci/: a cluster with
-# Vault, five voters, one node, a development cluster on one machine, and a
-# cluster opened to its clients. Every set is judged before the gate fails.
+# Vault, five voters, one node, a development cluster on one machine, a
+# cluster opened to its clients, and one the console may upgrade. Every set
+# is judged before the gate fails.
 failed=0
 sets=0
 for values in "$CHART"/ci/*.yaml; do

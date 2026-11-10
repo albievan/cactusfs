@@ -54,7 +54,8 @@ ROLLING_TEST        ?= TestRollingUpgradeFromSchema4ToSchema5
 # Targets that run inside the builder image.
 BUILDER_TARGETS := gen settings-docs fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
-	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy check
+	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy \
+	trusted-root check
 
 .PHONY: help builder shell run up down clean release $(BUILDER_TARGETS)
 
@@ -80,6 +81,7 @@ help:
 	@echo "  gen            regenerate code from API contracts, and the settings documents"
 	@echo "  settings-docs  write deploy/cactusfs.env.example and the settings tables of README and ARCHITECTURE"
 	@echo "  tidy           go mod tidy                web-lock    rewrite web/pnpm-lock.yaml"
+	@echo "  trusted-root   refresh Sigstore's trusted root the release verifier embeds (network; not part of check)"
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
 	@echo "  up / down      4-node compose cluster     test-chaos  fault injection"
 	@echo "  test-k8s       the Helm chart on k3s (a privileged container; not part of check)"
@@ -229,6 +231,14 @@ settings-docs:
 
 tidy:
 	go mod tidy
+
+# The trusted root of Sigstore's public-good instance that the verifier of
+# releases embeds (internal/adapters/releases/sigstore/trusted_root.json;
+# PLAN P.4, ADR-0029), fetched through Sigstore's TUF repository from the TUF
+# root sigstore-go embeds, and checked by it. It asks the network, so it is no
+# part of `make check`; run it when Sigstore rotates a key, and commit the file.
+trusted-root:
+	go run -tags tools ./internal/tools/trustedroot -out internal/adapters/releases/sigstore/trusted_root.json
 
 fmt:
 	go tool gofumpt -w $(GO_FILES)

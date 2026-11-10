@@ -8,6 +8,7 @@
 {{- end -}}
 {{- $drain := include "cactusfs.drainSeconds" . | int -}}
 {{- $class := include "cactusfs.storageClass" . -}}
+{{- $upgrade := include "cactusfs.upgradeFromConsole" . -}}
 {{- range $nodes }}
 {{- $id := .id -}}
 {{- $pool := index $root.Values.pools (int .pool) -}}
@@ -59,6 +60,11 @@ spec:
       {{- end }}
     spec:
       automountServiceAccountToken: false
+      {{- if $upgrade }}
+      # Upgrades from the console (upgrade-rbac.yaml): the pod has the
+      # identity, and only the cactusfs container its token (kube-api).
+      serviceAccountName: {{ include "cactusfs.upgradeAccount" $root }}
+      {{- end }}
       enableServiceLinks: false
       terminationGracePeriodSeconds: {{ add $drain (int $root.Values.shutdownTimeoutSeconds) 10 }}
       securityContext:
@@ -189,6 +195,9 @@ spec:
             {{- with $root.Values.otlpEndpoint }}
             - {name: CACTUSFS_OTLP_ENDPOINT, value: {{ . | quote }}}
             {{- end }}
+            {{- if $upgrade }}
+            - {name: CACTUSFS_UPGRADE_MODE, value: kubernetes}
+            {{- end }}
             {{- with $root.Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -231,6 +240,9 @@ spec:
             - {name: kms, mountPath: /etc/cactusfs/kms, readOnly: true}
             - {name: kms-passphrase, mountPath: /etc/cactusfs/kms-passphrase, readOnly: true}
             {{- end }}
+            {{- if $upgrade }}
+            - {name: kube-api, mountPath: {{ include "cactusfs.upgradeDir" $root }}, readOnly: true}
+            {{- end }}
       volumes:
         - name: tls
           secret: {secretName: {{ $root.Values.secrets.tls | quote }}, defaultMode: 0440}
@@ -253,6 +265,17 @@ spec:
           secret: {secretName: {{ $root.Values.kms.local.keyFileSecret | quote }}, defaultMode: 0440, items: [{key: kms.json, path: kms.json}]}
         - name: kms-passphrase
           secret: {secretName: {{ $root.Values.kms.local.passphraseSecret | quote }}, defaultMode: 0440, items: [{key: passphrase, path: passphrase}]}
+        {{- end }}
+        {{- if $upgrade }}
+        # A token of an hour, renewed by the kubelet; the CA of the API
+        # server; the namespace. Nothing else of the cluster.
+        - name: kube-api
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken: {path: token, expirationSeconds: 3600}
+              - configMap: {name: kube-root-ca.crt, items: [{key: ca.crt, path: ca.crt}]}
+              - downwardAPI: {items: [{path: namespace, fieldRef: {apiVersion: v1, fieldPath: metadata.namespace}}]}
         {{- end }}
   volumeClaimTemplates:
     - metadata:

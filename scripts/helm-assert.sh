@@ -1,11 +1,11 @@
 #!/bin/sh
-# Asserts what a render of the Helm chart must say (PLAN 7.1, 7.2, 7.6).
+# Asserts what a render of the Helm chart must say (PLAN 7.1, 7.2, 7.6, P.8).
 #
 #   scripts/helm-assert.sh <render-file> <value-set-name>
 #
 # <render-file> is the output of `helm template` with the value set
-# deploy/helm/cactusfs/ci/<value-set-name>.yaml and the release name cactusfs
-# (HELM_RELEASE says otherwise). What is expected is worked out from the
+# deploy/helm/cactusfs/ci/<value-set-name>.yaml, the release name cactusfs
+# (HELM_RELEASE says otherwise) and the namespace cactusfs (HELM_NAMESPACE). What is expected is worked out from the
 # values - the chart's own, with the value set laid over them - and not from
 # the render, so that a template that leaves something out is caught.
 #
@@ -25,6 +25,7 @@ RENDER=$1
 SET=$(basename "$2" .yaml)
 CHART=${HELM_CHART:-deploy/helm/cactusfs}
 RELEASE=${HELM_RELEASE:-cactusfs}
+NAMESPACE=${HELM_NAMESPACE:-cactusfs}
 SETFILE=$CHART/ci/$SET.yaml
 
 command -v yq >/dev/null 2>&1 || { echo "helm-assert: FAIL - yq is not installed (it is in the builder image: run make helm-lint)" >&2; exit 1; }
@@ -133,6 +134,11 @@ spread_key=$(q "$V" '.spread.topologyKey')
 spread_when=$(q "$V" '.spread.whenUnsatisfiable')
 kms=$(q "$V" '.kms.type')
 policy=$(q "$V" '.networkPolicy.enabled // false')
+# Upgrades from the console (ADR-0029): an identity, its token on the
+# cactusfs container alone, and a way to the API server - or none of it.
+upgrade=$(q "$V" '.upgrade.fromConsole.enabled // false')
+upgrade_account=$RELEASE-upgrade
+upgrade_dir=/var/run/secrets/cactusfs.io/kubernetes
 # The image a node runs: image.repository by image.digest, or else by
 # image.tag, or else by the chart's appVersion. And the version its pod says
 # it runs, as the helper cactusfs.version gives it: the tag, or the appVersion
@@ -191,9 +197,9 @@ if [ "$clustered" = yes ]; then
 fi
 
 # --- the kinds of the render -------------------------------------------------------
-# No Ingress, no Secret, no ServiceAccount or role, nothing of a cloud: the
-# chart renders these kinds and no other. StorageClass and PersistentVolume
-# only with localVolumes.
+# No Ingress, no Secret, nothing of a cloud: the chart renders these kinds
+# and no other. StorageClass and PersistentVolume only with localVolumes;
+# ServiceAccount, Role and RoleBinding only with upgrade.fromConsole.enabled.
 q "$RENDER" '.kind' | grep -v '^null$' | grep -v '^$' >"$TMP/kinds" || :
 sort -u "$TMP/kinds" >"$TMP/kinds.unique"
 while IFS= read -r kind <&3; do
@@ -203,7 +209,8 @@ while IFS= read -r kind <&3; do
 	PodDisruptionBudget) [ "$clustered" = yes ] || fail "$kind" "no PodDisruptionBudget for a node on its own" ;;
 	NetworkPolicy) [ "$policy" = true ] || fail "$kind" "no NetworkPolicy when networkPolicy.enabled is false" ;;
 	StorageClass | PersistentVolume) [ "$local_volumes" = true ] || fail "$kind" "no $kind unless localVolumes.enabled" ;;
-	*) fail "$kind" "the chart renders Service, StatefulSet, PodDisruptionBudget and NetworkPolicy (and StorageClass, PersistentVolume with localVolumes) - no $kind" ;;
+	ServiceAccount | Role | RoleBinding) [ "$upgrade" = true ] || fail "$kind" "no $kind unless upgrade.fromConsole.enabled" ;;
+	*) fail "$kind" "the chart renders Service, StatefulSet, PodDisruptionBudget and NetworkPolicy (and StorageClass, PersistentVolume with localVolumes; ServiceAccount, Role, RoleBinding with upgrade.fromConsole.enabled) - no $kind" ;;
 	esac
 done 3<"$TMP/kinds.unique"
 
@@ -376,6 +383,24 @@ while read -r id voter stores gateway <&4; do
 	want "$R" "no hostIPC" "$D" "$P.hostIPC // false" "false"
 	want "$R" "no hostPath volume" "$D" "[$P.volumes[] | select(has(\"hostPath\"))] | length" "0"
 
+	# Upgrades from the console: the pod has the identity, the cactusfs
+	# container alone its token, read-only; without them, neither.
+	K="$P.volumes[] | select(.name == \"kube-api\") | .projected"
+	if [ "$upgrade" = true ]; then
+		want "$R" "the ServiceAccount of upgrades from the console" "$D" "$P.serviceAccountName" "$upgrade_account"
+		want "$R" "CACTUSFS_UPGRADE_MODE=kubernetes" "$D" "$C | .env[] | select(.name == \"CACTUSFS_UPGRADE_MODE\") | .value" "kubernetes"
+		want "$R" "the projected volume kube-api of a token, a CA and the namespace, in that order and nothing else" "$D" "[$K | .sources[] | keys | .[0]] | join(\",\")" "serviceAccountToken,configMap,downwardAPI"
+		want "$R" "a token of an hour, for the API server's audience" "$D" "$K | .sources[0].serviceAccountToken | [.path, .expirationSeconds, (has(\"audience\") | tostring)] | join(\",\")" "token,3600,false"
+		want "$R" "the CA of the API server from kube-root-ca.crt" "$D" "$K | .sources[1].configMap | [.name, (.items | length), .items[0].key, .items[0].path] | join(\",\")" "kube-root-ca.crt,1,ca.crt,ca.crt"
+		want "$R" "the namespace from the downward API" "$D" "$K | .sources[2].downwardAPI | [(.items | length), .items[0].path, .items[0].fieldRef.fieldPath] | join(\",\")" "1,namespace,metadata.namespace"
+		want "$R" "kube-api mounted into the cactusfs container and no other" "$D" "[(($P.containers // []) + ($P.initContainers // []))[] | select([(.volumeMounts // [])[] | select(.name == \"kube-api\")] | length > 0) | .name] | join(\",\")" "cactusfs"
+		want "$R" "kube-api mounted read-only where the upgrader reads it" "$D" "$C | .volumeMounts[] | select(.name == \"kube-api\") | [.mountPath, .readOnly] | join(\",\")" "$upgrade_dir,true"
+	else
+		want "$R" "no ServiceAccount named: upgrades from the console are off" "$D" "$P.serviceAccountName" "null"
+		want "$R" "no CACTUSFS_UPGRADE_MODE: upgrades from the console are off" "$D" "[$C | .env[] | select(.name == \"CACTUSFS_UPGRADE_MODE\")] | length" "0"
+		want "$R" "no projected volume: no token of the cluster" "$D" "[$P.volumes[] | select(has(\"projected\"))] | length" "0"
+	fi
+
 	# Every container.
 	want "$R" "the container cactusfs" "$D" "[$C | .name] | join(\",\")" "cactusfs"
 	want "$R" "the image of image.repository, by image.digest, or else image.tag, or else the chart's appVersion" "$D" "$C | .image" "$image"
@@ -494,6 +519,35 @@ if [ "$local_volumes" = true ]; then
 	[ "$(count PersistentVolume)" = "$claims_total" ] || fail "PersistentVolume" "a volume for every claim ($claims_total), found $(count PersistentVolume)"
 fi
 
+# --- Upgrades from the console (P.8, ADR-0029) ----------------------------------------
+for kind in ServiceAccount Role RoleBinding; do
+	checks=$((checks + 1))
+	if [ "$upgrade" = true ]; then
+		[ "$(count $kind)" = 1 ] || fail "$kind" "one $kind with upgrade.fromConsole.enabled, found $(count $kind)"
+		[ -s "$(document $kind "$upgrade_account")" ] || fail "$kind/$upgrade_account" "the $kind of upgrades from the console, named $upgrade_account"
+	else
+		[ "$(count $kind)" = 0 ] || fail "$kind" "none without upgrade.fromConsole.enabled, found $(count $kind)"
+	fi
+done
+if [ "$upgrade" = true ]; then
+	R="ServiceAccount/$upgrade_account"
+	D=$(document ServiceAccount "$upgrade_account")
+	want "$R" "no token mounted by default: only the projected volume carries one" "$D" '.automountServiceAccountToken' "false"
+	sets=$(cut -d' ' -f1 "$NODES" | tr '\n' ',' | sed 's/,$//')
+	pods=$(cut -d' ' -f1 "$NODES" | sed 's/$/-0/' | tr '\n' ',' | sed 's/,$//')
+	R="Role/$upgrade_account"
+	D=$(document Role "$upgrade_account")
+	RULE='[(.apiGroups | join(",")), (.resources | join(",")), (.resourceNames | join(",")), (.verbs | join(","))] | join(" ")'
+	want "$R" "three rules and no other" "$D" '.rules | length' "3"
+	want "$R" "get and patch of the nodes' StatefulSets, by name" "$D" ".rules[0] | $RULE" "apps statefulsets $sets get,patch"
+	want "$R" "get of the nodes' pods, by name" "$D" ".rules[1] | $RULE" " pods $pods get"
+	want "$R" "evictions of the nodes' pods, by name" "$D" ".rules[2] | $RULE" " pods/eviction $pods create"
+	R="RoleBinding/$upgrade_account"
+	D=$(document RoleBinding "$upgrade_account")
+	want "$R" "binds the Role of upgrades" "$D" '[.roleRef.apiGroup, .roleRef.kind, .roleRef.name] | join(",")' "rbac.authorization.k8s.io,Role,$upgrade_account"
+	want "$R" "to the ServiceAccount of upgrades and nobody else" "$D" '[.subjects[] | [.kind, .name, .namespace] | join("/")] | join(",")' "ServiceAccount/$upgrade_account/$NAMESPACE"
+fi
+
 # --- NetworkPolicy (7.2) -------------------------------------------------------------
 # rules <file> <path of the rules> <key of the peers: from or to>: a line for
 # each rule - its ports, sorted, then its peers.
@@ -574,6 +628,11 @@ EOF
 		i=$((i + 1))
 	done
 	cat "$TMP/egress.named" >>"$TMP/egress.expected"
+	# The API server, for upgrades from the console, and only then.
+	if [ "$upgrade" = true ]; then
+		q "$V" '[.upgrade.fromConsole.apiServer.cidrs[] | {"ipBlock": {"cidr": .}}]' >"$TMP/apiserver.yaml"
+		echo "TCP/$(q "$V" '.upgrade.fromConsole.apiServer.port // 6443') $(peers "$TMP/apiserver.yaml" ".")" >>"$TMP/egress.expected"
+	fi
 	rules "$D" '.spec.egress' to >"$TMP/egress.actual"
 	same_rules "$R" egress "$TMP/egress.expected" "$TMP/egress.actual"
 
@@ -583,6 +642,13 @@ EOF
 		checks=$((checks + 1))
 		port=$(port_of "$(q "$V" '.kms.vault.addr')")
 		grep -Eq "^([^ ]*,)?TCP/$port(,[^ ]*)? " "$TMP/egress.named" || fail "$R" "egress: a rule of networkPolicy.egressTo for Vault's port $port (kms.vault.addr)"
+	fi
+	# The update source (ADR-0029), when extraEnv sets one: its port too.
+	update_source=$(q "$V" '[.extraEnv[]? | select(.name == "CACTUSFS_UPDATE_SOURCE") | .value] | .[0] // ""')
+	if [ -n "$update_source" ]; then
+		checks=$((checks + 1))
+		port=$(port_of "$update_source")
+		grep -Eq "^([^ ]*,)?TCP/$port(,[^ ]*)? " "$TMP/egress.named" || fail "$R" "egress: a rule of networkPolicy.egressTo for the update source's port $port (CACTUSFS_UPDATE_SOURCE)"
 	fi
 	otlp=$(q "$V" '.otlpEndpoint // ""')
 	if [ -n "$otlp" ]; then

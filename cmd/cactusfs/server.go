@@ -192,6 +192,9 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		// its settings.
 		n.local.serve(cluster.CertificateS3, certificate)
 	}
+	// An upgrade in Kubernetes waits for this node to be ready, as /readyz
+	// says it.
+	n.readiness.Store(readiness)
 	n.startBackground(ctx, cfg)
 
 	admin := http.NewServeMux()
@@ -203,7 +206,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 	if cfg.Roles.Has(cluster.RoleGateway) {
 		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
-			Settings: n.settings, Targets: n.targets,
+			Settings: n.settings, Targets: n.targets, Updates: n.updates,
 			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
 			Build: build,

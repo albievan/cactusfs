@@ -9,6 +9,7 @@ import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
 import { SearchScreen } from './SearchScreen';
 import { SettingsScreen } from './SettingsScreen';
+import { UpdatesScreen } from './UpdatesScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
 
@@ -16,7 +17,8 @@ interface ScreensProps {
   /**
    * Whether the session was signed in to with a password, as the API says:
    * only then is a password asked for again before every object of a bucket
-   * is deleted. The API decides; this only chooses what is offered.
+   * is deleted, and only then is installing a release offered. The API
+   * decides; this only chooses what is offered.
    */
   passwordSession?: boolean;
 }
@@ -54,6 +56,8 @@ export function Screens({ passwordSession = false }: ScreensProps) {
       return <ClusterScreen />;
     case 'settings':
       return <SettingsScreen />;
+    case 'updates':
+      return <UpdatesScreen passwordSession={passwordSession} />;
     case 'audit':
       return <AuditScreen after={parseAfter(route.query.get('after'))} />;
     default:

@@ -79,22 +79,22 @@ func (e IdentityVia) Valid() bool {
 
 // Defines values for NodeSettingsReason.
 const (
-	Failed      NodeSettingsReason = "failed"
-	Timeout     NodeSettingsReason = "timeout"
-	Unreachable NodeSettingsReason = "unreachable"
-	Unsupported NodeSettingsReason = "unsupported"
+	NodeSettingsReasonFailed      NodeSettingsReason = "failed"
+	NodeSettingsReasonTimeout     NodeSettingsReason = "timeout"
+	NodeSettingsReasonUnreachable NodeSettingsReason = "unreachable"
+	NodeSettingsReasonUnsupported NodeSettingsReason = "unsupported"
 )
 
 // Valid indicates whether the value is a known member of the NodeSettingsReason enum.
 func (e NodeSettingsReason) Valid() bool {
 	switch e {
-	case Failed:
+	case NodeSettingsReasonFailed:
 		return true
-	case Timeout:
+	case NodeSettingsReasonTimeout:
 		return true
-	case Unreachable:
+	case NodeSettingsReasonUnreachable:
 		return true
-	case Unsupported:
+	case NodeSettingsReasonUnsupported:
 		return true
 	default:
 		return false
@@ -362,6 +362,162 @@ func (e TargetPutKind) Valid() bool {
 	}
 }
 
+// Defines values for UpdateChannel.
+const (
+	Prerelease UpdateChannel = "prerelease"
+	Stable     UpdateChannel = "stable"
+)
+
+// Valid indicates whether the value is a known member of the UpdateChannel enum.
+func (e UpdateChannel) Valid() bool {
+	switch e {
+	case Prerelease:
+		return true
+	case Stable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpdateCheckError.
+const (
+	UpdateCheckErrorInvalidAnswer UpdateCheckError = "invalid-answer"
+	UpdateCheckErrorRateLimited   UpdateCheckError = "rate-limited"
+	UpdateCheckErrorRefused       UpdateCheckError = "refused"
+	UpdateCheckErrorTimeout       UpdateCheckError = "timeout"
+	UpdateCheckErrorUnreachable   UpdateCheckError = "unreachable"
+)
+
+// Valid indicates whether the value is a known member of the UpdateCheckError enum.
+func (e UpdateCheckError) Valid() bool {
+	switch e {
+	case UpdateCheckErrorInvalidAnswer:
+		return true
+	case UpdateCheckErrorRateLimited:
+		return true
+	case UpdateCheckErrorRefused:
+		return true
+	case UpdateCheckErrorTimeout:
+		return true
+	case UpdateCheckErrorUnreachable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpgradeMode.
+const (
+	Binary     UpgradeMode = "binary"
+	Kubernetes UpgradeMode = "kubernetes"
+	Off        UpgradeMode = "off"
+)
+
+// Valid indicates whether the value is a known member of the UpgradeMode enum.
+func (e UpgradeMode) Valid() bool {
+	switch e {
+	case Binary:
+		return true
+	case Kubernetes:
+		return true
+	case Off:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpgradeNodeState.
+const (
+	UpgradeNodeStateDone      UpgradeNodeState = "done"
+	UpgradeNodeStateFailed    UpgradeNodeState = "failed"
+	UpgradeNodeStatePending   UpgradeNodeState = "pending"
+	UpgradeNodeStateRestored  UpgradeNodeState = "restored"
+	UpgradeNodeStateUpgrading UpgradeNodeState = "upgrading"
+)
+
+// Valid indicates whether the value is a known member of the UpgradeNodeState enum.
+func (e UpgradeNodeState) Valid() bool {
+	switch e {
+	case UpgradeNodeStateDone:
+		return true
+	case UpgradeNodeStateFailed:
+		return true
+	case UpgradeNodeStatePending:
+		return true
+	case UpgradeNodeStateRestored:
+		return true
+	case UpgradeNodeStateUpgrading:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpgradeRefusal.
+const (
+	Equal              UpgradeRefusal = "equal"
+	Major              UpgradeRefusal = "major"
+	NotNewestPatch     UpgradeRefusal = "not-newest-patch"
+	Older              UpgradeRefusal = "older"
+	PrereleaseOnStable UpgradeRefusal = "prerelease-on-stable"
+	SkippedMinor       UpgradeRefusal = "skipped-minor"
+	UnknownRelease     UpgradeRefusal = "unknown-release"
+)
+
+// Valid indicates whether the value is a known member of the UpgradeRefusal enum.
+func (e UpgradeRefusal) Valid() bool {
+	switch e {
+	case Equal:
+		return true
+	case Major:
+		return true
+	case NotNewestPatch:
+		return true
+	case Older:
+		return true
+	case PrereleaseOnStable:
+		return true
+	case SkippedMinor:
+		return true
+	case UnknownRelease:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpgradeState.
+const (
+	UpgradeStateDone            UpgradeState = "done"
+	UpgradeStateFailed          UpgradeState = "failed"
+	UpgradeStateIdle            UpgradeState = "idle"
+	UpgradeStateRestartRequired UpgradeState = "restart-required"
+	UpgradeStateRunning         UpgradeState = "running"
+	UpgradeStateVerifying       UpgradeState = "verifying"
+)
+
+// Valid indicates whether the value is a known member of the UpgradeState enum.
+func (e UpgradeState) Valid() bool {
+	switch e {
+	case UpgradeStateDone:
+		return true
+	case UpgradeStateFailed:
+		return true
+	case UpgradeStateIdle:
+		return true
+	case UpgradeStateRestartRequired:
+		return true
+	case UpgradeStateRunning:
+		return true
+	case UpgradeStateVerifying:
+		return true
+	default:
+		return false
+	}
+}
+
 // APIKey defines model for APIKey.
 type APIKey struct {
 	AccessKeyId string     `json:"access_key_id"`
@@ -415,6 +571,31 @@ type AuditRecord struct {
 	Sequence     int64              `json:"sequence"`
 	SourceIp     *string            `json:"source_ip,omitempty"`
 	Time         time.Time          `json:"time"`
+}
+
+// AvailableRelease A release the source listed. Nothing of it is trusted until its signed lists verify, when it is installed.
+type AvailableRelease struct {
+	// Allowed Whether it may be installed from the running release.
+	Allowed bool `json:"allowed"`
+
+	// NotesUrl The https address of its release notes, for a link; the console never fetches it. Absent when there is none.
+	NotesUrl *string `json:"notes_url,omitempty"`
+
+	// Prerelease Whether it is a pre-release, by its version or because the source marks it so.
+	Prerelease bool `json:"prerelease"`
+
+	// Published When it was published, as the source says. Absent when the source did not say.
+	Published *time.Time `json:"published,omitempty"`
+
+	// Refusal Why a release may not be installed from the running one. Absent when it may. `equal` and `older`: it is
+	// not newer (nothing is downgraded); `prerelease-on-stable`: it is a pre-release and the channel is
+	// `stable`; `major`: it is of another major version; `skipped-minor`: it is more than one minor version
+	// ahead; `not-newest-patch`: a newer patch of the next minor version is listed; `unknown-release`: it was
+	// not listed when the node last checked. Values are only ever added to.
+	Refusal *UpgradeRefusal `json:"refusal,omitempty"`
+
+	// Version The release, a semantic version without a leading "v".
+	Version string `json:"version"`
 }
 
 // Bucket defines model for Bucket.
@@ -1526,6 +1707,137 @@ type UnlockRequest struct {
 	Password string `json:"password"`
 }
 
+// UpdateChannel Which releases are offered (`update-channel`): `stable` leaves pre-releases out, `prerelease` offers them
+// too. Values are only ever added to.
+type UpdateChannel string
+
+// UpdateCheckError Why the last check could not be read, as a class: the source could not be reached (`unreachable`), it
+// limited the rate of requests (`rate-limited`), it answered with a refusal (`refused`), its answer was
+// not one this node reads (`invalid-answer`), or it did not answer in time (`timeout`). Absent when the
+// last check was read. The cause is in the log of the node, without the source's address. Values are
+// only ever added to.
+type UpdateCheckError string
+
+// UpdatesView What the answering node knows of releases (`GET /updates`). Nothing in it names the update source's
+// address, nor anything the source said in its own words.
+type UpdatesView struct {
+	// Available The releases newer than the running one that the channel offers, newest first, as the source listed
+	// them when it last answered. Empty when it has not.
+	Available []AvailableRelease `json:"available"`
+
+	// Channel Which releases are offered (`update-channel`): `stable` leaves pre-releases out, `prerelease` offers them
+	// too. Values are only ever added to.
+	Channel UpdateChannel `json:"channel"`
+
+	// CheckedAt When the node last asked the source, whether or not it answered. Absent when it has not asked since it started.
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+
+	// Current Which build of CactusFS answered. It is told to a caller who has proved who they are, and to nobody
+	// else: no answer to a request without a credential names it, and no response header does.
+	Current ServerVersion `json:"current"`
+
+	// Instructions What an operator does to install `next_step` without the console, as lines of text to copy - the
+	// binary to download and its checksum to check, or the `helm upgrade` to run. Empty when there is
+	// nothing to install.
+	Instructions []string `json:"instructions"`
+
+	// LastError Why the last check could not be read, as a class: the source could not be reached (`unreachable`), it
+	// limited the rate of requests (`rate-limited`), it answered with a refusal (`refused`), its answer was
+	// not one this node reads (`invalid-answer`), or it did not answer in time (`timeout`). Absent when the
+	// last check was read. The cause is in the log of the node, without the source's address. Values are
+	// only ever added to.
+	LastError *UpdateCheckError `json:"last_error,omitempty"`
+
+	// Mode How this deployment installs a release (`upgrade-mode`): `off` installs nothing and gives the
+	// instructions instead; `binary` replaces the binary of a deployment of one node; `kubernetes` moves the
+	// nodes to the release's image, one at a time. Values are only ever added to.
+	Mode UpgradeMode `json:"mode"`
+
+	// NextStep The version the console offers to install: the newest of `available` that may be installed. Absent when
+	// none may.
+	NextStep *string `json:"next_step,omitempty"`
+
+	// SourceConfigured Whether an `update-source` is configured. Without one nothing is ever asked, and `available` is empty.
+	SourceConfigured bool `json:"source_configured"`
+
+	// UnavailableReason Why an upgrade cannot be started here, in words that name no secret. Absent when it can.
+	UnavailableReason *string `json:"unavailable_reason,omitempty"`
+
+	// UpgradeAvailable Whether an upgrade can be started from the console on this deployment: `mode` is not `off` and what
+	// it needs is there. It does not say whether the caller may.
+	UpgradeAvailable bool `json:"upgrade_available"`
+}
+
+// UpgradeMode How this deployment installs a release (`upgrade-mode`): `off` installs nothing and gives the
+// instructions instead; `binary` replaces the binary of a deployment of one node; `kubernetes` moves the
+// nodes to the release's image, one at a time. Values are only ever added to.
+type UpgradeMode string
+
+// UpgradeNode One node in an upgrade.
+type UpgradeNode struct {
+	// Build The node's build number, as it reports it. Absent when it could not be asked.
+	Build *string `json:"build,omitempty"`
+
+	// Id The node's ID.
+	Id string `json:"id"`
+
+	// Reason Why the node failed or was put back, in words that name no secret. Absent otherwise.
+	Reason *string `json:"reason,omitempty"`
+
+	// State Where a node stands in an upgrade: not moved yet (`pending`), being moved or coming up again
+	// (`upgrading`), running the target and ready (`done`), did not come up on the target (`failed`), or
+	// failed and was put back where it was (`restored`). Values are only ever added to.
+	State UpgradeNodeState `json:"state"`
+
+	// Version The release the node runs now, as it reports it. Absent when it could not be asked.
+	Version *string `json:"version,omitempty"`
+}
+
+// UpgradeNodeState Where a node stands in an upgrade: not moved yet (`pending`), being moved or coming up again
+// (`upgrading`), running the target and ready (`done`), did not come up on the target (`failed`), or
+// failed and was put back where it was (`restored`). Values are only ever added to.
+type UpgradeNodeState string
+
+// UpgradeProgress Where the latest upgrade stands, as read from the deployment. `idle`: none was started since the
+// answering node started; `verifying`: the release is being fetched and verified; `running`: nodes are
+// being moved; `restart-required`: the binary was replaced and whoever runs the node must restart it
+// (Windows); `failed`: it stopped, and the nodes say where and why; `done`: every node runs the target.
+type UpgradeProgress struct {
+	// Nodes The nodes of the deployment, in the order they are moved. Empty when idle.
+	Nodes []UpgradeNode `json:"nodes"`
+
+	// StartedAt When it was started. Absent when idle.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// StartedBy Who started it, as the audit trail names actors (`user/alice`). Absent when idle.
+	StartedBy *string `json:"started_by,omitempty"`
+
+	// State Where an upgrade stands (see `UpgradeProgress`). Values are only ever added to.
+	State UpgradeState `json:"state"`
+
+	// Target The version being installed. Absent when idle.
+	Target *string `json:"target,omitempty"`
+}
+
+// UpgradeRefusal Why a release may not be installed from the running one. Absent when it may. `equal` and `older`: it is
+// not newer (nothing is downgraded); `prerelease-on-stable`: it is a pre-release and the channel is
+// `stable`; `major`: it is of another major version; `skipped-minor`: it is more than one minor version
+// ahead; `not-newest-patch`: a newer patch of the next minor version is listed; `unknown-release`: it was
+// not listed when the node last checked. Values are only ever added to.
+type UpgradeRefusal string
+
+// UpgradeRequest defines model for UpgradeRequest.
+type UpgradeRequest struct {
+	// Password The password of the user the session belongs to, typed again for this request.
+	Password *string `json:"password,omitempty"`
+
+	// Version The release to install, as `GET /updates` lists it.
+	Version string `json:"version"`
+}
+
+// UpgradeState Where an upgrade stands (see `UpgradeProgress`). Values are only ever added to.
+type UpgradeState string
+
 // User defines model for User.
 type User struct {
 	CreatedAt time.Time `json:"created_at"`
@@ -1920,6 +2232,24 @@ type PutTargetParams struct {
 	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
+// CheckForUpdatesParams defines parameters for CheckForUpdates.
+type CheckForUpdatesParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// StartUpgradeParams defines parameters for StartUpgrade.
+type StartUpgradeParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // CreateUserParams defines parameters for CreateUser.
 type CreateUserParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -1997,6 +2327,9 @@ type UnlockSessionJSONRequestBody = UnlockRequest
 
 // PutTargetJSONRequestBody defines body for PutTarget for application/json ContentType.
 type PutTargetJSONRequestBody = TargetPut
+
+// StartUpgradeJSONRequestBody defines body for StartUpgrade for application/json ContentType.
+type StartUpgradeJSONRequestBody = UpgradeRequest
 
 // CreateUserJSONRequestBody defines body for CreateUser for application/json ContentType.
 type CreateUserJSONRequestBody = UserCreate
@@ -2177,6 +2510,18 @@ type ServerInterface interface {
 	// GetTargetStatus Whether a target is being delivered to
 	// (GET /targets/{name}/status)
 	GetTargetStatus(w http.ResponseWriter, r *http.Request, name TargetName)
+	// GetUpdates Which releases there are, and which of them may be installed
+	// (GET /updates)
+	GetUpdates(w http.ResponseWriter, r *http.Request)
+	// CheckForUpdates Ask the update source for its releases now
+	// (POST /updates/check)
+	CheckForUpdates(w http.ResponseWriter, r *http.Request, params CheckForUpdatesParams)
+	// GetUpgrade How far the latest upgrade has come
+	// (GET /upgrade)
+	GetUpgrade(w http.ResponseWriter, r *http.Request)
+	// StartUpgrade Install a release on the deployment
+	// (POST /upgrade)
+	StartUpgrade(w http.ResponseWriter, r *http.Request, params StartUpgradeParams)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(w http.ResponseWriter, r *http.Request)
@@ -5349,6 +5694,182 @@ func (siw *ServerInterfaceWrapper) GetTargetStatus(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// GetUpdates operation middleware
+func (siw *ServerInterfaceWrapper) GetUpdates(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUpdates(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CheckForUpdates operation middleware
+func (siw *ServerInterfaceWrapper) CheckForUpdates(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CheckForUpdatesParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CheckForUpdates(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUpgrade operation middleware
+func (siw *ServerInterfaceWrapper) GetUpgrade(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUpgrade(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// StartUpgrade operation middleware
+func (siw *ServerInterfaceWrapper) StartUpgrade(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params StartUpgradeParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.StartUpgrade(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListUsers operation middleware
 func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -5908,6 +6429,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster", wrapper.GetCluster)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster/maintenance", wrapper.GetMaintenance)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/updates", wrapper.GetUpdates)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/updates/check", wrapper.CheckForUpdates)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/upgrade", wrapper.GetUpgrade)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/upgrade", wrapper.StartUpgrade)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/targets", wrapper.ListTargets)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/targets/{name}", wrapper.DeleteTarget)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/targets/{name}", wrapper.GetTarget)
@@ -8223,6 +8748,324 @@ func (response GetTargetStatusdefaultApplicationProblemPlusJSONResponse) VisitGe
 	return err
 }
 
+type GetUpdatesRequestObject struct{}
+
+type GetUpdatesResponseObject interface {
+	VisitGetUpdatesResponse(w http.ResponseWriter) error
+}
+
+type GetUpdates200JSONResponse UpdatesView
+
+func (response GetUpdates200JSONResponse) VisitGetUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUpdatesdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetUpdatesdefaultApplicationProblemPlusJSONResponse) VisitGetUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CheckForUpdatesRequestObject struct {
+	Params CheckForUpdatesParams
+}
+
+type CheckForUpdatesResponseObject interface {
+	VisitCheckForUpdatesResponse(w http.ResponseWriter) error
+}
+
+type CheckForUpdates200JSONResponse UpdatesView
+
+func (response CheckForUpdates200JSONResponse) VisitCheckForUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CheckForUpdates403ApplicationProblemPlusJSONResponse Problem
+
+func (response CheckForUpdates403ApplicationProblemPlusJSONResponse) VisitCheckForUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CheckForUpdates409ApplicationProblemPlusJSONResponse Problem
+
+func (response CheckForUpdates409ApplicationProblemPlusJSONResponse) VisitCheckForUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CheckForUpdates429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type CheckForUpdates429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers CheckForUpdates429ResponseHeaders
+}
+
+func (response CheckForUpdates429ApplicationProblemPlusJSONResponse) VisitCheckForUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CheckForUpdatesdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response CheckForUpdatesdefaultApplicationProblemPlusJSONResponse) VisitCheckForUpdatesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUpgradeRequestObject struct{}
+
+type GetUpgradeResponseObject interface {
+	VisitGetUpgradeResponse(w http.ResponseWriter) error
+}
+
+type GetUpgrade200JSONResponse UpgradeProgress
+
+func (response GetUpgrade200JSONResponse) VisitGetUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUpgradedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetUpgradedefaultApplicationProblemPlusJSONResponse) VisitGetUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgradeRequestObject struct {
+	Params StartUpgradeParams
+	Body   *StartUpgradeJSONRequestBody
+}
+
+type StartUpgradeResponseObject interface {
+	VisitStartUpgradeResponse(w http.ResponseWriter) error
+}
+
+type StartUpgrade202ResponseHeaders struct {
+	Location *string
+}
+
+type StartUpgrade202JSONResponse struct {
+	Body    UpgradeProgress
+	Headers StartUpgrade202ResponseHeaders
+}
+
+func (response StartUpgrade202JSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.Location != nil {
+		w.Header().Set("Location", fmt.Sprint(*response.Headers.Location))
+	}
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade400ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade400ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade401ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade401ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade403ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade403ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade409ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade409ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade412ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade412ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(412)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade423ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade423ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type StartUpgrade429ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers StartUpgrade429ResponseHeaders
+}
+
+func (response StartUpgrade429ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgrade501ApplicationProblemPlusJSONResponse Problem
+
+func (response StartUpgrade501ApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(501)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StartUpgradedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response StartUpgradedefaultApplicationProblemPlusJSONResponse) VisitStartUpgradeResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListUsersRequestObject struct{}
 
 type ListUsersResponseObject interface {
@@ -8696,6 +9539,18 @@ type StrictServerInterface interface {
 	// GetTargetStatus Whether a target is being delivered to
 	// (GET /targets/{name}/status)
 	GetTargetStatus(ctx context.Context, request GetTargetStatusRequestObject) (GetTargetStatusResponseObject, error)
+	// GetUpdates Which releases there are, and which of them may be installed
+	// (GET /updates)
+	GetUpdates(ctx context.Context, request GetUpdatesRequestObject) (GetUpdatesResponseObject, error)
+	// CheckForUpdates Ask the update source for its releases now
+	// (POST /updates/check)
+	CheckForUpdates(ctx context.Context, request CheckForUpdatesRequestObject) (CheckForUpdatesResponseObject, error)
+	// GetUpgrade How far the latest upgrade has come
+	// (GET /upgrade)
+	GetUpgrade(ctx context.Context, request GetUpgradeRequestObject) (GetUpgradeResponseObject, error)
+	// StartUpgrade Install a release on the deployment
+	// (POST /upgrade)
+	StartUpgrade(ctx context.Context, request StartUpgradeRequestObject) (StartUpgradeResponseObject, error)
 	// ListUsers List users
 	// (GET /users)
 	ListUsers(ctx context.Context, request ListUsersRequestObject) (ListUsersResponseObject, error)
@@ -10319,6 +11174,113 @@ func (sh *strictHandler) GetTargetStatus(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetTargetStatusResponseObject); ok {
 		if err := validResponse.VisitGetTargetStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUpdates operation middleware
+func (sh *strictHandler) GetUpdates(w http.ResponseWriter, r *http.Request) {
+	var request GetUpdatesRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUpdates(ctx, request.(GetUpdatesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUpdates")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUpdatesResponseObject); ok {
+		if err := validResponse.VisitGetUpdatesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CheckForUpdates operation middleware
+func (sh *strictHandler) CheckForUpdates(w http.ResponseWriter, r *http.Request, params CheckForUpdatesParams) {
+	var request CheckForUpdatesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CheckForUpdates(ctx, request.(CheckForUpdatesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CheckForUpdates")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CheckForUpdatesResponseObject); ok {
+		if err := validResponse.VisitCheckForUpdatesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUpgrade operation middleware
+func (sh *strictHandler) GetUpgrade(w http.ResponseWriter, r *http.Request) {
+	var request GetUpgradeRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUpgrade(ctx, request.(GetUpgradeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUpgrade")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUpgradeResponseObject); ok {
+		if err := validResponse.VisitGetUpgradeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// StartUpgrade operation middleware
+func (sh *strictHandler) StartUpgrade(w http.ResponseWriter, r *http.Request, params StartUpgradeParams) {
+	var request StartUpgradeRequestObject
+
+	request.Params = params
+
+	var body StartUpgradeJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.StartUpgrade(ctx, request.(StartUpgradeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StartUpgrade")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(StartUpgradeResponseObject); ok {
+		if err := validResponse.VisitStartUpgradeResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

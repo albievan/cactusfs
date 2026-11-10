@@ -1,0 +1,55 @@
+{{- if include "cactusfs.upgradeFromConsole" . }}
+{{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
+{{- $account := include "cactusfs.upgradeAccount" . -}}
+{{- $sets := list -}}
+{{- $pods := list -}}
+{{- range $nodes -}}
+{{- $sets = append $sets .id -}}
+{{- $pods = append $pods (printf "%s-0" .id) -}}
+{{- end -}}
+# Upgrades from the console (upgrade.fromConsole.enabled, ADR-0029): the
+# identity the nodes use to move themselves to a newer image, one at a
+# time. It may read and patch the nodes' StatefulSets, read their pods and
+# evict them - each by name, and nothing else. Its token is mounted into
+# the cactusfs container alone, for an hour at a time.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $account }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+# Only the projected volume of the StatefulSets carries a token.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $account }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: {{ toJson $sets }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: {{ toJson $pods }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    resourceNames: {{ toJson $pods }}
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $account }}
+  labels: {{- include "cactusfs.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $account }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $account }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

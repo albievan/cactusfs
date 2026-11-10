@@ -90,7 +90,12 @@ type node struct {
 	settings    *app.SettingsService
 	idempotency *app.IdempotencyService
 	// targets defines the places outside the deployment that it sends to.
-	targets     *app.TargetService
+	targets *app.TargetService
+	// updates checks for releases and installs one (ADR-0029).
+	updates *app.UpdateService
+	// readiness is what /readyz answers by; the server gives it once the
+	// node has started (an upgrade in Kubernetes waits for it).
+	readiness   atomic.Pointer[app.HealthService]
 	maintenance *app.Maintenance
 	clock       ports.Clock
 	telemetry   *telemetry.Telemetry
@@ -311,6 +316,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		Local: n.local.Local, Reader: others, Logger: logger,
 	})
 	if err != nil {
+		return err
+	}
+	if err := n.openUpdates(ctx, cfg, view, others, logger); err != nil {
 		return err
 	}
 	if cfg.AuditExport && n.auditOut != nil {
@@ -681,6 +689,8 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	// The upload leases of the console sessions this node serves uploads
 	// for (ADR-0027).
 	n.background.Go(func() { n.sessions.Run(ctx) })
+	// Asks the update source now and then, when one is configured.
+	n.background.Go(func() { n.updates.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases

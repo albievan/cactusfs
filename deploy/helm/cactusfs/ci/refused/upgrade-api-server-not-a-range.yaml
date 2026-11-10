@@ -1,0 +1,3 @@
+# expect: is not an address range
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+upgrade: {fromConsole: {enabled: true, apiServer: {cidrs: ["kubernetes.default"]}}}

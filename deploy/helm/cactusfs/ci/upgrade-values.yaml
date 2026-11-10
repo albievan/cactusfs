@@ -1,0 +1,23 @@
+# The cluster of cluster-values.yaml, with upgrades from the console:
+# a ServiceAccount, its Role and RoleBinding, the token on the cactusfs
+# container only, and the API server reachable through the NetworkPolicy.
+# The nodes check a mirror of the releases (CACTUSFS_UPDATE_SOURCE, through
+# extraEnv), which the NetworkPolicy lets them reach on 443.
+secrets: {root: cactusfs-root, tls: cactusfs-tls, nodeCA: cactusfs-node-ca}
+kms:
+  type: vault
+  vault: {addr: "https://vault.example.test:8200", key: cactusfs, tokenSecret: cactusfs-vault-token}
+extraEnv:
+  - {name: CACTUSFS_UPDATE_SOURCE, value: "https://releases.example.test/repos/albievan/cactusfs/releases"}
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - to: [{ipBlock: {cidr: 192.0.2.30/32}}]
+      ports: [443]
+upgrade:
+  fromConsole:
+    enabled: true
+    apiServer:
+      cidrs: [192.0.2.10/32, 192.0.2.11/32]
+      port: 6443

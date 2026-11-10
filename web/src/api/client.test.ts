@@ -9,6 +9,7 @@ import {
   ApiError,
   objectDownloadUrl,
   onLocked,
+  readRetryAfter,
   onUnauthorized,
   REPLAYED_HEADER,
   SESSION_LOCKED,
@@ -660,5 +661,36 @@ describe('a session that is locked', () => {
     await expect(unwrap(api.GET('/session'))).rejects.toBeInstanceOf(ApiError);
     expect(ended).toHaveBeenLastCalledWith({ path: '/session', method: 'GET', wrongPasswords: 0 });
     stop();
+  });
+});
+
+describe('Retry-After', () => {
+  const NOW = Date.parse('2026-11-09T12:00:00Z');
+
+  it.each([
+    ['42', 42],
+    [' 0 ', 0],
+    ['Mon, 09 Nov 2026 12:01:30 GMT', 90],
+    ['Mon, 09 Nov 2026 11:00:00 GMT', 0],
+    ['soon', undefined],
+    ['-5', undefined],
+    ['1.5', undefined],
+    ['99999999999999999999', undefined],
+    [null, undefined],
+  ])('reads %j as %j seconds', (value, seconds) => {
+    expect(readRetryAfter(value, NOW)).toBe(seconds);
+  });
+
+  it('is on the error of a refusal that says it', async () => {
+    fakeApi({ 'GET /buckets': () => refusal(429, 'TooManyRequests', 'Too many requests', { 'Retry-After': '30' }) });
+    const error: unknown = await unwrap(api.GET('/buckets')).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).retryAfter).toBe(30);
+  });
+
+  it('is not on the error of a refusal that does not', async () => {
+    fakeApi({ 'GET /buckets': () => problem(403, 'Access denied') });
+    const error: unknown = await unwrap(api.GET('/buckets')).catch((cause: unknown) => cause);
+    expect((error as ApiError).retryAfter).toBeUndefined();
   });
 });

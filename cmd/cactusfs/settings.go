@@ -14,6 +14,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/release"
 )
 
 // The groups settings are listed under, in the order the documents print
@@ -29,6 +30,7 @@ const (
 	groupPreviews      = "previews"
 	groupDelivery      = "delivery"
 	groupMaintenance   = "maintenance"
+	groupUpdates       = "updates"
 	groupObservability = "observability"
 )
 
@@ -51,6 +53,7 @@ func settingGroups() []settingGroup {
 		{Name: groupPreviews, Title: "Previews: how much of an object the console is sent to show"},
 		{Name: groupDelivery, Title: "Delivery: outbound connections to notification targets and other sites"},
 		{Name: groupMaintenance, Title: "Maintenance: background work"},
+		{Name: groupUpdates, Title: "Updates: checking for releases, and installing one from the console"},
 		{Name: groupObservability, Title: "Observability: log, audit export and traces"},
 	}
 }
@@ -437,15 +440,17 @@ func serverSettings() []settingSpec {
 		{
 			Name: "egress-allow", Env: envEgressAllow, Flag: true, Group: groupDelivery, Kind: plain, Scope: all,
 			DefaultNote: "none",
-			Usage: "`ranges` (CIDRs, separated by commas) where a target may be at a loopback or link-local address - a receiver " +
-				"on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
-			Doc: "ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where a notification target or another site may be at " +
+			Usage: "`ranges` (CIDRs, separated by commas) where the update source, a target or another site may be at a loopback or " +
+				"link-local address - a mirror or a receiver on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0",
+			Doc: "ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every " +
+				"address its downloads are redirected to), a notification target or another site may be at " +
 				"an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 " +
 				"addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. " +
 				"A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses " +
 				"of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never " +
 				"connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one " +
-				"address a receiver has. The address a name resolves to is judged at every connect. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+				"address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source " +
+				"now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C",
 			bind: func(t *settingTargets) any { return &t.egressAllow },
 		},
 		{
@@ -515,6 +520,64 @@ func serverSettings() []settingSpec {
 			Usage: "how often the downloads this node counted are recorded with the objects, at least " + app.MinAccessFlushInterval.String() +
 				"; a node that crashes loses up to this much of the count",
 			bind: func(t *settingTargets) any { return &t.cfg.AccessFlushInterval },
+		},
+
+		// Updates (ADR-0029). Off until an operator names a source: the
+		// deployment asks nobody anything until then.
+		{
+			Name: "update-source", Env: envUpdateSource, Flag: true, Group: groupUpdates, Kind: url, Scope: all,
+			DefaultNote: "none: nothing is asked",
+			Usage: "`URL` of the releases JSON, https only, such as " + defaultUpdateSourceExample + " or a mirror; " +
+				"releases are not checked for when empty",
+			Doc: "address of the releases JSON - `" + defaultUpdateSourceExample + "`, or a mirror of it that answers as it does - " +
+				"which the node asks what releases exist. `https` only, with no user information, query or fragment. " +
+				"Nothing is asked of anyone while it is empty, the default. Who answers it decides what is offered, never what is " +
+				"installed: a release is installed only when its signed lists verify against the trusted root, for its version",
+			bind: func(t *settingTargets) any { return &t.cfg.UpdateSource },
+		},
+		{
+			Name: "update-check-interval", Env: envUpdateInterval, Flag: true, Default: durationText(defaultUpdateInterval),
+			Group: groupUpdates, Kind: plain, Scope: all,
+			Usage: "how often the node asks the update source by itself, give or take a tenth; at least " +
+				durationText(app.MinUpdateCheckInterval) + ", 0 only when asked to from the console",
+			Doc: "how often the node asks the update source by itself, give or take a tenth, the first time within " +
+				"5 minutes of its start (at least `" + durationText(app.MinUpdateCheckInterval) + "`; `0` only when asked to from the console). " +
+				"A node asks at most once a minute, however it is asked",
+			bind: func(t *settingTargets) any { return &t.cfg.UpdateCheckInterval },
+		},
+		{
+			Name: "update-channel", Env: envUpdateChannel, Flag: true, Default: defaultUpdateChannel,
+			Group: groupUpdates, Kind: plain, Scope: all,
+			Usage: "which releases are offered: " + string(release.ChannelStable) + ", or " + string(release.ChannelPrerelease) +
+				" for pre-releases too",
+			bind: func(t *settingTargets) any { return &t.cfg.UpdateChannel },
+		},
+		{
+			Name: "update-ca", Env: envUpdateCA, Flag: true, Group: groupUpdates, Kind: path, Scope: node,
+			DefaultNote: "the system's CAs",
+			Usage:       "`path` of a PEM file of the CA certificates the update source's certificate is verified against; default the system's CAs",
+			bind:        func(t *settingTargets) any { return &t.cfg.UpdateCA },
+		},
+		{
+			Name: "update-trusted-root", Env: envUpdateRoot, Flag: true, Group: groupUpdates, Kind: path, Scope: node,
+			DefaultNote: "the root embedded in the binary",
+			Usage:       "`path` of a Sigstore trusted_root.json that releases are verified against, instead of the one embedded in the binary",
+			Doc: "path of a Sigstore `trusted_root.json` that the signatures of releases are verified against, instead of " +
+				"the one embedded in the binary: for a node that has been offline across a rotation of Sigstore's keys. " +
+				"A file that does not parse stops the node at start",
+			bind: func(t *settingTargets) any { return &t.cfg.UpdateTrustedRoot },
+		},
+		{
+			Name: "upgrade-mode", Env: envUpgradeMode, Flag: true, Default: defaultUpgradeMode,
+			Group: groupUpdates, Kind: plain, Scope: node,
+			Usage: "how a release is installed from the console: off (never; instructions are shown instead), binary " +
+				"(the binary of a node on its own replaces itself) or kubernetes (the chart's nodes are moved to the release's image)",
+			Doc: "how a release is installed from the console: `off` installs nothing and shows the commands to run instead; " +
+				"`binary` replaces the binary of a node on its own and restarts it (needs `--update-source`; refused by the " +
+				"binary of the container image); `kubernetes` moves the nodes of a chart to the release's image one at a " +
+				"time, this node last (set by the chart's `upgrade.fromConsole.enabled`, which mounts the token it needs; " +
+				"refused without it)",
+			bind: func(t *settingTargets) any { return &t.cfg.UpgradeMode },
 		},
 
 		// Observability.

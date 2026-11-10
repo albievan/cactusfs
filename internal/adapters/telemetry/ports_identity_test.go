@@ -17,6 +17,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/domain/release"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -375,7 +376,10 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"AuditLog": tel.InstrumentAuditLog(identities), "EventPublisher": tel.InstrumentEventPublisher(refusing{}),
 		"IdentityProvider": tel.InstrumentIdentityProvider(fixedProvider{}), "Passwords": tel.InstrumentPasswords(fixedHasher{}),
 		"ClusterView": tel.InstrumentClusterView(fixedView{}), "LocalConfig": tel.InstrumentLocalConfig(mem),
-		"NodeSettings": tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
+		"NodeSettings":    tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
+		"ReleaseSource":   tel.InstrumentReleaseSource(porttest.NewReleaseSource(nil, nil)),
+		"ReleaseVerifier": tel.InstrumentReleaseVerifier(&porttest.ReleaseVerifier{}),
+		"Upgrader":        tel.InstrumentUpgrader(porttest.NewUpgrader(porttest.UpgraderConfig{Mode: release.ModeOff})),
 	}
 	for name, value := range decorated {
 		if _, ok := value.(telemetry.Instrumented); !ok {

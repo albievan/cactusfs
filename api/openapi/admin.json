@@ -57,6 +57,10 @@
       "name": "cluster"
     },
     {
+      "name": "updates",
+      "description": "Which releases there are, which of them may be installed, and installing one."
+    },
+    {
       "name": "audit"
     },
     {
@@ -2381,6 +2385,270 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/updates": {
+      "get": {
+        "operationId": "getUpdates",
+        "tags": [
+          "updates"
+        ],
+        "summary": "Which releases there are, and which of them may be installed",
+        "description": "What the answering node knows of releases: its own build, the releases it found when it last asked\nthe update source, which of them may be installed from here and why the others may not, and how this\ndeployment installs one. It is answered from the node's memory: **nothing is asked of any server to\nanswer it.** What a node found is not shared with the other nodes and is not kept across a restart;\nanother node may answer otherwise until it has asked too.\n\n**Air gap.** A deployment asks no server anything about releases until an operator sets\n`update-source` (`CACTUSFS_UPDATE_SOURCE`, https only); until then `source_configured` is false,\n`available` is empty and nothing has been checked. The node then asks by itself once every\n`update-check-interval` (24 hours unless configured), and when asked to (`POST /updates/check`).\n\n**What is listed** decides what is offered, never what is installed: the source is not trusted. A\nrelease may be installed when it is a newer patch of the running minor version, or the newest patch\nof the next minor version; pre-releases only on the channel `prerelease`. Each release that may not\nhas its `refusal`. What is installed is believed only from the release's signed lists, verified on\nthe node when it is installed (`POST /upgrade`).\n\n**Who may.** The caller needs `admin:GetUpdates` (`cluster-admin`, `auditor`). Nothing is written to\nthe audit trail for an answer; a refusal is.\n\nA node of an earlier release does not know this path, and answers 404 `NotFound`.\n",
+        "x-cactusfs-action": "admin:GetUpdates",
+        "responses": {
+          "200": {
+            "description": "What the answering node knows of releases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatesView"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/updates/check": {
+      "post": {
+        "operationId": "checkForUpdates",
+        "tags": [
+          "updates"
+        ],
+        "summary": "Ask the update source for its releases now",
+        "description": "Asks the update source for its releases now, on the answering node, and answers what the node knows\nthen - as `GET /updates` does. Whether the source answered is in the view: `checked_at` is when it was\nasked, and `last_error` says, as a class only, why it could not be read; the source's own words are\nnever given, and its address is never logged with what it may hold of a credential.\n\n**Air gap.** This makes the deployment call out, to the place the operator named and nowhere else.\nWithout `update-source` nothing is asked, and the answer is 409 with the code `UpdatesOff`.\n\n**Who may.** The caller needs `admin:CheckForUpdates` (`cluster-admin`): it reads, but it makes the\ndeployment call out, so it is not one of the `admin:Get*` actions. Every check is written to the\naudit trail, and so is a refusal.\n\n**Bounds.** A node asks at most once a minute, whoever asks; beyond, the answer is 429 with the code\n`TooManyRequests` and `Retry-After`, and nothing was asked.\n\nThe request has no body. Like every POST of this API it must still say\n`Content-Type: application/json`, and is refused with 415 otherwise.\n",
+        "x-cactusfs-action": "admin:CheckForUpdates",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The source was asked, or could not be; what the node knows now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatesView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not allowed `admin:CheckForUpdates`. The refusal is written to the audit trail.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Checking for updates is off: no `update-source` is configured, which is how a deployment is by\ndefault (`code` is `UpdatesOff`). Nothing was asked of anyone.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The node asked less than a minute ago (`code` is `TooManyRequests`). Nothing was asked; `GET /updates`\nanswers what that check found.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/upgrade": {
+      "post": {
+        "operationId": "startUpgrade",
+        "tags": [
+          "updates"
+        ],
+        "summary": "Install a release on the deployment",
+        "description": "Starts installing the release named, the way this deployment's `upgrade-mode` does: by replacing the\nbinary of a deployment of one node (`binary`), or by moving the nodes to the release's image one at a\ntime, the answering node last (`kubernetes`). The answer is given once the upgrade has begun; how far\nit has come is `GET /upgrade`, which the `Location` header names. Expect the answering node to restart\nduring it.\n\n**What may be installed.** A release the node found when it last checked (`GET /updates`), whose\n`allowed` is true: a newer patch of the running minor version, or the newest patch of the next minor\nversion. Anything else answers 409 with the code `UpgradeNotAllowed`. Before anything is installed the\nrelease's signed list - `SHA256SUMS` for a binary, `digests.txt` for an image - must verify against its\nSigstore bundle, offline, as signed by the release workflow of this product at the tag of that very\nversion, and the artifact must be the one the list names; otherwise the answer is 412 with the code\n`ReleaseNotVerified`, and nothing was installed.\n\n**Air gap.** Nothing is asked of any server until an operator sets `update-source`; without it the\nanswer is 409 with the code `UpdatesOff`. Installing also needs `upgrade-mode`, which is `off` by\ndefault: when it is, or when what the mode needs is not there, the answer is 501 with the code\n`UpgradeUnavailable`, and `GET /updates` says why and what to do instead.\n\n**Who may.** The caller needs `admin:UpgradeCluster` (`cluster-admin`), and must be a console session\nwhose user types the password again in this request: the server judges it, here. An API key can\nnever install, whatever its policy says: it has no password to type, and is answered 403. A password\nthat is not accepted answers 403 with the code `AccessDenied` - not 401 - and the session stays as it\nwas. Too many attempts from one address answer 429 with the code `TooManyAttempts` and\n`Retry-After`, as at sign-in: failed sign-ins, unlocks and upgrades are counted together. After too\nmany wrong passwords for one session the session is ended, and the answer is 401. A locked session\ninstalls nothing (423). One upgrade runs at a time (409, `UpgradeRunning`). Every start, and every\nrefusal, is written to the audit trail, with the version it was from and to.\n\n`Idempotency-Key` is accepted and has no effect: nothing of a request that holds a password is kept,\nand an upgrade is never started from a stored answer.\n",
+        "x-cactusfs-action": "admin:UpgradeCluster",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The upgrade has begun.",
+            "headers": {
+              "Location": {
+                "description": "Where its progress is read, `/api/v1/upgrade`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeProgress"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not an upgrade request, or its version is not a version (`code` is `InvalidArgument`).\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The request has no credential that checks out, or the session was ended - by too many wrong\npasswords among them (`code` is `Unauthenticated`).\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not allowed `admin:UpgradeCluster`, is an API key, or typed a password that was not\naccepted (`code` is `AccessDenied`). The refusal is written to the audit trail.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An upgrade is running already (`code` is `UpgradeRunning`); the version may not be installed from\nthe running one, or was not found when the node last checked (`UpgradeNotAllowed`); or checking\nfor updates is off (`UpdatesOff`). Nothing was installed.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "The release's signed list, or the artifact it names, did not verify (`code` is\n`ReleaseNotVerified`). Nothing of it was installed.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The session is locked (`code` is `SessionLocked`); a locked session installs nothing.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts from the caller's address (`code` is `TooManyAttempts`). The password was not\njudged; nothing was started.\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "This deployment cannot be upgraded from the console: `upgrade-mode` is `off`, or what the mode\nneeds is not there (`code` is `UpgradeUnavailable`). `GET /updates` says why, and what an operator\ndoes instead.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getUpgrade",
+        "tags": [
+          "updates"
+        ],
+        "summary": "How far the latest upgrade has come",
+        "description": "Where the latest upgrade stands, and each node with the build it runs. It is read from where the\nupgrade happens - the process itself for a binary, the StatefulSets, the pods and each node's build\nfor Kubernetes - not from anything kept: `idle` when none was started since the answering node\nstarted. Nothing is asked of any server outside the deployment to answer it. The console polls it\nthrough the answering node's restart.\n\n**Who may.** The caller needs `admin:GetUpdates` (`cluster-admin`, `auditor`).\n",
+        "x-cactusfs-action": "admin:GetUpdates",
+        "responses": {
+          "200": {
+            "description": "The progress of the latest upgrade.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeProgress"
                 }
               }
             }
@@ -5114,6 +5382,252 @@
             "$ref": "#/components/schemas/CollectionStatus"
           }
         }
+      },
+      "UpdatesView": {
+        "type": "object",
+        "description": "What the answering node knows of releases (`GET /updates`). Nothing in it names the update source's\naddress, nor anything the source said in its own words.\n",
+        "required": [
+          "current",
+          "source_configured",
+          "channel",
+          "available",
+          "mode",
+          "upgrade_available",
+          "instructions"
+        ],
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/ServerVersion"
+          },
+          "source_configured": {
+            "type": "boolean",
+            "description": "Whether an `update-source` is configured. Without one nothing is ever asked, and `available` is empty."
+          },
+          "channel": {
+            "$ref": "#/components/schemas/UpdateChannel"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the node last asked the source, whether or not it answered. Absent when it has not asked since it started."
+          },
+          "last_error": {
+            "$ref": "#/components/schemas/UpdateCheckError"
+          },
+          "available": {
+            "type": "array",
+            "description": "The releases newer than the running one that the channel offers, newest first, as the source listed\nthem when it last answered. Empty when it has not.\n",
+            "items": {
+              "$ref": "#/components/schemas/AvailableRelease"
+            }
+          },
+          "next_step": {
+            "type": "string",
+            "description": "The version the console offers to install: the newest of `available` that may be installed. Absent when\nnone may.\n"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/UpgradeMode"
+          },
+          "upgrade_available": {
+            "type": "boolean",
+            "description": "Whether an upgrade can be started from the console on this deployment: `mode` is not `off` and what\nit needs is there. It does not say whether the caller may.\n"
+          },
+          "unavailable_reason": {
+            "type": "string",
+            "description": "Why an upgrade cannot be started here, in words that name no secret. Absent when it can."
+          },
+          "instructions": {
+            "type": "array",
+            "description": "What an operator does to install `next_step` without the console, as lines of text to copy - the\nbinary to download and its checksum to check, or the `helm upgrade` to run. Empty when there is\nnothing to install.\n",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UpdateChannel": {
+        "type": "string",
+        "description": "Which releases are offered (`update-channel`): `stable` leaves pre-releases out, `prerelease` offers them\ntoo. Values are only ever added to.\n",
+        "enum": [
+          "stable",
+          "prerelease"
+        ]
+      },
+      "UpdateCheckError": {
+        "type": "string",
+        "description": "Why the last check could not be read, as a class: the source could not be reached (`unreachable`), it\nlimited the rate of requests (`rate-limited`), it answered with a refusal (`refused`), its answer was\nnot one this node reads (`invalid-answer`), or it did not answer in time (`timeout`). Absent when the\nlast check was read. The cause is in the log of the node, without the source's address. Values are\nonly ever added to.\n",
+        "enum": [
+          "unreachable",
+          "rate-limited",
+          "refused",
+          "invalid-answer",
+          "timeout"
+        ]
+      },
+      "AvailableRelease": {
+        "type": "object",
+        "description": "A release the source listed. Nothing of it is trusted until its signed lists verify, when it is installed.",
+        "required": [
+          "version",
+          "prerelease",
+          "allowed"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The release, a semantic version without a leading \"v\"."
+          },
+          "published": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was published, as the source says. Absent when the source did not say."
+          },
+          "prerelease": {
+            "type": "boolean",
+            "description": "Whether it is a pre-release, by its version or because the source marks it so."
+          },
+          "notes_url": {
+            "type": "string",
+            "description": "The https address of its release notes, for a link; the console never fetches it. Absent when there is none."
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "Whether it may be installed from the running release."
+          },
+          "refusal": {
+            "$ref": "#/components/schemas/UpgradeRefusal"
+          }
+        }
+      },
+      "UpgradeRefusal": {
+        "type": "string",
+        "description": "Why a release may not be installed from the running one. Absent when it may. `equal` and `older`: it is\nnot newer (nothing is downgraded); `prerelease-on-stable`: it is a pre-release and the channel is\n`stable`; `major`: it is of another major version; `skipped-minor`: it is more than one minor version\nahead; `not-newest-patch`: a newer patch of the next minor version is listed; `unknown-release`: it was\nnot listed when the node last checked. Values are only ever added to.\n",
+        "enum": [
+          "equal",
+          "older",
+          "prerelease-on-stable",
+          "major",
+          "skipped-minor",
+          "not-newest-patch",
+          "unknown-release"
+        ]
+      },
+      "UpgradeMode": {
+        "type": "string",
+        "description": "How this deployment installs a release (`upgrade-mode`): `off` installs nothing and gives the\ninstructions instead; `binary` replaces the binary of a deployment of one node; `kubernetes` moves the\nnodes to the release's image, one at a time. Values are only ever added to.\n",
+        "enum": [
+          "off",
+          "binary",
+          "kubernetes"
+        ]
+      },
+      "UpgradeRequest": {
+        "type": "object",
+        "required": [
+          "version",
+          "password"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The release to install, as `GET /updates` lists it.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "description": "The password of the user the session belongs to, typed again for this request.",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
+      "UpgradeProgress": {
+        "type": "object",
+        "description": "Where the latest upgrade stands, as read from the deployment. `idle`: none was started since the\nanswering node started; `verifying`: the release is being fetched and verified; `running`: nodes are\nbeing moved; `restart-required`: the binary was replaced and whoever runs the node must restart it\n(Windows); `failed`: it stopped, and the nodes say where and why; `done`: every node runs the target.\n",
+        "required": [
+          "state",
+          "nodes"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/UpgradeState"
+          },
+          "target": {
+            "type": "string",
+            "description": "The version being installed. Absent when idle."
+          },
+          "started_by": {
+            "type": "string",
+            "description": "Who started it, as the audit trail names actors (`user/alice`). Absent when idle."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was started. Absent when idle."
+          },
+          "nodes": {
+            "type": "array",
+            "description": "The nodes of the deployment, in the order they are moved. Empty when idle.",
+            "items": {
+              "$ref": "#/components/schemas/UpgradeNode"
+            }
+          }
+        }
+      },
+      "UpgradeState": {
+        "type": "string",
+        "description": "Where an upgrade stands (see `UpgradeProgress`). Values are only ever added to.",
+        "enum": [
+          "idle",
+          "verifying",
+          "running",
+          "restart-required",
+          "failed",
+          "done"
+        ]
+      },
+      "UpgradeNode": {
+        "type": "object",
+        "description": "One node in an upgrade.",
+        "required": [
+          "id",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The node's ID."
+          },
+          "version": {
+            "type": "string",
+            "description": "The release the node runs now, as it reports it. Absent when it could not be asked."
+          },
+          "build": {
+            "type": "string",
+            "description": "The node's build number, as it reports it. Absent when it could not be asked."
+          },
+          "state": {
+            "$ref": "#/components/schemas/UpgradeNodeState"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the node failed or was put back, in words that name no secret. Absent otherwise."
+          }
+        }
+      },
+      "UpgradeNodeState": {
+        "type": "string",
+        "description": "Where a node stands in an upgrade: not moved yet (`pending`), being moved or coming up again\n(`upgrading`), running the target and ready (`done`), did not come up on the target (`failed`), or\nfailed and was put back where it was (`restored`). Values are only ever added to.\n",
+        "enum": [
+          "pending",
+          "upgrading",
+          "done",
+          "failed",
+          "restored"
+        ]
       },
       "AuditRecord": {
         "type": "object",

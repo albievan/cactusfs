@@ -86,11 +86,13 @@ Conventions that follow from it:
 | `internal/domain/search` | the language of the search field: text, wildcard, `rx:` regular expression |
 | `internal/domain/preview` | what kind of thing an object is shown as in a preview, from its stored type and the signature of its bytes; the size of an image from its header; the walk of a GIF's frames as its bytes stream (ADR-0028) |
 | `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
+| `internal/domain/release` | versions (semantic versioning 2.0), releases and their files, the channels, what may be installed (`Allowed`, `NextStep`), the signed lists `SHA256SUMS` and `digests.txt` read strictly, `Verified` - the one thing an upgrader takes - and the progress of an upgrade (ADR-0029) |
 | `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018: rules only, used by no use case yet) |
-| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`; `SubBucketStore` and `TagDefinitionStore`, and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore`, and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
-| `internal/buildinfo` | the version, build and commit of the binary (section 8) |
+| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
+| `internal/buildinfo` | the version, build and commit of the binary, and whether it was built as the image's (section 8) |
+| `internal/tools` | tools of `make` targets, built with the tag `tools`: `trustedroot` fetches Sigstore's trusted root through its TUF client (`make trusted-root`) |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
 | `internal/adapters/adminapi` | in: the management API (`api/`: the server generated from the contract) and Swagger UI (`swaggerui/`) (ADR-0007) |
 | `internal/adapters/console` | in: serves the embedded console, or the page that says it was not built in |
@@ -103,6 +105,10 @@ Conventions that follow from it:
 | `internal/adapters/raftmeta` | out: Raft + bbolt metadata, one voter or a cluster (ADR-0003, 0005) |
 | `internal/adapters/noderpc` | both: node-to-node gRPC (`nodev1/`: generated from `api/proto`); drives of other nodes as `ShardStore` (ADR-0005) |
 | `internal/adapters/nodetls` | mutual TLS 1.3 between nodes; certificates read again from disk (ADR-0020); development certificates |
+| `internal/adapters/egress` | out: the one client of every outbound call a deployment is told to make - https only, every resolved address judged at connect, bounded bodies, redirects only where a policy allows (ADR-0023, as ADR-0029 amends it) |
+| `internal/adapters/releases/github` | out: the update source - GitHub's releases JSON or a mirror of it; downloads only from the source's host (and `github.com` for GitHub's API) (ADR-0029) |
+| `internal/adapters/releases/sigstore` | out: the verifier of the release workflow's Sigstore bundles, offline, against the embedded `trusted_root.json` (ADR-0029); `sigstoretest` signs with a Sigstore of its own for tests (a depguard rule keeps it out of the binary) |
+| `internal/adapters/upgrade/binary`, `upgrade/kubernetes`, `upgrade/off` | out: the three upgrade modes - replace the binary of a node on its own; move the chart's StatefulSets one node at a time through the Kubernetes API; install nothing and show the commands (ADR-0029) |
 | `internal/adapters/events/inproc` | out: in-process event bus |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
@@ -111,7 +117,7 @@ Conventions that follow from it:
 | `api/openapi`, `api/asyncapi`, `api/proto` | the contracts: the management API (and the Go package that embeds it for serving), the events, node RPC |
 | `web` | the console (React + TypeScript + Vite), and the Go package that embeds its build with the tag `console` |
 | `cmd/cactusfs` | composition root: the settings, node wiring, listeners, shutdown |
-| `test/integration`, `test/clustertest` | black-box tests of the built binary and of a four-node cluster of containers; fixtures of older schemas for the upgrade tests |
+| `test/integration`, `test/clustertest` | black-box tests of the built binary and of a four-node cluster of containers; fixtures of older schemas for the upgrade tests; `releasemirror`, a TLS mirror of releases signed with `sigstoretest`, for the test of upgrading from the console |
 | `test/s3compat`, `test/chaos`, `test/k8s` | the S3 compatibility suite and its baseline; fault injection; the chart on k3s |
 
 ## 3. The binary **(implemented: `version`, `server` standalone and clustered, `config`, `dev-init`)**
@@ -228,7 +234,7 @@ test. The binary reads no file of variables: what starts it hands it its environ
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
+| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C. The same on every node |
 | `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
 | `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
 | `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
@@ -243,6 +249,17 @@ test. The binary reads no file of variables: what starts it hands it its environ
 | `--gc-interval` | `CACTUSFS_GC_INTERVAL` | `1h` | pause between two passes of the garbage collector for unreferenced shards; 0 disables it |
 | `--gc-grace` | `CACTUSFS_GC_GRACE` | `24h` | minimum age of an unreferenced shard before it is removed (at least `1h`). The same on every node |
 | `--access-flush-interval` | `CACTUSFS_ACCESS_FLUSH_INTERVAL` | `30s` | how often the downloads this node counted are recorded with the objects, at least 5s; a node that crashes loses up to this much of the count |
+
+**Updates: checking for releases, and installing one from the console**
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--update-source` | `CACTUSFS_UPDATE_SOURCE` | none: nothing is asked | address of the releases JSON - `https://api.github.com/repos/albievan/cactusfs/releases`, or a mirror of it that answers as it does - which the node asks what releases exist. `https` only, with no user information, query or fragment. Nothing is asked of anyone while it is empty, the default. Who answers it decides what is offered, never what is installed: a release is installed only when its signed lists verify against the trusted root, for its version. The same on every node |
+| `--update-check-interval` | `CACTUSFS_UPDATE_CHECK_INTERVAL` | `24h` | how often the node asks the update source by itself, give or take a tenth, the first time within 5 minutes of its start (at least `1m`; `0` only when asked to from the console). A node asks at most once a minute, however it is asked. The same on every node |
+| `--update-channel` | `CACTUSFS_UPDATE_CHANNEL` | `stable` | which releases are offered: stable, or prerelease for pre-releases too. The same on every node |
+| `--update-ca` | `CACTUSFS_UPDATE_CA` | the system's CAs | path of a PEM file of the CA certificates the update source's certificate is verified against; default the system's CAs |
+| `--update-trusted-root` | `CACTUSFS_UPDATE_TRUSTED_ROOT` | the root embedded in the binary | path of a Sigstore `trusted_root.json` that the signatures of releases are verified against, instead of the one embedded in the binary: for a node that has been offline across a rotation of Sigstore's keys. A file that does not parse stops the node at start |
+| `--upgrade-mode` | `CACTUSFS_UPGRADE_MODE` | `off` | how a release is installed from the console: `off` installs nothing and shows the commands to run instead; `binary` replaces the binary of a node on its own and restarts it (needs `--update-source`; refused by the binary of the container image); `kubernetes` moves the nodes of a chart to the release's image one at a time, this node last (set by the chart's `upgrade.fromConsole.enabled`, which mounts the token it needs; refused without it) |
 
 **Observability: log, audit export and traces**
 
@@ -454,11 +471,15 @@ Prometheus client and are not listed.
 | `cactusfs_lifecycle_actions_total` | counter | `action` | what lifecycle rules did, by kind |
 | `cactusfs_object_access_dropped_total` | counter | - | reads not counted towards who read what |
 | `cactusfs_events_total` | counter | `type` | events derived from applied metadata entries |
+| `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
+| `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
+| `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
 <!-- metrics:end -->
 
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
-`identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`.
+`identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`, `release_source`,
+`release_verifier`, `upgrader`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
@@ -980,7 +1001,49 @@ The full analysis is in `docs/threat-model.md`. In brief:
   begins; each deletion is still judged by the authorizer, so that is a confirmation,
   not a permission (threat model, open question 32).
 - Versioning and Object Lock for ransomware resistance **(implemented, ADR-0008, 0009)**.
-- Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset.
+- Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset. The one
+  call a deployment can be told to make for itself - asking an update source for
+  releases - is off until an operator sets `update-source`.
+
+### Checking for releases and upgrading **(implemented, ADR-0029; off by default)**
+
+`app.UpdateService` asks `ports.ReleaseSource` (`releases/github`) for the releases -
+on its interval, or when the console asks, at most once a minute - and keeps what it
+found in memory; nothing about releases is replicated, and no event is published. It
+offers what `release.Allowed` admits: a newer patch of the running minor or the newest
+patch of the next one, on the channel set. All three actions - `admin:GetUpdates`,
+`admin:CheckForUpdates`, `admin:UpgradeCluster` - are asked of the one resource
+`arn:cactusfs:admin:::updates`. Installing needs a console session whose user types the
+password again in the request (`SessionService.Confirm`); an API key never installs.
+
+The trust chain, each link checked on the node, offline:
+
+1. the release's signed list - `SHA256SUMS` for a binary, `digests.txt` for the image -
+   and its Sigstore bundle are fetched (bounded: 64 KiB and 1 MiB), and the bundle is
+   verified by `ports.ReleaseVerifier` (`releases/sigstore`, `sigstore-go`) against the
+   trusted root embedded in the binary or `update-trusted-root`: certificate chain, a
+   transparency-log entry, an observer timestamp and a signed certificate timestamp;
+2. the certificate must name exactly the release workflow at the tag of the version
+   being installed, `…/release.yml@refs/tags/v<target>`, issued by GitHub Actions;
+3. the list is read strictly (`release.ParseSums`, `ParseDigests`);
+4. a binary is streamed through SHA-256 and must be the one the list names; an image is
+   installed by the digest of its manifest list, which the runtime checks itself.
+
+Only then is a `release.Verified` made, and `ports.Upgrader` takes nothing else. The
+modes: `off` (the default) shows the commands of the deployment's own way; `binary`
+fetches the binary again beside the executable, checks its SHA-256 and that `<new>
+version` names the target, keeps the old as `cactusfs.previous` and renames the new
+one into place, then restarts into it (Unix) or says `restart-required` (Windows) - a
+node that stops before the swap ends the run with the old binary, a swap once begun
+completes; `kubernetes` patches the chart's StatefulSets one node at a time, this node
+last, by eviction under the PodDisruptionBudget, held by a lock annotation written with
+`resourceVersion`, and puts back the first node that does not come up. A cluster of
+binaries on several machines, and compose, are `off`: commands only.
+
+The decorators of `internal/adapters/telemetry` trace every call of the three ports and
+count `cactusfs_update_checks_total{outcome}`, `cactusfs_update_available` and
+`cactusfs_upgrade_runs_total{outcome}` (section 3, metrics). The threats are in the
+threat model, "Updates and upgrades".
 
 ## 8. Build and delivery **(implemented)**
 

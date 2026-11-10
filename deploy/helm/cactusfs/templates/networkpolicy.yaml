@@ -2,8 +2,8 @@
 {{- $nodes := include "cactusfs.nodes" . | fromJsonArray -}}
 # Nothing reaches the pods and the pods reach nothing, except what is listed
 # here: each other on the node ports; whoever the operator names for S3, and
-# whoever for the admin port, each apart; DNS; and the addresses the operator names (Vault, a
-# collector of traces). Probes come from the kubelet on the pod's own
+# whoever for the admin port, each apart; DNS; the addresses the operator names (Vault, a
+# collector of traces); and the API server, when the console may upgrade. Probes come from the kubelet on the pod's own
 # machine, which a NetworkPolicy does not govern.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -47,6 +47,15 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+    {{- end }}
+    {{- if include "cactusfs.upgradeFromConsole" . }}
+    # Upgrades from the console: the Kubernetes API server.
+    - to:
+        {{- range .Values.upgrade.fromConsole.apiServer.cidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ int .Values.upgrade.fromConsole.apiServer.port }}}
     {{- end }}
     {{- range .Values.networkPolicy.egressTo }}
     - to: {{- toYaml .to | nindent 8 }}

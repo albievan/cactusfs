@@ -501,6 +501,46 @@ code {
   display: none;
 }
 
+/* "update available": under the version line, a link to the Updates screen.
+   Folded, and on a phone, the sign alone; its words are still read out. */
+.sidebar-update {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.3rem;
+  margin: 0.2rem 0.5rem 0;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  background: var(--dune);
+  color: var(--night-green);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.sidebar-update:hover,
+.sidebar-update:focus-visible {
+  background: var(--sand);
+  color: var(--night-green);
+}
+
+.layout-folded .sidebar-update {
+  align-self: center;
+  margin-inline: 0;
+  padding: 0.15rem 0.35rem;
+}
+
+.layout-folded .sidebar-update-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* A screen takes the whole width beside the navigation, with a small margin:
    the grids have many columns and are given the room there is. */
 .screen {
@@ -2937,5 +2977,186 @@ details[open] > summary .node-card-mark {
 
   .preview-image {
     max-height: calc(100dvh - 12rem);
+  }
+}
+
+/* Updates: which releases there are, and installing one. */
+.updates-status {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.updates-version {
+  white-space: nowrap;
+}
+
+.updates-prerelease {
+  margin-left: 0.4rem;
+}
+
+/* The reason a release is not offered wraps in its cell: the grid scrolls
+   sideways inside its panel before the page would. */
+.updates-refusal {
+  display: block;
+  min-width: 14rem;
+  max-width: 28rem;
+}
+
+.updates-instructions-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.updates-instructions-head h3 {
+  margin: 0;
+}
+
+/* Commands to copy keep their lines: a long one scrolls inside the block. */
+.updates-pre {
+  max-width: 100%;
+  margin: 0.5rem 0 0;
+  padding: 0.75rem 1rem;
+  overflow: auto;
+  border-radius: var(--bs-border-radius);
+  background: var(--wash);
+  color: var(--night-green);
+  font-size: 0.85rem;
+  white-space: pre;
+}
+
+.updates-progress-state p {
+  margin: 0 0 0.5rem;
+}
+
+.updates-restarting {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* "Upgrade to X?": a modal dialog over the whole console, as the preview's;
+   the whole screen on a phone. */
+.upgrade-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(0.75rem, 3vw, 2rem);
+  background: rgb(22 59 44 / 55%);
+  overscroll-behavior: contain;
+}
+
+.upgrade-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(40rem, 100%);
+  max-height: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.upgrade-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.upgrade-head,
+.upgrade-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.upgrade-head {
+  border-bottom: 1px solid var(--line);
+}
+
+.upgrade-foot {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+}
+
+.upgrade-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 1.15rem;
+  overflow-wrap: anywhere;
+}
+
+.upgrade-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.upgrade-what p,
+.upgrade-what ul {
+  margin: 0 0 0.5rem;
+}
+
+.upgrade-what ul {
+  padding-left: 1.25rem;
+}
+
+@media (max-width: 47.99rem) {
+  .sidebar-update,
+  .layout-folded .sidebar-update {
+    flex: none;
+    align-self: center;
+    margin: 0;
+    padding: 0.2rem 0.4rem;
+  }
+
+  .sidebar-update-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 575.98px) {
+  .upgrade-backdrop {
+    padding: 0;
+  }
+
+  .upgrade-dialog {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .upgrade-form,
+  .upgrade-body {
+    flex: 1 1 auto;
+  }
+
+  .upgrade-foot {
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .upgrade-foot .btn {
+    flex: 1 1 auto;
+    min-height: 44px;
   }
 }

@@ -16,9 +16,12 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
+	"github.com/albievan/cactusfs/internal/adapters/releases/github"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
+	"github.com/albievan/cactusfs/internal/domain/release"
 )
 
 // Environment variables read by "cactusfs server". Each has a matching flag,
@@ -79,6 +82,12 @@ const (
 	envTopologyHost    = "CACTUSFS_TOPOLOGY_HOST"
 	envDrainDelay      = "CACTUSFS_DRAIN_DELAY"
 	envShutdownTimeout = "CACTUSFS_SHUTDOWN_TIMEOUT"
+	envUpdateSource    = "CACTUSFS_UPDATE_SOURCE"
+	envUpdateInterval  = "CACTUSFS_UPDATE_CHECK_INTERVAL"
+	envUpdateChannel   = "CACTUSFS_UPDATE_CHANNEL"
+	envUpdateCA        = "CACTUSFS_UPDATE_CA"
+	envUpdateRoot      = "CACTUSFS_UPDATE_TRUSTED_ROOT"
+	envUpgradeMode     = "CACTUSFS_UPGRADE_MODE"
 )
 
 // Secrets are read from the environment only. They have no flag, because a
@@ -143,6 +152,14 @@ const (
 	defaultPreviewMaxSizeMiB = app.DefaultPreviewMaxSize >> 20
 	minPreviewMaxSizeMiB     = app.MinPreviewMaxSize >> 20
 	maxPreviewMaxSizeMiB     = app.MaxPreviewMaxSize >> 20
+)
+
+// The defaults of checking for releases and of installing one (ADR-0029):
+// once a day, stable releases only, and nothing installed from the console.
+const (
+	defaultUpdateInterval = 24 * time.Hour
+	defaultUpdateChannel  = string(release.ChannelStable)
+	defaultUpgradeMode    = string(release.ModeOff)
 )
 
 // errFlagParse marks a command line the flag package rejected and has already
@@ -257,6 +274,30 @@ type serverConfig struct {
 	// listeners have closed.
 	ShutdownTimeout time.Duration
 
+	// UpdateSource is the address of the releases JSON (ADR-0029): https,
+	// with no user information, query or fragment. Empty, the default,
+	// asks nothing of anyone.
+	UpdateSource string
+	// UpdateCheckInterval is how often the node asks the source by itself;
+	// zero only when asked.
+	UpdateCheckInterval time.Duration
+	// UpdateChannel is which releases are offered: stable or prerelease.
+	UpdateChannel string
+	// UpdateCA is the path of a PEM file of the roots the source's
+	// certificate is verified against; empty for the system's.
+	UpdateCA string
+	// UpdateTrustedRoot is the path of a Sigstore trusted_root.json that
+	// replaces the one embedded in the binary.
+	UpdateTrustedRoot string
+	// UpgradeMode is how a release is installed from the console: off,
+	// binary or kubernetes.
+	UpgradeMode string
+	// kubernetesAPIDir is where the token of the Kubernetes API is mounted
+	// for upgrade-mode kubernetes. It has no flag: the chart mounts it at
+	// kubernetes.DefaultAPIDir, and tests point it elsewhere. Empty is that
+	// default.
+	kubernetesAPIDir string
+
 	// NodeID names the node. A node of a cluster must be given one; a node
 	// on its own generates one.
 	NodeID string
@@ -289,6 +330,14 @@ type serverConfig struct {
 	// auditOut is where exported audit records go. It has no flag: the
 	// server sets it to its log stream when AuditExport is on.
 	auditOut io.Writer
+	// executable is the path of the running executable, symbolic links
+	// resolved, as main read it at start; empty when unknown. It has no
+	// flag: the binary upgrader replaces the file there (PLAN P.7).
+	executable string
+	// restart asks the node to stop gracefully and main to execute the
+	// executable again; nil when it cannot (Windows, an unknown path, or a
+	// node run by tests). It has no flag.
+	restart func()
 	// passwordParams overrides the cost of console password hashes. It has
 	// no flag: tests lower it, production keeps the default.
 	passwordParams passwords.Params
@@ -506,6 +555,9 @@ func (c *serverConfig) validate() error {
 	if err := c.validateDelivery(); err != nil {
 		return err
 	}
+	if err := c.validateUpdates(buildinfo.Packaging()); err != nil {
+		return err
+	}
 	if err := c.validateTransport(); err != nil {
 		return err
 	}
@@ -517,6 +569,47 @@ func (c *serverConfig) validate() error {
 	}
 	return c.validateSecrets()
 }
+
+// validateUpdates rejects settings of checking for releases and of
+// installing one that cannot be honoured (ADR-0029). No error repeats the
+// update source, which may hold what its owner keeps to themselves.
+// packaging is how this binary was shipped (buildinfo.Packaging): the binary
+// of an image never replaces itself.
+func (c *serverConfig) validateUpdates(packaging string) error {
+	if c.UpdateSource != "" {
+		if err := github.CheckSourceURL(c.UpdateSource); err != nil {
+			return fmt.Errorf("update-source: %w (the address of the releases JSON, such as %s)", err, defaultUpdateSourceExample)
+		}
+	} else if c.UpdateCA != "" || c.UpdateTrustedRoot != "" {
+		return errors.New("update-ca and update-trusted-root are for update-source: set --update-source, or neither")
+	}
+	if c.UpdateCheckInterval < 0 || (c.UpdateCheckInterval > 0 && c.UpdateCheckInterval < app.MinUpdateCheckInterval) {
+		return fmt.Errorf("update-check-interval %s: must be at least %s, or 0 to ask only when asked to",
+			durationText(c.UpdateCheckInterval), durationText(app.MinUpdateCheckInterval))
+	}
+	if _, err := release.ParseChannel(c.UpdateChannel); err != nil {
+		return fmt.Errorf("update-channel %q: want %s or %s", c.UpdateChannel, release.ChannelStable, release.ChannelPrerelease)
+	}
+	switch release.Mode(c.UpgradeMode) {
+	case release.ModeOff, release.ModeKubernetes:
+	case release.ModeBinary:
+		if packaging == buildinfo.PackagingImage {
+			return errors.New("upgrade-mode binary: this binary is the one of a container image, which is upgraded by " +
+				"moving its nodes to another image, never by replacing itself: set upgrade-mode to off, or to kubernetes in a chart")
+		}
+		if c.UpdateSource == "" {
+			return errors.New("upgrade-mode binary needs update-source: the binary installed is fetched from it")
+		}
+	default:
+		return fmt.Errorf("upgrade-mode %q: want %s, %s or %s", c.UpgradeMode, release.ModeOff, release.ModeBinary, release.ModeKubernetes)
+	}
+	return nil
+}
+
+// defaultUpdateSourceExample is the update source of the product's own
+// releases, as the documents name it. It is never a default: nothing is
+// asked of anyone until an operator sets one.
+const defaultUpdateSourceExample = "https://api.github.com/repos/albievan/cactusfs/releases"
 
 // parsePeers parses the --peers list.
 func parsePeers(list string) (map[string]string, error) {

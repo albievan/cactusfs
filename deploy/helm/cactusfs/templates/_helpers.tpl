@@ -88,6 +88,33 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- if and .Values.localVolumes.enabled (or (not .Values.localVolumes.basePath) (not .Values.localVolumes.nodeName)) -}}{{- fail "localVolumes: basePath and nodeName are required" -}}{{- end -}}
 {{- if lt (int .Values.drives.count) 1 -}}{{- fail "drives.count is at least 1" -}}{{- end -}}
+{{- if include "cactusfs.upgradeFromConsole" . -}}
+{{- $cidrs := dig "upgrade" "fromConsole" "apiServer" "cidrs" list .Values.AsMap -}}
+{{- if and .Values.networkPolicy.enabled (not $cidrs) -}}{{- fail "upgrade.fromConsole.apiServer.cidrs: an upgrade from the console goes through the Kubernetes API, and the NetworkPolicy lets the pods reach nothing: name the API server's addresses (the endpoints of the Service kubernetes in the namespace default)" -}}{{- end -}}
+{{- range $cidrs -}}
+{{- if not (regexMatch "^[0-9a-fA-F.:]+/[0-9]{1,3}$" (toString .)) -}}{{- fail (printf "upgrade.fromConsole.apiServer.cidrs: %q is not an address range (10.0.0.1/32)" (toString .)) -}}{{- end -}}
+{{- end -}}
+{{- $port := int (dig "upgrade" "fromConsole" "apiServer" "port" 6443 .Values.AsMap) -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}{{- fail "upgrade.fromConsole.apiServer.port is a port, 1 to 65535" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Whether the console may upgrade the nodes (ADR-0029): "true" or empty.
+     Read with dig, so that the values of a release installed before the
+     setting existed (helm upgrade --reuse-values) read as off. */}}
+{{- define "cactusfs.upgradeFromConsole" -}}
+{{- if dig "upgrade" "fromConsole" "enabled" false .Values.AsMap -}}true{{- end -}}
+{{- end -}}
+
+{{/* The ServiceAccount, Role and RoleBinding of upgrades from the console. */}}
+{{- define "cactusfs.upgradeAccount" -}}
+{{- printf "%s-upgrade" (include "cactusfs.fullname" .) -}}
+{{- end -}}
+
+{{/* Where the cactusfs container finds the token, the API server's CA and
+     the namespace (the upgrader's DefaultAPIDir). */}}
+{{- define "cactusfs.upgradeDir" -}}
+/var/run/secrets/cactusfs.io/kubernetes
 {{- end -}}
 
 {{- define "cactusfs.storageClass" -}}

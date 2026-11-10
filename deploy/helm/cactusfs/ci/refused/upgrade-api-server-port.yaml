@@ -1,0 +1,3 @@
+# expect: upgrade.fromConsole.apiServer.port is a port
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+upgrade: {fromConsole: {enabled: true, apiServer: {cidrs: [192.0.2.10/32], port: 0}}}

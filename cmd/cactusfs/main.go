@@ -38,15 +38,29 @@ Run "cactusfs <command> --help" for the flags and CACTUSFS_* variables of a comm
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.Getenv)
+	// The path is read now: an upgrade moves the file the process was
+	// started from aside before it asks for the restart.
+	restart := newRestarter(executablePath())
+	code := runCommand(ctx, os.Args[1:], os.Stdout, os.Stderr, os.Getenv, restart)
+	signalled := ctx.Err() != nil
 	stop()
-	os.Exit(code)
+	// Only once the command has returned - the server stopped, every
+	// listener, Raft and bbolt closed - may the process become another.
+	os.Exit(afterRun(code, signalled, restart, os.Args, os.Environ(), reexec, os.Stderr))
 }
 
 // run executes one command and returns the process exit code. Everything the
 // process reads from or writes to its environment is passed in, so run can be
-// tested without touching globals.
+// tested without touching globals. A node it runs cannot be asked to
+// restart.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	return runCommand(ctx, args, stdout, stderr, getenv, nil)
+}
+
+// runCommand is run with the restarter of the process: a node it runs may be
+// asked to stop and restart into its executable (restart.Request), and
+// returns as it does when ctx ends. restart may be nil.
+func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string, restart *restarter) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
@@ -60,7 +74,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		_, _ = io.WriteString(stdout, usage)
 		return exitOK
 	case "server":
-		return runServerCommand(ctx, args[1:], stdout, stderr, getenv)
+		return runServerCommand(ctx, args[1:], stdout, stderr, getenv, restart)
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
 	case "dev-init":
@@ -71,11 +85,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	}
 }
 
-func runServerCommand(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+func runServerCommand(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string, restart *restarter) int {
 	cfg, sources, err := parseServerSettings(args, getenv, stderr)
 	// Where each value came from is part of what the node says of its
 	// settings.
 	cfg.sources = sources
+	ctx, release := restart.attach(ctx, &cfg)
+	defer release()
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		return exitOK

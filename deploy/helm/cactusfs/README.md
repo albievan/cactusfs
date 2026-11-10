@@ -19,11 +19,13 @@ the chart from this directory with an image you built ([Installing](#installing)
 | PodDisruptionBudget | `<release>` | One node at a time may be evicted. Not rendered for a node on its own |
 | NetworkPolicy | `<release>` | Default deny for every pod, in and out, with the exceptions below |
 | StorageClass, PersistentVolumes | | Only with `localVolumes.enabled`: volumes on one named machine's disks, for a cluster with no storage driver. Not for production |
+| ServiceAccount, Role, RoleBinding | `<release>-upgrade` | Only with `upgrade.fromConsole.enabled`: the identity with which the nodes move themselves to a newer image ([Upgrading from the console](#upgrading-from-the-console)) |
 
-The chart makes no Secret, no ServiceAccount and no Ingress. Pods run as user 65532
-with a read-only root filesystem, every capability dropped, the runtime's default
-seccomp profile and no service-account token, and are admitted under the `restricted`
-Pod Security Standard.
+The chart makes no Secret and no Ingress, and no ServiceAccount unless upgrades from
+the console are turned on. Pods run as user 65532 with a read-only root filesystem,
+every capability dropped, the runtime's default seccomp profile and no service-account
+token (with upgrades from the console, the cactusfs container alone is given one of its
+own, below), and are admitted under the `restricted` Pod Security Standard.
 
 The release name is used exactly as given: `helm install store ...` makes the nodes
 `store-meta-0`, `store-meta-1`, `store-meta-2` and `store-data-0` with the default
@@ -133,8 +135,9 @@ with a NetworkPolicy that lets the nodes reach nothing, a missing Secret name.
 
 `ci/` has value sets to start from: a cluster with Vault (`cluster-values.yaml`), five
 voters (`five-voters-values.yaml`), one node (`standalone-values.yaml`), a development
-cluster on one machine's disks (`single-machine-values.yaml`), and a cluster opened to
-its clients (`exposed-values.yaml`). `ci/refused/` has what the chart refuses, each with
+cluster on one machine's disks (`single-machine-values.yaml`), a cluster opened to
+its clients (`exposed-values.yaml`), and a cluster the console may upgrade
+(`upgrade-values.yaml`). `ci/refused/` has what the chart refuses, each with
 the words of the refusal.
 
 ## Other values
@@ -284,6 +287,124 @@ what; the alert `CactusFSMetadataUpgradeUnfinished` fires when, for six hours, t
 cluster has written an older schema than its nodes support - an upgrade that was begun
 and not finished.
 
+## Upgrading from the console
+
+Off by default, and two opt-ins (ADR-0029,
+[`docs/adr/0029-updates-and-upgrades.md`](../../../docs/adr/0029-updates-and-upgrades.md)):
+the nodes check for releases only once `CACTUSFS_UPDATE_SOURCE` is set, and they install
+one only with `upgrade.fromConsole.enabled`. Turned on, the console of a `cluster-admin`
+who types their password again may move every node to a newer release's image - only a
+release signed by this project's release workflow for that version, and only a newer
+patch of the running minor or the newest patch of the next one. Whoever may do so
+chooses the code the cluster runs; turn it on only where that is wanted, and read
+[what the token can reach](#what-the-token-can-reach) first.
+
+**The update source.** The chart has no value of its own for it: set it through
+`extraEnv`, and let the pods reach it with a rule of `networkPolicy.egressTo` on 443 - a
+NetworkPolicy names addresses, not hosts. `extraEnv` and `egressTo` are lists, so give
+the whole list (with Vault's rule, if `egressTo` has one), in a values file:
+
+```yaml
+extraEnv:
+  - {name: CACTUSFS_UPDATE_SOURCE, value: "https://releases.example.internal/repos/albievan/cactusfs/releases"}
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - to: [{ipBlock: {cidr: 192.0.2.30/32}}]   # the mirror's address
+      ports: [443]
+upgrade:
+  fromConsole:
+    enabled: true
+    apiServer: {cidrs: [192.0.2.10/32], port: 6443}
+```
+
+```sh
+helm upgrade store deploy/helm/cactusfs -n cactusfs --reuse-values -f updates.yaml
+```
+
+GitHub's own source is `https://api.github.com/repos/albievan/cactusfs/releases`; its
+files are fetched from `github.com` and redirected to GitHub's storage, on addresses
+GitHub changes, so a rule for it is a wide range that must be kept current
+(`https://api.github.com/meta` publishes GitHub's ranges). A mirror inside the network,
+with `update-ca` if its certificate is of a private CA, is the dependable choice (the
+[README](../../../README.md#checking-for-releases-and-upgrading) says how).
+`ci/upgrade-values.yaml` is such a set of values, and `helm-assert` holds that the
+source's port has a rule.
+
+| Value | |
+|---|---|
+| `upgrade.fromConsole.enabled` | `false`. Renders what follows, and sets `CACTUSFS_UPGRADE_MODE=kubernetes` on every node |
+| `upgrade.fromConsole.apiServer.cidrs` | The addresses at which the pods reach the API server, for the NetworkPolicy: the endpoints of the Service `kubernetes` in the namespace `default`, as `kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes` lists them, each as `<address>/32`. A NetworkPolicy sees the address after the Service's translation, so the Service's own address does not do. Required when `networkPolicy.enabled`; the chart refuses to render without |
+| `upgrade.fromConsole.apiServer.port` | Their port: `6443` (k3s, kubeadm) |
+
+What it renders, and nothing more:
+
+- **A ServiceAccount, a Role and a RoleBinding**, `<release>-upgrade`. The Role may
+  `get` and `patch` the nodes' StatefulSets, `get` their pods and `create` their
+  evictions - each by name (`resourceNames`). It names no other resource; but see
+  [what the token can reach](#what-the-token-can-reach): patching a StatefulSet is
+  more than it looks.
+- **The token on the cactusfs container only.** The pods name the ServiceAccount but
+  keep `automountServiceAccountToken: false`; a projected volume, `kube-api`, mounted
+  read-only at `/var/run/secrets/cactusfs.io/kubernetes` into the cactusfs container
+  alone, holds a token that expires within the hour (the kubelet renews it), the API
+  server's CA (`kube-root-ca.crt`) and the namespace. The node reads the token again
+  for every request, trusts that CA alone, and never logs it.
+- **A way to the API server**: one egress rule of the NetworkPolicy, to the addresses
+  and port above.
+
+How a node is moved: its StatefulSet's image becomes `<the repository it runs>@<the
+digest of the release's image list>` and its pods' `app.kubernetes.io/version` the
+release; its pod is evicted, so the PodDisruptionBudget is respected; and the next node
+is not touched until the pod is ready on the new image, the node reports the release,
+and the cluster is ready. The nodes go one at a time, the node that runs the upgrade
+last. The first node that does not come up is put back to the image it ran and evicted
+again, and the upgrade stops there. The upgrade is held by the annotation
+`cactusfs.io/upgrade` on the StatefulSet of the first node by name, and its outcome is
+`cactusfs.io/upgrade-result`; each moved StatefulSet keeps what it ran before in
+`cactusfs.io/upgrade-previous`. The node that runs the upgrade is moved last, so its own
+pod is evicted before it could write the outcome: once every node runs the release,
+that node, restarted, replaces the lock with the outcome `done` as it starts (or when
+the console reads the progress from it), under the StatefulSet's `resourceVersion`;
+any node does so once the lock is stale. Another node reading the progress meanwhile
+says `done` and writes nothing. A lock whose node stops answering is taken over
+after twice a node's time (10 minutes each); a run that finds its lock taken over
+stops and puts nothing back. An upgrade that was cut off is resumed by starting it
+again: the nodes already moved are skipped.
+
+**Helm drift.** The console changes the StatefulSets behind Helm's back. The next
+`helm upgrade` renders the image of its own values again and, with `OnDelete`, puts it
+in the StatefulSets, where it waits until a pod is next deleted - which may take a node
+back to the release before. After an upgrade from the console, every `helm upgrade`
+must name the installed digest, or a newer one:
+
+```sh
+helm upgrade store deploy/helm/cactusfs -n cactusfs --reuse-values \
+  --set image.digest=sha256:<the digest the console installed>
+```
+
+The console shows that command with the digest it installed, and the audit trail
+records it.
+
+### What the token can reach
+
+`patch` of a StatefulSet changes its pod template, and Kubernetes then makes the pod
+that template says. That is as good as creating **any pod in the namespace**: a pod that
+mounts every Secret of the namespace - the Vault token, the root credentials, the TLS
+keys and the node CA's key - that runs as any ServiceAccount of the namespace, with any
+image. `resourceNames` limits which StatefulSets may be patched, not what their template
+may say; the `restricted` Pod Security Standard limits a pod's privileges, not which
+Secrets or ServiceAccounts it uses. So whoever holds the token - someone who has taken
+over a gateway, or read the token from its pod - holds the namespace and its secrets.
+
+- Install the chart in **a namespace of its own**, with no other workload's Secrets or
+  ServiceAccounts in it.
+- What would close it is a ValidatingAdmissionPolicy that lets this ServiceAccount's
+  patches change only the cactusfs container's image (to an `@sha256:` digest), the
+  label `app.kubernetes.io/version` and annotations `cactusfs.io/*`, and nothing else.
+  The chart does not render one: it is a residual risk, open question 10 of ADR-0029.
+
 ## Checking the chart
 
 ```sh
@@ -296,7 +417,8 @@ image carries - it is given no other place to look, so it reads nothing from the
 network, and a kind without a schema fails; `scripts/helm-assert.sh` on each render, which
 asserts what this document promises (the Services, the claims, the security context,
 the probes, the placement, every rule of the NetworkPolicy, the drain delay, the image
-and the version label); and a
+and the version label, and the identity of upgrades from the console: exactly its
+rules and the token on the cactusfs container with it, nothing of it without); and a
 render of every file of `ci/refused/`, which must fail with the words its first line
 names. A new value set in `ci/` is picked up by its name. Without a chart, without a
 value set or without a refusal to ask for, the gate fails.

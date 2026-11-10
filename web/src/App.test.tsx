@@ -122,6 +122,7 @@ describe('session', () => {
       'Policies',
       'Cluster',
       'Settings',
+      'Updates',
       'Audit log',
     ]);
     for (const link of links) {

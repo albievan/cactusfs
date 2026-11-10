@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 )
 
@@ -91,14 +92,17 @@ func TestSettingsClassification(t *testing.T) {
 	kinds := map[cluster.SettingKind][]string{
 		cluster.SettingSecret:     {"kms-passphrase", "root-access-key", "root-secret-key"},
 		cluster.SettingSecretFile: {"kms-key-file", "kms-passphrase-file", "node-tls-key", "tls-key", "vault-token-file"},
-		cluster.SettingURL:        {"otlp-endpoint", "vault-addr"},
-		cluster.SettingPath:       {"data", "meta-dir", "node-tls-ca", "node-tls-cert", "tls-cert", "vault-ca-cert"},
+		cluster.SettingURL:        {"otlp-endpoint", "update-source", "vault-addr"},
+		cluster.SettingPath: {
+			"data", "meta-dir", "node-tls-ca", "node-tls-cert", "tls-cert", "update-ca", "update-trusted-root", "vault-ca-cert",
+		},
 	}
 	sameEverywhere := []string{
 		"delivery-timeout", "egress-allow",
 		"gc-grace", "kms", "lifecycle-interval", "peers", "preview-max-size", "region", "replication-rate-mib", "replication-workers",
 		"s3-domain", "scrub-interval", "scrub-rate-mib",
 		"session-lifetime", "session-lock-max", "session-upload-grace",
+		"update-channel", "update-check-interval", "update-source",
 		"vault-addr", "vault-key", "vault-namespace", "vault-transit-mount",
 	}
 	got := map[cluster.SettingKind][]string{}
@@ -496,5 +500,29 @@ func TestSessionBoundsFitTheHorizonOfAPasswordChange(t *testing.T) {
 	t.Parallel()
 	if longest := maxSessionLifetime + maxSessionLockMax + maxSessionGrace; longest >= app.SessionsEndHorizon {
 		t.Errorf("a session can last %s, locked included; the mark of a password change is kept %s", longest, app.SessionsEndHorizon)
+	}
+}
+
+// TestTheBinaryOfAnImageNeverReplacesItself: upgrade-mode binary is refused
+// at start by the binary of the container image, which is upgraded by
+// moving to another image (ADR-0029), and accepted by a binary of its own.
+func TestTheBinaryOfAnImageNeverReplacesItself(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		packaging, mode string
+		refused         bool
+	}{
+		{buildinfo.PackagingImage, "binary", true},
+		{buildinfo.PackagingImage, "kubernetes", false},
+		{buildinfo.PackagingImage, "off", false},
+		{buildinfo.PackagingBinary, "binary", false},
+	} {
+		cfg := serverConfig{
+			UpdateSource: "https://mirror.example/releases", UpdateCheckInterval: time.Hour, UpdateChannel: "stable", UpgradeMode: tt.mode,
+		}
+		err := cfg.validateUpdates(tt.packaging)
+		if refused := err != nil; refused != tt.refused || (refused && !strings.Contains(err.Error(), "container image")) {
+			t.Errorf("%s with upgrade-mode %s: %v", tt.packaging, tt.mode, err)
+		}
 	}
 }

@@ -58,12 +58,13 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0020](0020-certificate-rotation.md) | Certificate rotation without restart | accepted; implemented |
 | [0021](0021-sbom-and-signatures.md) | SBOMs and image signatures, made and verified offline | accepted; the gate is implemented; releases are signed keyless by the release workflow, which is written and has not run: no release is published yet |
 | [0022](0022-settings.md) | Settings - declared once, shown for every node | accepted; implemented |
-| [0023](0023-schema-5-usage-outbox-targets.md) | Entry schema 5 - bucket usage, the delivery outbox, targets, outbound connections | accepted; entry schema 5 is implemented in the state machine and the store and is announced (`MetadataVersion` 5), its bytes frozen; **not implemented:** the worker that counts unasked, the delivery worker, targets as a use case, outbound connections (PLAN 8.0.12 to 8.0.14, 8.3.1) |
+| [0023](0023-schema-5-usage-outbox-targets.md) | Entry schema 5 - bucket usage, the delivery outbox, targets, outbound connections | accepted; its rules of outbound connections are amended by 0029 for the update client (redirects, larger bodies); entry schema 5 is implemented in the state machine and the store and is announced (`MetadataVersion` 5), its bytes frozen; **not implemented:** the worker that counts unasked, the delivery worker, targets as a use case, outbound connections (PLAN 8.0.12 to 8.0.14, 8.3.1) |
 | [0024](0024-quotas.md) | Quotas | proposed; **not implemented** beyond the contract (PLAN 8A) |
 | [0025](0025-bucket-notifications.md) | Bucket notifications and the export of the audit trail | proposed; **not implemented** beyond the contracts (PLAN 8B) |
 | [0026](0026-replication-between-sites.md) | Replication between sites, and the conflict rule | proposed; **not implemented** beyond the contracts (PLAN 8C) |
 | [0027](0027-session-lock.md) | A console session that locks while it uploads | accepted; implemented, the server and the console (PLAN L.0 to L.11) |
 | [0028](0028-object-preview.md) | Previews of objects in the console | accepted; implemented (PLAN Goal O, O.0 to O.12; review in a browser and roll-out are O.14); amended 2026-10-16 to say what was built |
+| [0029](0029-updates-and-upgrades.md) | Checking for the latest release, and upgrading from the console | accepted, pending Albie's review (the defaults of Goal P's questions taken 2026-11-09); implemented, off by default (PLAN P.1 to P.11; `make test-k8s` of the Kubernetes mode still to run); amends 0023 for the update client |
 
 "Implemented" is the state of the code on 2026-10-16; `PLAN.md` has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a

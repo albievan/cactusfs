@@ -78,6 +78,12 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		// A preview is the management API's (ADR-0028); S3 never meets one.
 		domain.ErrNotPreviewable:  {500, "InternalError"},
 		domain.ErrPreviewTooLarge: {500, "InternalError"},
+		// Updates and upgrades are the management API's (ADR-0029).
+		domain.ErrUpdatesOff:         {500, "InternalError"},
+		domain.ErrUpgradeNotAllowed:  {500, "InternalError"},
+		domain.ErrUpgradeUnavailable: {500, "InternalError"},
+		domain.ErrUpgradeRunning:     {500, "InternalError"},
+		domain.ErrReleaseNotVerified: {500, "InternalError"},
 	}
 	// The sentinels without a wire name, as they are answered today.
 	local := map[error]answer{

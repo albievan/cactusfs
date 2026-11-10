@@ -22,7 +22,7 @@ Usage of cactusfs server:
   -drive-labels labels
     	what the deployment calls the volume behind each drive directory - a compose volume, a claim - as labels separated by commas, one for each --data entry in the same order, or none; shown with the node's settings and used for nothing else ($CACTUSFS_DRIVE_LABELS)
   -egress-allow ranges
-    	ranges (CIDRs, separated by commas) where a target may be at a loopback or link-local address - a receiver on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_EGRESS_ALLOW)
+    	ranges (CIDRs, separated by commas) where the update source, a target or another site may be at a loopback or link-local address - a mirror or a receiver on the node itself; never the metadata services of clouds; not 0.0.0.0/0 or ::/0 ($CACTUSFS_EGRESS_ALLOW)
   -gc-grace duration
     	minimum age of an unreferenced shard before it is removed ($CACTUSFS_GC_GRACE) (default 24h0m0s)
   -gc-interval duration
@@ -95,6 +95,18 @@ Usage of cactusfs server:
     	region this node is in, for placement ($CACTUSFS_TOPOLOGY_REGION)
   -topology-zone zone
     	zone this node is in, for placement ($CACTUSFS_TOPOLOGY_ZONE)
+  -update-ca path
+    	path of a PEM file of the CA certificates the update source's certificate is verified against; default the system's CAs ($CACTUSFS_UPDATE_CA)
+  -update-channel string
+    	which releases are offered: stable, or prerelease for pre-releases too ($CACTUSFS_UPDATE_CHANNEL) (default "stable")
+  -update-check-interval duration
+    	how often the node asks the update source by itself, give or take a tenth; at least 1m, 0 only when asked to from the console ($CACTUSFS_UPDATE_CHECK_INTERVAL) (default 24h0m0s)
+  -update-source URL
+    	URL of the releases JSON, https only, such as https://api.github.com/repos/albievan/cactusfs/releases or a mirror; releases are not checked for when empty ($CACTUSFS_UPDATE_SOURCE)
+  -update-trusted-root path
+    	path of a Sigstore trusted_root.json that releases are verified against, instead of the one embedded in the binary ($CACTUSFS_UPDATE_TRUSTED_ROOT)
+  -upgrade-mode string
+    	how a release is installed from the console: off (never; instructions are shown instead), binary (the binary of a node on its own replaces itself) or kubernetes (the chart's nodes are moved to the release's image) ($CACTUSFS_UPGRADE_MODE) (default "off")
   -vault-addr URL
     	URL of Vault, https://host:port ($CACTUSFS_VAULT_ADDR)
   -vault-ca-cert path

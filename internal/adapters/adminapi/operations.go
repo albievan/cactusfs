@@ -23,6 +23,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/domain/release"
 )
 
 // operations implements the generated server interface: one method per
@@ -988,14 +989,14 @@ func stringsOf(list []string) []string {
 // has told this adapter nothing.
 func nodeSettingsOf(answer cluster.NodeAnswer) api.NodeSettings {
 	if !answer.Answered {
-		reason := api.Failed
+		reason := api.NodeSettingsReasonFailed
 		switch answer.Reason {
 		case cluster.ReasonUnreachable:
-			reason = api.Unreachable
+			reason = api.NodeSettingsReasonUnreachable
 		case cluster.ReasonTimeout:
-			reason = api.Timeout
+			reason = api.NodeSettingsReasonTimeout
 		case cluster.ReasonUnsupported:
-			reason = api.Unsupported
+			reason = api.NodeSettingsReasonUnsupported
 		case cluster.ReasonFailed, cluster.ReasonNone:
 		}
 		return api.NodeSettings{NodeId: answer.NodeID, Reason: &reason}
@@ -1324,4 +1325,204 @@ func (o *operations) GetBucketReplicaMode(context.Context, api.GetBucketReplicaM
 // PutBucketReplicaMode implements api.StrictServerInterface (PLAN 8.1.1).
 func (o *operations) PutBucketReplicaMode(context.Context, api.PutBucketReplicaModeRequestObject) (api.PutBucketReplicaModeResponseObject, error) {
 	return nil, notYet("replica mode")
+}
+
+// --- updates and upgrades (ADR-0029) ---
+//
+// What may be asked, of whom, and what is installed is the use case's
+// (app.UpdateService); these carry the caller, the session's token and the
+// password typed again, and turn the answers into the contract's. The
+// password is never kept, logged, or put in an answer.
+
+// updatesOf returns the use case of updates, or why there is none.
+func (o *operations) updatesOf() (*app.UpdateService, error) {
+	if o.h.cfg.Updates == nil {
+		return nil, fmt.Errorf("updates: %w", errNotImplemented)
+	}
+	return o.h.cfg.Updates, nil
+}
+
+// GetUpdates implements api.StrictServerInterface.
+func (o *operations) GetUpdates(ctx context.Context, _ api.GetUpdatesRequestObject) (api.GetUpdatesResponseObject, error) {
+	updates, err := o.updatesOf()
+	if err != nil {
+		return nil, err
+	}
+	view, err := updates.Get(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return api.GetUpdates200JSONResponse(updatesViewOf(view)), nil
+}
+
+// CheckForUpdates implements api.StrictServerInterface. A check asked for
+// too soon is a *app.CheckThrottledError, answered 429 with its
+// Retry-After (Handler.fail).
+func (o *operations) CheckForUpdates(ctx context.Context, _ api.CheckForUpdatesRequestObject) (api.CheckForUpdatesResponseObject, error) {
+	updates, err := o.updatesOf()
+	if err != nil {
+		return nil, err
+	}
+	view, err := updates.Check(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return api.CheckForUpdates200JSONResponse(updatesViewOf(view)), nil
+}
+
+// StartUpgrade implements api.StrictServerInterface. The password is
+// judged by the use case, for the session this request was made with; a
+// request made with an API key has no session, and is refused there.
+func (o *operations) StartUpgrade(ctx context.Context, request api.StartUpgradeRequestObject) (api.StartUpgradeResponseObject, error) {
+	updates, err := o.updatesOf()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	info := infoOf(ctx)
+	password := ""
+	if request.Body.Password != nil {
+		password = *request.Body.Password
+	}
+	progress, err := updates.Start(ctx, info.principal, info.token, password, request.Body.Version)
+	if errors.Is(err, domain.ErrCredentialNotFound) && errors.Is(err, domain.ErrTooManyAttempts) {
+		// This request ended the session, for too many wrong passwords:
+		// 401, and the browser forgets its cookie, as at /session/unlock.
+		info.sessionEnded = true
+	}
+	if err != nil {
+		return nil, err
+	}
+	location := BasePath + "/upgrade"
+	return api.StartUpgrade202JSONResponse{
+		Body: upgradeProgressOf(progress), Headers: api.StartUpgrade202ResponseHeaders{Location: &location},
+	}, nil
+}
+
+// GetUpgrade implements api.StrictServerInterface.
+func (o *operations) GetUpgrade(ctx context.Context, _ api.GetUpgradeRequestObject) (api.GetUpgradeResponseObject, error) {
+	updates, err := o.updatesOf()
+	if err != nil {
+		return nil, err
+	}
+	progress, err := updates.Progress(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return api.GetUpgrade200JSONResponse(upgradeProgressOf(progress)), nil
+}
+
+// updatesViewOf is what a node knows of releases, as the contract says it.
+func updatesViewOf(view app.UpdatesView) api.UpdatesView {
+	out := api.UpdatesView{
+		Current: api.ServerVersion{
+			Version: view.Current.String(), Build: view.Build, Commit: stringOrNil(view.Commit),
+		},
+		SourceConfigured: view.SourceConfigured, Channel: updateChannelOf(view.Channel), CheckedAt: timeOrNil(view.CheckedAt),
+		Available: make([]api.AvailableRelease, len(view.Available)), Mode: upgradeModeOf(view.Mode),
+		UpgradeAvailable: view.UpgradeAvailable, UnavailableReason: stringOrNil(view.UnavailableReason),
+		Instructions: append([]string{}, view.Instructions...),
+	}
+	if view.LastError != "" {
+		class := updateCheckErrorOf(view.LastError)
+		out.LastError = &class
+	}
+	if !view.NextStep.IsZero() {
+		next := view.NextStep.String()
+		out.NextStep = &next
+	}
+	for i, r := range view.Available {
+		available := api.AvailableRelease{
+			Version: r.Version.String(), Prerelease: r.Prerelease, Allowed: r.Allowed,
+			Published: timeOrNil(r.Published), NotesUrl: stringOrNil(r.NotesURL),
+		}
+		if r.Refusal != "" {
+			refusal := upgradeRefusalOf(r.Refusal)
+			available.Refusal = &refusal
+		}
+		out.Available[i] = available
+	}
+	return out
+}
+
+// upgradeProgressOf is where an upgrade stands, as the contract says it.
+func upgradeProgressOf(progress release.Progress) api.UpgradeProgress {
+	out := api.UpgradeProgress{
+		State: upgradeStateOf(progress.State), StartedBy: stringOrNil(progress.StartedBy), StartedAt: timeOrNil(progress.StartedAt),
+		Nodes: make([]api.UpgradeNode, len(progress.Nodes)),
+	}
+	if !progress.Target.IsZero() {
+		target := progress.Target.String()
+		out.Target = &target
+	}
+	for i, node := range progress.Nodes {
+		out.Nodes[i] = api.UpgradeNode{
+			Id: node.ID, Version: stringOrNil(node.Version), Build: stringOrNil(node.Build),
+			State: upgradeNodeStateOf(node.State), Reason: stringOrNil(node.Reason),
+		}
+	}
+	return out
+}
+
+// The values of the domain as the contract names them. Each is told by the
+// contract's own constants, so that a value the contract does not have is
+// a failure of the build of these tables, not of a client.
+
+func updateChannelOf(channel release.Channel) api.UpdateChannel {
+	if channel == release.ChannelPrerelease {
+		return api.Prerelease
+	}
+	return api.Stable
+}
+
+func upgradeModeOf(mode release.Mode) api.UpgradeMode {
+	switch mode {
+	case release.ModeBinary:
+		return api.Binary
+	case release.ModeKubernetes:
+		return api.Kubernetes
+	default:
+		return api.Off
+	}
+}
+
+func updateCheckErrorOf(class string) api.UpdateCheckError {
+	switch class {
+	case app.CheckErrorRateLimited:
+		return api.UpdateCheckErrorRateLimited
+	case app.CheckErrorRefused:
+		return api.UpdateCheckErrorRefused
+	case app.CheckErrorInvalidAnswer:
+		return api.UpdateCheckErrorInvalidAnswer
+	case app.CheckErrorTimeout:
+		return api.UpdateCheckErrorTimeout
+	default:
+		return api.UpdateCheckErrorUnreachable
+	}
+}
+
+func upgradeRefusalOf(reason release.Reason) api.UpgradeRefusal {
+	return map[release.Reason]api.UpgradeRefusal{
+		release.ReasonEqual: api.Equal, release.ReasonOlder: api.Older, release.ReasonPrereleaseOnStable: api.PrereleaseOnStable,
+		release.ReasonMajor: api.Major, release.ReasonSkippedMinor: api.SkippedMinor, release.ReasonNotNewestPatch: api.NotNewestPatch,
+		release.ReasonUnknownRelease: api.UnknownRelease,
+	}[reason]
+}
+
+func upgradeStateOf(state release.State) api.UpgradeState {
+	return map[release.State]api.UpgradeState{
+		release.StateIdle: api.UpgradeStateIdle, release.StateVerifying: api.UpgradeStateVerifying,
+		release.StateRunning: api.UpgradeStateRunning, release.StateRestartRequired: api.UpgradeStateRestartRequired,
+		release.StateFailed: api.UpgradeStateFailed, release.StateDone: api.UpgradeStateDone,
+	}[state]
+}
+
+func upgradeNodeStateOf(state release.NodeState) api.UpgradeNodeState {
+	return map[release.NodeState]api.UpgradeNodeState{
+		release.NodePending: api.UpgradeNodeStatePending, release.NodeUpgrading: api.UpgradeNodeStateUpgrading,
+		release.NodeDone: api.UpgradeNodeStateDone, release.NodeFailed: api.UpgradeNodeStateFailed,
+		release.NodeRestored: api.UpgradeNodeStateRestored,
+	}[state]
 }

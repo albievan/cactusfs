@@ -10,7 +10,12 @@
 //	          -X github.com/albievan/cactusfs/internal/buildinfo.commit=<hash>"
 //
 // and when they are not, the commit is the one the Go toolchain recorded and
-// the build is "0": a build that nobody numbered.
+// the build is "0": a build that nobody numbered. The Dockerfile also tells
+// the binary of the product image that it is one, with
+//
+//	-X github.com/albievan/cactusfs/internal/buildinfo.packaging=image
+//
+// so that it never tries to replace itself (Packaging).
 //
 // The package has no state: the variables below are constants of the build,
 // never modified at run time. internal/domain does not import it.
@@ -39,13 +44,24 @@ const dirtySuffix = "-dirty"
 //go:embed VERSION
 var embedded string
 
-// version, build and commit are build-time constants, set with -ldflags -X
-// (see the package comment) and never modified at run time. Each is empty
-// when the build did not set it.
+// version, build, commit and packaging are build-time constants, set with
+// -ldflags -X (see the package comment) and never modified at run time. Each
+// is empty when the build did not set it.
 var (
-	version string
-	build   string
-	commit  string
+	version   string
+	build     string
+	commit    string
+	packaging string
+)
+
+// How a binary was shipped (Packaging).
+const (
+	// PackagingBinary is a binary shipped on its own, to be run as it is:
+	// one built with go build, make build or make build-all.
+	PackagingBinary = "binary"
+	// PackagingImage is the binary of the product's container image, which
+	// is replaced by moving to another image, never in place.
+	PackagingImage = "image"
 )
 
 // Info identifies a build.
@@ -67,6 +83,21 @@ func Get() Info {
 		settings = info.Settings
 	}
 	return resolve(version, build, commit, embedded, settings)
+}
+
+// Packaging returns how this binary was shipped: PackagingImage when the
+// build said so (the Dockerfile does), PackagingBinary otherwise.
+func Packaging() string {
+	return resolvePackaging(packaging)
+}
+
+// resolvePackaging reads what the build injected: only PackagingImage is
+// told; anything else, nothing included, is a binary of its own.
+func resolvePackaging(injected string) string {
+	if strings.TrimSpace(injected) == PackagingImage {
+		return PackagingImage
+	}
+	return PackagingBinary
 }
 
 // Release returns the release named in the embedded VERSION file.

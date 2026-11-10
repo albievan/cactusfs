@@ -291,6 +291,7 @@ func TestBuiltInRoles(t *testing.T) {
 	// configurations, which are S3's, for the bucket-admin - and neither the
 	// quota of its bucket, nor a target, nor the replica mode.
 	target := iam.Resource{Admin: "target/hook"}
+	updates := iam.Resource{Admin: "updates"}
 	hybrid := []struct {
 		action   iam.Action
 		resource iam.Resource
@@ -316,6 +317,12 @@ func TestBuiltInRoles(t *testing.T) {
 		// The preview of objects (ADR-0028): every role that may read an
 		// object, and not the auditor, which reads none.
 		{iam.ActionPreviewObject, object, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin, iam.RoleReadWrite, iam.RoleReadOnly}},
+		// Releases and upgrades (ADR-0029): reading what the node knows for
+		// the cluster-admin and the auditor; asking the source and
+		// installing for the cluster-admin alone.
+		{iam.ActionGetUpdates, updates, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
+		{iam.ActionCheckForUpdates, updates, []string{iam.RoleClusterAdmin}},
+		{iam.ActionUpgradeCluster, updates, []string{iam.RoleClusterAdmin}},
 	}
 	for _, tt := range hybrid {
 		for role := range policies {

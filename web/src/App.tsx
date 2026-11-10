@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   api,
+  answeredPassword,
   ApiError,
   onLocked,
   onUnauthorized,
   signOut as endSession,
   UNLOCK_ATTEMPTS,
-  UNLOCK_PATH,
   unwrap,
   type Identity,
   type Session,
@@ -60,11 +60,11 @@ function signedInAs(identity: Identity): SignedIn {
  * Why a session ended, as far as the console can tell from the 401 that
  * said so: the API does not say why. A 401 to the console's own question of
  * how the session stands - at the timeout, or while it was locked - is a
- * session that timed out; one to an unlock after as many wrong passwords as
- * end a session is that; anything else is said without a reason.
+ * session that timed out; one to an unlock, or to installing a release,
+ * after as many wrong passwords as end a session is that; anything else is said without a reason.
  */
 function whyEnded(cause: Unauthorized | undefined, askedHowItStands: boolean): SessionEndReason {
-  if (cause?.path === UNLOCK_PATH && cause.wrongPasswords >= UNLOCK_ATTEMPTS - 1) {
+  if (cause !== undefined && answeredPassword(cause) && cause.wrongPasswords >= UNLOCK_ATTEMPTS - 1) {
     return 'wrong-passwords';
   }
   if (askedHowItStands && cause?.path === '/session' && cause.method === 'GET') {

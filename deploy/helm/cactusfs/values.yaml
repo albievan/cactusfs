@@ -221,3 +221,33 @@ networkPolicy:
   #   - to: [{ipBlock: {cidr: 10.0.0.5/32}}]
   #     ports: [8200]
   egressTo: []
+
+# --- upgrading from the console (ADR-0029): off ----------------------------
+upgrade:
+  fromConsole:
+    # Lets the console move the nodes to a newer release's image, one at a
+    # time, this chart's way: it gives the cactusfs container - and only it -
+    # a short-lived token of a ServiceAccount whose Role may get and patch the
+    # nodes' StatefulSets, get their pods and evict them, each by name, and
+    # lets the pods reach the API server. The node's own setting
+    # CACTUSFS_UPGRADE_MODE=kubernetes is set with it. Whoever may upgrade
+    # from the console then chooses the image the nodes run - among the
+    # releases signed for their version. After such an upgrade the next
+    # `helm upgrade` must name the installed digest or a newer one
+    # (--set image.digest=...), or it puts the nodes back (README, "Upgrading
+    # from the console"). The nodes find releases only once extraEnv sets
+    # CACTUSFS_UPDATE_SOURCE, and networkPolicy.egressTo has a rule to it on
+    # 443. The token can patch the StatefulSets' pod templates, which is as
+    # good as creating any pod - with any Secret and ServiceAccount - in the
+    # namespace: give the chart a namespace of its own (README, "What the
+    # token can reach").
+    enabled: false
+    # Where the pods reach the API server, for the NetworkPolicy: its
+    # addresses as the pods see them after the Service's translation - the
+    # endpoints of the Service kubernetes in the namespace default
+    # (kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes)
+    # - and their port (6443 on k3s and kubeadm). Required when enabled with
+    # networkPolicy.enabled.
+    apiServer:
+      cidrs: []
+      port: 6443

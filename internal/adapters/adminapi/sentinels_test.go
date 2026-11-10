@@ -77,6 +77,12 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrQuotaExceeded:         {403, "QuotaExceeded"},
 		domain.ErrNotPreviewable:        {415, "NotPreviewable"},
 		domain.ErrPreviewTooLarge:       {413, "PreviewTooLarge"},
+		// Updates and upgrades (ADR-0029): none of them a denial.
+		domain.ErrUpdatesOff:         {409, "UpdatesOff"},
+		domain.ErrUpgradeNotAllowed:  {409, "UpgradeNotAllowed"},
+		domain.ErrUpgradeUnavailable: {501, "UpgradeUnavailable"},
+		domain.ErrUpgradeRunning:     {409, "UpgradeRunning"},
+		domain.ErrReleaseNotVerified: {412, "ReleaseNotVerified"},
 	}
 	// The sentinels without a wire name, as they are answered today.
 	local := map[error]answer{

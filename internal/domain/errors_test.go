@@ -27,7 +27,8 @@ func TestErrorsCrossNodesWithTheirMeaning(t *testing.T) {
 		domain.ErrDriveOffline, domain.ErrEntityNotFound, domain.ErrEntityExists, domain.ErrEntityInUse,
 		domain.ErrCredentialNotFound, domain.ErrSubBucketNotFound, domain.ErrTooManySubBuckets, domain.ErrSubBucketNotEmpty,
 		domain.ErrTooManyRequests, domain.ErrTooManyBuckets, domain.ErrQuotaExceeded, domain.ErrNotPreviewable,
-		domain.ErrPreviewTooLarge,
+		domain.ErrPreviewTooLarge, domain.ErrUpdatesOff, domain.ErrUpgradeNotAllowed, domain.ErrUpgradeUnavailable,
+		domain.ErrUpgradeRunning, domain.ErrReleaseNotVerified,
 	}
 	seen := map[string]bool{}
 	for i, sentinel := range sentinels {
@@ -112,7 +113,9 @@ func TestSentinelsAreThoseWithAWireName(t *testing.T) {
 		"conflict": domain.ErrConflict, "access_denied": domain.ErrAccessDenied, "invalid_bucket_state": domain.ErrInvalidBucketState,
 		"entity_in_use": domain.ErrEntityInUse, "unavailable": domain.ErrUnavailable, "bucket_not_empty": domain.ErrBucketNotEmpty,
 		"quota_exceeded": domain.ErrQuotaExceeded, "not_previewable": domain.ErrNotPreviewable,
-		"preview_too_large": domain.ErrPreviewTooLarge,
+		"preview_too_large": domain.ErrPreviewTooLarge, "updates_off": domain.ErrUpdatesOff,
+		"upgrade_not_allowed": domain.ErrUpgradeNotAllowed, "upgrade_unavailable": domain.ErrUpgradeUnavailable,
+		"upgrade_running": domain.ErrUpgradeRunning, "release_not_verified": domain.ErrReleaseNotVerified,
 	} {
 		if !errors.Is(names[name], sentinel) {
 			t.Errorf("the wire name %s is of %v, want %v", name, names[name], sentinel)

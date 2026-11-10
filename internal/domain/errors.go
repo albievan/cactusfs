@@ -161,6 +161,30 @@ var (
 	ErrPreviewTooLarge = errors.New("the object is too large to preview")
 )
 
+// Errors of checking for releases and of upgrading from the console
+// (ADR-0029). None of them is a denial: whoever is told one was allowed to
+// ask.
+var (
+	// ErrUpdatesOff means that the deployment does not look for releases:
+	// no update source is configured, which is how it is by default.
+	ErrUpdatesOff = errors.New("checking for updates is off")
+	// ErrUpgradeNotAllowed means that the version asked for may not be
+	// installed from the running one: only a newer patch of the running
+	// minor version, or the newest patch of the next, may be.
+	ErrUpgradeNotAllowed = errors.New("the upgrade to this version is not allowed")
+	// ErrUpgradeUnavailable means that this deployment cannot be upgraded
+	// from the console: upgrade-mode is off, or what the mode needs is not
+	// there. The console shows what to do instead.
+	ErrUpgradeUnavailable = errors.New("upgrading from the console is not available")
+	// ErrUpgradeRunning means that an upgrade is already under way.
+	ErrUpgradeRunning = errors.New("an upgrade is already running")
+	// ErrReleaseNotVerified means that an artifact of a release, or the
+	// signed list that names it, did not verify: its signature is not the
+	// release workflow's for that version, or the bytes are not the ones
+	// the list names. Nothing of it is installed.
+	ErrReleaseNotVerified = errors.New("the release did not verify")
+)
+
 // Data-safety errors.
 var (
 	// ErrIntegrity reports stored bytes that failed checksum or
@@ -299,6 +323,11 @@ func wireCodes() []struct {
 		{"quota_exceeded", ErrQuotaExceeded},
 		{"not_previewable", ErrNotPreviewable},
 		{"preview_too_large", ErrPreviewTooLarge},
+		{"updates_off", ErrUpdatesOff},
+		{"upgrade_not_allowed", ErrUpgradeNotAllowed},
+		{"upgrade_unavailable", ErrUpgradeUnavailable},
+		{"upgrade_running", ErrUpgradeRunning},
+		{"release_not_verified", ErrReleaseNotVerified},
 	}
 }
 

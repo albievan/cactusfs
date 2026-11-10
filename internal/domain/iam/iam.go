@@ -210,6 +210,27 @@ const (
 // with Request.ObjectCreator.
 const ActionPreviewObject Action = "admin:PreviewObject"
 
+// The admin actions of releases and upgrades (ADR-0029), asked on the
+// resource "updates" (arn:cactusfs:admin:::updates).
+const (
+	// ActionGetUpdates allows reading what this node knows of releases:
+	// the running build, whether checks are on, what was found when, which
+	// releases may be installed and how far an upgrade has come. It begins
+	// with Get, so that the built-in auditor, which holds "admin:Get*",
+	// has it.
+	ActionGetUpdates Action = "admin:GetUpdates"
+	// ActionCheckForUpdates allows having the node ask the update source
+	// now. It reads, but it makes the deployment call out: it does not
+	// begin with Get, and the auditor does not have it.
+	ActionCheckForUpdates Action = "admin:CheckForUpdates"
+	// ActionUpgradeCluster allows installing a release on the deployment:
+	// replacing the code every node runs. Whoever holds it holds the
+	// deployment, as whoever holds "admin:*" does; the request must also
+	// carry the password of the console session that makes it, judged by
+	// the server, and an API key can never make it.
+	ActionUpgradeCluster Action = "admin:UpgradeCluster"
+)
+
 // ARN prefixes of the two kinds of resource a policy can name.
 const (
 	s3ARNPrefix    = "arn:aws:s3:::"

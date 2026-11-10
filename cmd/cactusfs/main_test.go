@@ -176,6 +176,7 @@ func TestParseServerConfig(t *testing.T) {
 			SessionLifetime: 30 * time.Minute, SessionUploadGrace: 90 * time.Second, SessionLockMax: 12 * time.Hour,
 			DeliveryTimeout: 30 * time.Second, ReplicationWorkers: 4, PreviewMaxSizeMiB: 32,
 			Roles: cluster.AllRoles(), RPCAddr: ":9002", RaftAddr: ":9003",
+			UpdateCheckInterval: 24 * time.Hour, UpdateChannel: "stable", UpgradeMode: "off",
 			secrets: secrets{kmsPassphrase: "unit test passphrase"},
 		}
 		if change != nil {
@@ -400,6 +401,33 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "bad admin address", args: dev("--admin-addr", "nonsense"), env: passphrase, wantErr: "admin address"},
 		{name: "bad S3 address", args: dev("--s3-addr", "nonsense"), env: passphrase, wantErr: "S3 address"},
 		{name: "non-positive shutdown timeout", args: dev("--shutdown-timeout", "0s"), env: passphrase, wantErr: "must be positive"},
+		// Checking for releases, and installing one (ADR-0029).
+		{
+			name: "updates, by variable", args: dev(), env: withPassphrase(map[string]string{
+				envUpdateSource: "https://mirror.example/cactusfs/releases", envUpdateInterval: "1m", envUpdateChannel: "prerelease",
+				envUpdateCA: "/etc/cactusfs/mirror-ca.pem", envUpdateRoot: "/etc/cactusfs/trusted_root.json", envUpgradeMode: "binary",
+			}),
+			want: base(func(c *serverConfig) {
+				c.UpdateSource, c.UpdateCheckInterval, c.UpdateChannel = "https://mirror.example/cactusfs/releases", time.Minute, "prerelease"
+				c.UpdateCA, c.UpdateTrustedRoot, c.UpgradeMode = "/etc/cactusfs/mirror-ca.pem", "/etc/cactusfs/trusted_root.json", "binary"
+			}),
+		},
+		{
+			name: "updates checked only when asked, by flag over variable", args: dev("--update-check-interval", "0", "--upgrade-mode", "kubernetes"),
+			env:  withPassphrase(map[string]string{envUpdateInterval: "1h", envUpgradeMode: "binary"}),
+			want: base(func(c *serverConfig) { c.UpdateCheckInterval, c.UpgradeMode = 0, "kubernetes" }),
+		},
+		{name: "an update source over http", args: dev("--update-source", "http://mirror.example/releases"), env: passphrase, wantErr: "update-source"},
+		{name: "an update source with a credential", args: dev("--update-source", "https://user:s3cr3t-in-url@mirror.example/r"), env: passphrase, wantErr: "user information"},
+		{name: "an update source with a query", args: dev("--update-source", "https://mirror.example/r?token=s3cr3t-in-url"), env: passphrase, wantErr: "a query"},
+		{name: "an update source with a fragment", args: dev("--update-source", "https://mirror.example/r#s3cr3t-in-url"), env: passphrase, wantErr: "a fragment"},
+		{name: "an update CA without a source", args: dev("--update-ca", "/etc/ca.pem"), env: passphrase, wantErr: "are for update-source"},
+		{name: "a trusted root without a source", args: dev("--update-trusted-root", "/etc/root.json"), env: passphrase, wantErr: "are for update-source"},
+		{name: "updates checked too often", args: dev("--update-check-interval", "59s"), env: passphrase, wantErr: "update-check-interval"},
+		{name: "a negative update interval", args: dev("--update-check-interval", "-1h"), env: passphrase, wantErr: "update-check-interval"},
+		{name: "an unknown channel", args: dev("--update-channel", "nightly"), env: passphrase, wantErr: "update-channel"},
+		{name: "an unknown upgrade mode", args: dev("--upgrade-mode", "ssh"), env: passphrase, wantErr: "upgrade-mode"},
+		{name: "a binary that replaces itself without a source", args: dev("--upgrade-mode", "binary"), env: passphrase, wantErr: "needs update-source"},
 		{name: "stray argument", args: dev("extra"), env: passphrase, wantErr: "unexpected argument"},
 		{name: "unknown flag", args: []string{"--nope"}, env: passphrase, wantErr: errFlagParse.Error()},
 	}
@@ -415,7 +443,7 @@ func TestParseServerConfig(t *testing.T) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
 				}
 				// Whatever is wrong, a secret is never echoed back.
-				for _, secret := range []string{"unit test passphrase", "root-secret-value"} {
+				for _, secret := range []string{"unit test passphrase", "root-secret-value", "s3cr3t-in-url"} {
 					if strings.Contains(err.Error(), secret) {
 						t.Errorf("the error message contains a secret: %q", err)
 					}

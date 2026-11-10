@@ -1015,3 +1015,16 @@ version as well as a row; the usage record carries `replication_pending` and
 `replication_failed`. The canonical document of replication, which the plan did not write
 down, is `bucket.ReplicationConfig.Document` with its golden file and its fuzz test
 (ADR-0026).
+
+## Amended 2026-11-09 (ADR-0029)
+
+ADR-0029 (checking for the latest release, and upgrading from the console) amends
+"Outbound connections" above **for the update client only**: it follows up to 3
+redirects, each to `https` only and each hop's resolved address checked in the dialer as
+the first is; it reads a body of up to 1 MiB of JSON (the releases JSON) and 256 MiB of
+a binary, with `Content-Length` checked before a byte is read. It sends no cookie, no
+`Authorization` header and no token, and its first request for a file goes only to the
+host of the update source (or `github.com` for GitHub's API). Every other client - targets, notifications,
+replication - keeps the rules written above: no redirect, 64 KiB. The two values are
+fields of `egress.Policy` whose zero values are those rules (PLAN P.5). Nothing else of
+this ADR changes.

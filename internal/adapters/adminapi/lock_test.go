@@ -412,6 +412,10 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"deleteTarget":               {path: "/targets/hook"},
 		"getTargetStatus":            {path: "/targets/hook/status"},
 		"listAudit":                  {path: "/audit"},
+		"getUpdates":                 {path: "/updates"},
+		"checkForUpdates":            {path: "/updates/check", headers: media},
+		"getUpgrade":                 {path: "/upgrade"},
+		"startUpgrade":               {path: "/upgrade", body: map[string]any{"version": "0.7.1", "password": "not-a-password-that-is-kept"}},
 	}
 	// The same operations asked in the other ways they can be: a list that
 	// is filtered must not answer "nothing" to a locked session.
@@ -437,6 +441,9 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",
 	}
+	// The operations that take Idempotency-Key and do nothing with it, as
+	// unlocking does: with a key they are asked as without one.
+	keyIgnored := []string{"startUpgrade"}
 	// The calls that are refused for another action than the contract
 	// names for their operation: the first question the use case asks. A
 	// search of all buckets asks first whether the caller may list them.
@@ -535,8 +542,10 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 					c.headers["Idempotency-Key"] = fmt.Sprintf("locked-%s-%d", id, n)
 				}
 				r := f.do(c)
-				if slices.Contains(notWritten, id) && !a.keyed {
-					unwritten++
+				if slices.Contains(notWritten, id) && (!a.keyed || slices.Contains(keyIgnored, id)) {
+					if !a.keyed {
+						unwritten++
+					}
 					if r.status != http.StatusNotImplemented {
 						t.Errorf("%s %s, not written yet, by a locked session = %d, want 501: %s", c.method, concrete, r.status, r.body)
 					}
@@ -558,7 +567,7 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 				if other, ok := auditedAs[concrete]; ok {
 					want = other
 				}
-				if a.keyed {
+				if a.keyed && !slices.Contains(keyIgnored, id) {
 					want = string(app.ActionRepeatRequest)
 				}
 				// The refusal is in the audit trail: in a record that names

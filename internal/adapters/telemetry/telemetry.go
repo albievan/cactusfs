@@ -110,6 +110,8 @@ type Telemetry struct {
 	handshakesRefused *prometheus.CounterVec
 	// handshakes is that counter as the registry collects it.
 	handshakes *handshakes
+	// updates are the metrics of checking for releases and upgrading.
+	updates *updateMetrics
 }
 
 // New returns the node's Telemetry. The caller must call Shutdown.
@@ -206,13 +208,14 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	// What nodetls counts for the Raft port is added when the node is scraped.
 	t.handshakes = newHandshakes(t.handshakesRefused, cfg.StateTimeout)
 
-	for _, collector := range []prometheus.Collector{
+	t.updates = newUpdateMetrics()
+	for _, collector := range append([]prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
 		t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
-	} {
+	}, t.updates.collectors()...) {
 		if err := t.registry.Register(collector); err != nil {
 			return nil, fmt.Errorf("telemetry.New: %w", err)
 		}

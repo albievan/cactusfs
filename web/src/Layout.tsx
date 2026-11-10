@@ -6,6 +6,7 @@ import mark from './assets/brand/cactusfs-mark.svg';
 import { useDeletions } from './deletions/context';
 import { navigate, routeHref, useRoute } from './router';
 import { ActivityBar } from './ui/ActivityBar';
+import { UpdatesNoticeContext, useAskedUpdates } from './updates/context';
 import { useUploads } from './uploads/context';
 
 const SECTIONS = [
@@ -16,6 +17,7 @@ const SECTIONS = [
   { segment: 'policies', label: 'Policies', icon: 'bi-shield-lock' },
   { segment: 'cluster', label: 'Cluster', icon: 'bi-hdd-network' },
   { segment: 'settings', label: 'Settings', icon: 'bi-gear' },
+  { segment: 'updates', label: 'Updates', icon: 'bi-arrow-up-circle' },
   { segment: 'audit', label: 'Audit log', icon: 'bi-journal-text' },
 ];
 
@@ -75,6 +77,11 @@ interface LayoutProps {
  *
  * Signing out ends the uploads with the session. While files are on their
  * way it is asked first, in the bar, where the uploads are.
+ *
+ * Under the version line is a badge, "update available", when the API
+ * lists a release that may be installed from the running one. It is asked
+ * once when the console is shown, and follows what the Updates screen
+ * learns after; a refusal hides it without a word.
  */
 export function Layout({ identity, onSignOut, children }: LayoutProps) {
   const route = useRoute();
@@ -107,6 +114,7 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
   // then there is no line, and nothing else is the worse for it.
   const server: ServerVersion | undefined = identity.server;
   const build = server === undefined ? null : describeBuild(server);
+  const updates = useAskedUpdates();
 
   const fold = () => {
     rememberFolded(!folded);
@@ -148,126 +156,134 @@ export function Layout({ identity, onSignOut, children }: LayoutProps) {
   };
 
   return (
-    <div className={folded ? 'layout layout-folded' : 'layout'}>
-      <div className="layout-top">
-        <header className="sidebar">
-          <div className="sidebar-head">
-            <a className="sidebar-brand" href={routeHref(['buckets'])}>
-              <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
-            </a>
-            {build !== null && (
-              <p className="sidebar-version" title={build.hint}>
-                {build.line}
-              </p>
-            )}
-          </div>
-          <form className="sidebar-search" role="search" aria-label="Search" onSubmit={search}>
-            <label className="visually-hidden" htmlFor="sidebar-search-field">
-              Search buckets and objects
-            </label>
-            <input
-              ref={searchField}
-              id="sidebar-search-field"
-              className="form-control form-control-sm"
-              type="search"
-              name="q"
-              placeholder="Search"
-              maxLength={256}
-              autoCapitalize="none"
-              autoComplete="off"
-              spellCheck={false}
-              value={sought}
-              onChange={(event) => {
-                setSought(event.target.value);
-              }}
-            />
+    <UpdatesNoticeContext.Provider value={updates}>
+      <div className={folded ? 'layout layout-folded' : 'layout'}>
+        <div className="layout-top">
+          <header className="sidebar">
+            <div className="sidebar-head">
+              <a className="sidebar-brand" href={routeHref(['buckets'])}>
+                <img className="sidebar-logo" src={folded ? mark : logo} alt="CactusFS" />
+              </a>
+              {build !== null && (
+                <p className="sidebar-version" title={build.hint}>
+                  {build.line}
+                </p>
+              )}
+              {updates.available ? (
+                <a className="sidebar-update" href={routeHref(['updates'])} title="A newer release may be installed: see Updates">
+                  <i className="bi bi-arrow-up-circle-fill" aria-hidden="true" />
+                  <span className="sidebar-update-text">update available</span>
+                </a>
+              ) : null}
+            </div>
+            <form className="sidebar-search" role="search" aria-label="Search" onSubmit={search}>
+              <label className="visually-hidden" htmlFor="sidebar-search-field">
+                Search buckets and objects
+              </label>
+              <input
+                ref={searchField}
+                id="sidebar-search-field"
+                className="form-control form-control-sm"
+                type="search"
+                name="q"
+                placeholder="Search"
+                maxLength={256}
+                autoCapitalize="none"
+                autoComplete="off"
+                spellCheck={false}
+                value={sought}
+                onChange={(event) => {
+                  setSought(event.target.value);
+                }}
+              />
+              <button
+                type="submit"
+                className="btn btn-outline-light btn-sm sidebar-button"
+                title="Search buckets and objects: text, wild*card? or rx:regular expression"
+              >
+                <i className="bi bi-search" aria-hidden="true" />
+                <span className="visually-hidden">Search</span>
+              </button>
+            </form>
             <button
-              type="submit"
-              className="btn btn-outline-light btn-sm sidebar-button"
-              title="Search buckets and objects: text, wild*card? or rx:regular expression"
+              type="button"
+              className="btn btn-outline-light btn-sm sidebar-button sidebar-search-open"
+              onClick={openSearch}
+              aria-label="Show the search field"
+              title="Search buckets and objects"
             >
               <i className="bi bi-search" aria-hidden="true" />
-              <span className="visually-hidden">Search</span>
             </button>
-          </form>
-          <button
-            type="button"
-            className="btn btn-outline-light btn-sm sidebar-button sidebar-search-open"
-            onClick={openSearch}
-            aria-label="Show the search field"
-            title="Search buckets and objects"
-          >
-            <i className="bi bi-search" aria-hidden="true" />
-          </button>
-          <nav className="sections" aria-label="Sections">
-            <ul className="nav nav-pills flex-column">
-              {SECTIONS.map((section) => (
-                <li className="nav-item" key={section.segment}>
-                  <a
-                    className={section.segment === active ? 'nav-link active' : 'nav-link'}
-                    href={routeHref([section.segment])}
-                    aria-current={section.segment === active ? 'page' : undefined}
-                    title={folded ? section.label : undefined}
-                  >
-                    <i className={`bi ${section.icon}`} aria-hidden="true" />
-                    <span className="nav-label">{section.label}</span>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </nav>
-          <div className="sidebar-session">
-            <span className="sidebar-user">
-              <i className="bi bi-person-circle" aria-hidden="true" />
-              <span className="nav-label">Signed in as {identity.user ?? identity.kind}</span>
-            </span>
-            <button
-              ref={signOutButton}
-              type="button"
-              className="btn btn-outline-light btn-sm sidebar-button"
-              onClick={signOut}
-              title="End this session"
-            >
-              <i className="bi bi-box-arrow-right" aria-hidden="true" />
-              <span className="nav-label">Sign out</span>
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline-light btn-sm sidebar-button sidebar-fold"
-              onClick={fold}
-              aria-pressed={folded}
-              aria-label="Show icons only"
-              title={folded ? 'Show the names of the sections' : 'Fold the navigation to icons'}
-            >
-              <i className={folded ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left'} aria-hidden="true" />
-              <span className="nav-label" aria-hidden="true">
-                Fold
+            <nav className="sections" aria-label="Sections">
+              <ul className="nav nav-pills flex-column">
+                {SECTIONS.map((section) => (
+                  <li className="nav-item" key={section.segment}>
+                    <a
+                      className={section.segment === active ? 'nav-link active' : 'nav-link'}
+                      href={routeHref([section.segment])}
+                      aria-current={section.segment === active ? 'page' : undefined}
+                      title={folded ? section.label : undefined}
+                    >
+                      <i className={`bi ${section.icon}`} aria-hidden="true" />
+                      <span className="nav-label">{section.label}</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+            <div className="sidebar-session">
+              <span className="sidebar-user">
+                <i className="bi bi-person-circle" aria-hidden="true" />
+                <span className="nav-label">Signed in as {identity.user ?? identity.kind}</span>
               </span>
-            </button>
-          </div>
-        </header>
-        <ActivityBar
-          leaving={
-            leaving
-              ? {
-                  onLeave: () => {
-                    setLeaving(false);
-                    uploads.cancelAll();
-                    deletions.cancelAll();
-                    onSignOut();
-                  },
-                  onStay: () => {
-                    setLeaving(false);
-                    // The answer was given in the bar, and the question goes
-                    // with it: the keyboard returns to where it was asked.
-                    signOutButton.current?.focus();
-                  },
-                }
-              : null
-          }
-        />
+              <button
+                ref={signOutButton}
+                type="button"
+                className="btn btn-outline-light btn-sm sidebar-button"
+                onClick={signOut}
+                title="End this session"
+              >
+                <i className="bi bi-box-arrow-right" aria-hidden="true" />
+                <span className="nav-label">Sign out</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline-light btn-sm sidebar-button sidebar-fold"
+                onClick={fold}
+                aria-pressed={folded}
+                aria-label="Show icons only"
+                title={folded ? 'Show the names of the sections' : 'Fold the navigation to icons'}
+              >
+                <i className={folded ? 'bi bi-chevron-double-right' : 'bi bi-chevron-double-left'} aria-hidden="true" />
+                <span className="nav-label" aria-hidden="true">
+                  Fold
+                </span>
+              </button>
+            </div>
+          </header>
+          <ActivityBar
+            leaving={
+              leaving
+                ? {
+                    onLeave: () => {
+                      setLeaving(false);
+                      uploads.cancelAll();
+                      deletions.cancelAll();
+                      onSignOut();
+                    },
+                    onStay: () => {
+                      setLeaving(false);
+                      // The answer was given in the bar, and the question goes
+                      // with it: the keyboard returns to where it was asked.
+                      signOutButton.current?.focus();
+                    },
+                  }
+                : null
+            }
+          />
+        </div>
+        <main className="screen">{children}</main>
       </div>
-      <main className="screen">{children}</main>
-    </div>
+    </UpdatesNoticeContext.Provider>
   );
 }

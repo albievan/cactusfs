@@ -657,8 +657,9 @@ func TestMetricsCarryNoTenantData(t *testing.T) {
 	}
 	// reason is why a handshake was refused, side is which end of a call
 	// between nodes this node was, drive is the generated ID of a drive:
-	// each a set that the binary fixes, none a name a tenant chose.
-	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile|reason|side|drive)$`)
+	// each a set that the binary fixes, none a name a tenant chose; so is
+	// outcome, of a check for releases and of an upgrade.
+	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile|reason|side|drive|outcome)$`)
 	for _, family := range families {
 		if !strings.HasPrefix(family.GetName(), "cactusfs_") {
 			continue

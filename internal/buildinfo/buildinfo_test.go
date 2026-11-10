@@ -207,3 +207,57 @@ func TestGet(t *testing.T) {
 		t.Errorf("Commit = %q, want at most %d characters of the hash", got.Commit, commitLength)
 	}
 }
+
+func TestResolvePackaging(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		injected string
+		want     string
+	}{
+		{injected: "", want: PackagingBinary},
+		{injected: "image", want: PackagingImage},
+		{injected: " image\n", want: PackagingImage},
+		{injected: "binary", want: PackagingBinary},
+		// Only an image is ever told; anything else is no reason to
+		// believe the binary is not its own.
+		{injected: "Image", want: PackagingBinary},
+		{injected: "container", want: PackagingBinary},
+	}
+	for _, tt := range tests {
+		t.Run(tt.injected, func(t *testing.T) {
+			t.Parallel()
+			if got := resolvePackaging(tt.injected); got != tt.want {
+				t.Errorf("resolvePackaging(%q) = %q, want %q", tt.injected, got, tt.want)
+			}
+		})
+	}
+	// The test binary was built by go test, which injects nothing.
+	if got := Packaging(); packaging == "" && got != PackagingBinary {
+		t.Errorf("Packaging() = %q, want %q", got, PackagingBinary)
+	}
+}
+
+// The product image says it is one, so that its binary never tries to
+// replace itself; the binaries of make build and make build-all do not, and
+// may.
+func TestOnlyTheImageIsBuiltAsAnImage(t *testing.T) {
+	t.Parallel()
+
+	repo := os.DirFS("../..")
+	const flag = "-X github.com/albievan/cactusfs/internal/buildinfo.packaging=image"
+	dockerfile, err := fs.ReadFile(repo, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(dockerfile), flag); got != 1 {
+		t.Errorf("the Dockerfile passes %q %d times, want once (the build of the product binary)", flag, got)
+	}
+	makefile, err := fs.ReadFile(repo, "Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(makefile), "packaging=") {
+		t.Error("the Makefile tells a binary how it is packaged: only the image's build may")
+	}
+}

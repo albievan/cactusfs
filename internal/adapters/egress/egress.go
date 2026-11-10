@@ -16,6 +16,13 @@
 //   - an error names the origin of a request - its scheme, host and port -
 //     and never its path or query, which may hold a token.
 //
+// ADR-0029 amends two of these for the update client only, through fields
+// of Policy whose zero values are the rules above: Redirects lets it
+// follow up to MaxRedirects redirects, each to https only, each hop dialled
+// under the same address check and sent without Authorization, Cookie,
+// Proxy-Authorization or Referer; MaxResponseBody lets it read a body of up
+// to MaxResponseBodyLimit.
+//
 // The rules that judge an address are the domain's; this package applies
 // them to sockets.
 package egress
@@ -33,6 +40,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -54,8 +62,15 @@ const (
 	// MinResponseTimeout is the shortest response timeout a policy may
 	// have.
 	MinResponseTimeout = time.Millisecond
-	// MaxResponseBody is the most of a response body that is ever read.
+	// MaxResponseBody is the most of a response body that is read when the
+	// policy says nothing (Policy.MaxResponseBody is zero).
 	MaxResponseBody = 64 << 10
+	// MaxResponseBodyLimit is the most a policy may let be read of a
+	// response body: a binary of a release (ADR-0029).
+	MaxResponseBodyLimit = 256 << 20
+	// MaxRedirects is the most redirects a policy may let be followed
+	// (ADR-0029).
+	MaxRedirects = 3
 	// maxResponseHeader bounds the headers of a response.
 	maxResponseHeader = 64 << 10
 	// maxAddresses is the most addresses of one name that are tried.
@@ -75,9 +90,10 @@ var (
 	ErrRedirect = errors.New("egress: redirect not followed")
 	// ErrNotTLS is a request that would be sent in the clear.
 	ErrNotTLS = errors.New("egress: only https is sent")
-	// ErrResponseTooLarge is a response body longer than MaxResponseBody,
-	// read to that bound.
-	ErrResponseTooLarge = errors.New("egress: response body larger than 64 KiB")
+	// ErrResponseTooLarge is a response body longer than the policy's
+	// bound (MaxResponseBody unless the policy says otherwise), read to
+	// that bound.
+	ErrResponseTooLarge = errors.New("egress: response body larger than the bound")
 	// errPolicy is a policy that cannot be applied.
 	errPolicy = errors.New("egress: invalid policy")
 )
@@ -107,6 +123,16 @@ type Policy struct {
 	ResponseTimeout time.Duration
 	// Resolver looks names up; nil is net.DefaultResolver.
 	Resolver Resolver
+	// MaxResponseBody is the most of a response body that is read. Zero
+	// is MaxResponseBody (64 KiB, ADR-0023); a negative bound or one above
+	// MaxResponseBodyLimit is refused.
+	MaxResponseBody int64
+	// Redirects is how many redirects are followed. Zero follows none,
+	// as ADR-0023 says for every client but the update client; more than
+	// MaxRedirects, or a negative number, is refused. A redirect is
+	// followed only to https, its address judged as the first one's is,
+	// and without Authorization, Cookie, Proxy-Authorization or Referer.
+	Redirects int
 }
 
 // TLSConfig returns the TLS configuration of a connection under the policy:
@@ -133,9 +159,10 @@ type Client struct {
 // an error, which names the scheme, the host and the port of r and nothing
 // of its path or its query, comes without a response, and has a class
 // (delivery.ClassOf): a redirect, an address refused, a timeout, a failed
-// handshake or a failed connection. The body of a response is read to
-// MaxResponseBody at most, and a longer one fails with ErrResponseTooLarge
-// there.
+// handshake or a failed connection. The body of a response is read to the
+// policy's bound at most, and a longer one fails with ErrResponseTooLarge
+// there. A response is never a redirect: one that is not followed is an
+// error of ErrRedirect.
 //
 // A connection must make progress within the response timeout, reading or
 // writing: a request body that the caller's reader hands over more slowly
@@ -143,6 +170,13 @@ type Client struct {
 func (c *Client) Do(r *http.Request) (*http.Response, error) {
 	resp, err := c.http.Do(r)
 	if err == nil {
+		if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+			// A redirect http.Client hands back instead of following it:
+			// one without a Location, or a 307 or 308 of a body that
+			// cannot be sent again. It is not followed, and not an answer.
+			_ = resp.Body.Close()
+			return nil, &url.Error{Op: urlOp(r.Method), URL: origin(r.URL), Err: delivery.Failed(delivery.ClassRedirect, ErrRedirect)}
+		}
 		return resp, nil
 	}
 	if resp != nil && resp.Body != nil {
@@ -195,6 +229,15 @@ func (c *Client) CloseIdleConnections() {
 	c.http.CloseIdleConnections()
 }
 
+// urlOp returns the Op of a url.Error of a request of that method, as
+// http.Client names it: "Get" of GET.
+func urlOp(method string) string {
+	if method == "" {
+		return "Get"
+	}
+	return method[:1] + strings.ToLower(method[1:])
+}
+
 // origin returns the scheme, the host and the port of u.
 func origin(u *url.URL) string {
 	if u == nil {
@@ -204,8 +247,9 @@ func origin(u *url.URL) string {
 }
 
 // NewClient returns an HTTP client and a dial function that apply the
-// policy. The client follows no redirect, uses no proxy, sends nothing but
-// https, and bounds every response body to MaxResponseBody; it has no
+// policy. The client follows the redirects the policy allows (none unless
+// it says so), uses no proxy, sends nothing but https, and bounds every
+// response body to the policy's bound; it has no
 // overall timeout - the context of a request is its deadline - but a
 // connection that makes no progress for the response timeout, reading or
 // writing, fails.
@@ -217,6 +261,15 @@ func NewClient(policy Policy) (*Client, DialFunc, error) {
 		// Shorter, half of it - how long a connection is kept idle -
 		// would be no time, which http.Transport takes for no limit.
 		return nil, nil, fmt.Errorf("egress.NewClient: %w: a response timeout of less than %s", errPolicy, MinResponseTimeout)
+	}
+	switch {
+	case policy.MaxResponseBody == 0:
+		policy.MaxResponseBody = MaxResponseBody
+	case policy.MaxResponseBody < 0 || policy.MaxResponseBody > MaxResponseBodyLimit:
+		return nil, nil, fmt.Errorf("egress.NewClient: %w: a response body bound outside 1 to %d bytes", errPolicy, MaxResponseBodyLimit)
+	}
+	if policy.Redirects < 0 || policy.Redirects > MaxRedirects {
+		return nil, nil, fmt.Errorf("egress.NewClient: %w: more than %d redirects, or fewer than none", errPolicy, MaxRedirects)
 	}
 	allow := make([]netip.Prefix, 0, len(policy.Allow))
 	for _, prefix := range policy.Allow {
@@ -263,27 +316,54 @@ func NewClient(policy Policy) (*Client, DialFunc, error) {
 		DisableCompression: true,
 		IdleConnTimeout:    keep,
 	}
+	redirects := policy.Redirects
 	client := &http.Client{
-		Transport: bounded{next: transport},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+		// Every hop goes through this transport, so its address is judged
+		// in the dialer's Control hook as the first one's is.
+		Transport: bounded{next: transport, limit: policy.MaxResponseBody, redirects: redirects},
+		// No cookie jar: no cookie is ever sent or kept.
+		Jar: nil,
+		CheckRedirect: func(next *http.Request, via []*http.Request) error {
+			return checkRedirect(next, via, redirects)
 		},
 	}
 	return &Client{http: client}, d.dial, nil
 }
 
+// checkRedirect is the CheckRedirect of a client that follows up to
+// redirects: the next hop is https, within the count, and carries no
+// credential, cookie or Referer - http.Client copies the first request's
+// headers to it and keeps some of them for a host it thinks is the same;
+// here none is kept, whatever the host.
+func checkRedirect(next *http.Request, via []*http.Request, redirects int) error {
+	if len(via) > redirects {
+		return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+	}
+	if next.URL == nil || next.URL.Scheme != "https" {
+		return delivery.Failed(delivery.ClassRedirect, fmt.Errorf("%w: %w", ErrRedirect, ErrNotTLS))
+	}
+	for _, name := range []string{"Authorization", "Cookie", "Proxy-Authorization", "Referer"} {
+		next.Header.Del(name)
+	}
+	return nil
+}
+
 // Discard reads what is left of a response body, to MaxResponseBody at
-// most, throws it away and closes the body. A body of this client is read
-// to its end, so that its connection is kept for the next request; a
-// longer one is no error here: it is not read past the bound. A body of
-// another client is read to MaxResponseBody.
+// most, throws it away and closes the body. A body of this client of up to
+// MaxResponseBody is read to its end, so that its connection is kept for
+// the next request; a longer one is no error here: it is read to
+// MaxResponseBody and a byte past it - past its own bound neither - and
+// closed. A body of another client is read to MaxResponseBody.
 func Discard(resp *http.Response) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-	var body io.Reader = resp.Body
-	if _, ours := resp.Body.(*limitedBody); !ours {
-		body = io.LimitReader(resp.Body, MaxResponseBody)
+	body := io.LimitReader(resp.Body, MaxResponseBody)
+	if _, ours := resp.Body.(*limitedBody); ours {
+		// The byte past MaxResponseBody is the read that sees the end of
+		// a body of exactly MaxResponseBody, or the bound of one of
+		// MaxResponseBody under the default policy.
+		body = io.LimitReader(resp.Body, MaxResponseBody+1)
 	}
 	_, err := io.Copy(io.Discard, body)
 	if errors.Is(err, ErrResponseTooLarge) {
@@ -506,10 +586,13 @@ func (c *progressConn) ConnectionState() tls.ConnectionState {
 	return tls.ConnectionState{}
 }
 
-// bounded sends https only, bounds every response body to
-// MaxResponseBody, and fills in the TLS state of a response.
+// bounded sends https only, bounds every response body to limit, fills in
+// the TLS state of a response, and refuses every redirect but those it may
+// hand to http.Client to follow: none when redirects is zero.
 type bounded struct {
-	next http.RoundTripper
+	next      http.RoundTripper
+	limit     int64
+	redirects int
 }
 
 // CloseIdleConnections closes the idle connections of the transport it
@@ -551,20 +634,51 @@ func (b bounded) RoundTrip(r *http.Request) (*http.Response, error) {
 		resp.TLS = &connection
 	}
 	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
-		// Refused here, before http.Client reads Location: a redirect is
-		// never followed, and what it points to - which a malformed
-		// Location would put in an error - is never looked at.
-		_ = resp.Body.Close()
-		return nil, delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+		if err := b.followable(r, resp); err != nil {
+			// Refused here, before http.Client reads Location: what a
+			// redirect that is not followed points to - which a malformed
+			// Location would put in an error - is never looked at.
+			_ = resp.Body.Close()
+			return nil, err
+		}
 	}
-	if resp.ContentLength > MaxResponseBody {
+	if resp.ContentLength > b.limit {
 		resp.ContentLength = -1
 	}
-	resp.Body = &limitedBody{body: resp.Body, left: MaxResponseBody}
+	resp.Body = &limitedBody{body: resp.Body, left: b.limit}
 	return resp, nil
 }
 
-// limitedBody is a response body read to MaxResponseBody. What is longer
+// followable returns nil when resp is a redirect that http.Client may
+// follow: the policy follows redirects, the status is one that redirects
+// to its Location (301, 302, 303, 307, 308), and the Location parses into
+// an https address. Anything else is ErrRedirect, of class redirect;
+// checkRedirect counts the hops and judges the request made of it again.
+func (b bounded) followable(r *http.Request, resp *http.Response) error {
+	if b.redirects == 0 {
+		return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+	}
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+	}
+	location := resp.Header.Get("Location")
+	if location == "" {
+		return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+	}
+	next, err := r.URL.Parse(location)
+	if err != nil {
+		return delivery.Failed(delivery.ClassRedirect, ErrRedirect)
+	}
+	if next.Scheme != "https" {
+		return delivery.Failed(delivery.ClassRedirect, fmt.Errorf("%w: %w", ErrRedirect, ErrNotTLS))
+	}
+	return nil
+}
+
+// limitedBody is a response body read to the policy's bound. What is longer
 // ends in ErrResponseTooLarge, not in io.EOF: a body cut at the bound is not
 // taken for a whole one.
 type limitedBody struct {

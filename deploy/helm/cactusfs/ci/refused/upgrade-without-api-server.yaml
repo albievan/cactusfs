@@ -1,0 +1,3 @@
+# expect: upgrade.fromConsole.apiServer.cidrs: an upgrade from the console
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+upgrade: {fromConsole: {enabled: true}}

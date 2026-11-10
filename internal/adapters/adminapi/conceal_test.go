@@ -204,9 +204,10 @@ func TestTheWalkOfTheContractFindsEverySecret(t *testing.T) {
 // other operation.
 func TestEverySecretOfTheContractIsConcealed(t *testing.T) {
 	t.Parallel()
-	// Sign-in and unlocking carry a password, and keep no answer: their
-	// requests are carried out again whatever key they come with.
-	want := contractSecrets(t, openapi.AdminJSON(), "signIn", "unlockSession")
+	// Sign-in, unlocking and starting an upgrade carry a password, and keep
+	// no answer: their requests are carried out again whatever key they
+	// come with.
+	want := contractSecrets(t, openapi.AdminJSON(), "signIn", "unlockSession", "startUpgrade")
 	got := map[string]bool{}
 	for pattern := range adminapi.ConcealedOperations() {
 		got[pattern] = true
