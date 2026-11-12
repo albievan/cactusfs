@@ -449,8 +449,20 @@ func (c *testCluster) register(ids ...string) {
 			ID: id, RPCAddr: id + ":9002", RaftAddr: c.members[id].RaftAddr, Roles: cluster.AllRoles(),
 			MetadataVersion: int(store.supported),
 		}
-		if err := store.SetNode(c.t.Context(), node); err != nil {
-			c.t.Fatalf("SetNode %s: %v", id, err)
+		// A node registers until it is heard, as cactusfs does when it
+		// starts: a leader can be lost while the entry is committed on a
+		// busy runner, and setting the same node again changes nothing.
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			err := store.SetNode(c.t.Context(), node)
+			if err == nil {
+				break
+			}
+			transient := errors.Is(err, domain.ErrNotLeader) || errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrOutcomeUnknown)
+			if !transient || time.Now().After(deadline) {
+				c.t.Fatalf("SetNode %s: %v", id, err)
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 }

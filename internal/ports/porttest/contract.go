@@ -1413,15 +1413,28 @@ func lockContract(t *testing.T, store Metadata) {
 	if exists(0x40) {
 		t.Error("a refused put left a version")
 	}
-	short := 1500 * time.Millisecond
-	if _, err := put(0x50, object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: time.Now().Add(short)}}); err != nil {
-		t.Fatal(err)
+	// The store judges a lock at the time of the change, and a put and a
+	// remove can take longer than a short retention on a busy runner: a
+	// cluster forwards both to its leader. A remove that was let through
+	// after the retention may have ended proves nothing, so the retention
+	// is tried again twice as long - with the next version - until the
+	// remove was certainly judged before it ended.
+	short, fill := 1500*time.Millisecond, byte(0x50)
+	for ; ; short, fill = 2*short, fill+1 {
+		until := time.Now().Add(short)
+		if _, err := put(fill, object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: until}}); err != nil {
+			t.Fatal(err)
+		}
+		err := remove(fill, true)
+		if errors.Is(err, domain.ErrObjectLocked) {
+			time.Sleep(time.Until(until) + 500*time.Millisecond)
+			break
+		}
+		if err != nil || time.Now().Before(until) || fill == 0x54 {
+			t.Fatalf("removing a version whose retention has not ended = %v", err)
+		}
 	}
-	if err := remove(0x50, true); !errors.Is(err, domain.ErrObjectLocked) {
-		t.Fatalf("removing a version whose retention has not ended = %v", err)
-	}
-	time.Sleep(short + 500*time.Millisecond)
-	if err := remove(0x50, false); err != nil {
+	if err := remove(fill, false); err != nil {
 		t.Fatalf("removing a version whose compliance retention has ended: %v", err)
 	}
 
