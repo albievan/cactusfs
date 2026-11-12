@@ -3,7 +3,7 @@ import { useCallback, useState } from 'react';
 import { api, ApiError, unwrap } from '../api/client';
 import { navigate, routeHref } from '../router';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { formatTime, joinNames } from '../ui/format';
+import { formatPolicyDocument, formatTime, joinNames } from '../ui/format';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { NamesEditor } from '../ui/NamesEditor';
@@ -125,8 +125,6 @@ export function RoleScreen({ name }: RoleScreenProps) {
 function RolePolicy({ name, action }: { name: string; action: Action }) {
   const load = useCallback(() => unwrap(api.GET('/policies/{name}', { params: { path: { name } } })), [name]);
   const policy = useLoad(load);
-  // Counts the saves, so that after one the editor shows what was stored.
-  const [saved, setSaved] = useState(0);
 
   if (policy.data === undefined) {
     const missing = policy.error instanceof ApiError && policy.error.problem.status === 404;
@@ -151,13 +149,13 @@ function RolePolicy({ name, action }: { name: string; action: Action }) {
         </p>
       )}
       <PolicyEditor
-        key={`${name} ${String(saved)}`}
+        // A fresh editor for every document the API returns: after a save,
+        // once the stored one has been read again, and not before - until
+        // then the policy loaded is the one before the save.
+        key={`${name}\n${formatPolicyDocument(policy.data.document)}`}
         policy={policy.data}
         action={action}
-        onSaved={() => {
-          setSaved((count) => count + 1);
-          policy.reload();
-        }}
+        onSaved={policy.reload}
       />
     </>
   );

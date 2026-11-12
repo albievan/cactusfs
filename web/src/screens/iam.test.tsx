@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, expect, it } from 'vitest';
 
 import { fakeApi, json, noContent, problem } from '../test/fakeApi';
+import { formatPolicyDocument } from '../ui/format';
 import { ApiKeys } from './ApiKeys';
 import { GroupsScreen } from './GroupsScreen';
 import { PoliciesScreen } from './PoliciesScreen';
@@ -473,6 +474,38 @@ describe('one role', () => {
     await waitFor(() => {
       expect(body(api.callsTo('PUT', '/policies/put-only')[0])).toEqual({ document: changed });
     });
+  });
+
+  it('shows the stored document after a save, not the one before it', async () => {
+    const original = { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 's3:PutObject', Resource: '*' }] };
+    const changed = { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 's3:GetObject', Resource: '*' }] };
+    let stored = { name: 'put-only', built_in: false, created_at: CREATED, document: original };
+    const api = fakeApi({
+      'GET /roles/uploader': () =>
+        json(200, { name: 'uploader', policies: ['put-only'], built_in: false, created_at: CREATED }),
+      'GET /policies/put-only': () => json(200, stored),
+      'PUT /policies/put-only': () => {
+        stored = { ...stored, document: changed };
+        return json(200, stored);
+      },
+    });
+    render(<RoleScreen name="uploader" />);
+
+    const label = 'Policy document of put-only as JSON';
+    const before = (await screen.findByLabelText(label)) as HTMLTextAreaElement;
+    expect(before.value).toBe(formatPolicyDocument(original));
+    // Typed without the layout the console gives a document: what is shown
+    // after the save is what the API stored and returned, laid out again.
+    fireEvent.change(before, { target: { value: JSON.stringify(changed) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+
+    await waitFor(() => {
+      expect(api.callsTo('GET', '/policies/put-only')).toHaveLength(2);
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText(label) as HTMLTextAreaElement).value).toBe(formatPolicyDocument(changed));
+    });
+    expect((screen.getByLabelText(label) as HTMLTextAreaElement).value).not.toContain('s3:PutObject');
   });
 
   it('gives the role other policies, and deletes it', async () => {
