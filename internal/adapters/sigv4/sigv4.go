@@ -107,17 +107,35 @@ func CanonicalQuery(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	type pair struct{ name, value string }
 	parts := strings.Split(raw, "&")
-	pairs := make([]string, 0, len(parts))
+	pairs := make([]pair, 0, len(parts))
 	for _, part := range parts {
 		if part == "" {
 			continue
 		}
 		name, value, _ := strings.Cut(part, "=")
-		pairs = append(pairs, URIEncode(unescape(name), true)+"="+URIEncode(unescape(value), true))
+		pairs = append(pairs, pair{URIEncode(unescape(name), true), URIEncode(unescape(value), true)})
 	}
-	slices.Sort(pairs)
-	return strings.Join(pairs, "&")
+	// Sorted by encoded name, then by encoded value - not as the strings
+	// "name=value", which would put x-amz-meta-foo-bar before
+	// x-amz-meta-foo because '-' sorts before '='.
+	slices.SortFunc(pairs, func(a, b pair) int {
+		if c := strings.Compare(a.name, b.name); c != 0 {
+			return c
+		}
+		return strings.Compare(a.value, b.value)
+	})
+	var b strings.Builder
+	for i, p := range pairs {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(p.name)
+		b.WriteByte('=')
+		b.WriteString(p.value)
+	}
+	return b.String()
 }
 
 // unescape decodes one component of a query string as

@@ -297,8 +297,12 @@ func TestCanonicalQuery(t *testing.T) {
 		"k=a%2Bb": "k=a%2Bb",
 		"k=a%20b": "k=a%20b",
 		"a+b=1":   "a%20b=1",
-		"&&a=1&":  "a=1",
-		"k=%zz":   "k=%25zz",
+		// By name, then by value: a name that is the start of another
+		// comes first, whatever follows it.
+		"x-amz-meta-foo-bar=2&x-amz-meta-foo=1": "x-amz-meta-foo=1&x-amz-meta-foo-bar=2",
+		"a-b=1&a=2&a=1":                         "a=1&a=2&a-b=1",
+		"&&a=1&":                                "a=1",
+		"k=%zz":                                 "k=%25zz",
 	}
 	for raw, want := range tests {
 		if got := canonicalQuery(raw); got != want {
