@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { fakeApi, json, noContent, problem } from '../test/fakeApi';
 import { formatPolicyDocument } from '../ui/format';
@@ -199,6 +199,33 @@ describe('API keys', () => {
     expect(screen.queryByText(secret)).toBeNull();
     expect(screen.queryByText(/Copy the secret key now/)).toBeNull();
     expect(document.body.innerHTML).not.toContain(secret);
+  });
+
+  it.each([
+    ['copies the secret key', () => Promise.resolve(), 'Copied.'],
+    ['says so when the browser refuses to copy', () => Promise.reject(new DOMException('Denied', 'NotAllowedError')), 'Could not copy: select the text and copy it.'],
+    ['says so when there is no clipboard', undefined, 'Could not copy: select the text and copy it.'],
+  ])('%s', async (_, write: (() => Promise<void>) | undefined, said) => {
+    const secret = 'wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY';
+    const writeText = write === undefined ? undefined : vi.fn(write);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: writeText === undefined ? undefined : { writeText } });
+    fakeApi({
+      'GET /users/bob/keys': () => json(200, []),
+      'POST /users/bob/keys': () => json(201, { key, secret_key: secret }),
+    });
+    render(<ApiKeys user="bob" />);
+    await screen.findByText('This user has no API keys.');
+    fireEvent.click(screen.getByRole('button', { name: 'Create API key' }));
+    expect(await screen.findByText(secret)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy secret key' }));
+
+    expect(await screen.findByText(said)).toBeDefined();
+    if (writeText !== undefined) {
+      expect(writeText).toHaveBeenCalledWith(secret);
+    }
+    // Whatever the clipboard did, the key is still there to be selected.
+    expect(screen.getByText(secret)).toBeDefined();
   });
 
   it('creates a key with nothing but defaults', async () => {

@@ -189,12 +189,24 @@ export function ApiKeys({ user }: ApiKeysProps) {
 }
 
 function NewKeyNotice({ created, onDone }: { created: APIKeyCreated; onDone: () => void }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'copied' | 'failed' | null>(null);
 
+  // A page that is not a secure context has no clipboard, and a browser may
+  // refuse to write to it: either way the key is shown, and is selected by hand.
   const copy = () => {
-    void navigator.clipboard.writeText(created.secret_key).then(() => {
-      setCopied(true);
-    });
+    const clipboard = navigator.clipboard as Clipboard | undefined;
+    if (clipboard === undefined) {
+      setCopied('failed');
+      return;
+    }
+    clipboard.writeText(created.secret_key).then(
+      () => {
+        setCopied('copied');
+      },
+      () => {
+        setCopied('failed');
+      },
+    );
   };
 
   return (
@@ -227,7 +239,9 @@ function NewKeyNotice({ created, onDone }: { created: APIKeyCreated; onDone: () 
         >
           <i className="bi bi-check-lg" aria-hidden="true" /> I have copied it
         </button>
-        <span role="status">{copied ? 'Copied.' : ''}</span>
+        <span role="status">
+          {copied === 'copied' ? 'Copied.' : copied === 'failed' ? 'Could not copy: select the text and copy it.' : ''}
+        </span>
       </div>
     </div>
   );
