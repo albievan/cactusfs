@@ -622,21 +622,27 @@ func TestConsoleSession(t *testing.T) {
 		t.Errorf("the cookie has a Domain, or the session token is in the body: %q", cookie)
 	}
 
-	var who struct{ Kind, Via, User string }
+	var who struct {
+		Kind, Via, User string
+		CSRFToken       string `json:"csrf_token"`
+	}
 	f.must(http.StatusOK, call{method: "GET", path: "/session", client: client}).decode(t, &who)
-	if who.Kind != "user" || who.Via != "session" || who.User != "carol" {
-		t.Errorf("GET /session = %+v", who)
+	// The CSRF token of the session is told again, to whoever has its
+	// cookie: it is the one sign-in returned.
+	if who.Kind != "user" || who.Via != "session" || who.User != "carol" || who.CSRFToken != csrf {
+		t.Errorf("GET /session = %+v, want carol's session with CSRF token %q", who, csrf)
 	}
 	f.must(http.StatusOK, call{method: "GET", path: "/buckets", client: client})
 	// The cookie alone changes nothing: that is what another site could
-	// make the browser send.
+	// make the browser send. The refusal is a 403 with a code of its own,
+	// not the 401 that ends a console's session: the session is there.
 	create := call{method: "POST", path: "/buckets", client: client, body: map[string]any{"name": "carols"}}
-	if r := f.do(create); r.status != http.StatusUnauthorized {
-		t.Fatalf("a change without the CSRF token = %d, want 401", r.status)
-	}
-	create.headers = map[string]string{httpsession.CSRFHeader: "not-the-token"}
-	if r := f.do(create); r.status != http.StatusUnauthorized {
-		t.Fatalf("a change with a wrong CSRF token = %d, want 401", r.status)
+	for _, token := range []string{"", "not-the-token"} {
+		create.headers = map[string]string{httpsession.CSRFHeader: token}
+		r := f.do(create)
+		if r.status != http.StatusForbidden || r.problem(t)["code"] != "CSRFTokenInvalid" {
+			t.Fatalf("a change with the CSRF token %q = %d %s, want 403 CSRFTokenInvalid", token, r.status, r.body)
+		}
 	}
 	create.headers = map[string]string{httpsession.CSRFHeader: csrf}
 	f.must(http.StatusCreated, create)
@@ -673,6 +679,64 @@ func TestConsoleSession(t *testing.T) {
 	}
 	if strings.Contains(f.logs.String(), password) || strings.Contains(fmt.Sprint(f.trail()), password) {
 		t.Fatal("a password is in the log or the audit trail")
+	}
+}
+
+// TestConsoleSessionOfAnotherTab: the cookie is the browser's, the CSRF
+// token a tab's. When a second tab signs in, the first tab's token is
+// refused with CSRFTokenInvalid - never a 401 - and GET /session tells that
+// tab who the session is now, and its token, which is accepted.
+func TestConsoleSessionOfAnotherTab(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	const password = "correct horse battery"
+	for _, name := range []string{"carol", "dave"} {
+		f.must(http.StatusCreated, call{method: "POST", path: "/users", body: map[string]any{
+			"name": name, "roles": []string{iam.RoleBucketAdmin}, "password": password,
+		}})
+	}
+	browser, firstTab, r := signIn(t, f, "carol", password)
+	if r.status != http.StatusOK || firstTab == "" {
+		t.Fatalf("sign-in of the first tab = %d %s", r.status, r.body)
+	}
+	// The second tab of the same browser: the same cookie jar.
+	var second struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	f.must(http.StatusOK, call{method: "POST", path: "/session", client: browser, body: map[string]any{"username": "dave", "password": password}}).
+		decode(t, &second)
+	if second.CSRFToken == "" || second.CSRFToken == firstTab {
+		t.Fatalf("the second sign-in's CSRF token = %q, the first's %q", second.CSRFToken, firstTab)
+	}
+
+	create := call{
+		method: "POST", path: "/buckets", client: browser, body: map[string]any{"name": "first-tab"},
+		headers: map[string]string{httpsession.CSRFHeader: firstTab},
+	}
+	refused := f.do(create)
+	if refused.status != http.StatusForbidden || refused.problem(t)["code"] != "CSRFTokenInvalid" {
+		t.Fatalf("a change of the first tab = %d %s, want 403 CSRFTokenInvalid", refused.status, refused.body)
+	}
+
+	var who struct {
+		User      string
+		CSRFToken string `json:"csrf_token"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/session", client: browser}).decode(t, &who)
+	if who.User != "dave" || who.CSRFToken != second.CSRFToken {
+		t.Fatalf("GET /session from the first tab = %+v, want dave with the second sign-in's token", who)
+	}
+	create.headers = map[string]string{httpsession.CSRFHeader: who.CSRFToken}
+	f.must(http.StatusCreated, create)
+
+	// An API key has no session, and no CSRF token is told.
+	var keyed map[string]any
+	f.must(http.StatusOK, call{method: "GET", path: "/session"}).decode(t, &keyed)
+	if _, told := keyed["csrf_token"]; told {
+		t.Errorf("GET /session with an API key tells a CSRF token: %v", keyed)
+	}
+	if strings.Contains(f.logs.String(), who.CSRFToken) || strings.Contains(fmt.Sprint(f.trail()), who.CSRFToken) {
+		t.Fatal("a CSRF token is in the log or the audit trail")
 	}
 }
 

@@ -138,6 +138,18 @@ keeps it in the page only.
   Content-Security-Policy: no inline script or style, nothing from another host.
 - The CSRF token is kept in the tab's `sessionStorage`. A second tab has the cookie but
   not the token, and signs in again.
+  *Amended 2026-11-12 (audit M1):* the cookie is the browser's and the token a tab's, so
+  a second sign-in, or an unlock, in one tab left every other tab with a token the
+  session no longer had - each change refused for good, while its reads ran as the
+  other tab's user. The CSRF token is now HMAC-SHA256 of a fixed label keyed with the
+  session token (`internal/app/csrf.go`), so the server can tell it again: `GET
+  /session` returns it (`csrf_token`) to whoever holds the cookie, which a page of
+  another origin can neither read nor compute. A change without it is answered 403
+  `CSRFTokenInvalid` instead of 401. The console takes the token and the identity from
+  `GET /session` on load, when a change is refused so, and when the tab is shown again;
+  a session of another user gets screens of its own. The stored record is unchanged
+  (its CSRF hash), so a session begun by a node of the release before keeps its drawn
+  token, which `GET /session` leaves out, for its lifetime.
 
 ### Cluster status
 

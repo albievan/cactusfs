@@ -89,10 +89,30 @@ func (o *operations) GetSession(ctx context.Context, _ api.GetSessionRequestObje
 			return nil, err
 		}
 		identity.Locked, identity.ExpiresAt, identity.LockEndsAt = &status.Locked, &status.ExpiresAt, timeOrNil(status.LockEndsAt)
+		identity.CsrfToken, err = o.csrfTokenOf(ctx, info.token)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		identity.AccessKeyId = &info.principal.AccessKeyID
 	}
 	return api.GetSession200JSONResponse(identity), nil
+}
+
+// csrfTokenOf is the CSRF token of the session of token as GET /session
+// tells it to the browser that holds the session's cookie, so that every
+// tab holds the token of the session there is now; nil when the use case
+// has none to tell.
+func (o *operations) csrfTokenOf(ctx context.Context, token string) (*string, error) {
+	csrf, err := o.h.cfg.Sessions.CSRFToken(ctx, token)
+	if errors.Is(err, domain.ErrAccessDenied) {
+		// It ended between the authentication of this request and now.
+		return nil, errors.Join(errUnauthenticated, err)
+	}
+	if err != nil || csrf == "" {
+		return nil, err
+	}
+	return &csrf, nil
 }
 
 // SignOut implements api.StrictServerInterface.

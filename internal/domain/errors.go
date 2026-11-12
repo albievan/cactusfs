@@ -236,6 +236,13 @@ var (
 	// ErrTooManyAttempts means that the caller must wait before trying
 	// again.
 	ErrTooManyAttempts = errors.New("too many attempts")
+	// ErrCSRFTokenRefused means that a request of a console session that
+	// changes something came without the CSRF token of that session, or
+	// with another one. It is an ErrAccessDenied: the request is refused.
+	// It is told apart from other denials because it is no word on the
+	// session - which is there, and may be another than the browser tab
+	// thinks - but on the token the tab holds, which it can ask for anew.
+	ErrCSRFTokenRefused = fmt.Errorf("%w: the CSRF token is missing or wrong", ErrAccessDenied)
 	// ErrTooManyRequests means that the node is already doing as much of
 	// this kind of work as it does at one time - for this caller, or for
 	// everybody. Nothing is wrong with the request; it can be repeated in
@@ -368,6 +375,7 @@ func LocalSentinels() []error {
 		ErrTooManyAttempts,
 		ErrNotSupported,
 		ErrSessionLocked,
+		ErrCSRFTokenRefused,
 	}
 }
 

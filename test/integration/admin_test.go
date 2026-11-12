@@ -157,8 +157,10 @@ func TestManagementAPIOfTheBinary(t *testing.T) {
 	if !strings.HasPrefix(cookie, "__Host-cactusfs-session=") || !strings.Contains(header.Get("Set-Cookie"), "HttpOnly") {
 		t.Fatalf("Set-Cookie = %q", header.Get("Set-Cookie"))
 	}
-	if status, _, _ := adminCall(ctx, t, http.MethodPost, base+"/api/v1/buckets", map[string]string{"Cookie": cookie}, map[string]any{"name": "no-csrf"}); status != http.StatusUnauthorized {
-		t.Errorf("a change with the cookie alone = %d, want 401", status)
+	// Refused for the token, with a code of its own - not the 401 that
+	// ends a console's session.
+	if status, _, body := adminCall(ctx, t, http.MethodPost, base+"/api/v1/buckets", map[string]string{"Cookie": cookie}, map[string]any{"name": "no-csrf"}); status != http.StatusForbidden || !strings.Contains(string(body), `"CSRFTokenInvalid"`) {
+		t.Errorf("a change with the cookie alone = %d %s, want 403 CSRFTokenInvalid", status, body)
 	}
 	if status, _, body := adminCall(ctx, t, http.MethodPost, base+"/api/v1/buckets",
 		map[string]string{"Cookie": cookie, "X-CSRF-Token": session.CSRFToken}, map[string]any{"name": "operators"}); status != http.StatusCreated {

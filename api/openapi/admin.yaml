@@ -13,7 +13,12 @@ info:
     `Authorization: Bearer <access key ID>:<secret key>`, or - from the
     console - the session cookie that signing in sets. A request made with a
     session that changes something must also carry the CSRF token of that
-    session in `X-CSRF-Token`.
+    session in `X-CSRF-Token`. One that does not is answered 403 with the
+    problem code `CSRFTokenInvalid` - not 401: the session is there, and
+    `getSession` returns its CSRF token (`csrf_token`). The cookie belongs to
+    the browser and the token to one tab of it: a tab whose token is not that
+    of the session the cookie stands for now - another tab signed in, say -
+    asks `getSession` again.
 
     **Authorization.** Every request is decided by the same authorizer as the
     S3 API, from the policies of the user. What a request needs is named in
@@ -112,8 +117,8 @@ paths:
       tags: [session]
       summary: Who is making this request
       description: |
-        The identity of the caller. For a console session it also says when the session reaches its timeout
-        and whether it is locked. A locked session can ask this.
+        The identity of the caller. For a console session it also says when the session reaches its timeout,
+        whether it is locked, and its CSRF token. A locked session can ask this.
       responses:
         '200':
           description: The identity of the caller.
@@ -2338,6 +2343,14 @@ components:
             Only with `via: session`, and only where sessions can lock. The latest moment the session can stay
             locked to: it has ended by then whatever is being uploaded. A locked session usually ends
             earlier, a moment after its last upload.
+        csrf_token:
+          type: string
+          description: |
+            Only with `via: session`. The CSRF token of the session the cookie of this request stands for -
+            the one signing in and unlocking returned - to send in `X-CSRF-Token`. Every tab of a browser
+            shares the cookie: a tab keeps the token it is given here, and asks again when a change is
+            answered `CSRFTokenInvalid`. Left out for a session begun by a node of an earlier release,
+            whose token only the tab that signed in knows.
     Bucket:
       type: object
       required: [name, created_at]

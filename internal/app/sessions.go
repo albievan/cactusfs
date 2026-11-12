@@ -140,8 +140,9 @@ func (p *LocalIdentityProvider) Authenticate(ctx context.Context, username, pass
 	return user.Name, nil
 }
 
-// SignedIn is what a browser is given at sign-in. Both tokens are shown
-// once; the store keeps only their hashes.
+// SignedIn is what a browser is given at sign-in. The session token is
+// shown once; the CSRF token derives from it and is told again to whoever
+// holds it (SessionService.CSRFToken). The store keeps only their hashes.
 type SignedIn struct {
 	// Token identifies the session. It goes into a cookie that scripts
 	// cannot read.
@@ -460,10 +461,7 @@ func (s *SessionService) SignIn(ctx context.Context, username, password string, 
 	if err != nil {
 		return SignedIn{}, fmt.Errorf("session.SignIn: %w", err)
 	}
-	csrf, err := s.newToken()
-	if err != nil {
-		return SignedIn{}, fmt.Errorf("session.SignIn: %w", err)
-	}
+	csrf := csrfTokenFor(token)
 	// Its lifetime is counted from now: the user gets all of it.
 	stored := ports.Session{
 		TokenHash: hashToken(token), User: name, CSRFHash: hashToken(csrf), CreatedAt: begun, ExpiresAt: s.clock.Now().UTC().Add(s.lifetime),
@@ -513,7 +511,7 @@ func (s *SessionService) Authenticate(ctx context.Context, token, csrfToken stri
 	}
 	if mutating && !iam.SecretsEqual([]byte(hashToken(csrfToken)), []byte(stored.CSRFHash)) {
 		s.auditor.AuthenticationFailed(ctx, "auth:CSRF", stored.User, session, "missing or wrong CSRF token")
-		return iam.Principal{}, fmt.Errorf("session.Authenticate: %w: the CSRF token is missing or wrong", domain.ErrAccessDenied)
+		return iam.Principal{}, fmt.Errorf("session.Authenticate: %w", domain.ErrCSRFTokenRefused)
 	}
 	identity, err := s.users.ResolveUser(ctx, stored.User)
 	if errors.Is(err, domain.ErrEntityNotFound) || (err == nil && identity.User.Disabled) {
@@ -730,10 +728,7 @@ func (s *SessionService) Unlock(ctx context.Context, token, password string, ses
 	if err != nil {
 		return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
 	}
-	csrf, err := s.newToken()
-	if err != nil {
-		return SignedIn{}, fmt.Errorf("session.Unlock: %w", err)
-	}
+	csrf := csrfTokenFor(fresh)
 	// The time of sign-in is kept: a password change that lands while the
 	// password is checked here leaves its mark after that time, so the
 	// renewed session is ended by it as the old one was.

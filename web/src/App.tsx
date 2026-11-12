@@ -4,6 +4,7 @@ import {
   api,
   answeredPassword,
   ApiError,
+  onCsrfRefused,
   onLocked,
   onUnauthorized,
   signOut as endSession,
@@ -45,6 +46,26 @@ type SessionState =
   | { status: 'signed-out'; error: unknown; ended: SessionEnded | null }
   | SignedIn
   | { status: 'failed'; error: unknown };
+
+/**
+ * Who a session is, as far as the console's screens go: a session of another
+ * user - the browser's session, which another tab may have begun since - is
+ * shown with screens of its own, and nothing of the one before.
+ */
+function whoIs(identity: Identity): string {
+  return `${identity.kind}:${identity.user ?? ''}`;
+}
+
+/**
+ * Keeps the CSRF token the API gave with the session's identity: the token of
+ * the session the browser's cookie stands for now, which every tab of the
+ * browser shares. An API of an earlier release gives none.
+ */
+function keepCsrfToken(identity: Identity): void {
+  if (identity.csrf_token !== undefined) {
+    storeCsrfToken(identity.csrf_token);
+  }
+}
 
 /** The session as the API described it. */
 function signedInAs(identity: Identity): SignedIn {
@@ -108,6 +129,10 @@ export function App() {
   // How the last run of uploads stands, kept here because it has to be said
   // after the uploads went away with the session.
   const lastRun = useRef<UploadTotals | null>(null);
+  // Whether the API refused the CSRF token of this tab since it was last
+  // asked who this is: the answer must then give the session's token, or
+  // nothing can be changed until the user signs in again.
+  const csrfRefused = useRef(false);
 
   useEffect(() => {
     shown.current = true;
@@ -139,9 +164,12 @@ export function App() {
         if (!current) {
           return;
         }
-        // A session without its CSRF token (a second tab, say) can read but
-        // not change anything, and the API hands the token out only at
-        // sign-in: so sign in again.
+        // The token of the session the cookie stands for now, whatever this
+        // tab kept: another tab may have signed in or unlocked since. An API
+        // of an earlier release gives none, and hands it out only at
+        // sign-in: a tab without one (a second tab, say) can read but not
+        // change anything, so it signs in again.
+        keepCsrfToken(identity);
         setSession(
           readCsrfToken() === null ? { status: 'signed-out', error: null, ended: null } : signedInAs(identity),
         );
@@ -182,9 +210,27 @@ export function App() {
     unwrap(api.GET('/session')).then(
       (identity) => {
         asking.current = false;
-        if (shown.current && asked === era.current) {
-          setSession((previous) => (previous.status === 'signed-in' ? signedInAs(identity) : previous));
+        const refused = csrfRefused.current;
+        csrfRefused.current = false;
+        if (!shown.current || asked !== era.current) {
+          return;
         }
+        // The session's token, and who it is: the browser's session may be
+        // one another tab began since, of another user - whom the header
+        // then names, and whose screens are shown (see whoIs).
+        keepCsrfToken(identity);
+        if (refused && identity.csrf_token === undefined) {
+          // The token of this tab was refused, and the API tells no other:
+          // only signing in again gives one.
+          dropCsrfToken();
+          lastRun.current = null;
+          era.current += 1;
+          setSession((previous) =>
+            previous.status === 'signed-in' ? { status: 'signed-out', error: null, ended: null } : previous,
+          );
+          return;
+        }
+        setSession((previous) => (previous.status === 'signed-in' ? signedInAs(identity) : previous));
       },
       () => {
         asking.current = false;
@@ -198,6 +244,37 @@ export function App() {
 
   // A 423 that says "the session is locked": ask, and show what the API says.
   useEffect(() => onLocked(ask), [ask]);
+
+  // A 403 that says "the CSRF token is not the session's": ask for the
+  // session's token, and who it is now. The request that was refused is not
+  // sent again: it was meant by the session this tab showed, which may not
+  // be the one there is now. Its screen says why, and it can be made again.
+  useEffect(
+    () =>
+      onCsrfRefused(() => {
+        csrfRefused.current = true;
+        ask();
+      }),
+    [ask],
+  );
+
+  // Coming back to this tab: ask who this is, and with which token - another
+  // tab may have signed in, as somebody else, meanwhile.
+  const signedInNow = session.status === 'signed-in';
+  useEffect(() => {
+    if (!signedInNow) {
+      return undefined;
+    }
+    const look = () => {
+      if (document.visibilityState === 'visible') {
+        ask();
+      }
+    };
+    document.addEventListener('visibilitychange', look);
+    return () => {
+      document.removeEventListener('visibilitychange', look);
+    };
+  }, [signedInNow, ask]);
 
   // When to ask: a moment after the timeout the API named, and every so
   // often while the session is locked - it ends a while after its last
@@ -297,7 +374,7 @@ export function App() {
       // says of it (`via`); only such a session is offered what asks for the
       // password again.
       return (
-        <NoticesProvider>
+        <NoticesProvider key={whoIs(session.identity)}>
           <UploadsProvider tally={tally}>
             <DeletionsProvider>
               {session.locked ? (

@@ -7,7 +7,10 @@ import {
   API_BASE,
   api,
   ApiError,
+  CSRF_REFUSED,
+  isCsrfRefusal,
   objectDownloadUrl,
+  onCsrfRefused,
   onLocked,
   readRetryAfter,
   onUnauthorized,
@@ -20,6 +23,7 @@ import {
   unwrap,
   uploadObject,
   uploadObjectWithProgress,
+  wrongPasswordCount,
 } from './client';
 import { dropCsrfToken, readCsrfToken, storeCsrfToken } from './csrf';
 
@@ -258,6 +262,93 @@ describe('the CSRF token', () => {
 
     dropCsrfToken();
     expect(readCsrfToken()).toBeNull();
+  });
+});
+
+describe("a CSRF token that is not the session's", () => {
+  /** What the API answers a change that came without the session's CSRF token. */
+  function csrfRefused(): Response {
+    return refusal(403, 'CSRFTokenInvalid', "The CSRF token is not the session's");
+  }
+
+  it('tells its listeners about a 403 that says so, and nobody who listens for a 401', async () => {
+    storeCsrfToken('of-another-session');
+    fakeApi({ 'POST /buckets': () => csrfRefused(), 'DELETE /buckets/photos': () => problem(403, 'Access denied') });
+    const refused = vi.fn();
+    const ended = vi.fn();
+    const stops = [onCsrfRefused(refused), onUnauthorized(ended)];
+
+    const error = await unwrap(api.POST('/buckets', { body: { name: 'photos' } })).catch((caught: unknown) => caught);
+    expect(isCsrfRefusal(error)).toBe(true);
+    expect(refused).toHaveBeenCalledTimes(1);
+    expect(ended).not.toHaveBeenCalled();
+    // The code is the one the API gives it: adminapi/handler.go, problemOf.
+    expect(CSRF_REFUSED).toBe('CSRFTokenInvalid');
+
+    // A denial is no refusal of the token.
+    const denied = await unwrap(api.DELETE('/buckets/{bucket}', { params: { path: { bucket: 'photos' } } })).catch(
+      (caught: unknown) => caught,
+    );
+    expect(isCsrfRefusal(denied)).toBe(false);
+    expect(refused).toHaveBeenCalledTimes(1);
+    for (const stop of stops) {
+      stop();
+    }
+  });
+
+  it('tells its listeners when an upload is answered so', async () => {
+    storeCsrfToken('of-another-session');
+    fakeApi({ 'PUT /buckets/photos/object': () => csrfRefused() });
+    const refused = vi.fn();
+    const stop = onCsrfRefused(refused);
+
+    const file = new NodeFile(['x'], 'x.txt', { type: 'text/plain' }) as unknown as File;
+    const error = await uploadObjectWithProgress('photos', 'x.txt', file, () => undefined).catch((caught: unknown) => caught);
+
+    expect(isCsrfRefusal(error)).toBe(true);
+    expect(refused).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('does not count a refused token as a wrong password when unlocking', async () => {
+    storeCsrfToken('old');
+    const fake = fakeApi({
+      'POST /session/unlock': () => json(200, { user: 'alice', csrf_token: 'new', expires_at: '2026-10-08T12:30:00Z', server: SERVER }),
+    });
+    // Counted from an unlock.
+    await unlock('correct horse battery staple');
+    fake.on({ 'POST /session/unlock': () => csrfRefused() });
+
+    await expect(unlock('correct horse battery staple')).rejects.toMatchObject({ problem: { status: 403, code: 'CSRFTokenInvalid' } });
+    expect(wrongPasswordCount()).toBe(0);
+  });
+
+  it('signs out with the token GET /session gives when the one of this tab is refused', async () => {
+    storeCsrfToken('of-the-session-before');
+    const fake = fakeApi({
+      'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'bob', server: SERVER, csrf_token: 'of-the-session-now' }),
+      'DELETE /session': (call) => (call.headers.get('X-CSRF-Token') === 'of-the-session-now' ? noContent() : csrfRefused()),
+    });
+
+    await expect(signOut()).resolves.toBeNull();
+
+    expect(fake.callsTo('DELETE', '/session').map((call) => call.headers.get('X-CSRF-Token'))).toEqual([
+      'of-the-session-before',
+      'of-the-session-now',
+    ]);
+  });
+
+  it('says why signing out failed when GET /session gives no token', async () => {
+    storeCsrfToken('of-the-session-before');
+    const fake = fakeApi({
+      'GET /session': () => json(200, { kind: 'user', via: 'session', user: 'bob', server: SERVER }),
+      'DELETE /session': () => csrfRefused(),
+    });
+
+    const error = await signOut();
+
+    expect(isCsrfRefusal(error)).toBe(true);
+    expect(fake.callsTo('DELETE', '/session')).toHaveLength(1);
   });
 });
 

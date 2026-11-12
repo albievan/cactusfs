@@ -627,9 +627,10 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	for _, key := range []string{"second", "slow"} {
 		f.must(http.StatusOK, call{method: "GET", path: "/buckets/some-bucket/object/metadata?key=" + key})
 	}
-	// Not without the CSRF token, locked or not.
-	if r := f.do(call{method: "PUT", path: "/buckets/some-bucket/object?key=third", client: admin.client, raw: []byte("x")}); r.status != http.StatusUnauthorized {
-		t.Errorf("an upload by a locked session without the CSRF token = %d, want 401", r.status)
+	// Not without the CSRF token, locked or not: refused as a CSRF token
+	// that is not the session's, and not as a session that ended.
+	if r := f.do(call{method: "PUT", path: "/buckets/some-bucket/object?key=third", client: admin.client, raw: []byte("x")}); r.status != http.StatusForbidden || r.problem(t)["code"] != "CSRFTokenInvalid" {
+		t.Errorf("an upload by a locked session without the CSRF token = %d %s, want 403 CSRFTokenInvalid", r.status, r.body)
 	}
 	// And where the user may: into a bucket that is not there it is told
 	// so, as it would be unlocked.
@@ -759,8 +760,8 @@ func TestUnlockSession(t *testing.T) {
 	// Not without the CSRF token: another site cannot make the browser
 	// unlock, or guess.
 	for name, headers := range map[string]map[string]string{"no": nil, "a wrong": {httpsession.CSRFHeader: "not-the-token"}} {
-		if r := unlock(password, headers); r.status != http.StatusUnauthorized {
-			t.Errorf("unlocking with %s CSRF token = %d, want 401", name, r.status)
+		if r := unlock(password, headers); r.status != http.StatusForbidden || r.problem(t)["code"] != "CSRFTokenInvalid" {
+			t.Errorf("unlocking with %s CSRF token = %d %s, want 403 CSRFTokenInvalid", name, r.status, r.body)
 		}
 	}
 	// Not with an API key, which has nothing to unlock - whatever cookie
@@ -859,7 +860,13 @@ func TestUnlockSession(t *testing.T) {
 		"unlocking with the old cookie":         {method: "POST", path: "/session/unlock", body: map[string]any{"password": password}, headers: map[string]string{"Cookie": old.cookie, httpsession.CSRFHeader: old.csrf}},
 	} {
 		r := f.do(stale)
-		if r.status != http.StatusUnauthorized {
+		// The new cookie is a session that is there: what is refused is
+		// the token, which another tab asks GET /session for anew.
+		if name == "the new cookie and the old CSRF token" {
+			if r.status != http.StatusForbidden || r.problem(t)["code"] != "CSRFTokenInvalid" {
+				t.Errorf("%s after the unlock = %d, want 403 CSRFTokenInvalid: %s", name, r.status, r.body)
+			}
+		} else if r.status != http.StatusUnauthorized {
 			t.Errorf("%s after the unlock = %d, want 401: %s", name, r.status, r.body)
 		}
 		// And the cookie is left alone. The unlock that comes with the old

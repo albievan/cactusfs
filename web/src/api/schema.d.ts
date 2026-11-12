@@ -13,8 +13,8 @@ export interface paths {
         };
         /**
          * Who is making this request
-         * @description The identity of the caller. For a console session it also says when the session reaches its timeout
-         *     and whether it is locked. A locked session can ask this.
+         * @description The identity of the caller. For a console session it also says when the session reaches its timeout,
+         *     whether it is locked, and its CSRF token. A locked session can ask this.
          */
         get: operations["getSession"];
         put?: never;
@@ -1231,6 +1231,14 @@ export interface components {
              *     earlier, a moment after its last upload.
              */
             lock_ends_at?: string;
+            /**
+             * @description Only with `via: session`. The CSRF token of the session the cookie of this request stands for -
+             *     the one signing in and unlocking returned - to send in `X-CSRF-Token`. Every tab of a browser
+             *     shares the cookie: a tab keeps the token it is given here, and asks again when a change is
+             *     answered `CSRFTokenInvalid`. Left out for a session begun by a node of an earlier release,
+             *     whose token only the tab that signed in knows.
+             */
+            csrf_token?: string;
         };
         Bucket: {
             name: string;

@@ -946,6 +946,13 @@ type HealStatus struct {
 type Identity struct {
 	AccessKeyId *string `json:"access_key_id,omitempty"`
 
+	// CsrfToken Only with `via: session`. The CSRF token of the session the cookie of this request stands for -
+	// the one signing in and unlocking returned - to send in `X-CSRF-Token`. Every tab of a browser
+	// shares the cookie: a tab keeps the token it is given here, and asks again when a change is
+	// answered `CSRFTokenInvalid`. Left out for a session begun by a node of an earlier release,
+	// whose token only the tab that signed in knows.
+	CsrfToken *string `json:"csrf_token,omitempty"`
+
 	// ExpiresAt Only with `via: session`. When the session reaches - or, if it is locked, reached - its timeout.
 	ExpiresAt *time.Time   `json:"expires_at,omitempty"`
 	Kind      IdentityKind `json:"kind"`

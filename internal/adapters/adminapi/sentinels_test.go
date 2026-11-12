@@ -98,6 +98,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrTooManyAttempts:      {429, "TooManyAttempts"},
 		domain.ErrNotSupported:         {500, "InternalError"},
 		domain.ErrSessionLocked:        {423, "SessionLocked"},
+		domain.ErrCSRFTokenRefused:     {403, "CSRFTokenInvalid"},
 	}
 	sentinels := domain.Sentinels()
 	if len(sentinels) != len(answers) {

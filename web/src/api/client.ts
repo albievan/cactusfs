@@ -209,6 +209,45 @@ export function onLocked(listener: () => void): () => void {
 }
 
 /**
+ * The code of the problem the API answers a change with, status 403, when
+ * it did not carry the CSRF token of the session the cookie stands for now.
+ * The cookie is the browser's and the token this tab's: another tab that
+ * signed in or unlocked since gave the browser a session whose token this
+ * tab does not hold. It says nothing of the session, which is there:
+ * `GET /session` returns its token, and who it is.
+ */
+export const CSRF_REFUSED = 'CSRFTokenInvalid';
+
+const csrfRefusedListeners = new Set<() => void>();
+
+/**
+ * Calls the listener whenever the API answers 403 with the code
+ * `CSRFTokenInvalid`: the tab holds a CSRF token that is not the session's.
+ * Returns the function that removes the listener.
+ */
+export function onCsrfRefused(listener: () => void): () => void {
+  csrfRefusedListeners.add(listener);
+  return () => {
+    csrfRefusedListeners.delete(listener);
+  };
+}
+
+/** Whether an error is the API's refusal of the CSRF token this tab sent. */
+export function isCsrfRefusal(error: unknown): boolean {
+  return error instanceof ApiError && error.problem.status === 403 && error.problem.code === CSRF_REFUSED;
+}
+
+// Told of a 403 only when its problem says that it is the CSRF token that
+// was refused: any other 403 is a denial, for whoever asked to show.
+function tellIfCsrfRefused(body: unknown): void {
+  if (isProblem(body) && body.code === CSRF_REFUSED) {
+    for (const listener of csrfRefusedListeners) {
+      listener();
+    }
+  }
+}
+
+/**
  * How many wrong passwords end a session that is being unlocked, as the API
  * has it (`unlockAttempts` in internal/app/sessions.go). The API counts the
  * passwords of unlocking and of installing a release (`POST /upgrade`)
@@ -365,6 +404,14 @@ const sessionMiddleware: Middleware = {
         .json()
         .then(tellIfLocked, () => undefined)
         .then(() => undefined);
+    } else if (response.status === 403) {
+      // The same: and a refused CSRF token is told to whoever listens, so
+      // that the console asks for the session's token and who it is.
+      return response
+        .clone()
+        .json()
+        .then(tellIfCsrfRefused, () => undefined)
+        .then(() => undefined);
     }
     return undefined;
   },
@@ -515,7 +562,9 @@ export function unlock(password: string): Promise<Session> {
       return session;
     },
     (error: unknown) => {
-      if (error instanceof ApiError && error.problem.status === 403) {
+      // A refused CSRF token is no word on the password: the API did not
+      // look at it.
+      if (error instanceof ApiError && error.problem.status === 403 && !isCsrfRefusal(error)) {
         wrongPasswords += 1;
       }
       throw error;
@@ -551,6 +600,11 @@ export function unlock(password: string): Promise<Session> {
  * ones. So that unlock is abandoned: should it succeed, its tokens are not
  * kept and the session it renewed is ended in turn.
  *
+ * A sign-out refused for its CSRF token - the browser's session is one that
+ * another tab began or unlocked since - is sent once more with the token
+ * `GET /session` returns: the session is the browser's, and so is signing
+ * out of it.
+ *
  * Resolves to null when the API signed the session out, and to why not when
  * it did not; it never rejects.
  */
@@ -558,10 +612,23 @@ export function signOut(): Promise<unknown> {
   if (pendingUnlock !== null) {
     pendingUnlock.abandoned = true;
   }
-  return unwrap(api.DELETE('/session')).then(
-    () => null,
-    (error: unknown) => error,
-  );
+  const end = () => unwrap(api.DELETE('/session'));
+  return end()
+    .catch(async (error: unknown) => {
+      if (!isCsrfRefusal(error)) {
+        throw error;
+      }
+      const identity = await unwrap(api.GET('/session'));
+      if (identity.csrf_token === undefined) {
+        throw error;
+      }
+      storeCsrfToken(identity.csrf_token);
+      return end();
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
 }
 
 /**
@@ -713,6 +780,9 @@ function sendObject(
       // if it comes all the same, it says "locked" and not "ended".
       if (request.status === 423) {
         tellIfLocked(body);
+      }
+      if (request.status === 403) {
+        tellIfCsrfRefused(body);
       }
       if (request.status >= 200 && request.status < 300) {
         onProgress(file.size, file.size);

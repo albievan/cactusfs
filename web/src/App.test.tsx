@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 import { App } from './App';
 import { describeBuild } from './Layout';
-import { CSRF_TOKEN, fakeApi, json, noContent, problem, SERVER, signedIn } from './test/fakeApi';
+import { api as client, unwrap } from './api/client';
+import { CSRF_TOKEN, fakeApi, json, noContent, problem, refusal, SERVER, signedIn } from './test/fakeApi';
 
 function typeInto(label: string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -230,6 +231,108 @@ describe('session', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+  });
+});
+
+describe('the session of the browser, which every tab shares', () => {
+  // The cookie is the browser's, the CSRF token a tab's: another tab that
+  // signs in replaces the session under this one. GET /session says which
+  // session there is now, and its token.
+  function identity(user: string, csrfToken?: string) {
+    return { kind: 'user', via: 'session', user, server: SERVER, ...(csrfToken === undefined ? {} : { csrf_token: csrfToken }) };
+  }
+
+  function csrfRefused(): Response {
+    return refusal(403, 'CSRFTokenInvalid', "The CSRF token is not the session's");
+  }
+
+  it("takes the session's CSRF token from GET /session, over the one the tab kept", async () => {
+    window.sessionStorage.setItem('cactusfs.csrf', 'of-a-session-before');
+    const fake = fakeApi({
+      'GET /session': () => json(200, identity('alice', 'of-the-session-now')),
+      'GET /buckets': () => json(200, []),
+      'DELETE /session': () => noContent(),
+    });
+    render(<App />);
+
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+    expect(window.sessionStorage.getItem('cactusfs.csrf')).toBe('of-the-session-now');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await screen.findByRole('heading', { name: 'Sign in' });
+    expect(fake.callsTo('DELETE', '/session')[0]?.headers.get('X-CSRF-Token')).toBe('of-the-session-now');
+  });
+
+  it('is signed in to in a new tab, which has no token of its own, when GET /session gives one', async () => {
+    fakeApi({ 'GET /session': () => json(200, identity('alice', 'of-the-session')), 'GET /buckets': () => json(200, []) });
+    render(<App />);
+
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+    expect(window.sessionStorage.getItem('cactusfs.csrf')).toBe('of-the-session');
+  });
+
+  it('asks who this is when its token is refused, and shows the session there is now', async () => {
+    let user = 'alice';
+    let token = 'of-alices-session';
+    const fake = fakeApi({
+      'GET /session': () => json(200, identity(user, token)),
+      'GET /buckets': () => json(200, []),
+      'POST /buckets': (call) =>
+        call.headers.get('X-CSRF-Token') === token ? json(201, { name: 'photos', created_at: '2026-10-01T00:00:00Z' }) : csrfRefused(),
+    });
+    render(<App />);
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+
+    // Another tab of the browser signs in, as bob.
+    user = 'bob';
+    token = 'of-bobs-session';
+    const refused = await unwrap(client.POST('/buckets', { body: { name: 'photos' } })).catch((error: unknown) => error);
+
+    // The change is refused - and not taken for the end of the session.
+    expect(refused).toMatchObject({ problem: { status: 403, code: 'CSRFTokenInvalid' } });
+    expect(await screen.findByText('Signed in as bob')).toBeDefined();
+    expect(screen.queryByText('Signed in as alice')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull();
+    expect(window.sessionStorage.getItem('cactusfs.csrf')).toBe('of-bobs-session');
+    expect(fake.callsTo('GET', '/session')).toHaveLength(2);
+    // The refused change is not sent again by itself; made again, it goes
+    // with the token of the session there is now.
+    expect(fake.callsTo('POST', '/buckets')).toHaveLength(1);
+    await unwrap(client.POST('/buckets', { body: { name: 'photos' } }));
+    expect(fake.callsTo('POST', '/buckets')[1]?.headers.get('X-CSRF-Token')).toBe('of-bobs-session');
+  });
+
+  it('asks to sign in again when its token is refused and GET /session gives none', async () => {
+    // An API of an earlier release: it gives the token at sign-in only.
+    signedIn({ 'GET /buckets': () => json(200, []), 'POST /buckets': () => csrfRefused() });
+    render(<App />);
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+
+    await unwrap(client.POST('/buckets', { body: { name: 'photos' } })).catch(() => undefined);
+
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeDefined();
+    expect(window.sessionStorage.getItem('cactusfs.csrf')).toBeNull();
+  });
+
+  it('asks who this is when the tab is shown again', async () => {
+    let user = 'alice';
+    const fake = fakeApi({
+      'GET /session': () => json(200, identity(user, `of-${user}s-session`)),
+      'GET /buckets': () => json(200, []),
+    });
+    render(<App />);
+    expect(await screen.findByText('Signed in as alice')).toBeDefined();
+    expect(fake.callsTo('GET', '/session')).toHaveLength(1);
+
+    user = 'bob';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(await screen.findByText('Signed in as bob')).toBeDefined();
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
+    expect(fake.callsTo('GET', '/session')).toHaveLength(2);
+    expect(window.sessionStorage.getItem('cactusfs.csrf')).toBe('of-bobs-session');
   });
 });
 

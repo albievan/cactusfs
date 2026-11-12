@@ -416,6 +416,11 @@ func (h *Handler) authenticate(r *http.Request, info *requestInfo) error {
 	if token := httpsession.Token(r); token != "" {
 		// The session use case records its own refusals.
 		principal, err := h.cfg.Sessions.Authenticate(ctx, token, httpsession.CSRFToken(r), httpsession.Mutating(r), info.session)
+		if errors.Is(err, domain.ErrCSRFTokenRefused) {
+			// The session is there; the tab's token is not its token. Not
+			// a 401, which a console takes for the end of its session.
+			return err
+		}
 		if errors.Is(err, domain.ErrAccessDenied) {
 			return errors.Join(errUnauthenticated, err)
 		}
@@ -556,6 +561,11 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 // sign-ins.
 const codeTooManyRequests = "TooManyRequests"
 
+// codeCSRFTokenInvalid is the code of the 403 that refuses a change of a
+// console session made without that session's CSRF token: told apart from
+// a denial by its code, so that a console asks for the token anew.
+const codeCSRFTokenInvalid = "CSRFTokenInvalid"
+
 // detailTooManyBuckets is what a caller is told when a search could not
 // decide in its time which buckets are theirs. It is said in so many words
 // because the answer is a 503 with Retry-After like any other, and unlike
@@ -612,6 +622,13 @@ func problemOf(err error) problem {
 		// It is asked before the denial, so that an error that names both is
 		// told as the lock.
 		return problem{status: http.StatusLocked, code: "SessionLocked", title: "The session is locked"}
+	case is(domain.ErrCSRFTokenRefused):
+		// A denial with a code of its own: the console asks GET /session
+		// for the token of the session there is now.
+		return problem{
+			status: http.StatusForbidden, code: codeCSRFTokenInvalid, title: "The CSRF token is not the session's",
+			detail: "the request did not carry the CSRF token of this session; GET /session returns it",
+		}
 	case is(domain.ErrAccessDenied):
 		return problem{status: http.StatusForbidden, code: "AccessDenied", title: "Access denied"}
 	case is(domain.ErrQuotaExceeded):
