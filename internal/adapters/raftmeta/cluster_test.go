@@ -411,9 +411,14 @@ func (c *testCluster) form(voters, others []string) {
 	c.ready(slices.Concat(voters, others)...)
 }
 
+// ready waits for each node to be ready. A node that was stopped and
+// started again is reached only when the leader next tries it, and Raft
+// backs off from a peer it failed to reach - up to 10 s between tries -
+// so a node that comes back can wait that long twice before it hears from
+// the leader, and longer than 30 s in all on a busy Windows runner.
 func (c *testCluster) ready(ids ...string) {
 	c.t.Helper()
-	ctx, cancel := context.WithTimeout(c.t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.t.Context(), time.Minute)
 	defer cancel()
 	for _, id := range ids {
 		if err := c.store(id).WaitReady(ctx); err != nil {
