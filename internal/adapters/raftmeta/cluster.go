@@ -574,8 +574,13 @@ func (s *Store) waitApplied(ctx context.Context, index uint64) error {
 			return ctx.Err()
 		case <-deadline.C:
 			wait.Stop()
-			return fmt.Errorf("%w: this node has not caught up with the metadata leader (applied %d, need %d)",
-				domain.ErrUnavailable, s.fsm.seen.Load(), index)
+			// Read once more: the entry may have been applied during the
+			// last pause, and a node that has caught up is not refused.
+			if seen := s.fsm.seen.Load(); seen < index {
+				return fmt.Errorf("%w: this node has not caught up with the metadata leader (applied %d, need %d)",
+					domain.ErrUnavailable, seen, index)
+			}
+			return nil
 		case <-wait.C:
 		}
 		pause = min(pause*2, 10*time.Millisecond)
