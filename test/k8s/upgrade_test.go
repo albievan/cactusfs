@@ -1043,10 +1043,17 @@ func (b *bench) upgradeTo(v upgradeVersions, next, bucket, key string, data []by
 		}
 	}
 
-	// Every node runs B and says it runs the release, on every node.
+	// Every node runs B and says it runs the release, on every node. The
+	// node replaced last has only just come back, and the connection to it
+	// may be cut once while the forward to its new pod is made: it is asked
+	// again then.
 	for _, id := range nodeIDs() {
-		p, err := b.progress(ctx, id)
-		if err != nil {
+		var p progressView
+		if err := within(ctx, time.Minute, 3*time.Second, func(ctx context.Context) (bool, error) {
+			var err error
+			p, err = b.progress(ctx, id)
+			return err == nil, err
+		}); err != nil {
 			t.Fatal(err)
 		}
 		var got []string

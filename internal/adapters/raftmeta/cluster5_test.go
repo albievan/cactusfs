@@ -282,7 +282,15 @@ func TestRollingUpgradeToSchema5(t *testing.T) {
 			t.Fatalf("AbortUpload %s/%s %s: %v", name, u.Key, through, err)
 		}
 		upload("pending", 77, 23)
-		if b, err := s.GetBucket(ctx, name); err != nil || b.CreatedBy != "user/albie" {
+		// A node that has not caught up with the leader in time refuses
+		// a read as unavailable, which a client tries again; so does this.
+		var b bucket.Bucket
+		var err error
+		eventually(t, "a read of the bucket "+name+" "+through, func() bool {
+			b, err = s.GetBucket(ctx, name)
+			return !errors.Is(err, domain.ErrUnavailable)
+		})
+		if err != nil || b.CreatedBy != "user/albie" {
 			t.Fatalf("the bucket %s %s was created by %q, %v: who created a bucket is of schema 4", name, through, b.CreatedBy, err)
 		}
 		if versioned {
