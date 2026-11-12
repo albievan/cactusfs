@@ -125,8 +125,10 @@ func TestManagementAPIOfTheBinary(t *testing.T) {
 	if status, _, body := adminCall(ctx, t, http.MethodPost, base+"/api/v1/session", nil, map[string]any{"username": "admin", "password": "admin"}); status != http.StatusOK {
 		t.Errorf("sign-in as the default console user = %d %s", status, body)
 	}
-	if status, _, body := adminCall(ctx, t, http.MethodPut, base+"/api/v1/users/admin", root, map[string]any{"roles": []string{"cluster-admin"}, "password": "admin"}); status != http.StatusBadRequest {
-		t.Errorf("setting the default password again = %d %s, want 400", status, body)
+	again := map[string]any{"roles": []string{"cluster-admin"}, "groups": []string{}, "disabled": false, "password": "admin"}
+	if status, _, body := adminCall(ctx, t, http.MethodPut, base+"/api/v1/users/admin", root, again); status != http.StatusBadRequest ||
+		!strings.Contains(string(body), "password") {
+		t.Errorf("setting the default password again = %d %s, want 400 for the password", status, body)
 	}
 	if status, _, body := adminCall(ctx, t, http.MethodDelete, base+"/api/v1/users/admin", root, nil); status != http.StatusNoContent {
 		t.Errorf("deleting the default console user = %d %s", status, body)

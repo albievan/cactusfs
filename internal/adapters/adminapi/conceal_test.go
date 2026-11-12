@@ -166,6 +166,78 @@ func contractSecrets(t *testing.T, document []byte, skip ...string) map[string][
 	return found
 }
 
+// contractRequired returns, for every operation of the contract with a JSON
+// request body, the fields that body's schema lists as required, sorted.
+func contractRequired(t *testing.T, document []byte) map[string][]string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(document, &doc); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(ref string) map[string]any {
+		var at any = doc
+		for _, step := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+			node, _ := at.(map[string]any)
+			at = node[step]
+		}
+		node, _ := at.(map[string]any)
+		return node
+	}
+	found := map[string][]string{}
+	paths, _ := doc["paths"].(map[string]any)
+	for path, raw := range paths {
+		operations, _ := raw.(map[string]any)
+		for method, raw := range operations {
+			operation, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			body, _ := operation["requestBody"].(map[string]any)
+			if ref, ok := body["$ref"].(string); ok {
+				body = lookup(ref)
+			}
+			content, _ := body["content"].(map[string]any)
+			media, _ := content["application/json"].(map[string]any)
+			schema, _ := media["schema"].(map[string]any)
+			for schema != nil && schema["$ref"] != nil {
+				ref, _ := schema["$ref"].(string)
+				schema = lookup(ref)
+			}
+			if _, combined := schema["allOf"]; combined {
+				t.Fatalf("%s %s: a request body of allOf is not read by this test", method, path)
+			}
+			list, _ := schema["required"].([]any)
+			var required []string
+			for _, field := range list {
+				required = append(required, fmt.Sprint(field))
+			}
+			if len(required) > 0 {
+				sort.Strings(required)
+				found[strings.ToUpper(method)+" "+adminapi.BasePath+path] = required
+			}
+		}
+	}
+	return found
+}
+
+// TestEveryRequiredFieldOfTheContractIsRequired: every operation whose JSON
+// body has fields the contract marks required refuses a body without them -
+// the adapter's list is the contract's, and no other.
+func TestEveryRequiredFieldOfTheContractIsRequired(t *testing.T) {
+	t.Parallel()
+	want := contractRequired(t, openapi.AdminJSON())
+	got := map[string][]string{}
+	for pattern, fields := range adminapi.RequiredFields() {
+		got[pattern] = slices.Sorted(slices.Values(fields))
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the adapter requires\n%v\nthe contract requires\n%v", got, want)
+	}
+	if len(want) == 0 {
+		t.Fatal("the contract requires no field of a request body: the walk found nothing")
+	}
+}
+
 // TestTheWalkOfTheContractFindsEverySecret holds contractSecrets to account
 // on a document made for it: a secret behind a request body that is a
 // reference, an array, an allOf, a map, and a cycle.

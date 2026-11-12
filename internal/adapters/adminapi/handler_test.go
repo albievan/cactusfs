@@ -884,6 +884,99 @@ func TestIdentityManagement(t *testing.T) {
 	}
 }
 
+// TestABodyWithoutARequiredFieldChangesNothing: a body that leaves out a
+// field the contract requires, or gives it null, is refused with 400 and
+// changes nothing - it is not taken for the field's zero value, which would
+// take a user's groups and roles away and enable them, or empty a group or
+// a role.
+func TestABodyWithoutARequiredFieldChangesNothing(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	const password = "a long enough password"
+	document := map[string]any{"Version": "2012-10-17", "Statement": []any{map[string]any{
+		"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::photos/*",
+	}}}
+	f.must(http.StatusCreated, call{method: "POST", path: "/policies", body: map[string]any{"name": "photos", "document": document}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/roles", body: map[string]any{"name": "viewers", "policies": []string{"photos"}}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/groups", body: map[string]any{"name": "team", "roles": []string{"viewers"}}})
+	f.must(http.StatusCreated, call{method: "POST", path: "/users", body: map[string]any{
+		"name": "henry", "groups": []string{"team"}, "roles": []string{iam.RoleReadOnly}, "disabled": true,
+	}})
+	userBody := func(change func(map[string]any)) map[string]any {
+		body := map[string]any{"groups": []string{"team"}, "roles": []string{iam.RoleReadOnly}, "disabled": true}
+		change(body)
+		return body
+	}
+	tests := []struct {
+		name    string
+		c       call
+		missing string
+	}{
+		{"a user with only a password", call{method: "PUT", path: "/users/henry", body: map[string]any{"password": password}}, "groups"},
+		{"a user without groups", call{method: "PUT", path: "/users/henry", body: userBody(func(b map[string]any) { delete(b, "groups") })}, "groups"},
+		{"a user without roles", call{method: "PUT", path: "/users/henry", body: userBody(func(b map[string]any) { delete(b, "roles") })}, "roles"},
+		{"a user with disabled null", call{method: "PUT", path: "/users/henry", body: userBody(func(b map[string]any) { b["disabled"] = nil })}, "disabled"},
+		{"a user with Disabled null after disabled", call{method: "PUT", path: "/users/henry", raw: []byte(
+			`{"groups":["team"],"roles":["read-only"],"disabled":true,"Disabled":null}`)}, "disabled"},
+		{"a user with roles only in another case", call{method: "PUT", path: "/users/henry", body: userBody(func(b map[string]any) {
+			b["Roles"] = b["roles"]
+			delete(b, "roles")
+		})}, "roles"},
+		{"a user with a password, and an idempotency key", call{
+			method: "PUT", path: "/users/henry", body: map[string]any{"password": password}, headers: map[string]string{"Idempotency-Key": "henry-1"},
+		}, "groups"},
+		{"a user, with an array for a body", call{method: "PUT", path: "/users/henry", raw: []byte(`[]`)}, ""},
+		{"a group with nothing", call{method: "PUT", path: "/groups/team", body: map[string]any{}}, "roles"},
+		{"a role with nothing", call{method: "PUT", path: "/roles/viewers", body: map[string]any{}}, "policies"},
+		{"a policy with nothing", call{method: "PUT", path: "/policies/photos", body: map[string]any{}}, "document"},
+		{"a new group without roles", call{method: "POST", path: "/groups", body: map[string]any{"name": "other-team"}}, "roles"},
+		{"a new role without policies", call{method: "POST", path: "/roles", body: map[string]any{"name": "other-viewers"}}, "policies"},
+		{"a new user without a name", call{method: "POST", path: "/users", body: map[string]any{"roles": []string{}}}, "name"},
+		{"a new bucket without a name", call{method: "POST", path: "/buckets", body: map[string]any{}}, "name"},
+		{"a target without its kind", call{method: "PUT", path: "/targets/t", body: map[string]any{"buckets": []string{}}}, "kind"},
+		{"a sign-in without a password", call{method: "POST", path: "/session", body: map[string]any{"username": "henry"}}, "password"},
+	}
+	for _, tt := range tests {
+		c := tt.c
+		if c.raw != nil {
+			c.headers = map[string]string{"Content-Type": "application/json"}
+		}
+		r := f.must(http.StatusBadRequest, c)
+		p := r.problem(t)
+		if p["code"] != "InvalidArgument" || (tt.missing != "" && !strings.Contains(fmt.Sprint(p["detail"]), `"`+tt.missing+`"`)) {
+			t.Errorf("%s: %s, want a problem that names %q", tt.name, r.body, tt.missing)
+		}
+	}
+
+	var user struct {
+		Groups      []string `json:"groups"`
+		Roles       []string `json:"roles"`
+		Disabled    bool     `json:"disabled"`
+		HasPassword bool     `json:"has_password"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/users/henry"}).decode(t, &user)
+	if fmt.Sprint(user.Groups) != "[team]" || fmt.Sprint(user.Roles) != "[read-only]" || !user.Disabled || user.HasPassword {
+		t.Errorf("henry after the refused changes = %+v", user)
+	}
+	var group struct {
+		Roles []string `json:"roles"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/groups/team"}).decode(t, &group)
+	var role struct {
+		Policies []string `json:"policies"`
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/roles/viewers"}).decode(t, &role)
+	if fmt.Sprint(group.Roles) != "[viewers]" || fmt.Sprint(role.Policies) != "[photos]" {
+		t.Errorf("after the refused changes the group has %v and the role %v", group.Roles, role.Policies)
+	}
+	for _, path := range []string{"/groups/other-team", "/roles/other-viewers"} {
+		f.must(http.StatusNotFound, call{method: "GET", path: path})
+	}
+	// A body with every field is a change as it always was.
+	f.must(http.StatusOK, call{method: "PUT", path: "/users/henry", body: userBody(func(b map[string]any) { b["disabled"] = false })})
+	f.must(http.StatusOK, call{method: "PUT", path: "/groups/team", body: map[string]any{"roles": []string{}}})
+}
+
 // TestBucketsAndObjects: the object browser's requests.
 func TestBucketsAndObjects(t *testing.T) {
 	t.Parallel()

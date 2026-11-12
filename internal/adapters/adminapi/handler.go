@@ -354,6 +354,21 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 				}
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+			if _, required := requiredFields()[r.Pattern]; required {
+				// What the contract requires is there before anything is
+				// carried out, reserved or kept: the generated decoder
+				// would take a field that is missing for its zero value.
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					h.fail(w, r, errors.Join(domain.ErrIncompleteBody, err))
+					return
+				}
+				if err := requireFields(r.Pattern, body); err != nil {
+					h.fail(w, r, err)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+			}
 		}
 		if upload && info.token != "" {
 			// The session use case is told that an upload of the session
