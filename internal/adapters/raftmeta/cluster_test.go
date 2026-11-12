@@ -39,6 +39,9 @@ type testCluster struct {
 	mu      sync.Mutex
 	stores  map[string]*Store
 	members map[string]Member
+	// sockets hold the Raft address of every node from its first start to
+	// the end of the test, through every stop (see heldSocket).
+	sockets map[string]*heldSocket
 	events  map[string]*recorder
 	// down nodes cannot be reached by the others through the leader client.
 	down map[string]bool
@@ -80,7 +83,7 @@ func (r *recorder) all() []ports.Event {
 func newTestCluster(t *testing.T) *testCluster {
 	t.Helper()
 	return &testCluster{
-		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{},
+		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{}, sockets: map[string]*heldSocket{},
 		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, schema3: map[string]bool{},
 		schema4: map[string]bool{}, deaf: map[string]bool{},
 	}
@@ -159,18 +162,7 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	if known {
 		address = member.RaftAddr
 	}
-	var listener net.Listener
-	var err error
-	// The address of a restarted node may linger for a moment.
-	for attempt := 0; ; attempt++ {
-		if listener, err = (&net.ListenConfig{}).Listen(c.t.Context(), "tcp", address); err == nil || attempt > 50 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		c.t.Fatalf("listen: %v", err)
-	}
+	listener := c.socket(id, address).open()
 	if _, ok := c.events[id]; !ok {
 		c.events[id] = &recorder{}
 	}
@@ -205,6 +197,119 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	c.mu.Unlock()
 	c.t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+// socket returns the socket that holds the Raft address of a node, binding
+// it at address the first time the node starts.
+func (c *testCluster) socket(id, address string) *heldSocket {
+	c.t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if socket, ok := c.sockets[id]; ok {
+		return socket
+	}
+	listener, err := (&net.ListenConfig{}).Listen(c.t.Context(), "tcp", address)
+	if err != nil {
+		c.t.Fatalf("listen: %v", err)
+	}
+	socket := &heldSocket{listener: listener}
+	go socket.serve()
+	c.t.Cleanup(func() { _ = listener.Close() })
+	c.sockets[id] = socket
+	return socket
+}
+
+// heldSocket keeps the Raft address of a test node bound while the node is
+// stopped, and hands what it accepts to the node only while it runs.
+//
+// The address must not be let go. The stores of every test in the package
+// run in one process, talk over loopback and are named alike - m1, m2, m3,
+// s4 - and Raft does not ask who answers at an address: an AppendEntries
+// that succeeds counts towards the quorum whoever sent the success. A port
+// a stopped node gave up could be bound by a node of another test running
+// in parallel, which then answered for the stopped one: a leader without a
+// quorum committed through it, the other test's node took entries of a log
+// that was not its group's, and the stopped node could not get its address
+// back to restart. A cluster does not depend on the address alone: nodetls
+// dials an address of the form <node id>@<host:port> and accepts only the
+// certificate of the cluster's CA that names that node. The plain TCP of
+// this harness has no such check, so it keeps the address instead: while
+// the node is stopped a connection to it is accepted and closed at once,
+// which Raft takes as a node it cannot reach.
+type heldSocket struct {
+	listener net.Listener
+
+	mu      sync.Mutex
+	current *heldSession
+}
+
+// heldSession is one run of the node: the listener its store is given,
+// closed when the store closes it.
+type heldSession struct {
+	socket *heldSocket
+	conns  chan net.Conn
+	done   chan struct{}
+	once   sync.Once
+}
+
+// open starts a session for a node that starts.
+func (h *heldSocket) open() *heldSession {
+	session := &heldSession{socket: h, conns: make(chan net.Conn), done: make(chan struct{})}
+	h.mu.Lock()
+	h.current = session
+	h.mu.Unlock()
+	return session
+}
+
+// serve accepts until the socket is closed at the end of the test.
+func (h *heldSocket) serve() {
+	for {
+		conn, err := h.listener.Accept()
+		if err != nil {
+			return
+		}
+		h.mu.Lock()
+		session := h.current
+		h.mu.Unlock()
+		if session == nil {
+			_ = conn.Close()
+			continue
+		}
+		select {
+		case session.conns <- conn:
+		case <-session.done:
+			_ = conn.Close()
+		}
+	}
+}
+
+// Accept implements net.Listener.
+func (s *heldSession) Accept() (net.Conn, error) {
+	select {
+	case conn := <-s.conns:
+		return conn, nil
+	case <-s.done:
+		return nil, net.ErrClosed
+	}
+}
+
+// Close implements net.Listener: the node stops listening, the address
+// stays bound.
+func (s *heldSession) Close() error {
+	s.once.Do(func() {
+		close(s.done)
+		s.socket.mu.Lock()
+		if s.socket.current == s {
+			s.socket.current = nil
+		}
+		s.socket.mu.Unlock()
+	})
+	return nil
+}
+
+// Addr implements net.Listener.
+func (s *heldSession) Addr() net.Addr {
+	return s.socket.listener.Addr()
 }
 
 // asNextRelease makes a store behave like the binary of a release that has
@@ -570,6 +675,34 @@ func TestNoQuorumNoAnswer(t *testing.T) {
 	c.ready("m1", "m2", "s4")
 	if _, err := c.store("s4").GetBucket(ctx, "bkt"); err != nil {
 		t.Errorf("read after the quorum returned: %v", err)
+	}
+}
+
+// TestAStoppedTestNodeKeepsItsAddress: the harness holds the address of a
+// stopped node, so that no node of another test can bind it and answer Raft
+// in its place, and gives it back to the node when it starts again.
+func TestAStoppedTestNodeKeepsItsAddress(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	c := newTestCluster(t)
+	c.form([]string{"m1", "m2", "m3"}, nil)
+	c.stop("m2")
+	c.stop("m3")
+	for _, id := range []string{"m2", "m3"} {
+		if listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.members[id].RaftAddr); err == nil {
+			_ = listener.Close()
+			t.Errorf("the address of the stopped node %s could be bound by another", id)
+		}
+	}
+	if err := c.store("m1").CreateBucket(ctx, bucket.Bucket{Name: "other"}); !errors.Is(err, domain.ErrUnavailable) &&
+		!errors.Is(err, domain.ErrOutcomeUnknown) {
+		t.Errorf("write on m1 with both other voters stopped = %v, want it to fail as unavailable or unknown", err)
+	}
+	c.start("m2", true)
+	c.start("m3", true)
+	c.ready("m1", "m2", "m3")
+	if err := c.store("m3").CreateBucket(ctx, bucket.Bucket{Name: "after"}); err != nil {
+		t.Errorf("write after the nodes restarted at their addresses: %v", err)
 	}
 }
 
