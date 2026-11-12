@@ -14,6 +14,7 @@ import (
 	"testing"
 	"testing/quick"
 	"time"
+	"unicode/utf8"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -501,12 +502,21 @@ func FuzzPolicyDecision(f *testing.F) {
 
 // FuzzWildcard compares the policy wildcard matcher with a slow, obviously
 // right one, through the one place a pattern is matched against a client's
-// string: a resource.
+// string: a resource. A '?' is one character - a UTF-8 code point, or a byte
+// that is not valid UTF-8 - never one byte of a character.
 func FuzzWildcard(f *testing.F) {
 	f.Add("a*b?c", "aXXbYc")
 	f.Add("***", "")
 	f.Add("?", "ab")
 	f.Add("a*a*a*a*b", "aaaaaaaaaaaaaaaa")
+	f.Add("?", "é")
+	f.Add("??", "é")
+	f.Add("*?é", "éé")
+	f.Add("a?c", "a日c")
+	f.Add("?", "\xc3")
+	f.Add("\xc3*", "é")
+	f.Add("*\xa9", "é")
+	f.Add("*?*?", "日本")
 	f.Fuzz(func(t *testing.T, pattern, key string) {
 		if strings.ContainsAny(pattern+key, "\x00\n\r") || len(pattern) > 12 || len(key) > 24 || key == "" {
 			return
@@ -518,7 +528,7 @@ func FuzzWildcard(f *testing.F) {
 		if doc.Validate() != nil {
 			return
 		}
-		want := matchBytes(pattern, key)
+		want := matchCharacters(characters(pattern), characters(key))
 		p := iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{doc}}
 		got := iam.Decide(iam.Request{Principal: p, Action: iam.ActionGetObject, Resource: iam.Resource{Bucket: "b", Key: key}, Now: policyNow}) == nil
 		if got != want {
@@ -527,23 +537,74 @@ func FuzzWildcard(f *testing.F) {
 	})
 }
 
-// matchBytes is a slow, obviously right wildcard matcher over bytes.
-func matchBytes(pattern, s string) bool {
-	if pattern == "" {
-		return s == ""
+// characters splits s into what a wildcard counts as one character: each
+// UTF-8 code point as it is encoded, and each byte that is not valid UTF-8.
+func characters(s string) []string {
+	var out []string
+	for len(s) > 0 {
+		_, width := utf8.DecodeRuneInString(s)
+		out = append(out, s[:width])
+		s = s[width:]
+	}
+	return out
+}
+
+// matchCharacters is a slow, obviously right wildcard matcher over
+// characters.
+func matchCharacters(pattern, s []string) bool {
+	if len(pattern) == 0 {
+		return len(s) == 0
 	}
 	switch pattern[0] {
-	case '*':
+	case "*":
 		for i := 0; i <= len(s); i++ {
-			if matchBytes(pattern[1:], s[i:]) {
+			if matchCharacters(pattern[1:], s[i:]) {
 				return true
 			}
 		}
 		return false
-	case '?':
-		return s != "" && matchBytes(pattern[1:], s[1:])
+	case "?":
+		return len(s) > 0 && matchCharacters(pattern[1:], s[1:])
 	default:
-		return s != "" && s[0] == pattern[0] && matchBytes(pattern[1:], s[1:])
+		return len(s) > 0 && s[0] == pattern[0] && matchCharacters(pattern[1:], s[1:])
+	}
+}
+
+// TestAWildcardCharacterIsACodePoint: '?' in a policy stands for one
+// character of the name it is matched against, as in IAM - not for one byte
+// of its UTF-8 encoding.
+func TestAWildcardCharacterIsACodePoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		pattern string
+		key     string
+		want    bool
+	}{
+		{"one question mark, one two-byte character", "?", "é", true},
+		{"two question marks, one two-byte character", "??", "é", false},
+		{"one question mark, one three-byte character", "a?c", "a日c", true},
+		{"three question marks, one three-byte character", "a???c", "a日c", false},
+		{"one question mark, one four-byte character", "?", "\U0001F335", true},
+		{"a star before a question mark", "*?", "日", true},
+		{"a star, a question mark and a literal", "*?é", "éé", true},
+		{"a literal is matched whole", "é?", "é", false},
+		{"ASCII as it was", "a?c", "abc", true},
+		{"an invalid byte is one character", "?", "\xc3", true},
+		{"half a character is no character", "\xc3?", "é", false},
+	}
+	for _, tt := range tests {
+		resource := iam.Document{Version: iam.PolicyVersion, Statements: []iam.Statement{
+			{Effect: iam.Allow, Actions: []string{"s3:GetObject"}, Resources: []string{"arn:aws:s3:::b/" + tt.pattern}},
+		}}
+		p := iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{resource}}
+		got := iam.Decide(iam.Request{Principal: p, Action: iam.ActionGetObject, Resource: iam.Resource{Bucket: "b", Key: tt.key}, Now: policyNow}) == nil
+		if got != tt.want {
+			t.Errorf("%s: resource %q against key %q = %v, want %v", tt.name, tt.pattern, tt.key, got, tt.want)
+		}
+		if got := matchCharacters(characters(tt.pattern), characters(tt.key)); got != tt.want {
+			t.Errorf("%s: the reference matcher = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

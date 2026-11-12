@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/albievan/cactusfs/internal/domain"
 )
@@ -531,25 +532,34 @@ func (c Condition) holds(ctx Context, effect Effect) bool {
 }
 
 // wildcardMatch reports whether s matches pattern, in which '*' stands for
-// any run of characters and '?' for exactly one. It runs in time
-// proportional to len(pattern) * len(s) at worst and never backtracks
-// exponentially.
+// any run of characters and '?' for exactly one. A character is a UTF-8
+// encoded code point, as in IAM: '?' matches "é" whole, never half of it.
+// A byte that is not part of valid UTF-8 counts as one character of its
+// own. It runs in time proportional to len(pattern) * len(s) at worst and
+// never backtracks exponentially.
 func wildcardMatch(pattern, s string) bool {
 	p, i := 0, 0
 	star, mark := -1, 0
 	for i < len(s) {
+		_, width := utf8.DecodeRuneInString(s[i:])
 		switch {
 		// The star is looked at first: a '*' in the pattern is always the
 		// wildcard, also when the text happens to have a '*' there.
 		case p < len(pattern) && pattern[p] == '*':
 			star, mark = p, i
 			p++
-		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == s[i]):
+		case p < len(pattern) && pattern[p] == '?':
 			p++
-			i++
+			i += width
+		case p < len(pattern) && strings.HasPrefix(pattern[p:], s[i:i+width]) && sameCharacter(pattern[p:], width):
+			p += width
+			i += width
 		case star >= 0:
+			// The star takes one more character of the text, and the rest
+			// of the pattern is tried from the one after it.
 			p = star + 1
-			mark++
+			_, taken := utf8.DecodeRuneInString(s[mark:])
+			mark += taken
 			i = mark
 		default:
 			return false
@@ -559,6 +569,15 @@ func wildcardMatch(pattern, s string) bool {
 		p++
 	}
 	return p == len(pattern)
+}
+
+// sameCharacter reports whether the character pattern begins with is width
+// bytes long: a literal of the pattern matches a character of the text only
+// whole, so that an invalid byte of the text never matches the first byte
+// of a valid character of the pattern.
+func sameCharacter(pattern string, width int) bool {
+	_, w := utf8.DecodeRuneInString(pattern)
+	return w == width
 }
 
 // matches reports whether the statement applies to the request.
