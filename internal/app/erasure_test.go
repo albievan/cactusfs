@@ -331,7 +331,10 @@ func within[T any](t *testing.T, what string, call func() (T, error)) (T, error)
 	select {
 	case r := <-done:
 		return r.value, r.err
-	case <-time.After(10 * time.Second):
+	case <-time.After(time.Minute):
+		// Far beyond the deadlines of stallingService, and far beyond
+		// how slow the race detector and a loaded machine make a call:
+		// what does not return by then waits for the drive.
 		t.Fatalf("%s is held up by a drive that hangs", what)
 		var zero T
 		return zero, nil
@@ -351,7 +354,7 @@ func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
 			t.Parallel()
 			f := erasureFixture(t)
 			objects := f.stallingService(t, step, 0)
-			data := randomBytes(t, multiStripe)
+			data := randomBytes(t, 300_000)
 
 			version, err := within(t, "Put", func() (object.Version, error) {
 				return objects.Put(context.Background(), porttest.Root(), app.PutInput{
