@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/audit"
@@ -193,5 +194,97 @@ func TestPolicyConditionsSeeTheRequest(t *testing.T) {
 	}
 	if status := get(user("until-2020", `{"DateLessThan":{"aws:CurrentTime":"2020-01-01T00:00:00Z"}}`)); status != http.StatusForbidden {
 		t.Errorf("allowed until 2020: status %d", status)
+	}
+}
+
+// TestEveryFailedAuthenticationIsAudited: a request whose credentials are
+// not accepted is in the audit trail, whatever the answer - a 403 for a
+// wrong signature and a 400 for a malformed one alike - under the access
+// key it claims, from the header or from the X-Amz-Credential of a
+// presigned URL.
+func TestEveryFailedAuthenticationIsAudited(t *testing.T) {
+	t.Parallel()
+	otherDay := func(r *http.Request) { r.Header.Set(headerAmzDate, serverNow.Add(-24*time.Hour).Format(amzDateFormat)) }
+	unsignedHeader := func(r *http.Request) { r.Header.Set("X-Amz-Meta-Added", "later") }
+	tests := map[string]struct {
+		// request makes the request of the test server s.
+		request func(s *testServer) call
+		status  int
+		code    string
+		// claimed says whether the record names the server's key.
+		claimed bool
+	}{
+		"a wrong signature": {
+			func(*testServer) call {
+				return call{method: http.MethodGet, path: "/bkt/k", key: []byte("not the secret")}
+			},
+			403, "SignatureDoesNotMatch", true,
+		},
+		"a credential date of another day": {
+			func(*testServer) call { return call{method: http.MethodGet, path: "/bkt/k", mutate: otherDay} },
+			400, "AuthorizationHeaderMalformed", true,
+		},
+		"an unsigned x-amz header": {
+			func(*testServer) call { return call{method: http.MethodGet, path: "/bkt/k", mutate: unsignedHeader} },
+			400, "AuthorizationHeaderMalformed", true,
+		},
+		"presigned, with an expiry of none": {
+			func(s *testServer) call {
+				link := strings.Replace(s.presign(http.MethodGet, "/bkt/k", serverNow, 600, nil), "X-Amz-Expires=600", "X-Amz-Expires=0", 1)
+				return call{method: http.MethodGet, path: link, unsigned: true}
+			},
+			400, "AuthorizationQueryParametersError", true,
+		},
+		"presigned, with a wrong signature": {
+			func(s *testServer) call {
+				link := s.presign(http.MethodGet, "/bkt/k", serverNow, 600, nil)
+				return call{method: http.MethodGet, path: link[:len(link)-4] + "0000", unsigned: true}
+			},
+			403, "SignatureDoesNotMatch", true,
+		},
+		"presigned for another region": {
+			func(s *testServer) call {
+				return call{method: http.MethodGet, path: s.presignIn("eu-west-1", http.MethodGet, "/bkt/k", serverNow, 600, nil), unsigned: true}
+			},
+			400, "AuthorizationQueryParametersError", true,
+		},
+		"Signature Version 2": {
+			func(*testServer) call {
+				return call{method: http.MethodGet, path: "/bkt/k", unsigned: true, headers: map[string]string{"Authorization": "AWS key:c2ln"}}
+			},
+			400, "InvalidRequest", false,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := newTestServer(t, "")
+			s.createBucket("bkt")
+			s.putObject("/bkt/k", []byte("here"))
+			s.expectError(s.do(tt.request(s)), tt.status, tt.code)
+
+			s.auditor.Flush(ctx)
+			records, err := s.iamStore.ListAudit(ctx, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var failures []audit.Record
+			for _, r := range records {
+				if r.Action == "auth:Authenticate" && r.Outcome == audit.Failed {
+					failures = append(failures, r)
+				}
+			}
+			if len(failures) != 1 {
+				t.Fatalf("%d failed authentications in the trail, want 1", len(failures))
+			}
+			want := ""
+			if tt.claimed {
+				want = s.keyID
+			}
+			if r := failures[0]; r.AccessKeyID != want || r.Details["reason"] != tt.code || r.SourceIP != "127.0.0.1" {
+				t.Errorf("record = %+v, want the key %q and the reason %s", r, want, tt.code)
+			}
+		})
 	}
 }

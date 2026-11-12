@@ -255,11 +255,19 @@ func (h *Handler) serve(ctx context.Context, req *request) error {
 		return h.preflight(ctx, req)
 	}
 	h.crossOrigin(ctx, req)
+	// Read before authenticate, which takes the signature out of the
+	// query string of a presigned request.
+	claimed := claimedAccessKey(req.Request)
 	if err := h.authenticate(ctx, req); err != nil {
-		if code := toAPIError(err); code.status == http.StatusForbidden {
-			// Refused credentials, as opposed to a request this adapter
-			// cannot serve: that goes to the audit trail.
-			h.cfg.Identities.AuthenticationFailed(ctx, claimedAccessKey(req.Request), sessionOf(req), code.code)
+		if code := toAPIError(err); code.status < http.StatusInternalServerError {
+			// Every request whose credentials were not accepted goes to
+			// the audit trail: a forged or stale signature, and a
+			// malformed one alike - a bad credential date, an unsigned
+			// x-amz-* header or presigned parameters that do not parse
+			// are as much a probe as a wrong signature. The auditor
+			// counts repeats from one address instead of writing each.
+			// A store that could not answer refused nobody.
+			h.cfg.Identities.AuthenticationFailed(ctx, claimed, sessionOf(req), code.code)
 		}
 		h.cfg.Logger.WarnContext(ctx, "authentication failed",
 			slog.String("request_id", req.id),
@@ -407,13 +415,30 @@ func sessionOf(req *request) iam.Session {
 }
 
 // claimedAccessKey returns the access key ID a request says it is signed
-// with, or "" when it says nothing that can be read.
+// with - by the Credential of its Authorization header, or by the
+// X-Amz-Credential of its query string - or "" when it names none that is
+// well formed. The rest of the signature need not be: a request refused for
+// a malformed signature is recorded under the key it claims.
 func claimedAccessKey(r *http.Request) string {
-	sig, err := parseAuthorization(r.Header.Get("Authorization"))
-	if err != nil {
+	var credential string
+	if header := r.Header.Get("Authorization"); header != "" {
+		_, rest, _ := strings.Cut(strings.TrimSpace(header), " ")
+		for part := range strings.SplitSeq(rest, ",") {
+			if value, ok := strings.CutPrefix(strings.TrimSpace(part), "Credential="); ok {
+				credential = value
+				break
+			}
+		}
+	} else if values := r.URL.Query()[querySigner]; len(values) == 1 {
+		credential = values[0]
+	}
+	id, _, _ := strings.Cut(credential, "/")
+	if iam.ValidateAccessKeyID(id) != nil {
+		// Whatever else it is, it is no key ID, and it is not written
+		// into the trail.
 		return ""
 	}
-	return sig.accessKeyID
+	return id
 }
 
 // queryClientInfo is a query parameter AWS SDKs add to name the operation
