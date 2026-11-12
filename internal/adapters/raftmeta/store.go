@@ -357,6 +357,42 @@ func (s *Store) catchUpToSnapshot(snapshots raft.SnapshotStore) error {
 	if err := s.fsm.Restore(source); err != nil {
 		return fmt.Errorf("state database is behind snapshot %s and could not be restored from it: %w", newest.ID, err)
 	}
+	return s.replayCovered(newest.Index)
+}
+
+// replayCovered applies the commands up to index - the index of the newest
+// snapshot - that the state does not reflect and the log still holds. Raft
+// replays only what follows the snapshot. A snapshot that holds less than
+// its index claims was taken, before M36 was fixed, by a state machine that
+// had stopped: the entries between are in no state and, without this, would
+// be skipped for good. A snapshot that holds what it claims leaves nothing
+// to apply here, for the entries above its state are those that change no
+// state (a no-op, a barrier, a configuration). An entry that fails stops the
+// state machine, and the node does not start.
+func (s *Store) replayCovered(index uint64) error {
+	applied, err := s.fsm.appliedIndex()
+	if err != nil {
+		return err
+	}
+	first, err := s.logs.FirstIndex()
+	if err != nil {
+		return fmt.Errorf("read raft log: %w", err)
+	}
+	for i := max(applied+1, first); i <= index && first != 0; i++ {
+		var log raft.Log
+		if err := s.logs.GetLog(i, &log); err != nil {
+			if errors.Is(err, raft.ErrLogNotFound) {
+				continue
+			}
+			return fmt.Errorf("read raft log entry %d: %w", i, err)
+		}
+		if log.Type != raft.LogCommand {
+			continue
+		}
+		if result, ok := s.fsm.Apply(&log).(applyResult); ok && result.fatal {
+			return fmt.Errorf("state database is behind snapshot index %d: %w", index, result.err)
+		}
+	}
 	return nil
 }
 

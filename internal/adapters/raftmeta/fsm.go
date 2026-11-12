@@ -944,9 +944,17 @@ func readVersion(index *bbolt.Bucket, key string) (*versionRecord, error) {
 // Snapshot implements raft.FSM. The read transaction is opened here, while
 // Raft guarantees no Apply is running, so the snapshot is a consistent view
 // even though Persist runs concurrently with later applies.
+//
+// A state machine that has stopped takes no snapshot. Raft labels a snapshot
+// with the index it has handed to the state machine, and it goes on handing
+// entries to one that has stopped: the label would claim entries the state
+// does not hold, and after a restart they would be skipped for good.
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	if f.failed != nil {
+		return nil, fmt.Errorf("raftmeta.Snapshot: %w", f.failed)
+	}
 	if f.db == nil {
 		return nil, domain.ErrShuttingDown
 	}
