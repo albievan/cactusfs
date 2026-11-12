@@ -1559,6 +1559,43 @@ func TestBodiesThatDestroyMustBeSigned(t *testing.T) {
 	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
 }
 
+// TestDeleteObjectsRefusesConditions: an object of a DeleteObjects that
+// names an ETag, a LastModifiedTime or a Size asks for a conditional
+// delete, which is not implemented. The request is refused as a whole and
+// nothing is deleted - not even the objects without a condition.
+func TestDeleteObjectsRefusesConditions(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	tests := map[string]struct {
+		object string
+		status int
+	}{
+		"no condition":         {`<Key>k</Key>`, 200},
+		"an ETag":              {`<Key>k</Key><ETag>"00000000000000000000000000000000"</ETag>`, 501},
+		"an empty ETag":        {`<Key>k</Key><ETag></ETag>`, 501},
+		"a last-modified time": {`<Key>k</Key><LastModifiedTime>2020-01-01T00:00:00Z</LastModifiedTime>`, 501},
+		"a size":               {`<Key>k</Key><Size>1</Size>`, 501},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			s.putObject("/bkt/k", []byte("kept"))
+			s.putObject("/bkt/other", []byte("kept"))
+			body := []byte(`<Delete><Object><Key>other</Key></Object><Object>` + tt.object + `</Object></Delete>`)
+			r := s.do(call{method: http.MethodPost, path: "/bkt?delete", body: body})
+			if tt.status == http.StatusOK {
+				s.mustStatus(r, http.StatusOK)
+				s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
+				return
+			}
+			s.expectError(r, tt.status, "NotImplemented")
+			for _, key := range []string{"k", "other"} {
+				s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/" + key}), http.StatusOK)
+			}
+		})
+	}
+}
+
 // TestAPlusInTheQueryMeansWhatWasSigned: a raw '+' in a query string is a
 // space to the signature as it is to the operation. A request signed for
 // the prefix "a+b" (sent as a%2Bb) cannot be turned into one for "a b" by

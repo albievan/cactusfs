@@ -378,6 +378,12 @@ type deleteRequest struct {
 	Objects []struct {
 		Key       string  `xml:"Key"`
 		VersionID *string `xml:"VersionId"`
+		// The conditions of a conditional delete. They are not
+		// implemented, and an object that names one is refused, never
+		// deleted without its condition.
+		ETag             *string `xml:"ETag"`
+		LastModifiedTime *string `xml:"LastModifiedTime"`
+		Size             *string `xml:"Size"`
 	} `xml:"Object"`
 }
 
@@ -424,6 +430,13 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 	}
 	if len(in.Objects) == 0 || len(in.Objects) > maxDeleteObjects {
 		return errMalformedXML
+	}
+	// A condition on what is deleted is answered as If-Match is on a
+	// single DeleteObject: not implemented, so nothing is deleted.
+	for _, target := range in.Objects {
+		if target.ETag != nil || target.LastModifiedTime != nil || target.Size != nil {
+			return errNotImplemented()
+		}
 	}
 	bypass, err := bypassOf(req.Header)
 	if err != nil {
