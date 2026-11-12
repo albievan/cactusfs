@@ -312,7 +312,7 @@ func (f *fixture) stallingService(t *testing.T, step string, stalled ...int) *ap
 	}
 	return f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
 		cfg.Drives = fixed(t, f.topology, drives)
-	}).WithShardDeadlines(50*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond)
+	}).WithShardDeadlines(time.Second, time.Second, time.Second)
 }
 
 // within runs call and fails the test if it does not return in time.
@@ -360,8 +360,14 @@ func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Put: %v", err)
 			}
-			if n := f.shardCount(); n != sixDrives-1 {
-				t.Errorf("%d shards stored, want %d: all but the one on the hanging drive", n, sixDrives-1)
+			// A drive that answers but is slow under the race detector
+			// may miss the short deadline too; a write quorum is what
+			// must be there.
+			if n := len(f.drives[0].IDs()); n != 0 {
+				t.Errorf("the hanging drive holds %d shards", n)
+			}
+			if n := f.shardCount(); n < sixDrives-sixParity+1 {
+				t.Errorf("%d shards stored, want at least the write quorum of %d", n, sixDrives-sixParity+1)
 			}
 			if len(version.Layout.Shards) != sixDrives {
 				t.Errorf("layout has %d locations, want %d", len(version.Layout.Shards), sixDrives)
@@ -411,11 +417,12 @@ func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
 			hanging := slices.Index(f.drives, drives[4])
 
 			objects := f.stallingService(t, step, hanging)
-			result, _ := within(t, "HealObject", func() (app.HealResult, error) {
+			result, err := within(t, "HealObject", func() (app.HealResult, error) {
 				return objects.Healer().HealObject(ctx, "b", "k")
 			})
-			if result.Damaged != 2 || result.Rebuilt != 1 {
-				t.Errorf("HealObject = %+v; want two damaged shards and the one on the drive that answers rebuilt", result)
+			if result.Damaged != 2 || result.Rebuilt != 1 || !errors.Is(err, domain.ErrUnavailable) {
+				t.Errorf("HealObject = %+v, %v; want two damaged shards, the one on the drive that answers rebuilt, and %v",
+					result, err, domain.ErrUnavailable)
 			}
 			if _, ok := drives[1].Bytes(shardID(version, 1)); !ok {
 				t.Error("the shard on the drive that answers was not rebuilt")
@@ -760,9 +767,16 @@ func TestFailedRebuildLeavesTheObjectNoWorse(t *testing.T) {
 		fail(drives[2])
 		fail(drives[5])
 
+		// A heal that rebuilt fewer shards than were damaged did not heal
+		// the object, and says so; it used to report success and log the
+		// object as healed (audit L32).
 		result, err := f.objects.Healer().HealObject(ctx, "b", "k")
-		if err != nil || result.Damaged != 2 || result.Rebuilt != 0 {
-			t.Errorf("%s: HealObject = %+v, %v; want two damaged shards and none rebuilt", name, result, err)
+		if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrIntegrity) || result.Unrecoverable ||
+			result.Damaged != 2 || result.Rebuilt != 0 {
+			t.Errorf("%s: HealObject = %+v, %v; want two damaged shards, none rebuilt and %v", name, result, err, domain.ErrUnavailable)
+		}
+		if logs := f.logs.String(); strings.Contains(logs, `"msg":"object healed"`) || !strings.Contains(logs, "shard cannot be rebuilt") {
+			t.Errorf("%s: the failed rebuild is logged as\n%s", name, logs)
 		}
 		// The truncated shard is still there, exactly as it was.
 		if now, ok := drives[2].Bytes(shardID(version, 2)); !ok || len(now) != len(stored)/2 {

@@ -852,7 +852,9 @@ type repair struct {
 //
 // It returns an error wrapping domain.ErrIntegrity when too few shards are
 // left to rebuild from, and one wrapping domain.ErrUnavailable when enough
-// might be left but cannot be reached now.
+// might be left but cannot be reached now, or when a damaged shard could not
+// be written again: the version is then not healed, and what was rebuilt is
+// still reported.
 func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle) (repair, error) {
 	geometry, err := geometryOf(v.Layout)
 	if err != nil {
@@ -964,6 +966,12 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 		result.rebuilt = append(result.rebuilt, i)
 	}
 	slices.Sort(result.rebuilt)
+	if len(result.rebuilt) < len(damaged) {
+		// The object is no worse than it was, but not healed either: a
+		// later heal has to finish the job.
+		return result, fmt.Errorf("%w: %d of %d damaged shards of %s were rebuilt",
+			domain.ErrUnavailable, len(result.rebuilt), len(damaged), v.DataID)
+	}
 	return result, nil
 }
 

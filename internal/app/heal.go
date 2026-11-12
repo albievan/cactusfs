@@ -225,6 +225,13 @@ func (h *Healer) heal(ctx context.Context, target healTarget, slow throttle) (He
 				slog.String("bucket", bucketName), slog.String("data_id", version.DataID.String()),
 				slog.Int("damaged_shards", result.Damaged), slog.Int("shards", result.Shards))
 			h.observe(result)
+		} else if result.Rebuilt > 0 {
+			// What was rebuilt is kept and counted; the rest waits for
+			// a later heal.
+			h.logger.WarnContext(ctx, "object partly healed",
+				slog.String("bucket", bucketName), slog.String("data_id", version.DataID.String()),
+				slog.Int("damaged_shards", result.Damaged), slog.Int("rebuilt_shards", result.Rebuilt))
+			h.observe(result)
 		}
 		return result, fmt.Errorf("heal.Object: %w", healErr)
 	}
@@ -271,6 +278,11 @@ func (h *Healer) healPart(ctx context.Context, target healTarget, slow throttle)
 			result.Unrecoverable = true
 			h.logger.ErrorContext(ctx, "part of an upload is damaged beyond repair",
 				slog.String("bucket", target.bucket), slog.String("data_id", extent.DataID.String()), slog.Int("part", target.part))
+			h.observe(result)
+		} else if result.Rebuilt > 0 {
+			h.logger.WarnContext(ctx, "part of an upload partly healed",
+				slog.String("bucket", target.bucket), slog.String("data_id", extent.DataID.String()),
+				slog.Int("damaged_shards", result.Damaged), slog.Int("rebuilt_shards", result.Rebuilt))
 			h.observe(result)
 		}
 		return result, fmt.Errorf("heal.Part: %w", healErr)
