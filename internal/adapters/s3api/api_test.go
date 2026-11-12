@@ -1623,21 +1623,22 @@ func TestDeleteObjectsRefusesConditions(t *testing.T) {
 		"a size":               {`<Key>k</Key><Size>1</Size>`, 501},
 	}
 	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			s.putObject("/bkt/k", []byte("kept"))
-			s.putObject("/bkt/other", []byte("kept"))
-			body := []byte(`<Delete><Object><Key>other</Key></Object><Object>` + tt.object + `</Object></Delete>`)
-			r := s.do(call{method: http.MethodPost, path: "/bkt?delete", body: body})
-			if tt.status == http.StatusOK {
-				s.mustStatus(r, http.StatusOK)
-				s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
-				return
+		s.putObject("/bkt/k", []byte("kept"))
+		s.putObject("/bkt/other", []byte("kept"))
+		body := []byte(`<Delete><Object><Key>other</Key></Object><Object>` + tt.object + `</Object></Delete>`)
+		status, code := answer(s.do(call{method: http.MethodPost, path: "/bkt?delete", body: body}))
+		want, kept := "NotImplemented", http.StatusOK
+		if tt.status == http.StatusOK {
+			want, kept = "", http.StatusNotFound
+		}
+		if status != tt.status || code != want {
+			t.Errorf("%s: %d %s, want %d %s", name, status, code, tt.status, want)
+		}
+		for _, key := range []string{"k", "other"} {
+			if got, _ := answer(s.do(call{method: http.MethodGet, path: "/bkt/" + key})); got != kept {
+				t.Errorf("%s: GET %s after the delete = %d, want %d", name, key, got, kept)
 			}
-			s.expectError(r, tt.status, "NotImplemented")
-			for _, key := range []string{"k", "other"} {
-				s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/" + key}), http.StatusOK)
-			}
-		})
+		}
 	}
 }
 
@@ -1665,18 +1666,18 @@ func TestAPlusInTheQueryMeansWhatWasSigned(t *testing.T) {
 		"presigned, rewritten to space": {call{method: http.MethodGet, path: strings.Replace(presigned, "a%2Bb", "a+b", 1), unsigned: true}, 403, ""},
 	}
 	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			r := s.do(tt.c)
-			if tt.status != http.StatusOK {
-				s.expectError(r, tt.status, "SignatureDoesNotMatch")
-				return
+		r := s.do(tt.c)
+		status, code := answer(r)
+		switch {
+		case tt.status != http.StatusOK:
+			if status != tt.status || code != "SignatureDoesNotMatch" {
+				t.Errorf("%s: %d %s, want %d SignatureDoesNotMatch", name, status, code, tt.status)
 			}
-			s.mustStatus(r, http.StatusOK)
-			if body := string(r.body); !strings.Contains(body, tt.listed) || strings.Count(body, "<Key>") != 1 {
-				t.Errorf("listing = %s, want only %s", body, tt.listed)
-			}
-		})
+		case status != http.StatusOK:
+			t.Errorf("%s: %d %s, want 200", name, status, code)
+		case !strings.Contains(string(r.body), tt.listed) || strings.Count(string(r.body), "<Key>") != 1:
+			t.Errorf("%s: listing = %s, want only %s", name, r.body, tt.listed)
+		}
 	}
 }
 

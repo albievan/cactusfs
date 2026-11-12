@@ -312,16 +312,13 @@ func TestIfRangeOverHTTP(t *testing.T) {
 		"no Range":                    {map[string]string{"If-Range": `"x"`}, 200, body},
 	}
 	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			r := s.do(call{method: http.MethodGet, path: "/bkt/k", headers: tt.headers})
-			if r.status != tt.status || (tt.want != nil && !bytes.Equal(r.body, tt.want)) {
-				t.Errorf("GET = %d %q, want %d %q", r.status, r.body, tt.status, tt.want)
-			}
-			if r.status == http.StatusOK && r.header.Get("Content-Range") != "" {
-				t.Errorf("a whole object with Content-Range %q", r.header.Get("Content-Range"))
-			}
-		})
+		r := s.do(call{method: http.MethodGet, path: "/bkt/k", headers: tt.headers})
+		if r.status != tt.status || (tt.want != nil && !bytes.Equal(r.body, tt.want)) {
+			t.Errorf("%s: GET = %d %q, want %d %q", name, r.status, r.body, tt.status, tt.want)
+		}
+		if r.status == http.StatusOK && r.header.Get("Content-Range") != "" {
+			t.Errorf("%s: a whole object with Content-Range %q", name, r.header.Get("Content-Range"))
+		}
 	}
 	// A condition on a write is not implemented, and says so.
 	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt/k", body: body, headers: map[string]string{"If-Range": tag}}), 501, "NotImplemented")
