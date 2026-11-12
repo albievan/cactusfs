@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1671,6 +1672,92 @@ func TestEveryPageOfTheAuditTrailSaysWhetherAnotherFollows(t *testing.T) {
 		}
 	}
 	f.must(http.StatusBadRequest, call{method: "GET", path: "/audit?limit=1001"})
+}
+
+// callChain matches the qualified name of a function at the head of a part
+// of an error message: what the code inside calls itself.
+var callChain = regexp.MustCompile(`(^|: |; )[a-z][a-z0-9]*\.[A-Za-z_][A-Za-z0-9_]*:`)
+
+// TestPublicDetail: what a caller is told of an error is what the use case
+// says of it, without the functions it passed through.
+func TestPublicDetail(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			"a chain of calls", fmt.Errorf("iam.UpdateUser: %w", fmt.Errorf("raftmeta.PutUser: %w: role %s", domain.ErrEntityNotFound, "auditors")),
+			"no such entity: role auditors",
+		},
+		{
+			"a reason of the use case", fmt.Errorf("iam.CreateUser: %w: a password must be 12 to 1024 characters", domain.ErrInvalidArgument),
+			"invalid argument: a password must be 12 to 1024 characters",
+		},
+		{
+			"a lower-case function", fmt.Errorf("idempotency.Begin: idempotency.fingerprint: %w: a request of yours is being recognised already", domain.ErrTooManyRequests),
+			"too many requests at once: a request of yours is being recognised already",
+		},
+		{
+			"joined errors", errors.Join(domain.ErrInvalidArgument, errors.New("query argument limit: value is not an integer")),
+			"invalid argument; query argument limit: value is not an integer",
+		},
+		{
+			"a name with a dot is no function", fmt.Errorf("buckets.Create: %w: bucket my.photos is taken", domain.ErrBucketAlreadyExists),
+			"bucket already exists: bucket my.photos is taken",
+		},
+		{
+			"a dotted name alone in a part", fmt.Errorf("targets.Put: %w: target: hooks.v2", domain.ErrInvalidArgument),
+			"invalid argument: target",
+		},
+		{
+			"too long", fmt.Errorf("x.Y: %w: %s", domain.ErrInvalidArgument, strings.Repeat("é", 400)),
+			"invalid argument: " + strings.Repeat("é", 247) + "...",
+		},
+	}
+	for _, tt := range tests {
+		if got := adminapi.PublicDetail(tt.err); got != tt.want {
+			t.Errorf("%s: %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestAProblemSaysNothingOfTheCodeInside: the detail of a refusal a caller
+// can correct says what to correct - the field, the role that does not
+// exist, what a policy may not hold - and names no function of the code
+// that refused it.
+func TestAProblemSaysNothingOfTheCodeInside(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.must(http.StatusCreated, call{method: "POST", path: "/users", body: map[string]any{"name": "ivy"}})
+	tests := []struct {
+		name   string
+		c      call
+		status int
+		says   string
+	}{
+		{"a password too short", call{method: "POST", path: "/users", body: map[string]any{"name": "jack", "password": "short"}}, 400, "password must be"},
+		{"a role that does not exist", call{method: "PUT", path: "/users/ivy", body: map[string]any{
+			"groups": []string{}, "roles": []string{"no-such-role"}, "disabled": false,
+		}}, 404, "no-such-role"},
+		{"a policy that does not exist", call{method: "POST", path: "/roles", body: map[string]any{"name": "r", "policies": []string{"no-such-policy"}}}, 404, "no-such-policy"},
+		{"a policy that is not understood", call{method: "POST", path: "/policies", body: map[string]any{"name": "bad", "document": map[string]any{
+			"Version": "2012-10-17", "Statement": []any{map[string]any{"Effect": "Allow", "NotAction": "s3:*", "Resource": "*"}},
+		}}}, 400, "NotAction"},
+		{"a user that is there", call{method: "POST", path: "/users", body: map[string]any{"name": "ivy"}}, 409, ""},
+		{"a key that expired already", call{method: "POST", path: "/users/ivy/keys", body: map[string]any{
+			"expires_at": testNow.Add(-time.Hour).Format(time.RFC3339),
+		}}, 400, "expired"},
+		{"a limit that is not a number", call{method: "GET", path: "/audit?limit=many"}, 400, "limit"},
+	}
+	for _, tt := range tests {
+		r := f.must(tt.status, tt.c)
+		detail := fmt.Sprint(r.problem(t)["detail"])
+		if !strings.Contains(detail, tt.says) || callChain.MatchString(detail) {
+			t.Errorf("%s: detail %q, want one that says %q and names no function", tt.name, detail, tt.says)
+		}
+	}
 }
 
 // TestEveryDomainErrorHasAnAnswer: the mapping from errors to problems.

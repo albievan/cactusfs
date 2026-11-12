@@ -783,7 +783,7 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 			retry = strconv.Itoa(int(math.Ceil(throttled.RetryAfter.Seconds())))
 		}
 		w.Header().Set("Retry-After", retry)
-		p.detail = err.Error()
+		p.detail = publicDetail(err)
 	case p.status == http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "300")
 	case p.status == http.StatusForbidden, p.status == http.StatusLocked:
@@ -796,9 +796,59 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		h.cfg.Logger.WarnContext(ctx, "upgrade refused: the release did not verify", slog.String("request_id", info.id), slog.Any("error", err))
 		p.detail = detailReleaseNotVerified
 	default:
-		p.detail = err.Error()
+		p.detail = publicDetail(err)
 	}
 	h.problem(w, r, p)
+}
+
+// maxDetail bounds the detail of a problem, in bytes.
+const maxDetail = 512
+
+// publicDetail is what a caller is told of an error that is theirs to
+// correct: what the use case says of it - which field, which role does not
+// exist, why a policy is not understood - and not the chain of calls it
+// passed through on its way out ("iam.UpdateUser: raftmeta.PutUser: ..."),
+// which names the code inside. Every part of the message that is no more
+// than a qualified name of a function is left out; what is left is bounded.
+func publicDetail(err error) string {
+	var lines []string
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		var kept []string
+		for part := range strings.SplitSeq(line, ": ") {
+			if part = strings.TrimSpace(part); part != "" && !callSite(part) {
+				kept = append(kept, part)
+			}
+		}
+		if len(kept) > 0 {
+			lines = append(lines, strings.Join(kept, ": "))
+		}
+	}
+	detail := strings.Join(lines, "; ")
+	if len(detail) > maxDetail {
+		detail = strings.ToValidUTF8(detail[:maxDetail], "") + "..."
+	}
+	return detail
+}
+
+// callSite reports whether s is the qualified name of a function, as the
+// use cases and adapters begin their errors with: "iam.UpdateUser",
+// "idempotency.fingerprint", "raftmeta.PutUser" - an identifier, a dot and
+// an identifier, and nothing else.
+func callSite(s string) bool {
+	pkg, fn, ok := strings.Cut(s, ".")
+	if !ok || pkg == "" || fn == "" || pkg[0] < 'a' || pkg[0] > 'z' {
+		return false
+	}
+	identifier := func(word string) bool {
+		for i, c := range word {
+			letter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+			if !letter && (i == 0 || c < '0' || c > '9') {
+				return false
+			}
+		}
+		return true
+	}
+	return identifier(pkg) && identifier(fn)
 }
 
 func (h *Handler) problem(w http.ResponseWriter, r *http.Request, p problem) {

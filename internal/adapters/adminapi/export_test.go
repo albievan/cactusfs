@@ -5,6 +5,9 @@ func Conceal(pattern string, body []byte) ([]byte, []string) {
 	return conceal(pattern, body)
 }
 
+// PublicDetail is publicDetail, for the tests of package adminapi_test.
+func PublicDetail(err error) string { return publicDetail(err) }
+
 // RequiredFields returns the fields the body of each operation must give.
 func RequiredFields() map[string][]string {
 	return requiredFields()
