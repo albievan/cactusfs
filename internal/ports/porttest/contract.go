@@ -1423,6 +1423,11 @@ func lockContract(t *testing.T, store Metadata) {
 	for ; ; short, fill = 2*short, fill+1 {
 		until := time.Now().Add(short)
 		if _, err := put(fill, object.Lock{Retention: &object.Retention{Mode: object.Compliance, Until: until}}); err != nil {
+			// The put itself may have been judged after the retention
+			// ended, which the store rightly refuses.
+			if errors.Is(err, domain.ErrInvalidArgument) && !time.Now().Before(until) && fill < 0x54 {
+				continue
+			}
 			t.Fatal(err)
 		}
 		err := remove(fill, true)
@@ -1430,8 +1435,11 @@ func lockContract(t *testing.T, store Metadata) {
 			time.Sleep(time.Until(until) + 500*time.Millisecond)
 			break
 		}
-		if err != nil || time.Now().Before(until) || fill == 0x54 {
+		if err != nil || time.Now().Before(until) {
 			t.Fatalf("removing a version whose retention has not ended = %v", err)
+		}
+		if fill == 0x54 {
+			t.Fatalf("every remove, up to a retention of %v, took longer than the retention", short)
 		}
 	}
 	if err := remove(fill, false); err != nil {

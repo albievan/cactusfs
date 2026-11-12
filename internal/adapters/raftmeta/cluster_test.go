@@ -177,6 +177,7 @@ func (c *testCluster) start(id string, voter bool) *Store {
 		},
 	})
 	if err != nil {
+		_ = listener.Close()
 		c.t.Fatalf("Open %s: %v", id, err)
 	}
 	if c.newer[id] {
@@ -261,12 +262,17 @@ func (h *heldSocket) open() *heldSession {
 	return session
 }
 
-// serve accepts until the socket is closed at the end of the test.
+// serve accepts until the socket is closed at the end of the test; any
+// other failure to accept is waited out, so the address keeps answering.
 func (h *heldSocket) serve() {
 	for {
 		conn, err := h.listener.Accept()
-		if err != nil {
+		if errors.Is(err, net.ErrClosed) {
 			return
+		}
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
 		h.mu.Lock()
 		session := h.current

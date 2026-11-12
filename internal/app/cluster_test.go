@@ -440,9 +440,10 @@ func TestOnlyTheActiveNodeScrubs(t *testing.T) {
 	// check everything. So the test waits until the scrubber has been told
 	// no rather than for a fixed time - the last object of a pass can take
 	// longer than any such time on a busy runner - and allows that one
-	// pass before it and none after it.
-	before, refusals := passes.Load(), refused.Load()
+	// pass before it and none after it. The count is read after the node
+	// stopped being active, so a pass that ended in between is not counted.
 	active.Store(false)
+	before, refusals := passes.Load(), refused.Load()
 	deadline = time.Now().Add(10 * time.Second)
 	for refused.Load() == refusals && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
