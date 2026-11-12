@@ -602,3 +602,88 @@ func TestListIgnoresWhatItDidNotWrite(t *testing.T) {
 		t.Errorf("List = %v, want only %v", listed, id)
 	}
 }
+
+// failingFile is a shard file on a drive whose media fails: reads of the
+// header, or of the blocks, return err.
+type failingFile struct {
+	*os.File
+	err        error
+	failHeader bool
+}
+
+func (f failingFile) Read(p []byte) (int, error) {
+	if f.failHeader {
+		return 0, f.err
+	}
+	return f.File.Read(p)
+}
+
+func (f failingFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= headerSize {
+		return 0, f.err
+	}
+	return f.File.ReadAt(p, off)
+}
+
+// TestMediaErrorsAreDamage proves that a shard whose bytes cannot be read -
+// EIO, a bad sector - is reported as damaged, so that heal rebuilds it from
+// parity. It used to come back unclassified, and heal never rebuilt such a
+// shard (audit M30). A file the process closed itself is not damage.
+func TestMediaErrorsAreDamage(t *testing.T) {
+	t.Parallel()
+
+	errMedia := errors.New("input/output error")
+	tests := []struct {
+		name       string
+		err        error
+		failHeader bool
+		damage     bool
+	}{
+		{name: "the header cannot be read", err: errMedia, failHeader: true, damage: true},
+		{name: "a block cannot be read", err: errMedia, damage: true},
+		{name: "the file was closed by the process", err: os.ErrClosed, damage: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			d := openDrive(t, dir)
+			id := shardID(9, 1)
+			writeShard(t, d, id, randomData(t, blockSize+10))
+
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = root.Close() }()
+			rel, err := filepath.Rel(dir, shardFile(dir, id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			file, err := root.Open(rel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = file.Close() }()
+
+			err = func() error {
+				r, err := disk.NewShardReader(failingFile{File: file, err: tt.err, failHeader: tt.failHeader}, id)
+				if err != nil {
+					return err
+				}
+				_, err = r.ReadAt(make([]byte, 10), 0)
+				return err
+			}()
+			if err == nil {
+				t.Fatal("reading a failing file succeeded")
+			}
+			if !errors.Is(err, tt.err) {
+				t.Errorf("error = %v, want it to wrap %v", err, tt.err)
+			}
+			if got := errors.Is(err, domain.ErrIntegrity); got != tt.damage {
+				t.Errorf("error = %v: wraps ErrIntegrity = %v, want %v", err, got, tt.damage)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"sync"
 
@@ -11,10 +12,32 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
+// shardFile is what a shard reader needs of an open shard file: an *os.File,
+// or in tests a file that fails as a failing drive does.
+type shardFile interface {
+	io.Reader
+	io.ReaderAt
+	io.Closer
+	Stat() (fs.FileInfo, error)
+}
+
+// mediaError classifies an error from reading the bytes of an open shard
+// file. The file is open, so the drive was reached and the shard is there: a
+// read that fails anyway - EIO, a bad sector, a CRC error - is the shard
+// being unreadable, which is damage the shard can be rebuilt from parity for,
+// and the error wraps domain.ErrIntegrity. A file this process has closed is
+// its own mistake, not the drive's, and is returned as it is.
+func mediaError(err error) error {
+	if errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return fmt.Errorf("%w: read failed: %w", domain.ErrIntegrity, err)
+}
+
 // shardReader reads a shard file and verifies every block before it returns
 // any of the block's bytes.
 type shardReader struct {
-	file      *os.File
+	file      shardFile
 	id        object.ShardID
 	index     uint32 // shard index as the checksum covers it
 	blockSize int
@@ -27,13 +50,13 @@ type shardReader struct {
 	buf    []byte
 }
 
-func newShardReader(f *os.File, want object.ShardID) (*shardReader, error) {
+func newShardReader(f shardFile, want object.ShardID) (*shardReader, error) {
 	head := make([]byte, headerSize)
 	if _, err := io.ReadFull(f, head); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, fmt.Errorf("%w: shard file is shorter than its header", domain.ErrIntegrity)
 		}
-		return nil, err
+		return nil, mediaError(err)
 	}
 	h, err := decodeHeader(head)
 	if err != nil {
@@ -114,7 +137,7 @@ func (r *shardReader) verifiedBlock(block int64) ([]byte, error) {
 		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("%w: block %d is truncated", domain.ErrIntegrity, block)
 		}
-		return nil, err
+		return nil, mediaError(err)
 	}
 	if block < 0 {
 		return nil, fmt.Errorf("%w: negative block number", domain.ErrInvalidArgument)
