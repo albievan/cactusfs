@@ -187,7 +187,7 @@ test. The binary reads no file of variables: what starts it hands it its environ
 |---|---|---|---|
 | `--tls-cert` | `CACTUSFS_TLS_CERT` | required, unless `--dev-plaintext` | path of the PEM certificate chain of the S3 and admin listeners |
 | `--tls-key` | `CACTUSFS_TLS_KEY` | required, unless `--dev-plaintext` | path of the PEM private key of that certificate. The file holds a secret: its path is not shown with the node's settings |
-| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`; `0` never reads them again). A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular files (not pipes) |
+| `--tls-reload-interval` | `CACTUSFS_TLS_RELOAD_INTERVAL` | `1m` | how often the certificate and key files, the node's too, are read again (at least `5s`; `0` never reads them again). A new pair that is valid is used for new connections without a restart; one that is not is refused and logged, and the old one stays (`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until that certificate expires; for a compromised key, replace the node CA (a node that leaves the cluster is revoked, ADR-0030, but only the node itself can ask to leave). The files must be regular files (not pipes) |
 | `--dev-plaintext` | `CACTUSFS_DEV_PLAINTEXT` | `false` | DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only |
 | `--node-tls-cert` | `CACTUSFS_NODE_TLS_CERT` | required in a cluster | path of the node certificate for mutual TLS between nodes |
 | `--node-tls-key` | `CACTUSFS_NODE_TLS_KEY` | required in a cluster | path of the node certificate's private key. The file holds a secret: its path is not shown with the node's settings |
@@ -958,7 +958,10 @@ four at a time.
   with `buf lint` and `buf breaking`. **Implemented**, three services: `NodeService`
   (`Info`, `InFlight`, `Settings`), `MetaService` for what only the metadata leader
   can do (`Propose`, `ReadIndex`, `Term`, `Join`, `Leave`), and `StorageService` for
-  shards (`WriteShard`, `StatShard`, `ReadShard`, `DeleteShard`, `ListShards`).
+  shards (`WriteShard`, `StatShard`, `ReadShard`, `DeleteShard`, `ListShards`). A node
+  that leaves (`Leave`) is revoked through Raft (entry schema 6, ADR-0030): no member
+  serves it, lets it join again or keeps its Raft connections afterwards. Only the node
+  itself can ask to leave; an operator's command to remove another node is not built.
 - **Sub-buckets and tag rules (not implemented).** ADR-0017 and ADR-0018 are accepted,
   and entry schema 3 carries their commands: the domain rules
   (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,

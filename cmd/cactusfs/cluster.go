@@ -131,6 +131,7 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		TLS:        identity.Server(),
 		PeerNodeID: nodetls.PeerNodeID,
 		Authz:      n.authorizer,
+		Revoked:    n.revoked,
 		Info:       func(ctx context.Context) (noderpc.NodeInfo, error) { return n.info(ctx, cfg) },
 		InFlight: func(id object.ID) bool {
 			objects := n.inFlight.Load()
@@ -293,6 +294,17 @@ func (m metaRPC) Subject(entry []byte) (registers, removes, counts string, err e
 	return store.Subject(entry)
 }
 
+// revoked reports whether a node was taken out of the cluster for good
+// (ADR-0030), by this node's copy of the metadata. Before the store has
+// opened there is no record, and nobody is revoked.
+func (n *node) revoked(nodeID string) (bool, error) {
+	meta := n.started.Load()
+	if meta == nil {
+		return false, nil
+	}
+	return meta.NodeRevoked(nodeID)
+}
+
 // Join adds a node to the metadata group. The set of voters is fixed when
 // the cluster forms: a node gets a vote here only if it has one already and
 // is being added again after starting late. Anything else joins without.
@@ -306,6 +318,15 @@ func (m metaRPC) Join(ctx context.Context, nodeID, raftAddr string, voter bool) 
 		return err
 	} else if named != nodeID {
 		return fmt.Errorf("%w: Raft address %q does not name node %s", domain.ErrInvalidArgument, raftAddr, nodeID)
+	}
+	// A node that left comes back under another name, or not at all
+	// (ADR-0030). Node RPC refuses its calls already; this is the same
+	// rule where the group is changed.
+	if revoked, err := store.NodeRevoked(nodeID); err != nil {
+		return err
+	} else if revoked {
+		return fmt.Errorf("%w: node %s was removed from the cluster and cannot join it again under that name",
+			domain.ErrAccessDenied, nodeID)
 	}
 	members, err := store.Members()
 	if err != nil {
@@ -324,23 +345,44 @@ func (m metaRPC) Join(ctx context.Context, nodeID, raftAddr string, voter bool) 
 	return store.AddMember(ctx, raftmeta.Member{ID: nodeID, RaftAddr: raftAddr, Voter: votes})
 }
 
+// Leave takes a node out of the cluster for good (ADR-0030): out of the
+// group, its record deleted, and revoked - from then on no member answers
+// it, whatever certificate it shows, and it never joins again under its
+// name. While a member of a release before schema 6 remains, the revocation
+// cannot be recorded, and nothing is done: the error wraps
+// domain.ErrUnavailable.
+//
+// The revocation comes last. Every step can be taken again, and only the
+// node itself may ask for them: one that is revoked could not ask again to
+// finish what failed half-way, and a leader that leaves could not have the
+// next leader write what is left.
 func (m metaRPC) Leave(ctx context.Context, nodeID string) error {
 	store, err := m.store()
 	if err != nil {
 		return err
 	}
+	if err := store.CanRevoke(); err != nil {
+		return err
+	}
 	if err := store.RemoveMember(ctx, nodeID); err != nil {
 		return err
 	}
-	return store.RemoveNode(ctx, nodeID)
+	if err := store.RemoveNode(ctx, nodeID); err != nil {
+		return err
+	}
+	return store.RevokeNode(ctx, nodeID)
 }
 
 // mayReplicate reports whether a node may open a Raft connection to this
-// one: a voter of the metadata group as this node knows it, or - while this
-// node knows no group yet - a node of the list it was started with.
+// one, or keep one open: a voter of the metadata group as this node knows
+// it, or - while this node knows no group yet - a node of the list it was
+// started with; never a node that was revoked (ADR-0030).
 func (n *node) mayReplicate(cfg serverConfig, nodeID string) bool {
 	meta := n.started.Load()
 	if meta == nil {
+		return false
+	}
+	if revoked, err := meta.NodeRevoked(nodeID); err != nil || revoked {
 		return false
 	}
 	members, err := meta.Members()

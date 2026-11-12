@@ -300,6 +300,11 @@ type Principal struct {
 	// NodeID is set, and nothing else is, when the caller is a node of the
 	// cluster: it proved possession of the node certificate that names it.
 	NodeID string
+	// NodeRevoked marks a node that was taken out of the cluster for good
+	// (ADR-0030): its certificate is still one of the node CA, and it may
+	// do nothing. Only node RPC sets it, from the replicated record of
+	// revoked nodes.
+	NodeRevoked bool
 	// User is the name of the user the key belongs to; empty for root and
 	// for nodes.
 	User string
@@ -459,9 +464,11 @@ func Decide(req Request) error {
 	}
 	if node := req.Principal.NodeID; node != "" || req.Action.cluster() {
 		// A node adds, records and removes itself only, and reports no
-		// counts but its own.
+		// counts but its own. A node that was taken out of the cluster
+		// does none of it, whatever certificate it shows.
 		own := req.Action == ActionNodeRPC || req.Resource.Node == node
-		if node != "" && req.Principal.AccessKeyID == "" && !req.Principal.Root && req.Principal.User == "" && req.Action.cluster() && own {
+		if node != "" && !req.Principal.NodeRevoked && req.Principal.AccessKeyID == "" && !req.Principal.Root &&
+			req.Principal.User == "" && req.Action.cluster() && own {
 			return nil
 		}
 		return refused

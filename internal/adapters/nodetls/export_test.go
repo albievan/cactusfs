@@ -3,6 +3,7 @@ package nodetls
 import (
 	"context"
 	"net"
+	"time"
 )
 
 // ReadWith replaces how a Reloader reads its files, for a test of a reading
@@ -17,7 +18,10 @@ func PeerRefusalOf(err error) PeerRefusal {
 }
 
 // ListenOn serves the connections of inner as Listen serves those of the
-// address it listens on, with at most handshakes handshakes at once.
-func (i *Identity) ListenOn(ctx context.Context, inner net.Listener, allow func(string) bool, handshakes int) net.Listener {
-	return i.serve(ctx, inner, allow, handshakes)
+// address it listens on, with at most handshakes handshakes at once, and asks
+// allow again about the open ones every recheck.
+func (i *Identity) ListenOn(
+	ctx context.Context, inner net.Listener, allow func(string) bool, handshakes int, recheck time.Duration,
+) net.Listener {
+	return i.serve(ctx, inner, allow, handshakes, recheck)
 }

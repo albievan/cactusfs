@@ -54,12 +54,14 @@ type testCluster struct {
 	// newer names the nodes that run the binary of the next release, older
 	// those that run the binary of the release of entry schema 2, and
 	// schema3 those that run the binary of the release of entry schema 3,
-	// and schema4 those that run the binary of the release of entry schema
-	// 4, the one before this.
+	// schema4 those that run the binary of the release of entry schema 4,
+	// and schema5 those that run the binary of the release of entry schema
+	// 5, the one before this.
 	newer   map[string]bool
 	older   map[string]bool
 	schema3 map[string]bool
 	schema4 map[string]bool
+	schema5 map[string]bool
 }
 
 type recorder struct {
@@ -85,7 +87,7 @@ func newTestCluster(t *testing.T) *testCluster {
 	return &testCluster{
 		t: t, base: t.TempDir(), stores: map[string]*Store{}, members: map[string]Member{}, sockets: map[string]*heldSocket{},
 		events: map[string]*recorder{}, down: map[string]bool{}, newer: map[string]bool{}, older: map[string]bool{}, schema3: map[string]bool{},
-		schema4: map[string]bool{}, deaf: map[string]bool{},
+		schema4: map[string]bool{}, schema5: map[string]bool{}, deaf: map[string]bool{},
 	}
 }
 
@@ -188,6 +190,11 @@ func (c *testCluster) start(id string, voter bool) *Store {
 	}
 	if c.schema3[id] {
 		asSchema3Release(store)
+	}
+	// The release of schema 5 first: a node of it that is taken back
+	// further runs the older one.
+	if c.schema5[id] {
+		asSchema5Release(store)
 	}
 	if c.schema4[id] {
 		asSchema4Release(store)
@@ -354,8 +361,19 @@ func asSchema3Release(s *Store) {
 	s.versionOf = func(e entry) byte { return min(versionOf(e), entrySchema3) }
 }
 
+// asSchema5Release makes a store behave like the binary of the release
+// before this one, which applies entry schema 5 and nothing newer: it
+// announces 5 when it registers, writes nothing above it, and stops at an
+// entry of schema 6. Revoking a node, which only this release can be asked,
+// that binary has no caller for; asked of this stand-in it is answered as
+// this release answers it below level 6: unavailable, with nothing logged.
+func asSchema5Release(s *Store) {
+	s.supported = entrySchema5
+	s.fsm.supported = entrySchema5
+}
+
 // asSchema4Release makes a store behave like the binary of the release
-// before this one, which applies entry schema 4 and nothing newer: it
+// of schema 4, which applies entry schema 4 and nothing newer: it
 // announces 4 when it registers, writes nothing above it - a bucket as it
 // always wrote one, a delete without who deleted - and stops at an entry of
 // schema 5. What only this release can be asked - a quota, a walk, a target,
@@ -1980,10 +1998,12 @@ func TestTheLeaderStampsEntries(t *testing.T) {
 	clocks[leader].set(noon.Add(-time.Hour))
 	// s4 writes the bucket in the schema it believes the cluster takes, and
 	// learns of the last registration when it has applied that entry: one
-	// written a moment before would be of a schema below 5 for good.
-	eventually(t, "s4 to see every member on schema 5", func() bool {
+	// written a moment before would be of a schema below 5 for good. (Every
+	// member runs this release: the level is its own, of which a bucket
+	// needs schema 5.)
+	eventually(t, "s4 to see every member on this release", func() bool {
 		level, err := c.store("s4").entryVersion()
-		return err == nil && level == entrySchema5
+		return err == nil && level == MetadataVersion
 	})
 	if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "after-the-jump"}); err != nil {
 		t.Fatal(err)

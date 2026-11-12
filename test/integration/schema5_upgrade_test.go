@@ -245,7 +245,7 @@ func TestUpgradeFromSchema4(t *testing.T) {
 		} `json:"cluster"`
 	}
 	status, _, body := adminCall(ctx, t, http.MethodGet, node.admin+"/settings", schema3RootBearer(), nil)
-	if err := json.Unmarshal(body, &settings); err != nil || status != http.StatusOK || settings.Cluster.MetadataLevel != raftmeta.MetadataVersion || raftmeta.MetadataVersion != 5 {
+	if err := json.Unmarshal(body, &settings); err != nil || status != http.StatusOK || settings.Cluster.MetadataLevel != raftmeta.MetadataVersion || raftmeta.MetadataVersion < 5 {
 		t.Fatalf("the settings = %d (%v), metadata level %d; a node on its own writes at level %d from its first start", status, err, settings.Cluster.MetadataLevel, raftmeta.MetadataVersion)
 	}
 	for _, differs := range schema4FixtureShown(ctx, t, node, &contents, true) {

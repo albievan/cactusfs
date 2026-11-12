@@ -331,6 +331,9 @@ func (s *Store) Subject(data []byte) (registers, removes, counts string, err err
 		return e.SetNode.ID, "", "", nil
 	case cmdRemoveNode:
 		return "", e.RemoveNode.ID, "", nil
+	case cmdRevokeNode:
+		// A node is revoked as it is removed: by itself only.
+		return "", e.RevokeNode.ID, "", nil
 	case cmdAddReads:
 		return "", "", e.AddReads.Node, nil
 	default:
@@ -356,10 +359,13 @@ func (s *Store) entryVersion() (byte, error) {
 	// just added - does not take the cluster back. The same holds for a
 	// state of schema 3 and the release before it, and for a state of
 	// schema 4 and the release of schema 3, and for a state of schema 5 and
-	// the release of schema 4 (ADR-0023).
+	// the release of schema 4 (ADR-0023), and for a state of schema 6 and
+	// the release of schema 5 (ADR-0030).
 	floor := byte(entrySchemaVersion)
 	if err := s.fsm.view(func(tx *bbolt.Tx) error {
 		switch schema := readStateSchema(tx); {
+		case schema >= stateSchema6:
+			floor = entrySchema6
 		case schema >= stateSchema5:
 			floor = entrySchema5
 		case schema >= stateSchema4:

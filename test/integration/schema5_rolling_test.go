@@ -125,8 +125,8 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 	// What a node of this tree registers, and what one of the release
 	// before does.
 	const mine, before = raftmeta.MetadataVersion, 4
-	if mine != 5 {
-		t.Fatalf("this tree is of metadata version %d: this test is of the upgrade to schema 5", mine)
+	if mine < 5 {
+		t.Fatalf("this tree is of metadata version %d: this test is of the upgrade to schema 5 or later", mine)
 	}
 	levels := map[string]int{"node4": mine}
 	for _, id := range voters {
@@ -382,8 +382,10 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 			if !read {
 				t.Fatalf("%s: the state of %s was not read", when, id)
 			}
-			if member.Schema != uint64(mine) {
-				t.Errorf("%s: the state of %s says schema %d, want %d", when, id, member.Schema, mine)
+			// A bucket is an entry of schema 5 at any level from 5 on;
+			// only the revocation of a node writes schema 6 (ADR-0030).
+			if member.Schema != 5 {
+				t.Errorf("%s: the state of %s says schema %d, want 5", when, id, member.Schema)
 			}
 			if got := slices.Sorted(maps.Keys(member.Usage)); !slices.Equal(got, slices.Sorted(slices.Values(counted))) {
 				t.Errorf("%s: the state of %s holds the usage records of %v; want those of %v, the buckets made at level 5, and of no bucket of before (%v)",

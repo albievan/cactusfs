@@ -65,6 +65,7 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0027](0027-session-lock.md) | A console session that locks while it uploads | accepted; implemented, the server and the console (PLAN L.0 to L.11) |
 | [0028](0028-object-preview.md) | Previews of objects in the console | accepted; implemented (PLAN Goal O, O.0 to O.12; review in a browser and roll-out are O.14); amended 2026-10-16 to say what was built |
 | [0029](0029-updates-and-upgrades.md) | Checking for the latest release, and upgrading from the console | accepted, pending Albie's review (the defaults of Goal P's questions taken 2026-11-09); implemented, off by default (PLAN P.1 to P.11; `make test-k8s` of the Kubernetes mode still to run); amends 0023 for the update client |
+| [0030](0030-node-revocation-and-schema-6.md) | A node that leaves is revoked - and entry schema 6 | accepted; implemented (`MetadataVersion` 6, its bytes frozen); **not implemented:** an operator's command to remove another node, and taking a node off the record |
 
 "Implemented" is the state of the code on 2026-10-16; `PLAN.md` has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a

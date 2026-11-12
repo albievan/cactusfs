@@ -34,8 +34,9 @@ import (
 const schema5EntriesFile = "schema5-entries.golden.txt"
 
 // newMachine5 is the state machine of a binary whose newest entry schema is
-// the fifth: this one, since it announces schema 5 (PLAN 8.0.10). It says
-// so by name where a test is about schema 5 and not about "the newest".
+// the fifth: the release of schema 5 (PLAN 8.0.10), the one before this
+// (ADR-0030). It says so by name where a test is about schema 5 and not
+// about "the newest".
 func newMachine5(t *testing.T) *machine {
 	t.Helper()
 	m := newMachine(t)
@@ -860,7 +861,7 @@ func TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5(t *testing.T) {
 
 	// And what is above this binary it refuses, as that release refuses
 	// this: a state marked with a schema it does not know.
-	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema5+1) }); err != nil {
+	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema6+1) }); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.close(); err != nil {
@@ -870,7 +871,7 @@ func TestAStateOfSchema5IsOpenedOnlyByABinaryOfSchema5(t *testing.T) {
 		if newer != nil {
 			_ = newer.close()
 		}
-		t.Errorf("this binary opens a state of schema %d: %v", stateSchema5+1, err)
+		t.Errorf("this binary opens a state of schema %d: %v", stateSchema6+1, err)
 	}
 }
 

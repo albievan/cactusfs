@@ -77,12 +77,13 @@ import (
 // state of schema 3 is the state the release of schema 3 wrote. And for
 // schema 5 (ADR-0023): its first entry marks the state - whether it took
 // effect, was refused or was applied as nothing - and until then a state of
-// schema 4 is the state the release of schema 4 wrote.
+// schema 4 is the state the release of schema 4 wrote. And for schema 6
+// (ADR-0030; revoked.go).
 //
 // A state machine opens the states it can go on from: those up to the schema
 // of the newest entry it applies (fsm.supported). This binary announces
-// schema 5 (MetadataVersion) and opens a state of schema 5 and a snapshot of
-// one; the release of schema 4 refuses both.
+// schema 6 (MetadataVersion) and opens a state of schema 6 and a snapshot of
+// one; the release of schema 5 refuses both.
 const (
 	stateSchemaVersion = 1
 	stateSchemaTimed   = 2
@@ -592,6 +593,12 @@ func (f *fsm) Apply(log *raft.Log) any {
 				return err
 			}
 		}
+		if log.Data[0] >= entrySchema6 {
+			// And for the release of schema 5 (ADR-0030).
+			if err := raiseStateSchema(tx, stateSchema6); err != nil {
+				return err
+			}
+		}
 		result, err = applyEntry(tx, e, now)
 		if err != nil {
 			return err
@@ -669,6 +676,8 @@ func applyEntry(tx *bbolt.Tx, e entry, now applied) (applyResult, error) {
 		return applySetNode(tx, *e.SetNode)
 	case cmdRemoveNode:
 		return applyRemoveNode(tx, e.RemoveNode.ID)
+	case cmdRevokeNode:
+		return applyRevokeNode(tx, *e.RevokeNode, now)
 	case cmdAddReads:
 		return applyAddReads(tx, *e.AddReads, now)
 	case cmdPutSubBucket:

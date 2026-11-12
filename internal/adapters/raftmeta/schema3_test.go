@@ -315,8 +315,8 @@ func TestVersionOf(t *testing.T) {
 			}
 		})
 	}
-	if MetadataVersion != entrySchema5 {
-		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema5)
+	if MetadataVersion != entrySchema6 {
+		t.Errorf("MetadataVersion = %d: a node must announce that it applies schema %d", MetadataVersion, entrySchema6)
 	}
 }
 
@@ -674,14 +674,14 @@ func TestStateBecomesSchema3WithItsFirstEntryOfSchema3(t *testing.T) {
 	if got := stateSchema(t, f); got != stateSchema3 {
 		t.Errorf("after reopening: state schema %d", got)
 	}
-	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema5+1) }); err != nil {
+	if err := f.db.Update(func(tx *bbolt.Tx) error { return raiseStateSchema(tx, stateSchema6+1) }); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openFSM(root); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema5+1, err, domain.ErrUnsupportedFormat)
+		t.Errorf("opening a state of schema %d = %v, want %v", stateSchema6+1, err, domain.ErrUnsupportedFormat)
 	}
 }
 

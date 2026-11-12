@@ -48,13 +48,19 @@ func (c caughtUp) BucketUsages(ctx context.Context, names []string) ([]ports.Buc
 }
 
 // clusterAtLevel5 forms a cluster of three voters and a node without a
-// vote, all of this release, has every member register, and returns it when
-// the node without a vote has seen that the cluster writes schema 5. prepare,
-// when it is given, is run on every store before anything is proposed.
+// vote, all of the release of schema 5 - the release before this one, whose
+// level is 5 exactly (ADR-0030) - has every member register, and returns it
+// when the node without a vote has seen that the cluster writes schema 5.
+// A node of it that is stopped and started again runs that release still.
+// prepare, when it is given, is run on every store before anything is
+// proposed.
 func clusterAtLevel5(t *testing.T, prepare func(*Store)) *testCluster {
 	t.Helper()
 	c := newTestCluster(t)
 	nodes := []string{"m1", "m2", "m3", "s4"}
+	for _, id := range nodes {
+		c.schema5[id] = true
+	}
 	c.form(nodes[:3], nodes[3:])
 	if prepare != nil {
 		for _, id := range nodes {
@@ -373,10 +379,11 @@ func TestRollingUpgradeToSchema5(t *testing.T) {
 	nothingOfSchema5("before the upgrade")
 
 	for i, id := range nodes {
-		// The node is stopped and comes back with this release.
+		// The node is stopped and comes back with the release of schema
+		// 5 (which this test is about; ADR-0030 is the next).
 		c.stop(id)
 		c.mu.Lock()
-		c.schema4[id] = false
+		c.schema4[id], c.schema5[id] = false, true
 		c.mu.Unlock()
 		store := c.start(id, id != "s4")
 		c.ready(id)

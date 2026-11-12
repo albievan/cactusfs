@@ -16,7 +16,8 @@ import (
 // docs/adr/0008-object-versions.md; version 3 is
 // docs/adr/0016-object-access-and-schema-3.md; version 4 is
 // docs/adr/0019-bucket-activity-and-schema-4.md; version 5 is
-// docs/adr/0023-schema-5-usage-outbox-targets.md. Any change that an older
+// docs/adr/0023-schema-5-usage-outbox-targets.md; version 6 is
+// docs/adr/0030-node-revocation-and-schema-6.md. Any change that an older
 // binary could not apply needs a new version, an ADR, a migration and an
 // upgrade test.
 //
@@ -52,6 +53,10 @@ import (
 // and a bucket.create is written as version 5 once every member knows it,
 // though it says nothing new: that is what gives a new bucket its usage
 // record from the start (bucketusage.go).
+//
+// Version 6 adds one command, node.revoke: the record that a node was taken
+// out of the cluster and may not speak for it again (revoked.go). An entry is
+// of version 6 only when it is that command.
 const (
 	// entrySchemaVersion is the oldest entry schema, which every binary
 	// applies.
@@ -69,17 +74,20 @@ const (
 	// for quotas, notifications and replication, so that no binary knows a
 	// part of it.
 	entrySchema5 = 5
+	// entrySchema6 is the schema of ADR-0030.
+	entrySchema6 = 6
 )
 
 // MetadataVersion is the newest entry schema this binary can apply. A node
 // announces it when it registers; see Store.entryVersion.
 //
-// It is 5 (ADR-0023): every member that registers it applies everything of
-// schema 5, and once all have, the cluster writes it. The bytes of an entry
-// and of a stored record of schema 5 are fixed from here on
-// (testdata/schema5-entries.golden.txt, testdata/schema5-records.golden.txt):
-// a change of either needs a schema 6.
-const MetadataVersion = entrySchema5
+// It is 6 (ADR-0030): every member that registers it applies everything of
+// schema 6, and once all have, the cluster writes it. The bytes of an entry
+// and of a stored record of schema 5 are fixed
+// (testdata/schema5-entries.golden.txt, testdata/schema5-records.golden.txt),
+// and so are those of schema 6 (testdata/schema6.golden.txt): a
+// change of any of them needs a schema 7.
+const MetadataVersion = entrySchema6
 
 // Command types.
 const (
@@ -97,6 +105,8 @@ const (
 	cmdSetTopology   = "topology.set"
 	cmdSetNode       = "node.set"
 	cmdRemoveNode    = "node.remove"
+	// Schema 6.
+	cmdRevokeNode = "node.revoke"
 )
 
 // entry is the decoded form of a Raft log entry. Exactly one of the command
@@ -144,6 +154,8 @@ type entry struct {
 	AckOutbox        *ackOutboxCmd     `json:"ack_outbox,omitempty"`
 	SetBucketReplica *bucketReplicaCmd `json:"set_bucket_replica,omitempty"`
 	PutResync        *resyncCmd        `json:"put_resync,omitempty"`
+	// The record of a node taken out of the cluster (schema 6; revoked.go).
+	RevokeNode *revokeNodeCmd `json:"revoke_node,omitempty"`
 }
 
 // bucketConfigCmd replaces one configuration document of a bucket; without
@@ -483,6 +495,9 @@ func encodeEntry(e entry, version byte) ([]byte, error) {
 
 // versionOf returns the oldest schema version that can express an entry.
 func versionOf(e entry) byte {
+	if e.Type == cmdRevokeNode {
+		return entrySchema6
+	}
 	// The commands of the fifth schema, and a command of an older schema
 	// that carries what only the fifth knows: a binary of the fourth would
 	// stop at the one and drop the other.
@@ -588,6 +603,10 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.SetBucketQuota, e.WalkBucketUsage, e.PutTarget, e.DeleteTarget = nil, nil, nil, nil
 		e.AckOutbox, e.SetBucketReplica, e.PutResync = nil, nil, nil
 	}
+	if data[0] < entrySchema6 {
+		// Nor does a binary of the fifth schema see this one.
+		e.RevokeNode = nil
+	}
 	set := 0
 	for _, present := range []bool{
 		e.CreateBucket != nil, e.DeleteBucket != nil, e.PutObject != nil, e.DeleteObject != nil, e.SetRoot != nil, e.SetTopology != nil,
@@ -598,6 +617,7 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		e.AddReads != nil, e.PutSubBucket != nil, e.DeleteSubBucket != nil, e.PutTagDefinition != nil, e.DeleteTagDefinition != nil,
 		e.SetBucketQuota != nil, e.WalkBucketUsage != nil, e.PutTarget != nil, e.DeleteTarget != nil,
 		e.AckOutbox != nil, e.SetBucketReplica != nil, e.PutResync != nil,
+		e.RevokeNode != nil,
 	} {
 		if present {
 			set++
@@ -667,6 +687,8 @@ func decodeEntry(data []byte, supported byte) (entry, error) {
 		ok = ok && e.SetBucketReplica != nil && data[0] >= entrySchema5
 	case cmdPutResync:
 		ok = ok && e.PutResync != nil && data[0] >= entrySchema5
+	case cmdRevokeNode:
+		ok = ok && e.RevokeNode != nil && data[0] >= entrySchema6
 	default:
 		if !isIAMCommand(e.Type) {
 			return entry{}, fmt.Errorf("%w: metadata command %q", domain.ErrUnsupportedFormat, e.Type)

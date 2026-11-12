@@ -306,29 +306,68 @@ const (
 	acceptRetryMax   = time.Second
 )
 
+// recheckInterval is how often a listener asks allow again about the nodes
+// whose connections it handed out. A node that is no longer admitted - a
+// voter taken out of the group, a node that was revoked (ADR-0030) - loses
+// the connections it has within this long, not only the ones it would open.
+const recheckInterval = 5 * time.Second
+
 // Listen accepts connections from other nodes on address. A connection is
 // handed out only after its handshake has completed and allow has accepted
 // the node the caller's certificate names; any other is closed. allow lets
 // the owner of the listener admit fewer nodes than the CA has certified -
-// the Raft listener admits only the nodes that vote.
+// the Raft listener admits only the nodes that vote. allow is asked again,
+// every few seconds, about every connection that is open, and a connection
+// of a node it no longer admits is closed.
 func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID string) bool) (net.Listener, error) {
 	inner, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("nodetls.Listen: %w", err)
 	}
-	return i.serve(ctx, inner, allow, maxHandshakes), nil
+	return i.serve(ctx, inner, allow, maxHandshakes, recheckInterval), nil
 }
 
 // serve hands out the connections of inner that are authenticated and
-// admitted, with at most handshakes handshakes under way at once.
-func (i *Identity) serve(ctx context.Context, inner net.Listener, allow func(nodeID string) bool, handshakes int) *listener {
+// admitted, with at most handshakes handshakes under way at once, and asks
+// allow again about the open ones every recheck.
+func (i *Identity) serve(
+	ctx context.Context, inner net.Listener, allow func(nodeID string) bool, handshakes int, recheck time.Duration,
+) *listener {
 	l := &listener{
 		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
 		refuse: i.refuse, open: map[*tracked]struct{}{}, handshakes: make(chan struct{}, handshakes),
 	}
 	// The listener outlives the call that opened it.
 	go l.run(context.WithoutCancel(ctx))
+	go l.recheck(recheck)
 	return l
+}
+
+// recheck closes, every interval until the listener is closed, the
+// connections of the nodes allow no longer admits.
+func (l *listener) recheck(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.closed:
+			return
+		case <-ticker.C:
+		}
+		l.mu.Lock()
+		open := make([]*tracked, 0, len(l.open))
+		for conn := range l.open {
+			open = append(open, conn)
+		}
+		l.mu.Unlock()
+		// allow is asked outside the lock: it may take a moment, and a
+		// connection that is closed meanwhile only leaves the map.
+		for _, conn := range open {
+			if !l.allow(conn.nodeID) {
+				_ = conn.Close()
+			}
+		}
+	}
 }
 
 // listener hands out connections that are authenticated and admitted.
@@ -354,8 +393,9 @@ type listener struct {
 // tracked is a connection the listener handed out.
 type tracked struct {
 	net.Conn
-	owner *listener
-	state tls.ConnectionState
+	owner  *listener
+	nodeID string
+	state  tls.ConnectionState
 }
 
 // ConnectionState returns the TLS state of the connection, from which
@@ -406,11 +446,11 @@ func (l *listener) run(ctx context.Context) {
 }
 
 func (l *listener) admit(ctx context.Context, raw net.Conn) {
-	conn := l.handshake(ctx, raw)
+	conn, nodeID := l.handshake(ctx, raw)
 	if conn == nil {
 		return
 	}
-	handed := &tracked{Conn: conn, owner: l, state: conn.ConnectionState()}
+	handed := &tracked{Conn: conn, owner: l, nodeID: nodeID, state: conn.ConnectionState()}
 	l.mu.Lock()
 	l.open[handed] = struct{}{}
 	l.mu.Unlock()
@@ -422,10 +462,10 @@ func (l *listener) admit(ctx context.Context, raw net.Conn) {
 }
 
 // handshake authenticates and admits the caller of raw, and returns the
-// connection, or nil when the caller was turned away. It gives back the
-// token of the handshake when it returns: a node that has been admitted and
-// waits to be accepted no longer holds one.
-func (l *listener) handshake(ctx context.Context, raw net.Conn) *tls.Conn {
+// connection and the node it is of, or nil when the caller was turned away.
+// It gives back the token of the handshake when it returns: a node that has
+// been admitted and waits to be accepted no longer holds one.
+func (l *listener) handshake(ctx context.Context, raw net.Conn) (*tls.Conn, string) {
 	defer func() { <-l.handshakes }()
 	conn := tls.Server(raw, l.config)
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
@@ -433,20 +473,20 @@ func (l *listener) handshake(ctx context.Context, raw net.Conn) *tls.Conn {
 	if err := conn.HandshakeContext(ctx); err != nil {
 		l.refuse(peerRefusalOf(err))
 		_ = conn.Close()
-		return nil
+		return nil, ""
 	}
 	nodeID, err := PeerNodeID(conn.ConnectionState())
 	if err != nil {
 		l.refuse(PeerRefusedIdentity)
 		_ = conn.Close()
-		return nil
+		return nil, ""
 	}
 	if !l.allow(nodeID) {
 		l.refuse(PeerRefusedNotAdmitted)
 		_ = conn.Close()
-		return nil
+		return nil, ""
 	}
-	return conn
+	return conn, nodeID
 }
 
 // Accept implements net.Listener.

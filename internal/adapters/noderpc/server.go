@@ -50,6 +50,12 @@ type ServerConfig struct {
 	PeerNodeID func(tls.ConnectionState) (string, error)
 	// Authz decides on every call, with the calling node as principal.
 	Authz ports.Authorizer
+	// Revoked reports whether a node was taken out of the cluster for good
+	// (ADR-0030). Such a node is still the node its certificate names, and
+	// is marked so in the principal the authorizer is given, which refuses
+	// it whatever it asks. A nil one knows of no revoked node; one that
+	// fails refuses the call.
+	Revoked func(nodeID string) (bool, error)
 	// Info describes this node.
 	Info func(ctx context.Context) (NodeInfo, error)
 	// InFlight reports whether this node has an unresolved write that uses
@@ -160,6 +166,13 @@ func (s *Server) authenticate(ctx context.Context) (context.Context, error) {
 		return nil, status.Error(codes.Unauthenticated, err.Error())
 	}
 	principal := iam.Principal{NodeID: nodeID}
+	if s.cfg.Revoked != nil {
+		revoked, err := s.cfg.Revoked(nodeID)
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
+		principal.NodeRevoked = revoked
+	}
 	if err := s.cfg.Authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionNodeRPC}); err != nil {
 		return nil, status.Error(codes.PermissionDenied, err.Error())
 	}

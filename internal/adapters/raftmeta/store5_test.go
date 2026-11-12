@@ -374,7 +374,7 @@ func TestTheGoldenFilesOfSchema5AreFrozen(t *testing.T) {
 			t.Errorf("testdata/%s was changed (SHA-256 %x): the bytes of schema 5 are frozen since it was announced, and a change of them needs a schema 6", name, sum)
 		}
 	}
-	if MetadataVersion != entrySchema5 {
-		t.Errorf("MetadataVersion = %d: when a schema above 5 is announced, its golden files are frozen beside these", MetadataVersion)
+	if MetadataVersion != entrySchema6 {
+		t.Errorf("MetadataVersion = %d: when a schema above 6 is announced, its golden files are frozen beside these", MetadataVersion)
 	}
 }

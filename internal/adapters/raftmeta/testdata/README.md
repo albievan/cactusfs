@@ -26,6 +26,16 @@ came to be and must not be run to replace them.
 The three `bucket-usage-record*.golden.json` files pin the usage record, which the domain
 encodes (`internal/domain/bucket/testdata/`); they are frozen with it.
 
+## Frozen: the bytes of entry schema 6
+
+`schema6.golden.txt` is **frozen from 2026-11-12 on**, when this release announced entry
+schema 6 (`MetadataVersion = 6`, ADR-0030). It pins the one command of schema 6,
+`node.revoke`, as it is logged, and the record it leaves in `revokednodes`, as it is
+stored. SHA-256 `a9f9d10e1f85d9acf5730e64cdf7cce7a92578df3e9a3be81805aad5925cdadf`.
+`TestTheEntryOfSchema6IsPinned` and `TestRevokingANode` hold the code to the file;
+`TestTheGoldenFileOfSchema6IsFrozen` holds the file to the sum. A change of either needs a
+schema 7.
+
 ## Evidence of earlier releases
 
 | File | Written by | Held by |

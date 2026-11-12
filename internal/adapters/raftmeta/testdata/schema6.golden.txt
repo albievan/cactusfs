@@ -1,0 +1,2 @@
+entry	node.revoke	{"type":"node.revoke","revoke_node":{"id":"gateway-1"}}
+record	revokednodes/gateway-1	{"id":"gateway-1","at":"2026-10-12T09:00:01Z"}

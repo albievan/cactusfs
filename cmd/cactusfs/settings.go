@@ -279,7 +279,8 @@ func serverSettings() []settingSpec {
 				"new connections without a restart; one that is not is refused and logged, and the old one stays " +
 				"(`cactusfs_tls_reload_pending` in `/metrics` is 1 while it does). The node CA is read at start only: a new CA " +
 				"needs a restart. Rotation is not revocation: a replaced certificate and its key remain accepted by peers until " +
-				"that certificate expires; for a compromised key, rotate the CA or remove the node. The files must be regular " +
+				"that certificate expires; for a compromised key, replace the node CA (a node that leaves the cluster is " +
+				"revoked, ADR-0030, but only the node itself can ask to leave). The files must be regular " +
 				"files (not pipes)",
 			bind: func(t *settingTargets) any { return &t.cfg.TLSReloadInterval },
 		},

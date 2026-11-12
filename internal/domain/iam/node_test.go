@@ -15,6 +15,7 @@ func TestNodesAndClusterActionsBelongToEachOther(t *testing.T) {
 	t.Parallel()
 
 	node := iam.Principal{NodeID: "n1"}
+	revoked := iam.Principal{NodeID: "n1", NodeRevoked: true}
 	root := iam.Principal{AccessKeyID: "ROOT", Root: true}
 	user := iam.Principal{AccessKeyID: "SOMEONE"}
 	tests := []struct {
@@ -51,6 +52,14 @@ func TestNodesAndClusterActionsBelongToEachOther(t *testing.T) {
 		{"a principal that claims to be both", iam.Principal{NodeID: "n1", AccessKeyID: "ROOT", Root: true}, iam.ActionNodeRPC, iam.Resource{}, false},
 		{"both, on an object", iam.Principal{NodeID: "n1", AccessKeyID: "ROOT", Root: true}, iam.ActionGetObject, iam.Resource{Bucket: "b"}, false},
 		{"root reads an object", root, iam.ActionGetObject, iam.Resource{Bucket: "b", Key: "k"}, true},
+		// A node taken out of the cluster (ADR-0030) keeps a certificate
+		// of the node CA, and may do nothing with it.
+		{"a revoked node speaks node RPC", revoked, iam.ActionNodeRPC, iam.Resource{}, false},
+		{"a revoked node joins again", revoked, iam.ActionJoinNode, iam.Resource{Node: "n1"}, false},
+		{"a revoked node records itself", revoked, iam.ActionRegisterNode, iam.Resource{Node: "n1"}, false},
+		{"a revoked node removes itself", revoked, iam.ActionRemoveNode, iam.Resource{Node: "n1"}, false},
+		{"a revoked node reports what it counted", revoked, iam.ActionReportReads, iam.Resource{Node: "n1"}, false},
+		{"a revoked node reads an object", revoked, iam.ActionGetObject, iam.Resource{Bucket: "b", Key: "k"}, false},
 	}
 	for _, tt := range tests {
 		err := iam.Decide(iam.Request{Principal: tt.principal, Action: tt.action, Resource: tt.resource})

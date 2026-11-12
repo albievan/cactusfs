@@ -45,7 +45,7 @@ func TestListenerOutlivesFailedAccepts(t *testing.T) {
 	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
 	inner := &failing{Listener: tcpListener(t)}
 	inner.failures.Store(8) // 5 ms doubling: some 1.3 s of failures
-	listener := server.ListenOn(ctx, inner, func(string) bool { return true }, 4)
+	listener := server.ListenOn(ctx, inner, func(string) bool { return true }, 4, time.Hour)
 	t.Cleanup(func() { _ = listener.Close() })
 
 	accepted := make(chan net.Conn, 1)
@@ -88,7 +88,7 @@ func TestListenerBoundsHandshakes(t *testing.T) {
 	ctx := t.Context()
 	ca := authority(t)
 	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
-	listener := server.ListenOn(ctx, tcpListener(t), func(string) bool { return true }, 1)
+	listener := server.ListenOn(ctx, tcpListener(t), func(string) bool { return true }, 1, time.Hour)
 	t.Cleanup(func() { _ = listener.Close() })
 	address := listener.Addr().String()
 
@@ -153,5 +153,56 @@ func TestListenerBoundsHandshakes(t *testing.T) {
 		_ = held.Close()
 	case <-time.After(10 * time.Second):
 		t.Fatal("the node was not handed out")
+	}
+}
+
+// TestListenerClosesTheConnectionsOfANodeNoLongerAdmitted: a voter taken
+// out of the group, or a node that was revoked (ADR-0030), keeps no
+// connection it opened while it was admitted; the others keep theirs.
+func TestListenerClosesTheConnectionsOfANodeNoLongerAdmitted(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	ca := authority(t)
+	server := identity(t, ca, "meta-1")
+	var removed atomic.Bool
+	allow := func(nodeID string) bool { return nodeID != "meta-2" || !removed.Load() }
+	listener := server.ListenOn(ctx, tcpListener(t), allow, 4, 20*time.Millisecond)
+	t.Cleanup(func() { _ = listener.Close() })
+	address := listener.Addr().String()
+
+	accepted := make(chan net.Conn, 2)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn
+		}
+	}()
+	dial := func(nodeID string) net.Conn {
+		t.Helper()
+		conn, err := identity(t, ca, nodeID).Dial(ctx, nodetls.Address("meta-1", address))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		select {
+		case <-accepted:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s was not handed out", nodeID)
+		}
+		return conn
+	}
+	leaving, staying := dial("meta-2"), dial("meta-3")
+
+	removed.Store(true)
+	_ = leaving.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := leaving.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the connection of a node no longer admitted: read = %v, want it closed", err)
+	}
+	_ = staying.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := staying.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("the connection of an admitted node: read = %v, want it open", err)
 	}
 }

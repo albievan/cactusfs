@@ -222,8 +222,9 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 	}
 	// alike compares what the members hold of schema 4: the same bucket
 	// records and the same records of use, byte for byte, in states that all
-	// say the schema of this tree. (A bucket that is created at the level
-	// of this tree is an entry of its schema: of the fifth, ADR-0023.)
+	// say schema 5. (A bucket that is created at the level of this tree is
+	// an entry of the fifth schema, ADR-0023; nothing a bucket does needs
+	// the sixth, which only the revocation of a node writes, ADR-0030.)
 	alike := func(when string, members map[string]schema4Member) schema4Member {
 		t.Helper()
 		first := members[nodes[0]]
@@ -232,8 +233,8 @@ func schema4Recorded(t *testing.T, c *clustertest.Cluster, bucketName string, un
 			if !read {
 				t.Fatalf("%s: the state of %s was not read", when, id)
 			}
-			if member.Schema != uint64(mine) || !member.Kept {
-				t.Errorf("%s: the state of %s says schema %d, a place for records of buckets' use: %t; want %d and one", when, id, member.Schema, member.Kept, mine)
+			if member.Schema != 5 || !member.Kept {
+				t.Errorf("%s: the state of %s says schema %d, a place for records of buckets' use: %t; want 5 and one", when, id, member.Schema, member.Kept)
 			}
 			if !maps.Equal(member.Activity, first.Activity) {
 				t.Errorf("%s: bucketactivity on %s:\n%v\non %s:\n%v", when, id, member.Activity, nodes[0], first.Activity)

@@ -345,7 +345,9 @@ func TestIAMContract(t *testing.T) {
 // TestANodeOnItsOwnUsesTheNewestSchema: nothing can hold a single node back,
 // so its entries carry the time from the start - and its first bucket is an
 // entry of schema 5, which gives the bucket its usage record and ends the way
-// back to the release before (ADR-0023, "Rollback").
+// back to the release of schema 4 (ADR-0023, "Rollback"). Schema 6 has
+// nothing a node on its own writes: only a node that leaves a cluster is
+// revoked (ADR-0030).
 func TestANodeOnItsOwnUsesTheNewestSchema(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -353,8 +355,8 @@ func TestANodeOnItsOwnUsesTheNewestSchema(t *testing.T) {
 	if err := store.CreateBucket(context.Background(), bucket.Bucket{Name: "timed", CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if got := raftmeta.StateSchemaForTest(t, store); got != raftmeta.MetadataVersion {
-		t.Errorf("state schema of a node on its own = %d, want %d", got, raftmeta.MetadataVersion)
+	if got := raftmeta.StateSchemaForTest(t, store); got != 5 {
+		t.Errorf("state schema of a node on its own = %d, want 5", got)
 	}
 	usage, err := store.BucketUsages(context.Background(), []string{"timed"})
 	if err != nil || len(usage) != 1 || !usage[0].Usage.Exact {
