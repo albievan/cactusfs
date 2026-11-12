@@ -222,7 +222,8 @@ type fsm struct {
 	publish func(ports.Event)
 	onFail  func(error)
 	// beforeApply, when set by a test (under mu), runs before every
-	// command is applied; it stands in for a slow disk.
+	// command is applied, before the state is locked for it; it stands in
+	// for a slow disk, or a state machine behind its log.
 	beforeApply func()
 	// beforeSwap, when set by a test (under mu), runs in Restore after the
 	// state has been closed and before the snapshot takes its place; it
@@ -464,11 +465,14 @@ func (f *fsm) Apply(log *raft.Log) any {
 	if log.Type != raft.LogCommand {
 		return applyResult{}
 	}
+	f.mu.RLock()
+	before := f.beforeApply
+	f.mu.RUnlock()
+	if before != nil {
+		before()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.beforeApply != nil {
-		f.beforeApply()
-	}
 
 	if f.failed != nil {
 		return applyResult{err: f.failed, fatal: true}

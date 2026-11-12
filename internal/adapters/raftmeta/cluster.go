@@ -428,17 +428,24 @@ func (s *Store) ReadIndexLocal(ctx context.Context) (uint64, error) {
 	return index, nil
 }
 
-// readIndexLocal is the read-index protocol of Raft, in terms of what the
-// state machine has applied rather than what Raft has handed to it.
+// readIndexLocal is the read-index protocol of Raft, in terms of the command
+// entries the state machines apply rather than every entry of the log.
 //
-// A change is acknowledged only after the leader's state machine applied it.
-// So once this node's state machine holds everything from earlier terms -
-// established once per term, with a barrier - the index it has applied covers
-// every change acknowledged so far, provided no other leader has been
-// acknowledging changes meanwhile. That is what the round of confirmations
-// rules out: a majority of the voters say, after the read began, that they
-// are still in this node's term, so no later leader can have been elected
-// before the read began.
+// The read index is the leader's commit index once it has committed an
+// entry of its own term - established once per term, with a barrier. It is
+// not what this node's state machine has applied: an entry is applied on a
+// follower as soon as the follower learns that it is committed, which may be
+// before the leader's own state machine has applied it, and a read that
+// followed one on that follower must see it too. The index holds provided no
+// other leader has been committing meanwhile; that is what the round of
+// confirmations rules out: a majority of the voters say, after the read
+// began, that they are still in this node's term, so no later leader can
+// have been elected before the read began.
+//
+// Every state machine counts only the command entries it applied (fsm.seen),
+// so the index returned is that of the last command entry at or below the
+// commit index: the no-ops, barriers and configurations above it change no
+// state.
 func (s *Store) readIndexLocal(ctx context.Context) (uint64, error) {
 	if s.raft.State() != raft.Leader {
 		return 0, domain.ErrNotLeader
@@ -447,7 +454,7 @@ func (s *Store) readIndexLocal(ctx context.Context) (uint64, error) {
 	if err := s.caughtUp(ctx, term); err != nil {
 		return 0, err
 	}
-	index := s.fsm.seen.Load()
+	commit := s.raft.CommitIndex()
 	confirmed, err := s.verifier.verify(ctx, s)
 	if err != nil {
 		return 0, err
@@ -455,7 +462,29 @@ func (s *Store) readIndexLocal(ctx context.Context) (uint64, error) {
 	if confirmed != term || s.raft.CurrentTerm() != term || s.raft.State() != raft.Leader {
 		return 0, fmt.Errorf("%w: leadership changed", domain.ErrNotLeader)
 	}
-	return index, nil
+	return s.lastCommand(commit)
+}
+
+// lastCommand returns the index of the last command entry at or below index:
+// the index a state machine that reflects everything up to index has applied.
+// Only the entries above what this node's state machine has applied are
+// looked at, newest first; an entry the log no longer holds lies below the
+// newest snapshot, which this state machine holds.
+func (s *Store) lastCommand(index uint64) (uint64, error) {
+	seen := s.fsm.seen.Load()
+	for i := index; i > seen; i-- {
+		var log raft.Log
+		if err := s.logs.GetLog(i, &log); err != nil {
+			if errors.Is(err, raft.ErrLogNotFound) {
+				break
+			}
+			return 0, fmt.Errorf("%w: read raft log entry %d: %w", domain.ErrUnavailable, i, err)
+		}
+		if log.Type == raft.LogCommand {
+			return i, nil
+		}
+	}
+	return seen, nil
 }
 
 // caughtUp makes sure, once per term this node leads, that its state machine
