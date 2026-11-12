@@ -1097,6 +1097,20 @@ func TestSessions(t *testing.T) {
 	if _, err := f.iam.UpdateUser(ctx, f.root, app.UserInput{Name: "alice", Roles: []string{iam.RoleReadWrite}}); err != nil {
 		t.Fatal(err)
 	}
+	// Enabled again, the user has none of the sessions back: disabling
+	// ended them.
+	for name, token := range map[string]string{"first": signed.Token, "second": another.Token} {
+		if _, err := f.sessions.Authenticate(ctx, token, "", false, where); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("the %s session of a user disabled and enabled again = %v", name, err)
+		}
+	}
+	f.clock.Advance(app.PasswordChangeMargin + time.Second)
+	if signed, err = f.sessions.SignIn(ctx, "alice", password, where); err != nil {
+		t.Fatal(err)
+	}
+	if another, err = f.sessions.SignIn(ctx, "alice", password, where); err != nil {
+		t.Fatal(err)
+	}
 	// Roles changed meanwhile: the session has the new ones at once.
 	principal, err = f.sessions.Authenticate(ctx, signed.Token, "", false, where)
 	if err != nil {
@@ -1127,12 +1141,14 @@ func TestSessions(t *testing.T) {
 	}
 	f.clock.Advance(time.Second)
 	// It is not swept yet: a session past its timeout may be locked, for as
-	// long as sessions can be (ADR-0027). After that it is.
-	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 0 || f.store.Sessions() != 1 {
+	// long as sessions can be (ADR-0027). After that it is - with the two
+	// that disabling the user ended. The mark that ended them is kept
+	// for longer than any session can last (SessionsEndHorizon).
+	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 0 || f.store.Sessions() != 4 {
 		t.Errorf("Sweep at the timeout = %d, %v; %d sessions left", removed, err, f.store.Sessions())
 	}
 	f.clock.Advance(app.DefaultSessionLockMax)
-	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 1 || f.store.Sessions() != 0 {
+	if removed, err := f.sessions.Sweep(ctx); err != nil || removed != 3 || f.store.Sessions() != 1 {
 		t.Errorf("Sweep = %d, %v; %d sessions left", removed, err, f.store.Sessions())
 	}
 	// Deleting the user ends the user's sessions.
@@ -1168,7 +1184,7 @@ func TestSessions(t *testing.T) {
 			t.Fatal("a password is in the audit trail")
 		}
 	}
-	if signIns != 3 || signOuts != 1 || failed == 0 || csrf == 0 {
+	if signIns != 5 || signOuts != 1 || failed == 0 || csrf == 0 {
 		t.Errorf("trail: %d sign-ins, %d sign-outs, %d failed sign-ins, %d CSRF refusals", signIns, signOuts, failed, csrf)
 	}
 	if strings.Contains(f.logs.String(), password) {

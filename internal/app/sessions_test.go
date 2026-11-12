@@ -331,10 +331,15 @@ func TestSessionLock(t *testing.T) {
 			if _, err := f.sessions.Authenticate(t.Context(), f.signed.Token, "", false, f.where); !errors.Is(err, domain.ErrAccessDenied) {
 				t.Errorf("the locked session of a disabled user = %v", err)
 			}
-			// And no password unlocks it.
-			if _, err := f.sessions.Unlock(t.Context(), f.signed.Token, f.password, f.where); !errors.Is(err, domain.ErrAccessDenied) {
-				t.Errorf("unlocking the session of a disabled user = %v", err)
+			// And no password unlocks it: disabling the user ended it.
+			if _, err := f.sessions.Unlock(t.Context(), f.signed.Token, f.password, f.where); !errors.Is(err, domain.ErrCredentialNotFound) {
+				t.Errorf("unlocking the session of a disabled user = %v, want not signed in", err)
 			}
+			// Nor does enabling the user again give it back.
+			if _, err := f.iam.UpdateUser(t.Context(), f.root, app.UserInput{Name: "alice", Roles: []string{iam.RoleReadWrite}}); err != nil {
+				t.Fatal(err)
+			}
+			f.expect(t, "ended", "its user disabled and enabled again,")
 		}},
 		"signing out of a locked session": {run: func(t *testing.T, f *lockFixture) {
 			defer f.upload(t, f.signed.Token)()
@@ -1324,6 +1329,50 @@ func TestAPasswordChangeEndsTheSessions(t *testing.T) {
 	}
 }
 
+// TestDisablingAUserEndsTheSessions: a user who is disabled loses every
+// session they had, so that enabling them again revives none of them - a
+// session that was suspended with its user is not handed back with the
+// user. Whoever signs in after the user is enabled again begins a session
+// like any other.
+func TestDisablingAUserEndsTheSessions(t *testing.T) {
+	t.Parallel()
+	roles := []string{iam.RoleReadWrite}
+	tests := []struct {
+		name    string
+		changes []app.UserInput
+		want    string
+	}{
+		{"disabled, then enabled", []app.UserInput{{Name: "alice", Roles: roles, Disabled: true}, {Name: "alice", Roles: roles}}, "ended"},
+		{"disabled twice, then enabled", []app.UserInput{
+			{Name: "alice", Roles: roles, Disabled: true}, {Name: "alice", Roles: roles, Disabled: true}, {Name: "alice", Roles: roles},
+		}, "ended"},
+		{"roles changed, never disabled", []app.UserInput{{Name: "alice", Roles: []string{iam.RoleReadOnly}}, {Name: "alice", Roles: roles}}, "active"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			f := newLockFixture(t, nil)
+			for _, change := range tt.changes {
+				f.clock.Advance(time.Second)
+				if _, err := f.iam.UpdateUser(ctx, f.root, change); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.expect(t, tt.want, "after the changes,")
+			// A session begun now, past the margin of the mark, works.
+			f.clock.Advance(app.PasswordChangeMargin + time.Second)
+			fresh, err := f.sessions.SignIn(ctx, "alice", f.password, f.where)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := f.state(t, fresh.Token); got != "active" {
+				t.Errorf("a session begun after the changes is %s", got)
+			}
+		})
+	}
+}
+
 // TestEndedSessionsAreRemoved: the node that began a session removes its
 // record a tick after it has ended - not while it is locked - with its lease
 // once that has lapsed. Without that, every record would stay for as long as
@@ -1673,7 +1722,7 @@ func TestAPasswordChangeRaces(t *testing.T) {
 			}
 		}
 		if len(said) != 1 || said[0].Outcome != audit.Failed || said[0].Resource != "arn:cactusfs:admin:::user/alice" || said[0].Actor != "root" ||
-			said[0].Details["reason"] != "the password is changed, but the sessions of the user are not ended" {
+			said[0].Details["reason"] != "the user is changed, but the sessions of the user are not ended" {
 			t.Fatalf("the audit trail says of the sessions that were not ended: %+v", said)
 		}
 		// What it says is so: the password is changed, the session lives on.
