@@ -292,8 +292,17 @@ func openFSMOf(root *os.Root, supported byte) (*fsm, error) {
 
 // openState opens a state database of a schema up to newest, and refuses
 // one of a newer schema: what it holds is not known here.
+//
+// The database is mapped at no less than stateMmapSize. A snapshot holds a
+// read transaction for as long as it takes to write the state out, and
+// bbolt cannot map the file anew while a read transaction is open: an entry
+// that grew the state past its map would wait for the whole snapshot to be
+// written, and every read behind it (L39). bbolt doubles the map as the
+// state grows, from 32 KiB; with this floor no entry waits on a snapshot
+// until the state outgrows it, and then only at each doubling (up to 1 GiB,
+// and every GiB after) that falls within a snapshot.
 func openState(path string, newest uint64) (*bbolt.DB, error) {
-	db, err := bbolt.Open(path, stateFileMode, &bbolt.Options{Timeout: lockTimeout})
+	db, err := bbolt.Open(path, stateFileMode, &bbolt.Options{Timeout: lockTimeout, InitialMmapSize: stateMmapSize})
 	if err != nil {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
