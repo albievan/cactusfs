@@ -396,9 +396,18 @@ func TestOnlyTheActiveNodeScrubs(t *testing.T) {
 	var active atomic.Bool
 	var passes atomic.Int32
 	var checked atomic.Int64
+	// refused counts the times the scrubber asked whether it is active and
+	// was told no.
+	var refused atomic.Int64
 	scrubber := app.NewScrubber(app.ScrubberConfig{
 		Buckets: f.meta, Index: f.meta, Healer: f.objects.Healer(), Logger: slog.New(slog.DiscardHandler),
-		Active: active.Load,
+		Active: func() bool {
+			if active.Load() {
+				return true
+			}
+			refused.Add(1)
+			return false
+		},
 		OnPass: func(s app.ScrubStats) {
 			checked.Add(int64(s.Objects))
 			passes.Add(1)
@@ -426,9 +435,25 @@ func TestOnlyTheActiveNodeScrubs(t *testing.T) {
 	if passes.Load() == 0 || checked.Load() < 6 {
 		t.Fatalf("the active node made %d passes over %d objects", passes.Load(), checked.Load())
 	}
+	// The node stops being active. A pass that had already checked its
+	// last object when that happened finishes and is reported: it did
+	// check everything. So the test waits until the scrubber has been told
+	// no rather than for a fixed time - the last object of a pass can take
+	// longer than any such time on a busy runner - and allows that one
+	// pass before it and none after it.
+	before, refusals := passes.Load(), refused.Load()
 	active.Store(false)
-	time.Sleep(20 * time.Millisecond)
+	deadline = time.Now().Add(10 * time.Second)
+	for refused.Load() == refusals && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if refused.Load() == refusals {
+		t.Fatal("the scrubber did not ask again whether it is active")
+	}
 	settled := passes.Load()
+	if settled > before+1 {
+		t.Errorf("%d passes ended after the node stopped being active, want at most the one in progress", settled-before)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if passes.Load() != settled {
 		t.Error("a node kept scrubbing after it stopped being active")
