@@ -242,6 +242,191 @@ func TestWriteQuorum(t *testing.T) {
 	}
 }
 
+// stallingDrive is a drive that hangs at one step of writing a shard until
+// release is closed. A create or commit that hangs gives up when its context
+// ends, as one on another node does; a write that hangs does not, as one on
+// a local drive that stopped answering does not.
+type stallingDrive struct {
+	ports.ShardStore
+	step    string // "create", "write" or "commit"
+	release chan struct{}
+}
+
+func (d stallingDrive) hang(ctx context.Context) error {
+	select {
+	case <-d.release:
+		return errBoom
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d stallingDrive) Create(ctx context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	if d.step == "create" {
+		return nil, d.hang(ctx)
+	}
+	w, err := d.ShardStore.Create(ctx, id)
+	return stallingWriter{ShardWriter: w, drive: d}, err
+}
+
+func (d stallingDrive) Rewrite(ctx context.Context, id object.ShardID) (ports.ShardWriter, error) {
+	if d.step == "create" {
+		return nil, d.hang(ctx)
+	}
+	w, err := d.ShardStore.Rewrite(ctx, id)
+	return stallingWriter{ShardWriter: w, drive: d}, err
+}
+
+type stallingWriter struct {
+	ports.ShardWriter
+	drive stallingDrive
+}
+
+func (w stallingWriter) Write(p []byte) (int, error) {
+	if w.drive.step == "write" {
+		<-w.drive.release
+		return 0, errBoom
+	}
+	return w.ShardWriter.Write(p)
+}
+
+func (w stallingWriter) Commit(ctx context.Context) error {
+	if w.drive.step == "commit" {
+		return w.drive.hang(ctx)
+	}
+	return w.ShardWriter.Commit(ctx)
+}
+
+// stallingService returns an object service over the fixture's drives in
+// which the drives listed hang at step, with short deadlines.
+func (f *fixture) stallingService(t *testing.T, step string, stalled ...int) *app.ObjectService {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	drives := make([]ports.ShardStore, len(f.drives))
+	for i, d := range f.drives {
+		drives[i] = d
+		if slices.Contains(stalled, i) {
+			drives[i] = stallingDrive{ShardStore: d, step: step, release: release}
+		}
+	}
+	return f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
+		cfg.Drives = fixed(t, f.topology, drives)
+	}).WithShardDeadlines(50*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond)
+}
+
+// within runs call and fails the test if it does not return in time.
+func within[T any](t *testing.T, what string, call func() (T, error)) (T, error) {
+	t.Helper()
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := call()
+		done <- result{value, err}
+	}()
+	select {
+	case r := <-done:
+		return r.value, r.err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s is held up by a drive that hangs", what)
+		var zero T
+		return zero, nil
+	}
+}
+
+// TestAHangingDriveDoesNotHoldUpWrites: a drive or node that stops answering
+// at any step of a write costs the write one deadline, after which its shard
+// counts as lost and the write goes on while a write quorum holds. Shards
+// used to be written one after the other with no deadline, so one hanging
+// drive held up every write (audit M31).
+func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range []string{"create", "write", "commit"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+			f := erasureFixture(t)
+			objects := f.stallingService(t, step, 0)
+			data := randomBytes(t, multiStripe)
+
+			version, err := within(t, "Put", func() (object.Version, error) {
+				return objects.Put(context.Background(), porttest.Root(), app.PutInput{
+					Bucket: "b", Key: "k", Body: bytes.NewReader(data), Size: int64(len(data)),
+				})
+			})
+			if err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if n := f.shardCount(); n != sixDrives-1 {
+				t.Errorf("%d shards stored, want %d: all but the one on the hanging drive", n, sixDrives-1)
+			}
+			if len(version.Layout.Shards) != sixDrives {
+				t.Errorf("layout has %d locations, want %d", len(version.Layout.Shards), sixDrives)
+			}
+			if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("Get: %v", err)
+			}
+		})
+	}
+
+	// Too many hanging drives still fail the write rather than store it
+	// below its write quorum.
+	t.Run("below quorum", func(t *testing.T) {
+		t.Parallel()
+		f := erasureFixture(t)
+		objects := f.stallingService(t, "create", 0, 1, 2)
+		data := randomBytes(t, 1000)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_, err := within(t, "Put", func() (object.Version, error) {
+			return objects.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "k", Body: bytes.NewReader(data), Size: int64(len(data))})
+		})
+		if err == nil {
+			t.Fatal("Put with three of six drives hanging succeeded")
+		}
+		if _, getErr := f.meta.GetObject(context.Background(), "b", "k"); !errors.Is(getErr, domain.ErrObjectNotFound) {
+			t.Errorf("the object is visible: %v", getErr)
+		}
+	})
+}
+
+// TestAHangingDriveDoesNotHoldUpHealing: a heal rebuilds what it can and
+// gives up on a shard whose drive hangs, rather than wait for it forever.
+func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for _, step := range []string{"create", "write", "commit"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+			f := erasureFixture(t)
+			data := randomBytes(t, multiStripe)
+			version := f.put(t, "b", "k", data)
+			drives := f.shardsOf(t, version)
+			_ = drives[1].Delete(ctx, shardID(version, 1))
+			_ = drives[4].Delete(ctx, shardID(version, 4))
+			hanging := slices.Index(f.drives, drives[4])
+
+			objects := f.stallingService(t, step, hanging)
+			result, _ := within(t, "HealObject", func() (app.HealResult, error) {
+				return objects.Healer().HealObject(ctx, "b", "k")
+			})
+			if result.Damaged != 2 || result.Rebuilt != 1 {
+				t.Errorf("HealObject = %+v; want two damaged shards and the one on the drive that answers rebuilt", result)
+			}
+			if _, ok := drives[1].Bytes(shardID(version, 1)); !ok {
+				t.Error("the shard on the drive that answers was not rebuilt")
+			}
+			if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("Get: %v", err)
+			}
+		})
+	}
+}
+
 // runHealer runs the background healer until done reports true.
 func (f *fixture) runHealer(t *testing.T, done func() bool) {
 	t.Helper()

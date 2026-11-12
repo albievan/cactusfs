@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
@@ -29,11 +32,147 @@ type shardStorage struct {
 	codec  ports.ErasureCodec
 	logger *slog.Logger
 
+	// deadlines bound how long one shard may hold up a write.
+	deadlines shardDeadlines
+
 	// pinned holds the data IDs of writes whose version is not known to be
 	// committed or refused yet. Their shards are unreferenced and must not
 	// be collected, however long the write takes.
 	pinMu  sync.Mutex
 	pinned map[object.ID]struct{}
+}
+
+// shardDeadlines bound how long one shard may take over each step of a
+// write: creating it, taking one stripe's chunk, and being made durable. A
+// shard that has not answered by then while a write quorum of the others has
+// is given up on, as if its drive had failed, and the write goes on without
+// it; the version is stored degraded and healed later. One stalled drive or
+// node therefore costs a write at most one deadline, instead of holding it -
+// and every write after it - for as long as the drive stays stalled.
+//
+// The deadlines are generous: they are there for drives that hang, not for
+// drives that are merely slow, and a shard given up on too early costs a
+// rebuild. A commit flushes the whole shard, so it is given time in
+// proportion to the shard's size as well.
+type shardDeadlines struct {
+	create time.Duration
+	write  time.Duration
+	commit time.Duration
+	// flushRate is the slowest flush, in bytes per second, a commit is
+	// given time for on top of commit.
+	flushRate int64
+}
+
+// defaultShardDeadlines are the deadlines a node uses (PLAN decision of
+// 2026-11-12, audit M31).
+func defaultShardDeadlines() shardDeadlines {
+	return shardDeadlines{create: 15 * time.Second, write: 15 * time.Second, commit: 30 * time.Second, flushRate: 8 << 20}
+}
+
+// commitFor returns the deadline of the commit of a shard of size bytes.
+func (d shardDeadlines) commitFor(size int64) time.Duration {
+	if d.flushRate <= 0 {
+		return d.commit
+	}
+	return d.commit + time.Duration(float64(size)/float64(d.flushRate)*float64(time.Second))
+}
+
+// stepOutcome is how one step went on one shard.
+type stepOutcome struct {
+	// writer is the shard's writer after the step: the one the step made
+	// or was given.
+	writer ports.ShardWriter
+	err    error
+	// late reports that the shard missed its deadline and was given up
+	// on. Its step may still be running, and owns the writer: when it
+	// returns, it aborts it. Nobody else may touch that writer again.
+	late bool
+}
+
+// runShards runs step for every shard in indexes at once, each in its own
+// goroutine, and returns how it went for each.
+//
+// It waits until every step has returned, or, once timeout has passed, until
+// at least need of them have succeeded: the shards that have not answered by
+// then are given up on. drop is called for each of them at once - it cancels
+// whatever the shard's step is waiting for - and the step, whenever it does
+// return, aborts the writer it returns. When ctx ends every step still
+// running is given up on.
+func runShards(
+	ctx context.Context, indexes []int, timeout time.Duration, need int,
+	step func(i int) (ports.ShardWriter, error), drop func(i int),
+) map[int]stepOutcome {
+	type result struct {
+		index int
+		stepOutcome
+	}
+	var mu sync.Mutex
+	late := make(map[int]bool, len(indexes))
+	delivered := make(map[int]bool, len(indexes))
+	// Buffered for all, so a step never blocks on delivering.
+	results := make(chan result, len(indexes))
+	for _, i := range indexes {
+		go func() {
+			writer, err := step(i)
+			mu.Lock()
+			if late[i] {
+				mu.Unlock()
+				if writer != nil {
+					_ = writer.Abort()
+				}
+				return
+			}
+			delivered[i] = true
+			results <- result{index: i, stepOutcome: stepOutcome{writer: writer, err: err}}
+			mu.Unlock()
+		}()
+	}
+
+	out := make(map[int]stepOutcome, len(indexes))
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	expired, succeeded := false, 0
+	collect := func(r result) {
+		out[r.index] = r.stepOutcome
+		if r.err == nil {
+			succeeded++
+		}
+	}
+wait:
+	for len(out) < len(indexes) && (!expired || succeeded < need) {
+		select {
+		case r := <-results:
+			collect(r)
+		case <-timer.C:
+			expired = true
+		case <-ctx.Done():
+			break wait
+		}
+	}
+
+	// Whatever has not answered is given up on - unless it has answered
+	// just now, in which case its answer is waiting in results.
+	mu.Lock()
+	for _, i := range indexes {
+		if _, ok := out[i]; !ok && !delivered[i] {
+			late[i] = true
+		}
+	}
+	mu.Unlock()
+	for len(results) > 0 {
+		collect(<-results)
+	}
+	reason := fmt.Errorf("%w: no answer within %s", domain.ErrUnavailable, timeout)
+	if err := ctx.Err(); err != nil {
+		reason = err
+	}
+	for _, i := range indexes {
+		if _, ok := out[i]; !ok {
+			drop(i)
+			out[i] = stepOutcome{err: reason, late: true}
+		}
+	}
+	return out
 }
 
 // fixedDrives is a DriveSource over a topology that does not change and
@@ -100,7 +239,9 @@ func newShardStorage(drives ports.DriveSource, codec ports.ErasureCodec, logger 
 	if drives == nil {
 		return nil, fmt.Errorf("%w: no drives", domain.ErrInvalidArgument)
 	}
-	return &shardStorage{drives: drives, codec: codec, logger: logger, pinned: map[object.ID]struct{}{}}, nil
+	return &shardStorage{
+		drives: drives, codec: codec, logger: logger, deadlines: defaultShardDeadlines(), pinned: map[object.ID]struct{}{},
+	}, nil
 }
 
 // located finds the drives that shards are recorded on, in the topology as
@@ -158,11 +299,14 @@ type streamWriter struct {
 	dataID   object.ID
 	// ctx is the context of the request that writes; io.Writer has none.
 	ctx context.Context
-	// driveIDs and writers are indexed by shard. A nil writer is a shard
-	// that could not be written; the write goes on while a write quorum
-	// remains.
+	// driveIDs, writers and cancels are indexed by shard. A nil writer is a
+	// shard that could not be written; the write goes on while a write
+	// quorum remains. cancels ends the context a shard was created under,
+	// which is how a shard that missed its deadline is cut loose.
 	driveIDs []string
 	writers  []ports.ShardWriter
+	contexts []context.Context
+	cancels  []context.CancelFunc
 	stripe   []byte
 	written  int64
 }
@@ -189,22 +333,37 @@ func (s *shardStorage) create(ctx context.Context, dataID object.ID) (*streamWri
 		ctx:      ctx,
 		driveIDs: make([]string, len(positions)),
 		writers:  make([]ports.ShardWriter, len(positions)),
+		contexts: make([]context.Context, len(positions)),
+		cancels:  make([]context.CancelFunc, len(positions)),
 		stripe:   make([]byte, 0, erasure.DefaultStripeSize),
 	}
+	drives := make([]ports.ShardStore, len(positions))
+	var reachable []int
 	for i, position := range positions {
 		slot := topology.Sets[set][position]
 		w.driveIDs[i] = slot.DriveID
+		w.contexts[i], w.cancels[i] = context.WithCancel(ctx)
 		drive, ok := s.drives.Drive(slot)
 		if !ok {
-			w.lose(ctx, i, "create", fmt.Errorf("%w: drive %s is not attached", domain.ErrDriveOffline, slot.DriveID))
+			w.lose(ctx, i, "create", fmt.Errorf("%w: drive %s is not attached", domain.ErrDriveOffline, slot.DriveID), false)
 			continue
 		}
-		writer, err := drive.Create(ctx, object.ShardID{DataID: dataID, Index: i})
-		if err != nil {
-			w.lose(ctx, i, "create", err)
+		drives[i] = drive
+		reachable = append(reachable, i)
+	}
+	// The shards are created at once, so that a drive that does not
+	// answer holds the write up for one deadline, not forever.
+	created := runShards(ctx, reachable, s.deadlines.create, w.geometry.WriteQuorum(),
+		func(i int) (ports.ShardWriter, error) {
+			return drives[i].Create(w.contexts[i], object.ShardID{DataID: dataID, Index: i})
+		}, w.drop)
+	for _, i := range reachable {
+		outcome := created[i]
+		if outcome.err != nil {
+			w.lose(ctx, i, "create", outcome.err, outcome.late)
 			continue
 		}
-		w.writers[i] = writer
+		w.writers[i] = outcome.writer
 	}
 	if err := w.quorum(); err != nil {
 		w.abort()
@@ -213,10 +372,31 @@ func (s *shardStorage) create(ctx context.Context, dataID object.ID) (*streamWri
 	return w, nil
 }
 
-// lose gives up on one shard of the write in progress.
-func (w *streamWriter) lose(ctx context.Context, index int, step string, err error) {
+// drop cuts a shard that missed its deadline loose: whatever its writer is
+// waiting for - another node, for one - is cancelled.
+func (w *streamWriter) drop(index int) {
+	w.cancels[index]()
+}
+
+// live returns the shards that are still being written, and their writers.
+func (w *streamWriter) live() ([]int, []ports.ShardWriter) {
+	var indexes []int
+	for i, writer := range w.writers {
+		if writer != nil {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes, slices.Clone(w.writers)
+}
+
+// lose gives up on one shard of the write in progress. A shard that is late
+// is not aborted here: the step it missed its deadline in still owns its
+// writer, and aborts it when it returns.
+func (w *streamWriter) lose(ctx context.Context, index int, step string, err error, late bool) {
 	if w.writers[index] != nil {
-		_ = w.writers[index].Abort()
+		if !late {
+			_ = w.writers[index].Abort()
+		}
 		w.writers[index] = nil
 	}
 	w.storage.logger.WarnContext(ctx, "shard write failed; the object will be stored degraded if a write quorum remains",
@@ -270,12 +450,17 @@ func (w *streamWriter) flush(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for i, writer := range w.writers {
-		if writer == nil {
-			continue
-		}
-		if _, err := writer.Write(chunks[i]); err != nil {
-			w.lose(ctx, i, "write", err)
+	// The chunks are copies, so a shard left behind still writing one
+	// does not hold up the stripe buffer.
+	indexes, writers := w.live()
+	wrote := runShards(ctx, indexes, w.storage.deadlines.write, w.geometry.WriteQuorum(),
+		func(i int) (ports.ShardWriter, error) {
+			_, err := writers[i].Write(chunks[i])
+			return writers[i], err
+		}, w.drop)
+	for _, i := range indexes {
+		if outcome := wrote[i]; outcome.err != nil {
+			w.lose(ctx, i, "write", outcome.err, outcome.late)
 		}
 	}
 	w.written += int64(len(w.stripe))
@@ -292,12 +477,19 @@ func (w *streamWriter) commit(ctx context.Context) (layout object.Layout, degrad
 		w.abort()
 		return object.Layout{}, false, err
 	}
-	for i, writer := range w.writers {
-		if writer == nil {
-			continue
-		}
-		if err := writer.Commit(ctx); err != nil {
-			w.lose(ctx, i, "commit", err)
+	defer w.release()
+	// A shard counts only once its commit has answered that it is on
+	// stable storage; one that is late is not counted, even if it does get
+	// there later.
+	shardSize := w.geometry.ShardSize(w.written)
+	indexes, writers := w.live()
+	committed := runShards(ctx, indexes, w.storage.deadlines.commitFor(shardSize), w.geometry.WriteQuorum(),
+		func(i int) (ports.ShardWriter, error) {
+			return writers[i], writers[i].Commit(w.contexts[i])
+		}, w.drop)
+	for _, i := range indexes {
+		if outcome := committed[i]; outcome.err != nil {
+			w.lose(ctx, i, "commit", outcome.err, outcome.late)
 		}
 	}
 	layout = object.Layout{
@@ -307,7 +499,6 @@ func (w *streamWriter) commit(ctx context.Context) (layout object.Layout, degrad
 		StoredSize:   w.written,
 		Shards:       make([]object.ShardLocation, len(w.driveIDs)),
 	}
-	shardSize := w.geometry.ShardSize(w.written)
 	for i, driveID := range w.driveIDs {
 		layout.Shards[i] = object.ShardLocation{DriveID: driveID, Size: shardSize}
 	}
@@ -328,6 +519,17 @@ func (w *streamWriter) abort() {
 		if writer != nil {
 			_ = writer.Abort()
 			w.writers[i] = nil
+		}
+	}
+	w.release()
+}
+
+// release ends the contexts the shards were created under, once nothing is
+// being written under them any more.
+func (w *streamWriter) release() {
+	for _, cancel := range w.cancels {
+		if cancel != nil {
+			cancel()
 		}
 	}
 }
@@ -704,26 +906,33 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 			domain.ErrIntegrity, len(damaged), geometry.Total(), v.DataID, geometry.Parity)
 	}
 
-	writers := map[int]ports.ShardWriter{}
-	defer func() {
-		for _, writer := range writers {
-			_ = writer.Abort()
-		}
-	}()
+	// Each rebuilt shard is written under the same deadlines as a new one,
+	// so a drive that hangs is given up on and the others are still
+	// rebuilt. No quorum applies: every shard rebuilt is a gain.
+	rebuild := s.newRebuild(ctx, v.DataID)
+	defer rebuild.release()
+	drives := map[int]ports.ShardStore{}
+	var reachable []int
 	for _, i := range damaged {
 		drive, err := where.drive(v.Layout.Shards[i].DriveID)
 		if err != nil {
 			continue
 		}
-		id := object.ShardID{DataID: v.DataID, Index: i}
-		writer, err := drive.Rewrite(ctx, id)
-		if err != nil {
-			s.logger.WarnContext(ctx, "shard cannot be rebuilt", slog.String("shard", id.String()), slog.Any("error", err))
-			continue
-		}
-		writers[i] = writer
+		drives[i] = drive
+		rebuild.contexts[i], rebuild.cancels[i] = context.WithCancel(ctx)
+		reachable = append(reachable, i)
 	}
-	for stripe := int64(0); stripe < geometry.Stripes(v.Layout.StoredSize) && len(writers) > 0; stripe++ {
+	created := runShards(ctx, reachable, s.deadlines.create, 0, func(i int) (ports.ShardWriter, error) {
+		return drives[i].Rewrite(rebuild.context(i), object.ShardID{DataID: v.DataID, Index: i})
+	}, rebuild.drop)
+	for _, i := range reachable {
+		if outcome := created[i]; outcome.err != nil {
+			rebuild.fail(i, "rewrite", outcome)
+		} else {
+			rebuild.writers[i] = outcome.writer
+		}
+	}
+	for stripe := int64(0); stripe < geometry.Stripes(v.Layout.StoredSize) && len(rebuild.writers) > 0; stripe++ {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -731,22 +940,96 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 		if err != nil {
 			return result, err
 		}
-		for i, writer := range writers {
-			if _, err := writer.Write(chunks[i]); err != nil {
-				_ = writer.Abort()
-				delete(writers, i)
+		indexes, writers := rebuild.live()
+		wrote := runShards(ctx, indexes, s.deadlines.write, 0, func(i int) (ports.ShardWriter, error) {
+			_, err := writers[i].Write(chunks[i])
+			return writers[i], err
+		}, rebuild.drop)
+		for _, i := range indexes {
+			if outcome := wrote[i]; outcome.err != nil {
+				rebuild.fail(i, "write", outcome)
 			}
 		}
 	}
-	for i, writer := range writers {
-		if err := writer.Commit(ctx); err != nil {
-			s.logger.WarnContext(ctx, "rebuilt shard cannot be committed",
-				slog.String("shard", object.ShardID{DataID: v.DataID, Index: i}.String()), slog.Any("error", err))
+	indexes, writers := rebuild.live()
+	committed := runShards(ctx, indexes, s.deadlines.commitFor(shardSize), 0, func(i int) (ports.ShardWriter, error) {
+		return writers[i], writers[i].Commit(rebuild.context(i))
+	}, rebuild.drop)
+	for _, i := range indexes {
+		if outcome := committed[i]; outcome.err != nil {
+			rebuild.fail(i, "commit", outcome)
 			continue
 		}
+		delete(rebuild.writers, i)
 		result.rebuilt = append(result.rebuilt, i)
 	}
+	slices.Sort(result.rebuilt)
 	return result, nil
+}
+
+// rebuild is the set of shards one heal writes again.
+type rebuild struct {
+	storage *shardStorage
+	ctx     context.Context
+	dataID  object.ID
+	// writers holds the shards still being written, by index.
+	writers  map[int]ports.ShardWriter
+	contexts map[int]context.Context
+	cancels  map[int]context.CancelFunc
+}
+
+func (s *shardStorage) newRebuild(ctx context.Context, dataID object.ID) *rebuild {
+	return &rebuild{
+		storage: s, ctx: ctx, dataID: dataID, writers: map[int]ports.ShardWriter{},
+		contexts: map[int]context.Context{}, cancels: map[int]context.CancelFunc{},
+	}
+}
+
+// context returns the context shard i is written under. It is made before
+// any step runs, in the goroutine that runs the heal.
+func (r *rebuild) context(i int) context.Context {
+	return r.contexts[i]
+}
+
+// drop cuts a shard that missed its deadline loose.
+func (r *rebuild) drop(i int) {
+	r.cancels[i]()
+}
+
+// live returns the shards still being written and a copy of their writers,
+// which the steps may read while the heal goes on.
+func (r *rebuild) live() ([]int, map[int]ports.ShardWriter) {
+	indexes := make([]int, 0, len(r.writers))
+	for i := range r.writers {
+		indexes = append(indexes, i)
+	}
+	slices.Sort(indexes)
+	return indexes, maps.Clone(r.writers)
+}
+
+// fail gives up on rebuilding shard i, and says so: the shard stays as it
+// was, damaged or missing, until a later heal.
+func (r *rebuild) fail(i int, step string, outcome stepOutcome) {
+	if writer, ok := r.writers[i]; ok {
+		if !outcome.late {
+			_ = writer.Abort()
+		}
+		delete(r.writers, i)
+	}
+	r.storage.logger.WarnContext(r.ctx, "shard cannot be rebuilt",
+		slog.String("shard", object.ShardID{DataID: r.dataID, Index: i}.String()),
+		slog.String("step", step), slog.Bool("deadline_missed", outcome.late), slog.Any("error", outcome.err))
+}
+
+// release aborts what was not committed and ends the shards' contexts.
+func (r *rebuild) release() {
+	for i, writer := range r.writers {
+		_ = writer.Abort()
+		delete(r.writers, i)
+	}
+	for _, cancel := range r.cancels {
+		cancel()
+	}
 }
 
 // removeShards deletes the listed shards of a version, best effort.

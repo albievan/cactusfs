@@ -13,6 +13,14 @@ func (s *ObjectService) CountObjects(ctx context.Context, bucketName string, lim
 	return s.countObjects(ctx, bucketName, limit)
 }
 
+// WithShardDeadlines gives the writes and heals of the service deadlines a
+// test can reach: how long one shard may take to be created, to take one
+// stripe and to be committed.
+func (s *ObjectService) WithShardDeadlines(create, write, commit time.Duration) *ObjectService {
+	s.storage.deadlines = shardDeadlines{create: create, write: write, commit: commit}
+	return s
+}
+
 // SearchChunk is the most keys one walk of the index visits for a search.
 const SearchChunk = searchChunk
 
