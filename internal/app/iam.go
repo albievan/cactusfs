@@ -151,8 +151,28 @@ func (s *IAMService) EnsureDefaultAdmin(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// reasonBoundedPassword is why a principal narrowed by a policy of its own
+// sets no password.
+const reasonBoundedPassword = "an API key with a policy of its own cannot set a password"
+
+// boundedPassword refuses a principal that is narrowed by a policy of its
+// own - an API key with an inline policy - setting a console password, of
+// any user, its owner included: whoever holds the key could then sign in as
+// that user, and a console session carries no narrowing. It is the reason
+// such a key makes no keys either (CreateAPIKey). The refusal is audited.
+func (s *IAMService) boundedPassword(ctx context.Context, p iam.Principal, in UserInput) error {
+	if p.Boundary == nil || in.Password == "" {
+		return nil
+	}
+	s.auditor.Denied(ctx, iam.Request{Principal: p, Action: iam.ActionPutUser, Resource: iam.Resource{Admin: "user/" + in.Name}}, reasonBoundedPassword)
+	return fmt.Errorf("%w: %s", domain.ErrAccessDenied, reasonBoundedPassword)
+}
+
 // CreateUser adds a user.
 func (s *IAMService) CreateUser(ctx context.Context, p iam.Principal, in UserInput) (iam.User, error) {
+	if err := s.boundedPassword(ctx, p, in); err != nil {
+		return iam.User{}, fmt.Errorf("iam.CreateUser: %w", err)
+	}
 	record, err := s.allow(ctx, p, iam.ActionPutUser, "user", in.Name, userDetails("create", in))
 	if err != nil {
 		return iam.User{}, fmt.Errorf("iam.CreateUser: %w", err)
@@ -173,6 +193,9 @@ func (s *IAMService) CreateUser(ctx context.Context, p iam.Principal, in UserInp
 // when one is given. A new password ends every console session of the user,
 // that of the caller included when the caller changes their own.
 func (s *IAMService) UpdateUser(ctx context.Context, p iam.Principal, in UserInput) (iam.User, error) {
+	if err := s.boundedPassword(ctx, p, in); err != nil {
+		return iam.User{}, fmt.Errorf("iam.UpdateUser: %w", err)
+	}
 	record, err := s.allow(ctx, p, iam.ActionPutUser, "user", in.Name, userDetails("update", in))
 	if err != nil {
 		return iam.User{}, fmt.Errorf("iam.UpdateUser: %w", err)

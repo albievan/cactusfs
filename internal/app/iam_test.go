@@ -520,6 +520,84 @@ func TestAKeyNeverExceedsItsOwner(t *testing.T) {
 	}
 }
 
+// TestANarrowedKeySetsNoPassword: an API key with a policy of its own does
+// not set a console password - not its owner's, not another user's, not a
+// new user's - though its policy allows admin:PutUser: whoever holds the key
+// would sign in with the password, and a session carries no narrowing. What
+// else the key may change of a user, it still may; a key without a policy
+// of its own sets passwords as its owner may.
+func TestANarrowedKeySetsNoPassword(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newIAMFixture(t)
+	const password = "a password long enough"
+	for _, name := range []string{"admin", "other"} {
+		if _, err := f.iam.CreateUser(ctx, f.root, app.UserInput{Name: name, Roles: []string{iam.RoleClusterAdmin}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	administer := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:*","Resource":"*"}]}`)
+	narrow, _, err := f.iam.CreateAPIKey(ctx, f.root, app.APIKeyInput{Owner: "admin", InlinePolicy: administer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide, _, err := f.iam.CreateAPIKey(ctx, f.root, app.APIKeyInput{Owner: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []string{iam.RoleClusterAdmin}
+	tests := []struct {
+		name   string
+		creds  app.Credentials
+		create bool
+		in     app.UserInput
+		want   error
+	}{
+		{"a narrowed key setting its owner's password", narrow, false, app.UserInput{Name: "admin", Roles: roles, Password: password}, domain.ErrAccessDenied},
+		{"a narrowed key setting another user's password", narrow, false, app.UserInput{Name: "other", Roles: roles, Password: password}, domain.ErrAccessDenied},
+		{"a narrowed key making a user with a password", narrow, true, app.UserInput{Name: "made", Roles: roles, Password: password}, domain.ErrAccessDenied},
+		{"a narrowed key changing a user, no password", narrow, false, app.UserInput{Name: "other", Roles: []string{iam.RoleReadOnly}}, nil},
+		{"a narrowed key making a user without a password", narrow, true, app.UserInput{Name: "nopassword"}, nil},
+		{"a key without a policy setting its owner's password", wide, false, app.UserInput{Name: "admin", Roles: roles, Password: password}, nil},
+	}
+	for _, tt := range tests {
+		p := f.as(t, tt.creds)
+		before := len(f.trail(t))
+		if tt.create {
+			_, err = f.iam.CreateUser(ctx, p, tt.in)
+		} else {
+			_, err = f.iam.UpdateUser(ctx, p, tt.in)
+		}
+		if !errors.Is(err, tt.want) || (tt.want == nil) != (err == nil) {
+			t.Errorf("%s: %v, want %v", tt.name, err, tt.want)
+			continue
+		}
+		user, getErr := f.store.GetUser(ctx, tt.in.Name)
+		switch {
+		case tt.want == nil:
+			if getErr != nil {
+				t.Errorf("%s: the user is not there: %v", tt.name, getErr)
+			}
+		case tt.create:
+			if !errors.Is(getErr, domain.ErrEntityNotFound) {
+				t.Errorf("%s: the user was made: %v", tt.name, getErr)
+			}
+		case user.PasswordHash != "":
+			t.Errorf("%s: the password was set", tt.name)
+		}
+		if tt.want != nil {
+			trail := f.trail(t)
+			last := trail[len(trail)-1]
+			if len(trail) != before+1 || last.Outcome != audit.Denied || last.Action != string(iam.ActionPutUser) || !strings.HasSuffix(last.Resource, ":user/"+tt.in.Name) {
+				t.Errorf("%s: the refusal is not in the trail: %+v", tt.name, last)
+			}
+			if strings.Contains(fmt.Sprint(trail), password) {
+				t.Fatalf("%s: the password is in the trail", tt.name)
+			}
+		}
+	}
+}
+
 // TestKeyUseIsRecordedSparingly: when a key was last used is written to the
 // replicated state at most once in a while, and never on the request's time.
 func TestKeyUseIsRecordedSparingly(t *testing.T) {
