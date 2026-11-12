@@ -1107,6 +1107,31 @@ func TestInternalFailuresRevealNothing(t *testing.T) {
 	}
 }
 
+// TestObjectKeyErrors: a key that is too long is told as one, and a key
+// that is invalid for another reason - not UTF-8 - is an invalid argument,
+// not a key that is too long.
+func TestObjectKeyErrors(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	tests := map[string]struct {
+		path   string
+		status int
+		code   string
+	}{
+		"the longest key":   {"/bkt/" + strings.Repeat("k", object.MaxKeyLength), 200, ""},
+		"a key too long":    {"/bkt/" + strings.Repeat("k", object.MaxKeyLength+1), 400, "KeyTooLongError"},
+		"a key not UTF-8":   {"/bkt/bad%FF", 400, "InvalidArgument"},
+		"a key half UTF-8":  {"/bkt/cut%E2%82", 400, "InvalidArgument"},
+		"a key of one byte": {"/bkt/k", 200, ""},
+	}
+	for name, tt := range tests {
+		if status, code := answer(s.do(call{method: http.MethodPut, path: tt.path, body: []byte("x")})); status != tt.status || code != tt.code {
+			t.Errorf("PUT %s: %d %s, want %d %s", name, status, code, tt.status, tt.code)
+		}
+	}
+}
+
 func TestErrorMapping(t *testing.T) {
 	t.Parallel()
 
@@ -1120,7 +1145,9 @@ func TestErrorMapping(t *testing.T) {
 		{domain.ErrBucketAlreadyExists, 409, "BucketAlreadyOwnedByYou"},
 		{domain.ErrBucketNotEmpty, 409, "BucketNotEmpty"},
 		{domain.ErrInvalidBucketName, 400, "InvalidBucketName"},
-		{domain.ErrInvalidObjectKey, 400, "KeyTooLongError"},
+		{domain.ErrInvalidObjectKey, 400, "InvalidArgument"},
+		{domain.ErrObjectKeyTooLong, 400, "KeyTooLongError"},
+		{fmt.Errorf("%w: key is empty", domain.ErrInvalidObjectKey), 400, "InvalidArgument"},
 		{domain.ErrInvalidRange, 416, "InvalidRange"},
 		{domain.ErrInvalidArgument, 400, "InvalidArgument"},
 		{domain.ErrAccessDenied, 403, "AccessDenied"},

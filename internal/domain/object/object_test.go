@@ -110,6 +110,10 @@ func TestValidateKey(t *testing.T) {
 			if !tt.valid && !errors.Is(err, domain.ErrInvalidObjectKey) {
 				t.Errorf("ValidateKey = %v, want %v", err, domain.ErrInvalidObjectKey)
 			}
+			// Only a key that is too long is told as one.
+			if tooLong := len(tt.key) > object.MaxKeyLength; errors.Is(err, domain.ErrObjectKeyTooLong) != tooLong {
+				t.Errorf("ValidateKey = %v; too long: %v", err, tooLong)
+			}
 		})
 	}
 }

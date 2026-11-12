@@ -101,6 +101,9 @@ var (
 var (
 	// ErrInvalidObjectKey reports an object key that breaks the key rules.
 	ErrInvalidObjectKey = errors.New("invalid object key")
+	// ErrObjectKeyTooLong reports an object key longer than a key may be.
+	// It is an ErrInvalidObjectKey, which S3 tells apart from the others.
+	ErrObjectKeyTooLong = fmt.Errorf("%w: too long", ErrInvalidObjectKey)
 	// ErrObjectNotFound reports that the object does not exist.
 	ErrObjectNotFound = errors.New("object not found")
 	// ErrVersionNotFound means that an object has no version with the ID
@@ -359,6 +362,7 @@ func LocalSentinels() []error {
 		ErrKeyUnavailable,
 		ErrInvalidTag,
 		ErrTagRule,
+		ErrObjectKeyTooLong,
 		ErrIdempotencyKeyReused,
 		ErrRequestInProgress,
 		ErrTooManyAttempts,

@@ -22,13 +22,14 @@ const MaxUserMetadataSize = 2 << 10
 // valid UTF-8. Keys are opaque names in the index and never become filesystem
 // paths, so no character is forbidden.
 //
-// The returned error wraps domain.ErrInvalidObjectKey.
+// The returned error wraps domain.ErrInvalidObjectKey, and
+// domain.ErrObjectKeyTooLong for a key that is too long.
 func ValidateKey(key string) error {
 	switch {
 	case key == "":
 		return fmt.Errorf("%w: key is empty", domain.ErrInvalidObjectKey)
 	case len(key) > MaxKeyLength:
-		return fmt.Errorf("%w: key is %d bytes, the maximum is %d", domain.ErrInvalidObjectKey, len(key), MaxKeyLength)
+		return fmt.Errorf("%w: key is %d bytes, the maximum is %d", domain.ErrObjectKeyTooLong, len(key), MaxKeyLength)
 	case !utf8.ValidString(key):
 		return fmt.Errorf("%w: key is not valid UTF-8", domain.ErrInvalidObjectKey)
 	}

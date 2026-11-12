@@ -96,7 +96,9 @@ func errorMappings() []mapping {
 		{domain.ErrBucketNotFound, apiError{http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist."}},
 		{domain.ErrBucketAlreadyExists, apiError{http.StatusConflict, "BucketAlreadyOwnedByYou", "Your previous request to create the named bucket succeeded and you already own it."}},
 		{domain.ErrBucketNotEmpty, apiError{http.StatusConflict, "BucketNotEmpty", "The bucket that you tried to delete is not empty."}},
-		{domain.ErrInvalidObjectKey, apiError{http.StatusBadRequest, "KeyTooLongError", "Your key is too long or not valid."}},
+		// Before the key error it is one of.
+		{domain.ErrObjectKeyTooLong, apiError{http.StatusBadRequest, "KeyTooLongError", "Your key is too long."}},
+		{domain.ErrInvalidObjectKey, apiError{http.StatusBadRequest, "InvalidArgument", "The object key is not valid."}},
 		{domain.ErrObjectNotFound, apiError{http.StatusNotFound, "NoSuchKey", "The specified key does not exist."}},
 		{domain.ErrInvalidRange, apiError{http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable."}},
 		// Before the argument error it is one of.
