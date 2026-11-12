@@ -430,7 +430,7 @@ func allowQuery(query url.Values, allowed ...string) error {
 // is about. They are read on GET and HEAD of an object; on a write they ask
 // for a conditional write, which is not implemented.
 func conditionalHeaders() []string {
-	return []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"}
+	return []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range"}
 }
 
 // x-amz-* request headers that are understood. Every other x-amz-* header

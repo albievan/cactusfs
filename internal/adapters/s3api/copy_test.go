@@ -285,6 +285,48 @@ func TestConditionalReadsOverHTTP(t *testing.T) {
 	}
 }
 
+// TestIfRangeOverHTTP: a ranged GET with If-Range is served the range when
+// the validator names the current version, and the whole object - a 200 -
+// when it names another, or cannot be read.
+func TestIfRangeOverHTTP(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	body := []byte("resumed after a broken download")
+	s.putObject("/bkt/k", body)
+	tag := etagOf(body)
+	modified := s.mustStatus(s.do(call{method: http.MethodHead, path: "/bkt/k"}), http.StatusOK).header.Get("Last-Modified")
+	tests := map[string]struct {
+		headers map[string]string
+		status  int
+		want    []byte
+	}{
+		"its tag":                     {map[string]string{"Range": "bytes=0-6", "If-Range": tag}, 206, body[:7]},
+		"its time":                    {map[string]string{"Range": "bytes=0-6", "If-Range": modified}, 206, body[:7]},
+		"another tag":                 {map[string]string{"Range": "bytes=0-6", "If-Range": `"x"`}, 200, body},
+		"its tag, said weakly":        {map[string]string{"Range": "bytes=0-6", "If-Range": "W/" + tag}, 200, body},
+		"another time":                {map[string]string{"Range": "bytes=0-6", "If-Range": "Mon, 01 Jan 2001 00:00:00 GMT"}, 200, body},
+		"a value that is neither":     {map[string]string{"Range": "bytes=0-6", "If-Range": "yesterday"}, 200, body},
+		"another tag, beyond the end": {map[string]string{"Range": "bytes=500-600", "If-Range": `"x"`}, 200, body},
+		"its tag, beyond the end":     {map[string]string{"Range": "bytes=500-600", "If-Range": tag}, 416, nil},
+		"no Range":                    {map[string]string{"If-Range": `"x"`}, 200, body},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := s.do(call{method: http.MethodGet, path: "/bkt/k", headers: tt.headers})
+			if r.status != tt.status || (tt.want != nil && !bytes.Equal(r.body, tt.want)) {
+				t.Errorf("GET = %d %q, want %d %q", r.status, r.body, tt.status, tt.want)
+			}
+			if r.status == http.StatusOK && r.header.Get("Content-Range") != "" {
+				t.Errorf("a whole object with Content-Range %q", r.header.Get("Content-Range"))
+			}
+		})
+	}
+	// A condition on a write is not implemented, and says so.
+	s.expectError(s.do(call{method: http.MethodPut, path: "/bkt/k", body: body, headers: map[string]string{"If-Range": tag}}), 501, "NotImplemented")
+}
+
 // TestListObjectsV1OverHTTP: the first version of ListObjects, by marker.
 func TestListObjectsV1OverHTTP(t *testing.T) {
 	t.Parallel()

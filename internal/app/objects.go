@@ -539,6 +539,10 @@ type GetOutput struct {
 	// Range is the part of the object in Body: the whole object unless a
 	// range was asked for.
 	Range object.Range
+	// Partial says that Body is the range that was asked for. It is false
+	// when no range was, and when the If-Range of the range names another
+	// version than the one served: Body is then the whole object.
+	Partial bool
 	// Body yields the bytes of Range. Every byte it returns has been
 	// authenticated; a read fails with an error wrapping
 	// domain.ErrIntegrity rather than return damaged data. The caller must
@@ -615,7 +619,10 @@ func (s *ObjectService) get(ctx context.Context, principal iam.Principal, in Get
 func (s *ObjectService) open(ctx context.Context, version object.Version, in GetInput) (GetOutput, error) {
 	var err error
 	span := object.Range{Offset: 0, Length: version.Size}
-	if in.Range != nil {
+	// A range of another version than the one the caller has would be
+	// spliced into the wrong object: its If-Range says which it has.
+	partial := in.Range != nil && in.Range.Applies(version.ETag, version.ModifiedAt)
+	if partial {
 		if span, err = in.Range.Resolve(version.Size); err != nil {
 			return GetOutput{}, err
 		}
@@ -629,7 +636,7 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 		if err != nil {
 			return GetOutput{}, err
 		}
-		return GetOutput{Version: version, Range: span, Body: body}, nil
+		return GetOutput{Version: version, Range: span, Partial: partial, Body: body}, nil
 	}
 
 	stream, err := s.openVersionKeys(ctx, version, in.CustomerKey)
@@ -665,7 +672,7 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 	if span.Length > 0 {
 		body = io.LimitReader(plain, span.Length)
 	}
-	return GetOutput{Version: version, Range: span, Body: &objectBody{Reader: body, shards: shard, healer: s.healer, version: version}}, nil
+	return GetOutput{Version: version, Range: span, Partial: partial, Body: &objectBody{Reader: body, shards: shard, healer: s.healer, version: version}}, nil
 }
 
 // openVersionKeys unwraps the data key of a stored version and returns the

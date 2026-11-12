@@ -256,7 +256,7 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 		return err
 	}
 	in := app.GetInput{
-		Bucket: req.bucket, Key: req.key, Range: parseRange(req.Header.Get("Range")), Version: req.version, CustomerKey: customerKey,
+		Bucket: req.bucket, Key: req.key, Range: rangeOf(req.Header), Version: req.version, CustomerKey: customerKey,
 		Conditions: conditions,
 	}
 	out, err := h.cfg.Objects.Get(ctx, req.principal, in)
@@ -278,7 +278,7 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 	setVersionHeader(header, out.Version, req.version != nil)
 	header.Set("Content-Length", strconv.FormatInt(out.Range.Length, 10))
 	status := http.StatusOK
-	if in.Range != nil {
+	if out.Partial {
 		status = http.StatusPartialContent
 		header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d",
 			out.Range.Offset, out.Range.Offset+out.Range.Length-1, out.Version.Size))
@@ -386,6 +386,44 @@ func setObjectHeaders(header http.Header, v object.Version, customerDigest strin
 // "+", and "/" left as it is.
 func encodeName(s string) string {
 	return strings.ReplaceAll(url.QueryEscape(s), "%2F", "/")
+}
+
+// rangeOf reads the Range of a read together with its If-Range, which says
+// of which version the client holds the rest. If-Range without a Range is
+// nothing, as HTTP has it.
+func rangeOf(header http.Header) *object.RangeSpec {
+	spec := parseRange(header.Get("Range"))
+	if spec == nil {
+		return nil
+	}
+	if values := header.Values("If-Range"); len(values) > 0 {
+		spec.If = ifRange(values)
+	}
+	return spec
+}
+
+// ifRange reads an If-Range header: a strong entity tag in quotes, or an
+// HTTP date. Anything else - a weak tag, a value given twice, one that does
+// not parse - is a validator that holds for no version, so the whole object
+// is served: HTTP has a server ignore the Range when the validator does not
+// match, and serving a range of what may be another version would splice
+// two objects together in the client.
+func ifRange(values []string) *object.RangeValidator {
+	v := &object.RangeValidator{}
+	if len(values) != 1 {
+		return v
+	}
+	value := strings.TrimSpace(values[0])
+	if strings.HasPrefix(value, `"`) {
+		if tag, ok := strings.CutSuffix(value[1:], `"`); ok && tag != "" && !strings.ContainsAny(tag, `" `) {
+			v.ETag = tag
+		}
+		return v
+	}
+	if date, err := conditionDate(value); err == nil {
+		v.Date = date
+	}
+	return v
 }
 
 // parseRange parses an HTTP Range header with a single byte range. As HTTP

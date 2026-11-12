@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -299,6 +300,50 @@ func TestGetRanges(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("If-Range", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		f.createBucket(t, "b")
+		data := randomBytes(t, 100)
+		_, err := f.objects.Put(t.Context(), porttest.Root(), app.PutInput{
+			Bucket: "b", Key: "k", Body: bytes.NewReader(data), Size: int64(len(data)),
+			Verify: func() (string, error) { return "0123456789abcdef0123456789abcdef", nil },
+		})
+		if err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		_, whole, err := f.get("b", "k", nil)
+		if err != nil || whole.Version.ETag == "" || whole.Partial {
+			t.Fatalf("Get = %+v, %v", whole, err)
+		}
+		v := whole.Version
+		second := v.ModifiedAt.Truncate(time.Second)
+		tests := []struct {
+			name    string
+			spec    object.RangeSpec
+			partial bool
+			want    []byte
+		}{
+			{"no If-Range", object.RangeSpec{First: 10, Last: 19}, true, data[10:20]},
+			{"its tag", object.RangeSpec{First: 10, Last: 19, If: &object.RangeValidator{ETag: v.ETag}}, true, data[10:20]},
+			{"its second", object.RangeSpec{First: 10, Last: 19, If: &object.RangeValidator{Date: second}}, true, data[10:20]},
+			{"another tag", object.RangeSpec{First: 10, Last: 19, If: &object.RangeValidator{ETag: "x"}}, false, data},
+			{"another second", object.RangeSpec{First: 10, Last: 19, If: &object.RangeValidator{Date: second.Add(-time.Hour)}}, false, data},
+			{"a validator that says nothing", object.RangeSpec{First: 10, Last: 19, If: &object.RangeValidator{}}, false, data},
+			// The range of another version is not judged at all.
+			{"another tag, a range beyond the end", object.RangeSpec{First: 500, Last: -1, If: &object.RangeValidator{ETag: "x"}}, false, data},
+		}
+		for _, tt := range tests {
+			got, out, err := f.get("b", "k", &tt.spec)
+			if err != nil {
+				t.Fatalf("%s: Get: %v", tt.name, err)
+			}
+			if out.Partial != tt.partial || !bytes.Equal(got, tt.want) {
+				t.Errorf("%s: Partial = %v with %d bytes, want %v with %d", tt.name, out.Partial, len(got), tt.partial, len(tt.want))
+			}
+		}
+	})
 
 	t.Run("any range of an empty object", func(t *testing.T) {
 		t.Parallel()

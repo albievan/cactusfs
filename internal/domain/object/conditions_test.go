@@ -53,3 +53,34 @@ func TestConditions(t *testing.T) {
 		}
 	}
 }
+
+// TestRangeApplies: the If-Range of a range names the version the range is
+// to be served from, strongly by its tag or exactly by its second; for any
+// other version, and for a validator that says nothing, it does not apply.
+func TestRangeApplies(t *testing.T) {
+	t.Parallel()
+	modified := time.Date(2026, 10, 7, 12, 0, 0, 500_000_000, time.UTC)
+	second := modified.Truncate(time.Second)
+	const tag = "9e107d9d372bb6826bd81d3542a419d6"
+	tests := []struct {
+		name string
+		If   *object.RangeValidator
+		want bool
+	}{
+		{"no If-Range", nil, true},
+		{"its tag", &object.RangeValidator{ETag: tag}, true},
+		{"another tag", &object.RangeValidator{ETag: "x"}, false},
+		{"its tag said weakly", &object.RangeValidator{ETag: `W/"` + tag + `"`}, false},
+		{"its second", &object.RangeValidator{Date: second}, true},
+		{"a second later", &object.RangeValidator{Date: second.Add(time.Second)}, false},
+		{"a second earlier", &object.RangeValidator{Date: second.Add(-time.Second)}, false},
+		{"the tag before the date", &object.RangeValidator{ETag: "x", Date: second}, false},
+		{"nothing that could be read", &object.RangeValidator{}, false},
+	}
+	for _, tt := range tests {
+		spec := object.RangeSpec{First: 0, Last: 9, If: tt.If}
+		if got := spec.Applies(tag, modified); got != tt.want {
+			t.Errorf("%s: Applies = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
