@@ -37,7 +37,7 @@ Run "cactusfs <command> --help" for the flags and CACTUSFS_* variables of a comm
 `
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := shutdownContext(context.Background(), signal.NotifyContext)
 	// The path is read now: an upgrade moves the file the process was
 	// started from aside before it asks for the restart.
 	restart := newRestarter(executablePath())
@@ -47,6 +47,19 @@ func main() {
 	// Only once the command has returned - the server stopped, every
 	// listener, Raft and bbolt closed - may the process become another.
 	os.Exit(afterRun(code, signalled, restart, os.Args, os.Environ(), reexec, os.Stderr))
+}
+
+// notifyFunc is the shape of signal.NotifyContext.
+type notifyFunc func(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc)
+
+// shutdownContext returns a context that ends at the first SIGINT or
+// SIGTERM. Once it has, the signals are handed back to the runtime, so a
+// second one ends the process at once, however long the graceful shutdown
+// the first one started takes.
+func shutdownContext(parent context.Context, notify notifyFunc) (context.Context, context.CancelFunc) {
+	ctx, stop := notify(parent, os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 // run executes one command and returns the process exit code. Everything the
