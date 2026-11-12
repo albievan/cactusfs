@@ -1067,6 +1067,46 @@ func TestRequestsAreSafeToRepeat(t *testing.T) {
 	}
 }
 
+// TestAUserMadeAgainIsAnotherCaller: the answers kept for the idempotency
+// keys of a console user are not given to a user of the same name who was
+// made after the first was deleted - not the secret of an API key the first
+// one made. The same user, signed in again, is the same caller.
+func TestAUserMadeAgainIsAnotherCaller(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		recreate bool
+		replayed bool
+	}{
+		{"the same user, signed in again", false, true},
+		{"a user of the same name, made after the first was deleted", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			makeKey := func(c *console) reply {
+				return f.must(http.StatusCreated, call{
+					method: "POST", path: "/users/frank/keys", client: c.client, body: map[string]any{"description": "laptop"},
+					headers: c.changing("make-a-key"),
+				})
+			}
+			first := makeKey(consoleOf(t, f, "frank", iam.RoleClusterAdmin))
+			role := ""
+			if tt.recreate {
+				f.must(http.StatusNoContent, call{method: "DELETE", path: "/users/frank"})
+				f.clock.Advance(time.Minute)
+				role = iam.RoleClusterAdmin
+			}
+			again := makeKey(consoleOf(t, f, "frank", role))
+			replayed := again.header.Get("Idempotent-Replayed") == "true"
+			if replayed != tt.replayed || bytes.Equal(first.body, again.body) != tt.replayed {
+				t.Fatalf("replayed = %v, the same answer = %v; want %v", replayed, bytes.Equal(first.body, again.body), tt.replayed)
+			}
+		})
+	}
+}
+
 func withBearer(c call, bearer string) call {
 	c.bearer = bearer
 	return c

@@ -433,11 +433,15 @@ func (h *Handler) authenticate(r *http.Request, info *requestInfo) error {
 	return refuse("", "no credential")
 }
 
-// scopeOf names whose idempotency keys a request's key belongs with.
+// scopeOf names whose idempotency keys a request's key belongs with. The
+// scope of a console user names the user and when the user was made: a user
+// who is deleted and made again under the same name is another caller, and
+// is not given the answers - the secret of an API key among them - that
+// were kept for the one before. An API key's ID is never given twice.
 func scopeOf(info *requestInfo) string {
 	switch p := info.principal; {
 	case info.token != "":
-		return "session:" + p.User
+		return "session:" + p.User + "@" + p.UserCreatedAt.UTC().Format(time.RFC3339Nano)
 	case p.Root:
 		return "root:" + p.AccessKeyID
 	default:

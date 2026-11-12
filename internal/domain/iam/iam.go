@@ -303,6 +303,11 @@ type Principal struct {
 	// User is the name of the user the key belongs to; empty for root and
 	// for nodes.
 	User string
+	// UserCreatedAt is when User was made, where the use case that
+	// authenticated the principal read it: it tells a user apart from one
+	// of the same name that was deleted before. It decides nothing about
+	// what the principal may do.
+	UserCreatedAt time.Time
 	// Policies are the documents that say what the user may do: those of
 	// every role held directly or through a group, resolved when the
 	// request was authenticated.

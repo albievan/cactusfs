@@ -521,7 +521,8 @@ func (s *SessionService) Authenticate(ctx context.Context, token, csrfToken stri
 		return iam.Principal{}, fmt.Errorf("session.Authenticate: %w", err)
 	}
 	return iam.Principal{
-		User: identity.User.Name, Policies: identity.Policies, Session: session, LockedSession: state == sessionLocked,
+		User: identity.User.Name, UserCreatedAt: identity.User.CreatedAt, Policies: identity.Policies, Session: session,
+		LockedSession: state == sessionLocked,
 	}, nil
 }
 
