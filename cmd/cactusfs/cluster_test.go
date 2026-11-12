@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/disk"
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
 	"github.com/albievan/cactusfs/internal/adapters/nodetls"
 	"github.com/albievan/cactusfs/internal/adapters/passwords"
@@ -244,18 +246,66 @@ func randomData(t *testing.T, n int) []byte {
 	return data
 }
 
-// shardsOn counts the shard files on a node's drives.
+// shardsOn counts the shard files on a node's drives: every file under a
+// drive's shards directory, at whatever depth the drive files it.
 func (c *testCluster) shardsOn(id string) int {
 	c.t.Helper()
 	total := 0
 	for _, dir := range c.configs[id].Data {
-		matches, err := filepath.Glob(filepath.Join(dir, "shards", "*", "*"))
+		err := filepath.WalkDir(filepath.Join(dir, "shards"), func(_ string, entry fs.DirEntry, err error) error {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil // a drive that has never been opened
+			}
+			if err != nil {
+				return err
+			}
+			if entry.Type().IsRegular() {
+				total++
+			}
+			return nil
+		})
 		if err != nil {
 			c.t.Fatal(err)
 		}
-		total += len(matches)
 	}
 	return total
+}
+
+// TestShardsOnCountsEveryShard: shardsOn counts shard files, however their
+// data IDs begin. Shards are filed under the first two bytes of their data
+// ID, so two shards of a drive whose IDs share those bytes share a
+// directory; a count of directories took them for one.
+func TestShardsOnCountsEveryShard(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dir := t.TempDir()
+	drive, err := disk.Open(ctx, dir, rand.Reader, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = drive.Close() })
+	ids := []object.ShardID{
+		{DataID: object.ID{0xab, 0xcd, 1}, Index: 0},
+		{DataID: object.ID{0xab, 0xcd, 2}, Index: 0}, // the same directory as the first
+		{DataID: object.ID{0xab, 0xcd, 2}, Index: 1}, // another shard of the second, as a drive of one node can hold
+		{DataID: object.ID{0x12, 0x34, 3}, Index: 0},
+	}
+	for _, id := range ids {
+		writer, err := drive.Create(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write([]byte("shard")); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &testCluster{t: t, configs: map[string]serverConfig{"n1": {Data: []string{dir, t.TempDir()}}}}
+	if n := c.shardsOn("n1"); n != len(ids) {
+		t.Errorf("shardsOn = %d, want the %d shards stored", n, len(ids))
+	}
 }
 
 func fourNodes() map[string]string {
@@ -431,7 +481,9 @@ func TestClusterStoresObjectsAcrossNodes(t *testing.T) {
 	}
 	// A pass that runs before the leader has its connection to the returned
 	// node back finds those shards out of reach and leaves them for the
-	// next pass - it must not count them as damage, or as rebuilt.
+	// next pass - it must not count them as damage, or as rebuilt. Only a
+	// pass that ends past the deadline with shards still to rebuild is a
+	// failure: a slow pass that rebuilt the last of them is not.
 	total := 0
 	for deadline := time.Now().Add(30 * time.Second); total < 8; {
 		stats, err := leader.scrubber.RunOnce(ctx)
@@ -439,7 +491,7 @@ func TestClusterStoresObjectsAcrossNodes(t *testing.T) {
 			t.Fatalf("scrub after the nodes returned = %+v, %v", stats, err)
 		}
 		total += stats.ShardsRebuilt
-		if time.Now().After(deadline) {
+		if total < 8 && time.Now().After(deadline) {
 			t.Fatalf("the scrubber rebuilt %d shards on the returned node, want 8", total)
 		}
 	}
