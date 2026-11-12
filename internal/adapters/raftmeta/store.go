@@ -683,8 +683,17 @@ func (s *Store) stamp(data []byte) ([]byte, error) {
 }
 
 // apply commits an encoded entry on this node, which must be the leader.
+// Every entry is logged here, whoever proposed it: an entry the state
+// machine could not store is refused first, definitely (admit).
 func (s *Store) apply(ctx context.Context, data []byte) (applyResult, error) {
-	data, err := s.stamp(data)
+	e, err := decodeEntry(data, s.supported)
+	if err != nil {
+		return applyResult{}, err
+	}
+	if err := admit(e); err != nil {
+		return applyResult{}, err
+	}
+	data, err = s.stamp(data)
 	if err != nil {
 		return applyResult{}, err
 	}

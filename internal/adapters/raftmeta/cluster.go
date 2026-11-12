@@ -271,6 +271,10 @@ func (r *levelRefusal) Error() string { return r.cause.Error() }
 // domain.ErrUnsupportedFormat with it; see aboveLevel): its proposer knew
 // the cluster less well than this node, and can try again when it has caught
 // up. Nothing was logged.
+//
+// So is an entry the state machine could not store - a key of no bytes, or
+// too long (admit): it would stop every member. The error wraps the domain
+// error that says why, and nothing was logged.
 func (s *Store) ProposeLocal(ctx context.Context, data []byte) ([]byte, error) {
 	var encoded []byte
 	err := s.use(func() error {
