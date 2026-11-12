@@ -291,6 +291,21 @@ func PeerNodeID(state tls.ConnectionState) (string, error) {
 // that a peer that connects and says nothing holds nothing for long.
 const handshakeTimeout = 10 * time.Second
 
+// maxHandshakes bounds the handshakes a listener has under way at once. A
+// connection that arrives while that many are is closed at once, and counted
+// as PeerRefusedHandshake: callers that connect and say nothing can hold a
+// goroutine and a socket each for handshakeTimeout, and no more than this
+// many of them.
+const maxHandshakes = 256
+
+// The pause after a failed Accept: the first, and the longest it grows to.
+// A failure such as running out of file descriptors passes; until it does,
+// the listener must neither spin nor give up.
+const (
+	acceptRetryFirst = 5 * time.Millisecond
+	acceptRetryMax   = time.Second
+)
+
 // Listen accepts connections from other nodes on address. A connection is
 // handed out only after its handshake has completed and allow has accepted
 // the node the caller's certificate names; any other is closed. allow lets
@@ -301,13 +316,19 @@ func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID
 	if err != nil {
 		return nil, fmt.Errorf("nodetls.Listen: %w", err)
 	}
+	return i.serve(ctx, inner, allow, maxHandshakes), nil
+}
+
+// serve hands out the connections of inner that are authenticated and
+// admitted, with at most handshakes handshakes under way at once.
+func (i *Identity) serve(ctx context.Context, inner net.Listener, allow func(nodeID string) bool, handshakes int) *listener {
 	l := &listener{
 		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
-		refuse: i.refuse, open: map[*tracked]struct{}{},
+		refuse: i.refuse, open: map[*tracked]struct{}{}, handshakes: make(chan struct{}, handshakes),
 	}
 	// The listener outlives the call that opened it.
 	go l.run(context.WithoutCancel(ctx))
-	return l, nil
+	return l
 }
 
 // listener hands out connections that are authenticated and admitted.
@@ -320,6 +341,8 @@ type listener struct {
 	accepted chan net.Conn
 	closed   chan struct{}
 	once     sync.Once
+	// handshakes holds a token for each handshake under way.
+	handshakes chan struct{}
 
 	// open holds the connections that were handed out and are not closed
 	// yet. Closing the listener closes them: a node that stops must not
@@ -349,36 +372,42 @@ func (c *tracked) Close() error {
 	return c.Conn.Close()
 }
 
+// run accepts connections until the listener is closed. Any other failure
+// to accept - out of file descriptors, a connection reset before it was
+// taken - is waited out and tried again: a listener that stopped for it
+// would leave the node deaf until it restarts.
 func (l *listener) run(ctx context.Context) {
+	pause := acceptRetryFirst
 	for {
 		raw, err := l.Listener.Accept()
 		if err != nil {
-			l.once.Do(func() { close(l.closed) })
-			return
+			if errors.Is(err, net.ErrClosed) {
+				l.once.Do(func() { close(l.closed) })
+				return
+			}
+			select {
+			case <-l.closed:
+				return
+			case <-time.After(pause):
+			}
+			pause = min(2*pause, acceptRetryMax)
+			continue
 		}
-		// Handshakes run side by side: a slow one must not hold up the next.
-		go l.admit(ctx, raw)
+		pause = acceptRetryFirst
+		select {
+		case l.handshakes <- struct{}{}:
+			// Handshakes run side by side: a slow one must not hold up the next.
+			go l.admit(ctx, raw)
+		default:
+			l.refuse(PeerRefusedHandshake)
+			_ = raw.Close()
+		}
 	}
 }
 
 func (l *listener) admit(ctx context.Context, raw net.Conn) {
-	conn := tls.Server(raw, l.config)
-	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer cancel()
-	if err := conn.HandshakeContext(ctx); err != nil {
-		l.refuse(peerRefusalOf(err))
-		_ = conn.Close()
-		return
-	}
-	nodeID, err := PeerNodeID(conn.ConnectionState())
-	if err != nil {
-		l.refuse(PeerRefusedIdentity)
-		_ = conn.Close()
-		return
-	}
-	if !l.allow(nodeID) {
-		l.refuse(PeerRefusedNotAdmitted)
-		_ = conn.Close()
+	conn := l.handshake(ctx, raw)
+	if conn == nil {
 		return
 	}
 	handed := &tracked{Conn: conn, owner: l, state: conn.ConnectionState()}
@@ -390,6 +419,34 @@ func (l *listener) admit(ctx context.Context, raw net.Conn) {
 	case <-l.closed:
 		_ = handed.Close()
 	}
+}
+
+// handshake authenticates and admits the caller of raw, and returns the
+// connection, or nil when the caller was turned away. It gives back the
+// token of the handshake when it returns: a node that has been admitted and
+// waits to be accepted no longer holds one.
+func (l *listener) handshake(ctx context.Context, raw net.Conn) *tls.Conn {
+	defer func() { <-l.handshakes }()
+	conn := tls.Server(raw, l.config)
+	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	if err := conn.HandshakeContext(ctx); err != nil {
+		l.refuse(peerRefusalOf(err))
+		_ = conn.Close()
+		return nil
+	}
+	nodeID, err := PeerNodeID(conn.ConnectionState())
+	if err != nil {
+		l.refuse(PeerRefusedIdentity)
+		_ = conn.Close()
+		return nil
+	}
+	if !l.allow(nodeID) {
+		l.refuse(PeerRefusedNotAdmitted)
+		_ = conn.Close()
+		return nil
+	}
+	return conn
 }
 
 // Accept implements net.Listener.
