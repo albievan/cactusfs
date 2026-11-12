@@ -509,6 +509,8 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	var (
 		content   string
 		concealed []string
+		action    iam.Action
+		resource  iam.Resource
 	)
 	if upload {
 		content = "length:" + strconv.FormatInt(r.ContentLength, 10) + ";type:" + r.Header.Get("Content-Type")
@@ -530,13 +532,14 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 		sum := sha256.Sum256(shown)
 		content, concealed = hex.EncodeToString(sum[:]), taken
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		action, resource = firstQuestion(r, body)
 	}
 	answer, reservation, err := h.cfg.Idempotency.Begin(ctx, app.IdempotentRequest{
 		Scope: scopeOf(info), Key: key, Fingerprint: strings.Join([]string{r.Method, r.URL.Path, r.URL.RawQuery, content}, "\n"),
 		Operation: r.Method + " " + r.URL.Path, Concealed: concealed,
-		// Who asks, and whether for an upload: what follows from that is
-		// the use case's to say.
-		Principal: info.principal, Upload: upload,
+		// Who asks, whether for an upload, and what the operation will ask
+		// the authorizer: what follows from that is the use case's to say.
+		Principal: info.principal, Upload: upload, Action: action, Resource: resource,
 	})
 	if err != nil {
 		h.fail(w, r, err)

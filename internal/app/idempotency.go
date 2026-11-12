@@ -54,6 +54,16 @@ type IdempotentRequest struct {
 	// Upload says that the request stores an object - the one request a
 	// locked console session may make, and so the one it may repeat.
 	Upload bool
+	// Action and Resource, when Action is set, are what the operation
+	// behind the key asks the authorizer first, as it will ask it: Begin
+	// asks it before anything is concealed, read or reserved, so that a
+	// caller who may not do the operation costs neither a replicated write
+	// nor a slot of the hasher. Leave Action empty where what the operation
+	// asks depends on more than the request says - the owner of a key, the
+	// policy of a bucket. The operation asks again; this decides nothing
+	// that it does not.
+	Action   iam.Action
+	Resource iam.Resource
 }
 
 // ActionRepeatRequest names, in the audit trail, the asking for what an
@@ -208,6 +218,28 @@ func (s *IdempotencyService) locked(ctx context.Context, req IdempotentRequest) 
 	return iam.Decide(ask)
 }
 
+// permitted asks the authorizer what the operation behind the key will ask
+// it first (IdempotentRequest.Action), and refuses as it would refuse. The
+// refusal is the authorizer's, recorded as it records every other - once:
+// the operation is then not carried out. Without an authorizer, or without
+// an action, the operation alone decides.
+func (s *IdempotencyService) permitted(ctx context.Context, req IdempotentRequest) error {
+	if req.Action == "" || s.authz == nil {
+		return nil
+	}
+	return s.authz.Authorize(ctx, iam.Request{Principal: req.Principal, Action: req.Action, Resource: req.Resource})
+}
+
+// unkept reports whether an answer is one that is not kept for repeats: a
+// failure of the server, and a refusal of who asks - not authenticated, not
+// allowed, a locked session. A refusal is of the moment and cheap to give
+// again, and keeping it would let anybody who may sign in make the
+// deployment write - and seal through the KMS - an answer for every request
+// they are refused.
+func unkept(status int) bool {
+	return status >= 500 || status == 401 || status == 403 || status == 423
+}
+
 func hashHex(parts ...string) string {
 	h := sha256.New()
 	for _, part := range parts {
@@ -225,13 +257,17 @@ func hashHex(parts ...string) string {
 // The error wraps domain.ErrIdempotencyKeyReused when the key belongs to
 // another request, and domain.ErrRequestInProgress when the first request
 // with the key has not finished. For a locked console session and anything
-// but an upload it wraps domain.ErrSessionLocked: no answer is looked for
-// and nothing is reserved.
+// but an upload it wraps domain.ErrSessionLocked, and for a caller the
+// authorizer refuses req.Action it wraps domain.ErrAccessDenied: either way
+// no answer is looked for, nothing is concealed and nothing is reserved.
 func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (*IdempotentAnswer, Reservation, error) {
 	if req.Scope == "" || req.Key == "" {
 		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w: no scope or key", domain.ErrInvalidArgument)
 	}
 	if err := s.locked(ctx, req); err != nil {
+		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
+	}
+	if err := s.permitted(ctx, req); err != nil {
 		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
 	}
 	fingerprint, err := s.fingerprint(ctx, req)
@@ -283,13 +319,14 @@ func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (
 }
 
 // Complete leaves the answer of a request for its repeats. An answer that
-// says the server failed, or one too large to keep, is not kept: the key is
-// freed and a repeat is carried out again.
+// says the server failed, one that refuses the caller (401, 403, 423), and
+// one too large to keep, is not kept: the key is freed and a repeat is
+// carried out again.
 func (s *IdempotencyService) Complete(ctx context.Context, r Reservation, answer IdempotentAnswer) error {
 	if r.id == "" {
 		return nil
 	}
-	if answer.Status >= 500 || len(answer.Body) > MaxIdempotentAnswer {
+	if unkept(answer.Status) || len(answer.Body) > MaxIdempotentAnswer {
 		return s.Abandon(ctx, r)
 	}
 	sealed, err := s.seal(ctx, r.id, answer.Body)

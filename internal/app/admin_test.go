@@ -353,7 +353,12 @@ func TestGuessesAtTheSameMomentAreCounted(t *testing.T) {
 // store.
 type countingIdempotency struct {
 	ports.IdempotencyStore
-	begun, read atomic.Int64
+	begun, read, completed atomic.Int64
+}
+
+func (c *countingIdempotency) CompleteIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
+	c.completed.Add(1)
+	return c.IdempotencyStore.CompleteIdempotent(ctx, r)
 }
 
 func (c *countingIdempotency) BeginIdempotent(ctx context.Context, r ports.IdempotencyRecord) error {
@@ -465,6 +470,154 @@ func TestIdempotencyOfALockedSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIdempotencyKeepsNoRefusal: the answer that refuses the caller - not
+// authenticated, not allowed, a locked session - is not kept: the key is
+// freed, nothing is sealed, and a repeat is carried out again. Every other
+// answer below 500 is kept as it always was.
+func TestIdempotencyKeepsNoRefusal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status int
+		kept   bool
+	}{
+		{401, false},
+		{403, false},
+		{423, false},
+		{500, false},
+		{503, false},
+		{200, true},
+		{201, true},
+		{204, true},
+		{400, true},
+		{404, true},
+		{409, true},
+		{422, true},
+		{429, true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.status), func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			kms, err := porttest.NewKMS("test:1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mem := porttest.NewMemIAM()
+			store := &countingIdempotency{IdempotencyStore: mem}
+			s := app.NewIdempotencyService(store, kms, porttest.NewClock(testNow), rand.Reader)
+			request := app.IdempotentRequest{Scope: "key:AKID", Key: "k-1", Fingerprint: "DELETE /keys/AKOTHER"}
+			_, reservation, err := s.Begin(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Complete(ctx, reservation, app.IdempotentAnswer{Status: tt.status, ContentType: "application/problem+json", Body: []byte(`{}`)}); err != nil {
+				t.Fatal(err)
+			}
+			if kept := store.completed.Load() == 1; kept != tt.kept {
+				t.Errorf("the answer %d was kept: %v, want %v", tt.status, kept, tt.kept)
+			}
+			replay, again, err := s.Begin(ctx, request)
+			if err != nil || (replay != nil) != tt.kept {
+				t.Fatalf("the repeat of an answer %d = %+v, %v; want replayed %v", tt.status, replay, err, tt.kept)
+			}
+			if !tt.kept {
+				if err := s.Abandon(ctx, again); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestIdempotencyAsksTheAuthorizerFirst: when the request names what its
+// operation will ask the authorizer, a caller who is refused is refused
+// before the key is reserved, read or concealed - no replicated write, no
+// slot of the hasher - and the refusal is recorded once. A caller who is
+// allowed reserves as before; a request that names nothing is reserved
+// before anybody is asked.
+func TestIdempotencyAsksTheAuthorizerFirst(t *testing.T) {
+	t.Parallel()
+	reader := iam.Principal{
+		AccessKeyID: "AKREADER", User: "reader", Session: session("198.51.100.7"),
+		Policies: []iam.Document{iam.BuiltInPolicies()[iam.RoleReadOnly]},
+	}
+	admin := iam.Principal{AccessKeyID: "AKADMIN", User: "admin", Session: session("198.51.100.8"), Policies: []iam.Document{mustPolicyDoc(t,
+		`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"admin:*","Resource":"*"}]}`)}}
+	tests := []struct {
+		name      string
+		principal iam.Principal
+		action    iam.Action
+		want      error
+		reserved  bool
+	}{
+		{"a caller who may not", reader, iam.ActionPutUser, domain.ErrAccessDenied, false},
+		{"a caller who may", admin, iam.ActionPutUser, nil, true},
+		{"a request that names no action", reader, "", nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			kms, err := porttest.NewKMS("test:1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mem, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+			logger := slog.New(slog.DiscardHandler)
+			auditor := app.NewAuditor(mem, clock, logger)
+			store := &countingIdempotency{IdempotencyStore: mem}
+			hasher := &countingConcealer{PasswordHasher: &porttest.Hasher{}}
+			s := app.NewIdempotencyService(store, kms, clock, rand.Reader).
+				WithAuthorizer(app.NewAuthorizer(logger, clock, auditor)).WithHasher(hasher)
+			request := app.IdempotentRequest{
+				Scope: "key:" + tt.principal.AccessKeyID, Key: "k-1", Fingerprint: "PUT /users/bob", Operation: "PUT /api/v1/users/bob",
+				Concealed: []string{`body={"password":"a long enough password"}`}, Principal: tt.principal,
+				Action: tt.action, Resource: iam.Resource{Admin: "user/bob"},
+			}
+			replay, reservation, err := s.Begin(ctx, request)
+			if !errors.Is(err, tt.want) || (tt.want == nil) != (err == nil) || replay != nil {
+				t.Fatalf("Begin = %+v, %v; want %v", replay, err, tt.want)
+			}
+			reserved := store.begun.Load() == 1
+			if reserved != tt.reserved || (hasher.concealed.Load() > 0) != tt.reserved || (store.read.Load() > 0 && !tt.reserved) {
+				t.Errorf("reserved %v, concealed %d times, read %d times; want reserved %v",
+					reserved, hasher.concealed.Load(), store.read.Load(), tt.reserved)
+			}
+			if tt.reserved {
+				if err := s.Abandon(ctx, reservation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			auditor.Flush(ctx)
+			trail, err := mem.ListAudit(ctx, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			denied := 0
+			for _, r := range trail {
+				if r.Outcome == audit.Denied && r.Action == string(iam.ActionPutUser) && strings.HasSuffix(r.Resource, ":user/bob") {
+					denied++
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tt.want != nil]; denied != want {
+				t.Errorf("%d denials in the trail, want %d: %+v", denied, want, trail)
+			}
+		})
+	}
+}
+
+// countingConcealer counts what it conceals.
+type countingConcealer struct {
+	ports.PasswordHasher
+	concealed atomic.Int64
+}
+
+// Conceal implements ports.PasswordHasher.
+func (c *countingConcealer) Conceal(ctx context.Context, value, salt []byte) ([]byte, error) {
+	c.concealed.Add(1)
+	return c.PasswordHasher.Conceal(ctx, value, salt)
 }
 
 // TestIdempotencyConcealsSecrets: the values of a request that may be

@@ -2877,6 +2877,8 @@ func TestTargetsWhenTheyCannotBeDefinedYet(t *testing.T) {
 type busyHasher struct {
 	ports.PasswordHasher
 	busy atomic.Bool
+	// concealed counts what was concealed.
+	concealed atomic.Int64
 }
 
 // Conceal implements ports.PasswordHasher.
@@ -2884,7 +2886,112 @@ func (h *busyHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, e
 	if h.busy.Load() {
 		return nil, fmt.Errorf("%w: every slot for concealing is taken", domain.ErrTooManyRequests)
 	}
+	h.concealed.Add(1)
 	return h.PasswordHasher.Conceal(ctx, value, salt)
+}
+
+// TestARefusedCallerReservesNothing: a caller who may not carry out an
+// operation on a user, group, role, policy or target, and sends it with an
+// idempotency key, is refused before the key is reserved or the body
+// concealed - no replicated write, no Argon2id - and is refused as the
+// operation itself refuses: the denial in the trail names the action and
+// the resource it names without the key. A refusal of the operation itself
+// is not kept either: its repeat is carried out again.
+func TestARefusedCallerReservesNothing(t *testing.T) {
+	t.Parallel()
+	const password = "a long enough password"
+	document := map[string]any{"Version": "2012-10-17", "Statement": []any{map[string]any{
+		"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::photos/*",
+	}}}
+	tests := []struct {
+		method, path string
+		body         any
+	}{
+		{"POST", "/users", map[string]any{"name": "newcomer", "password": password}},
+		{"PUT", "/users/reader", map[string]any{"groups": []string{}, "roles": []string{iam.RoleClusterAdmin}, "disabled": false, "password": password}},
+		{"DELETE", "/users/reader", nil},
+		{"POST", "/users/reader/keys", map[string]any{}},
+		{"POST", "/groups", map[string]any{"name": "team", "roles": []string{}}},
+		{"PUT", "/groups/team", map[string]any{"roles": []string{}}},
+		{"DELETE", "/groups/team", nil},
+		{"POST", "/roles", map[string]any{"name": "viewers", "policies": []string{}}},
+		{"PUT", "/roles/viewers", map[string]any{"policies": []string{}}},
+		{"DELETE", "/roles/viewers", nil},
+		{"POST", "/policies", map[string]any{"name": "photos", "document": document}},
+		{"PUT", "/policies/photos", map[string]any{"document": document}},
+		{"DELETE", "/policies/photos", nil},
+		{"PUT", "/targets/hook", map[string]any{"kind": "webhook", "endpoint": "https://hooks.example.test/in", "buckets": []string{}}},
+		{"DELETE", "/targets/hook", nil},
+	}
+	if len(tests) != len(adminapi.AskedFirst()) {
+		t.Fatalf("%d operations are tested, %d are asked first", len(tests), len(adminapi.AskedFirst()))
+	}
+	// denial sends the request as a reader and returns what the trail says
+	// was refused.
+	denial := func(t *testing.T, f *fixture, c call) string {
+		t.Helper()
+		before := len(f.trail())
+		r := f.do(c)
+		if r.status != http.StatusForbidden || r.problem(t)["code"] != "AccessDenied" {
+			t.Fatalf("%s %s = %d %s, want 403", c.method, c.path, r.status, r.body)
+		}
+		var denied []string
+		for _, record := range f.trail()[before:] {
+			if record.Outcome == audit.Denied {
+				denied = append(denied, record.Action+" "+record.Resource)
+			}
+		}
+		if len(denied) != 1 {
+			t.Fatalf("%s %s: denials in the trail %v, want one", c.method, c.path, denied)
+		}
+		return denied[0]
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			t.Parallel()
+			plain := newFixture(t)
+			c := call{method: tt.method, path: tt.path, body: tt.body, bearer: plain.userKey("reader", iam.RoleReadOnly)}
+			want := denial(t, plain, c)
+
+			keyed := newFixture(t)
+			c.bearer = keyed.userKey("reader", iam.RoleReadOnly)
+			c.headers = map[string]string{"Idempotency-Key": "refused-1"}
+			begun, concealed := keyed.watched.idempotent.Load(), keyed.concealer.concealed.Load()
+			if got := denial(t, keyed, c); got != want {
+				t.Errorf("refused with a key for %s, without for %s", got, want)
+			}
+			if keyed.watched.idempotent.Load() != begun || keyed.concealer.concealed.Load() != concealed {
+				t.Errorf("a refused caller reserved %d keys and concealed %d bodies",
+					keyed.watched.idempotent.Load()-begun, keyed.concealer.concealed.Load()-concealed)
+			}
+		})
+	}
+
+	t.Run("a refusal of the operation itself", func(t *testing.T) {
+		t.Parallel()
+		f := newFixture(t)
+		f.userKey("owner", iam.RoleReadOnly)
+		var keys []struct {
+			AccessKeyID string `json:"access_key_id"`
+		}
+		f.must(http.StatusOK, call{method: "GET", path: "/users/owner/keys"}).decode(t, &keys)
+		// Whose key it is decides what is asked: the operation is reserved
+		// before it is asked, and refused by its use case.
+		c := call{
+			method: "DELETE", path: "/keys/" + keys[0].AccessKeyID, bearer: f.userKey("reader", iam.RoleReadOnly),
+			headers: map[string]string{"Idempotency-Key": "refused-2"},
+		}
+		for range 2 {
+			if r := f.do(c); r.status != http.StatusForbidden || r.header.Get("Idempotent-Replayed") != "" {
+				t.Fatalf("a refused deletion = %d, replayed %q", r.status, r.header.Get("Idempotent-Replayed"))
+			}
+		}
+		for _, kept := range f.watched.Kept() {
+			if kept.Done {
+				t.Errorf("an answer was kept: status %d", kept.Status)
+			}
+		}
+	})
 }
 
 // TestARepeatedRequestThatCannotBeRecognisedYet: when the body of a request
