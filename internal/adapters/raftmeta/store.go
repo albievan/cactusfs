@@ -11,6 +11,7 @@ package raftmeta
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1094,11 +1095,24 @@ func (s *Store) ScanVersions(
 				switch after, storedKey, err := h.find(key, resume.String()); {
 				case err != nil:
 					return err
-				case after == nil:
+				case after == nil && start.Seq == 0:
 					// The version the caller saw last is gone; where
 					// it was cannot be told. Go on with the next key.
 					resume = nil
 					continue
+				case after == nil:
+					// It is gone, but where it was is known: the
+					// versions of the key are in order of their
+					// sequence, newest first, and the scan goes on
+					// with the first that is older. The current one
+					// may be: it took the place of the one that went.
+					if record != nil && record.Seq >= start.Seq {
+						record = nil
+					}
+					latest = record != nil
+					if k, raw, err = seekPast(older, key, *resume, start.Seq); err != nil {
+						return err
+					}
 				case storedKey == nil:
 					// It was the current one: the others follow.
 					record, latest = nil, false
@@ -1138,6 +1152,26 @@ func (s *Store) ScanVersions(
 		return fmt.Errorf("raftmeta.ScanVersions: %w", err)
 	}
 	return nil
+}
+
+// seekPast moves a cursor of "versions" to the first version of key after
+// where the version ref of sequence seq is, or would be: the next older
+// one. It returns nothing when there is no "versions".
+func seekPast(older *bbolt.Cursor, key string, ref object.VersionRef, seq uint64) (k, raw []byte, err error) {
+	if older == nil {
+		return nil, nil, nil
+	}
+	at, ok := locator(key, ref.String())
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: version %s", domain.ErrInvalidArgument, ref.String())
+	}
+	split := len(at) - object.IDSize
+	place := binary.BigEndian.AppendUint64(bytes.Clone(at[:split]), ^seq)
+	place = append(place, at[split:]...)
+	if k, raw = older.Seek(place); bytes.Equal(k, place) {
+		k, raw = older.Next()
+	}
+	return k, raw, nil
 }
 
 // GetObject implements ports.ObjectIndex.

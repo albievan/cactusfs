@@ -263,7 +263,7 @@ func (w *LifecycleWorker) versions(ctx context.Context, bucketName string, rules
 			return w.remove(ctx, bucketName, held, stats)
 		}
 		ref := last.Ref()
-		start = ports.VersionCursor{Key: last.Key, After: &ref}
+		start = ports.VersionCursor{Key: last.Key, After: &ref, Seq: last.Seq}
 	}
 }
 

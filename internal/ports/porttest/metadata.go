@@ -722,10 +722,16 @@ func (m *MemMetadata) ScanVersions(
 		list, first := versions[keys[i]], 0
 		if start.After != nil && keys[i] == start.Key {
 			first = len(list)
+			found := false
 			for n, v := range list {
 				if v.Is(*start.After) {
-					first = n + 1
+					first, found = n+1, true
 				}
+			}
+			// One that is gone is placed by its sequence, when it is given:
+			// the versions of a key are newest first.
+			for n := len(list) - 1; !found && start.Seq != 0 && n >= 0 && list[n].Seq < start.Seq; n-- {
+				first = n
 			}
 		}
 		for n := first; n < len(list); n++ {

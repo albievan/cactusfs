@@ -286,6 +286,79 @@ func MetadataContract(t *testing.T, open func(t *testing.T) Metadata) {
 		}
 	})
 
+	t.Run("a scan of versions resumes after a version that is gone", func(t *testing.T) {
+		store := open(t)
+		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "r", CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetBucketVersioning(ctx, "r", bucket.VersioningEnabled); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []object.Version{
+			SampleVersion("r", "k", 1), SampleVersion("r", "k", 2), SampleVersion("r", "k", 3), SampleVersion("r", "k", 4), SampleVersion("r", "z", 5),
+		} {
+			if _, err := store.PutVersion(ctx, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var all []object.Version
+		if err := store.ScanVersions(ctx, "r", ports.VersionCursor{}, func(v object.Version, _ bool) ports.ScanControl {
+			all = append(all, v)
+			return ports.ScanControl{}
+		}); err != nil || len(all) != 5 {
+			t.Fatalf("ScanVersions: %d versions, %v", len(all), err)
+		}
+		// all is k@4 (current), k@3, k@2, k@1, z@5.
+		name := func(v object.Version, latest bool) string {
+			if latest {
+				return v.Key + "@" + v.Ref().String() + "*"
+			}
+			return v.Key + "@" + v.Ref().String()
+		}
+		resume := func(after object.Version) []string {
+			t.Helper()
+			ref := after.Ref()
+			var got []string
+			if err := store.ScanVersions(ctx, "r", ports.VersionCursor{Key: after.Key, After: &ref, Seq: after.Seq},
+				func(v object.Version, latest bool) ports.ScanControl {
+					got = append(got, name(v, latest))
+					return ports.ScanControl{}
+				}); err != nil {
+				t.Fatalf("ScanVersions: %v", err)
+			}
+			return got
+		}
+		remove := func(v object.Version) {
+			t.Helper()
+			ref := v.Ref()
+			if _, err := store.DeleteObject(ctx, "r", v.Key, ports.DeleteOptions{Version: &ref}); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// A version in the middle goes between two pages: the next page
+		// begins with the version older than it.
+		remove(all[1])
+		if got, want := resume(all[1]), []string{name(all[2], false), name(all[3], false), name(all[4], true)}; !slices.Equal(got, want) {
+			t.Errorf("resumed after a version in the middle that is gone: %v, want %v", got, want)
+		}
+		// The current one goes: the next older takes its place, and the
+		// page begins with it.
+		remove(all[0])
+		if got, want := resume(all[0]), []string{name(all[2], true), name(all[3], false), name(all[4], true)}; !slices.Equal(got, want) {
+			t.Errorf("resumed after the current version that is gone: %v, want %v", got, want)
+		}
+		// Without its sequence, where it was cannot be told: the next key.
+		ref := all[0].Ref()
+		var keys []string
+		if err := store.ScanVersions(ctx, "r", ports.VersionCursor{Key: "k", After: &ref}, func(v object.Version, _ bool) ports.ScanControl {
+			keys = append(keys, v.Key)
+			return ports.ScanControl{}
+		}); err != nil || !slices.Equal(keys, []string{"z"}) {
+			t.Errorf("resumed after a version that is gone, without its sequence: %v, %v; want the next key", keys, err)
+		}
+	})
+
 	t.Run("data references", func(t *testing.T) {
 		store := open(t)
 		if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: created}); err != nil {

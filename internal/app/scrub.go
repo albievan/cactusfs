@@ -192,7 +192,7 @@ func (s *Scrubber) scrubBucket(ctx context.Context, bucketName string, stats *Sc
 			return nil
 		}
 		last := batch[len(batch)-1].Ref()
-		start = ports.VersionCursor{Key: batch[len(batch)-1].Key, After: &last}
+		start = ports.VersionCursor{Key: batch[len(batch)-1].Key, After: &last, Seq: batch[len(batch)-1].Seq}
 	}
 }
 

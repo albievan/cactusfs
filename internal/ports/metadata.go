@@ -196,8 +196,13 @@ type VersionCursor struct {
 	Key string
 	// After, when not nil, names a version of Key: the scan begins with
 	// the version after it. When Key has no such version any more, the
-	// scan begins with the key after Key.
+	// scan begins with the version of Key older than it - by Seq - when
+	// Seq is given, and with the key after Key when it is not.
 	After *object.VersionRef
+	// Seq is the sequence of the version After names (object.Version.Seq),
+	// or zero when it is not known: a version ID a client sends as a
+	// marker carries none.
+	Seq uint64
 }
 
 // PutResult is what committing a version did.
