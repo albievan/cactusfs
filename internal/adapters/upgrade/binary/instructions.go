@@ -1,7 +1,6 @@
 package binary
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/albievan/cactusfs/internal/adapters/releases/sigstore"
@@ -25,18 +24,31 @@ func (u *Upgrader) instructions() []string {
 // one, put the new one in its place, start the node. The version is left
 // for the operator to fill in. An empty path is written as a placeholder.
 // They are what an upgrader of another mode - upgrade-mode off - shows a
-// binary that was shipped as one.
+// binary that was shipped as one. The path is goos's, whatever the platform
+// that writes them: the previous binary is named beside it with goos's
+// separators, never the host's.
 func Instructions(executable, goos, goarch string) []string {
 	if executable == "" {
 		executable = "<the path of cactusfs>"
 	}
 	ext := ""
-	if strings.EqualFold(filepath.Ext(executable), ".exe") || goos == "windows" {
+	if strings.HasSuffix(strings.ToLower(executable), ".exe") || goos == "windows" {
 		ext = ".exe"
 	}
 	return manual{
-		executable: executable, previous: filepath.Join(filepath.Dir(executable), PreviousName+ext), goos: goos, goarch: goarch,
+		executable: executable, previous: beside(executable, PreviousName+ext, goos), goos: goos, goarch: goarch,
 	}.instructions()
+}
+
+// beside returns the path of the file name in the directory of path, a path
+// of goos: up to its last separator - "/" or, on Windows, "\" too - kept as
+// it is written. A path with no separator has name alone.
+func beside(path, name, goos string) string {
+	separators := "/"
+	if goos == "windows" {
+		separators = `/\`
+	}
+	return path[:strings.LastIndexAny(path, separators)+1] + name
 }
 
 // manual is what the instructions name.

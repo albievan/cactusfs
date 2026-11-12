@@ -54,6 +54,8 @@ func TestTheUpgraderOfModeOff(t *testing.T) {
 
 // TestInstructionsNameTheDeployment: each kind of instructions names what
 // its kind of deployment is upgraded with, and verifies the release first.
+// The paths are those of the platform the instructions are for, the same on
+// every platform the test runs on.
 func TestInstructionsNameTheDeployment(t *testing.T) {
 	t.Parallel()
 	for name, tt := range map[string]struct {
@@ -61,12 +63,20 @@ func TestInstructionsNameTheDeployment(t *testing.T) {
 		want  []string
 	}{
 		"a binary": {binary.Instructions("/opt/cactusfs/cactusfs", "linux", "arm64"), []string{
-			"cactusfs-linux-arm64", "cosign verify-blob", "SHA256SUMS", "'/opt/cactusfs/cactusfs.previous'",
+			"cactusfs-linux-arm64", "cosign verify-blob", "SHA256SUMS",
+			"cp -p '/opt/cactusfs/cactusfs' '/opt/cactusfs/cactusfs.previous'",
 		}},
-		"a binary of an unknown path": {binary.Instructions("", "darwin", "arm64"), []string{"<the path of cactusfs>", "shasum -a 256"}},
-		"a binary on Windows":         {binary.Instructions(`C:\cactusfs\cactusfs.exe`, "windows", "amd64"), []string{"Get-FileHash", "cactusfs.previous.exe"}},
-		"the chart":                   {kubernetes.Instructions(), []string{"helm upgrade", "image.digest"}},
-		"compose":                     {off.ImageInstructions(), []string{"digests.txt", "cosign verify-blob", "docker compose up"}},
+		"a binary of an unknown path": {binary.Instructions("", "darwin", "arm64"), []string{
+			"<the path of cactusfs>", "shasum -a 256", "'cactusfs.previous'",
+		}},
+		"a binary on Windows": {binary.Instructions(`C:\cactusfs\cactusfs.exe`, "windows", "amd64"), []string{
+			"Get-FileHash", `Move-Item -Force 'C:\cactusfs\cactusfs.exe' 'C:\cactusfs\cactusfs.previous.exe'`,
+		}},
+		"a binary of Windows by a forward slash": {binary.Instructions("C:/cactusfs/cactusfs.exe", "windows", "arm64"), []string{
+			"cactusfs-windows-arm64.exe", "'C:/cactusfs/cactusfs.previous.exe'",
+		}},
+		"the chart": {kubernetes.Instructions(), []string{"helm upgrade", "image.digest"}},
+		"compose":   {off.ImageInstructions(), []string{"digests.txt", "cosign verify-blob", "docker compose up"}},
 	} {
 		text := strings.Join(tt.lines, "\n")
 		for _, want := range tt.want {

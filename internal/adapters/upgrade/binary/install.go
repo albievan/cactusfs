@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/release"
@@ -96,6 +98,11 @@ func (u *Upgrader) install(ctx context.Context, target release.Verified, running
 
 	running()
 	if err := u.check(ctx, name, target.Version()); err != nil {
+		if ctx.Err() != nil {
+			// The run ended while the binary ran, or before: the binary is
+			// not to blame.
+			return stopped(ctx)
+		}
 		return &failure{reason: "the new binary did not run, or did not name " + target.Version().String(), err: err}
 	}
 	if err := u.at(stageChecked); err != nil {
@@ -103,14 +110,7 @@ func (u *Upgrader) install(ctx context.Context, target release.Verified, running
 	}
 
 	if !swapping() {
-		cause := context.Cause(ctx)
-		if cause == nil {
-			cause = errors.New("the node is stopping")
-		}
-		return &failure{
-			reason: "the node stopped before the new binary was moved into place",
-			err:    fmt.Errorf("binary.install: %w", cause),
-		}
+		return stopped(ctx)
 	}
 	if err := u.replace(u.cfg.Executable, u.previous, name, u.at); err != nil {
 		return &failure{reason: "the new binary could not be moved into place", err: err}
@@ -125,6 +125,19 @@ func (u *Upgrader) install(ctx context.Context, target release.Verified, running
 	return nil
 }
 
+// stopped is the failure of a run that ended - the node stopped, or the
+// run's time was up - before the new binary was moved into place.
+func stopped(ctx context.Context) *failure {
+	cause := context.Cause(ctx)
+	if cause == nil {
+		cause = errors.New("the node is stopping")
+	}
+	return &failure{
+		reason: "the node stopped before the new binary was moved into place",
+		err:    fmt.Errorf("binary.install: %w", cause),
+	}
+}
+
 // findAsset returns the target's binary as the source lists it.
 func findAsset(releases []release.Release, target release.Verified) (release.Asset, bool) {
 	for _, r := range releases {
@@ -135,12 +148,43 @@ func findAsset(releases []release.Release, target release.Verified) (release.Ass
 	return release.Asset{}, false
 }
 
+// The tries of "<new> version" that exec refuses with ETXTBSY.
+const (
+	// busyTries is how many times the binary is run at most.
+	busyTries = 6
+	// busyWait is the wait before the second try; it doubles at each.
+	busyWait = 10 * time.Millisecond
+)
+
 // check runs "<path> version", with no environment and for at most the
 // check timeout, and returns nil when its first line names the target as
 // cmd/cactusfs prints it: "cactusfs <version> ...".
+//
+// On Linux, exec refuses a file that any process holds open for writing
+// (ETXTBSY). The upgrader closed its own descriptor of the new binary, but a
+// child the process forks at that moment - for anything, from any goroutine -
+// holds a copy of it until the child's own exec closes it. The run is tried
+// again a few times for that error, and only for that one.
 func (u *Upgrader) check(ctx context.Context, path string, target release.Version) error {
 	ctx, cancel := context.WithTimeout(ctx, u.checkTimeout)
 	defer cancel()
+	wait := busyWait
+	for try := 1; ; try++ {
+		err := u.runVersion(ctx, path, target)
+		if err == nil || !errors.Is(err, syscall.ETXTBSY) || try == busyTries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("binary.check: %w", errors.Join(err, ctx.Err()))
+		case <-time.After(wait):
+		}
+		wait *= 2
+	}
+}
+
+// runVersion runs "<path> version" once, under ctx, as check describes.
+func (u *Upgrader) runVersion(ctx context.Context, path string, target release.Version) error {
 	cmd := exec.CommandContext(ctx, path, "version")
 	// Nothing of the node's environment - which may hold its credentials -
 	// is given to a binary that has not run here before.

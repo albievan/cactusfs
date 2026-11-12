@@ -708,14 +708,23 @@ func TestTheNodeStoppingEndsARunUntilTheSwapBegins(t *testing.T) {
 			last := reports[len(reports)-1]
 			want, wantBinary := release.StateFailed, old
 			if tt.swapped {
+				// A swap that completes ends as every completed swap does
+				// here: done, and restarting, where the node executes
+				// itself again; restart-required on Windows, where it
+				// cannot.
 				want, wantBinary = release.StateDone, good
+				if runtime.GOOS == "windows" {
+					want = release.StateRestartRequired
+				}
 			}
 			if last.State != want {
 				t.Fatalf("the last progress = %+v, want %s", last, want)
 			}
-			// Stopped at written, the run of "<new> version" is what ends;
-			// stopped at checked, nothing else is left before the swap.
-			if tt.stage == stageChecked && (len(last.Nodes) != 1 || !strings.Contains(last.Nodes[0].Reason, "the node stopped before")) {
+			// Stopped at written, the run of "<new> version" ends, or the
+			// swap is refused, whichever comes first; stopped at checked,
+			// nothing else is left before the swap. Either way the node's
+			// stopping is the reason, not the new binary.
+			if !tt.swapped && (len(last.Nodes) != 1 || !strings.Contains(last.Nodes[0].Reason, "the node stopped before")) {
 				t.Errorf("the reason = %+v", last.Nodes)
 			}
 			if got, err := os.ReadFile(f.exe); err != nil || !bytes.Equal(got, wantBinary) {
