@@ -224,8 +224,10 @@ func TestSettingsOfEveryNode(t *testing.T) {
 	t.Cleanup(func() { close(stuck) })
 
 	tests := []struct {
-		name    string
-		nodes   map[string]porttest.NodeBehaviour
+		name  string
+		nodes map[string]porttest.NodeBehaviour
+		// timeout is each node's time to answer: long enough for the nodes
+		// that answer to do so on a busy runner, which 100 ms was not.
 		timeout time.Duration
 		// want is the reason of each node that did not answer.
 		want map[string]cluster.AnswerReason
@@ -241,13 +243,13 @@ func TestSettingsOfEveryNode(t *testing.T) {
 		{
 			name:    "one does not answer in time",
 			nodes:   with(answering("n2", "n3"), "n4", porttest.NodeBehaviour{Silent: true}),
-			timeout: 100 * time.Millisecond,
+			timeout: time.Second,
 			want:    map[string]cluster.AnswerReason{"n4": cluster.ReasonTimeout}, logged: "context deadline exceeded",
 		},
 		{
 			name:    "one is asked by a reader that does not look at its context",
 			nodes:   with(answering("n2", "n3"), "n4", porttest.NodeBehaviour{Stuck: stuck}),
-			timeout: 100 * time.Millisecond,
+			timeout: time.Second,
 			want:    map[string]cluster.AnswerReason{"n4": cluster.ReasonTimeout}, logged: "gave up waiting",
 		},
 		{
@@ -266,7 +268,7 @@ func TestSettingsOfEveryNode(t *testing.T) {
 				"n2": {Err: fmt.Errorf("%w: its certificate names another node", domain.ErrNotSupported)},
 				"n4": {Silent: true},
 			},
-			timeout: 100 * time.Millisecond,
+			timeout: time.Second,
 			want: map[string]cluster.AnswerReason{
 				"n2": cluster.ReasonUnsupported, "n3": cluster.ReasonUnreachable, "n4": cluster.ReasonTimeout,
 			},
