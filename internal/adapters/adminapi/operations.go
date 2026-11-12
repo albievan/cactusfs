@@ -24,6 +24,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/domain/release"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // operations implements the generated server interface: one method per
@@ -1112,6 +1113,10 @@ func (o *operations) GetSettings(ctx context.Context, _ api.GetSettingsRequestOb
 
 const defaultAuditLimit = 100
 
+// maxAuditLimit is the largest page of the audit trail a caller may ask
+// for: one less than the store gives in full.
+const maxAuditLimit = ports.MaxAuditPage - 1
+
 // sequenceOf carries a sequence number of the trail into the contract's
 // signed integer.
 func sequenceOf(n uint64) int64 {
@@ -1127,10 +1132,11 @@ func (o *operations) ListAudit(ctx context.Context, request api.ListAuditRequest
 	if l := request.Params.Limit; l != nil {
 		limit = *l
 	}
-	if after < 0 || limit < 1 || limit > 1000 {
-		return nil, fmt.Errorf("%w: after must not be negative and limit must be 1 to 1000", domain.ErrInvalidArgument)
+	if after < 0 || limit < 1 || limit > maxAuditLimit {
+		return nil, fmt.Errorf("%w: after must not be negative and limit must be 1 to %d", domain.ErrInvalidArgument, maxAuditLimit)
 	}
-	// One more than asked for tells whether there is a next page.
+	// One more than asked for tells whether there is a next page: the
+	// store gives a page of the largest limit and one more in full.
 	records, err := o.h.cfg.IAM.AuditLog(ctx, who(ctx), uint64(after), limit+1)
 	if err != nil {
 		return nil, err

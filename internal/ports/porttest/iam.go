@@ -443,8 +443,8 @@ func (m *MemIAM) AppendAudit(_ context.Context, record audit.Record) error {
 func (m *MemIAM) ListAudit(_ context.Context, after uint64, limit int) ([]audit.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
+	if limit <= 0 || limit > ports.MaxAuditPage {
+		limit = ports.MaxAuditPage
 	}
 	var records []audit.Record
 	for _, record := range m.trail {

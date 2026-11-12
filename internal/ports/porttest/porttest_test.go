@@ -242,6 +242,20 @@ func TestMemIAMContract(t *testing.T) {
 	porttest.IdempotencyContract(t, func(*testing.T) ports.IdempotencyStore { return porttest.NewMemIAM() })
 }
 
+// TestMemIAMGivesTheLargestAuditPageInFull: a page of the largest limit is
+// given whole, so that the management API can tell that another follows it.
+func TestMemIAMGivesTheLargestAuditPageInFull(t *testing.T) {
+	t.Parallel()
+	store := porttest.NewMemIAM()
+	record := audit.Record{Actor: "user/alice", Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k", Outcome: audit.Denied}
+	for i := range ports.MaxAuditPage + 1 {
+		if err := store.AppendAudit(context.Background(), record); err != nil {
+			t.Fatalf("AppendAudit %d: %v", i, err)
+		}
+	}
+	porttest.AuditPageContract(t, store)
+}
+
 func TestNodeSettingsReaderContract(t *testing.T) {
 	t.Parallel()
 	porttest.NodeSettingsContract(t, func(_ *testing.T, script porttest.NodeSettingsScript) ports.NodeSettingsReader {

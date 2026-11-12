@@ -1496,6 +1496,50 @@ func TestClusterAndAudit(t *testing.T) {
 	}
 }
 
+// TestEveryPageOfTheAuditTrailSaysWhetherAnotherFollows: next_after is
+// there on every page but the last - a page of the largest limit included,
+// for which the store is asked one record more than that limit.
+func TestEveryPageOfTheAuditTrailSaysWhetherAnotherFollows(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	const appended = 2100
+	total := len(f.trail()) + appended
+	record := audit.Record{Actor: "user/alice", Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k", Outcome: audit.Denied}
+	for i := range appended {
+		if err := f.store.AppendAudit(context.Background(), record); err != nil {
+			t.Fatalf("AppendAudit %d: %v", i, err)
+		}
+	}
+	type page struct {
+		Records []struct {
+			Sequence int64 `json:"sequence"`
+		} `json:"records"`
+		NextAfter *int64 `json:"next_after"`
+	}
+	for _, limit := range []int{1000, 999, 700} {
+		seen, pages, after := 0, 0, int64(0)
+		for {
+			var p page
+			f.must(http.StatusOK, call{method: "GET", path: fmt.Sprintf("/audit?limit=%d&after=%d", limit, after)}).decode(t, &p)
+			pages++
+			seen += len(p.Records)
+			if p.NextAfter == nil {
+				break
+			}
+			if len(p.Records) != limit || *p.NextAfter != p.Records[len(p.Records)-1].Sequence {
+				t.Fatalf("limit %d: a page of %d records says next_after %d", limit, len(p.Records), *p.NextAfter)
+			}
+			after = *p.NextAfter
+		}
+		// Every audit read of the test adds nothing to the trail: reading
+		// it is no change.
+		if seen != total || pages != (total+limit-1)/limit {
+			t.Errorf("limit %d: %d pages saw %d records; the trail has %d", limit, pages, seen, total)
+		}
+	}
+	f.must(http.StatusBadRequest, call{method: "GET", path: "/audit?limit=1001"})
+}
+
 // TestEveryDomainErrorHasAnAnswer: the mapping from errors to problems.
 func TestEveryDomainErrorHasAnAnswer(t *testing.T) {
 	t.Parallel()

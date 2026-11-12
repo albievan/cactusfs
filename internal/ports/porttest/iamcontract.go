@@ -555,3 +555,33 @@ func IdempotencyContract(t *testing.T, open func(t *testing.T) ports.Idempotency
 		t.Fatalf("a deleted record: %v", err)
 	}
 }
+
+// AuditPageContract is what every audit trail must do with a page of the
+// largest limit: give it in full. The management API asks for one record
+// more than the largest page it gives, to tell whether another follows.
+// log must hold exactly ports.MaxAuditPage+1 records, numbered from 1.
+func AuditPageContract(t *testing.T, log ports.AuditLog) {
+	t.Helper()
+	tests := []struct {
+		name  string
+		after uint64
+		limit int
+		want  int
+	}{
+		{"the largest limit", 0, ports.MaxAuditPage, ports.MaxAuditPage},
+		{"no limit", 0, 0, ports.MaxAuditPage},
+		{"more than the largest limit", 0, ports.MaxAuditPage + 1, ports.MaxAuditPage},
+		{"the largest limit, from the second record", 1, ports.MaxAuditPage, ports.MaxAuditPage},
+		{"the largest limit, from the third record", 2, ports.MaxAuditPage, ports.MaxAuditPage - 1},
+	}
+	for _, tt := range tests {
+		records, err := log.ListAudit(context.Background(), tt.after, tt.limit)
+		if err != nil || len(records) != tt.want {
+			t.Errorf("%s: ListAudit(%d, %d) = %d records, %v; want %d", tt.name, tt.after, tt.limit, len(records), err, tt.want)
+			continue
+		}
+		if records[0].Sequence != tt.after+1 {
+			t.Errorf("%s: the page begins at %d, want %d", tt.name, records[0].Sequence, tt.after+1)
+		}
+	}
+}

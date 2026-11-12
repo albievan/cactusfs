@@ -68,6 +68,12 @@ type IAMStore interface {
 	ResolveUser(ctx context.Context, name string) (iam.Identity, error)
 }
 
+// MaxAuditPage is the largest limit that ListAudit must honour in full: the
+// largest page of the management API and one record more, by which a page
+// tells whether another follows. An implementation may bound limit, but
+// never below this.
+const MaxAuditPage = 1001
+
 // AuditLog is the replicated, append-only, hash-chained audit trail.
 type AuditLog interface {
 	// AppendAudit adds a record. The store numbers it and links it to the
@@ -75,7 +81,8 @@ type AuditLog interface {
 	// ignored.
 	AppendAudit(ctx context.Context, record audit.Record) error
 	// ListAudit returns up to limit records with a sequence number greater
-	// than after, in order.
+	// than after, in order. A limit that is not positive, or larger than
+	// MaxAuditPage, may be taken as MaxAuditPage.
 	ListAudit(ctx context.Context, after uint64, limit int) ([]audit.Record, error)
 }
 

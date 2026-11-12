@@ -959,8 +959,9 @@ func (s *Store) AppendAudit(ctx context.Context, record audit.Record) error {
 	return s.proposeIAM(ctx, "AppendAudit", cmdAppendAudit, iamCmd{}, record)
 }
 
-// maxAuditPage bounds one ListAudit.
-const maxAuditPage = 1000
+// maxAuditPage bounds one ListAudit: the largest page of the management
+// API and the one record more that tells it whether another page follows.
+const maxAuditPage = ports.MaxAuditPage
 
 // ListAudit implements ports.AuditLog.
 func (s *Store) ListAudit(ctx context.Context, after uint64, limit int) ([]audit.Record, error) {
