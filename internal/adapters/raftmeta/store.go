@@ -176,7 +176,17 @@ var (
 // waits until the node leads it or ctx ends. A member of a cluster starts
 // without a group and returns at once: the group is formed with Bootstrap, or
 // the node is added to an existing one by its leader.
-func Open(ctx context.Context, cfg Config) (*Store, error) {
+//
+// Open takes the listener of cfg.Cluster: the store closes it when it is
+// closed, and Open closes it when it fails, whenever it fails.
+func Open(ctx context.Context, cfg Config) (_ *Store, err error) {
+	defer func() {
+		if err != nil && cfg.Cluster != nil && cfg.Cluster.Listener != nil {
+			// Closed already when the transport was made and closed with
+			// the store; closing it twice is harmless.
+			_ = cfg.Cluster.Listener.Close()
+		}
+	}()
 	if err := os.MkdirAll(cfg.Dir, dirMode); err != nil {
 		return nil, fmt.Errorf("raftmeta.Open: %w", err)
 	}
