@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -178,7 +179,12 @@ type SessionService struct {
 	entropyMu sync.Mutex
 	entropy   io.Reader
 
+	// attempts counts failed sign-ins and unlocks per address; names
+	// counts failed sign-ins per user name; known remembers from where
+	// each user signed in.
 	attempts attemptLimiter
+	names    attemptLimiter
+	known    knownAddresses
 	unlocks  unlockFailures
 	leases   uploadLeases
 }
@@ -188,16 +194,51 @@ const (
 	// signInWindow before it has to wait for the window to end.
 	signInAttempts = 10
 	signInWindow   = 5 * time.Minute
-	// signInAddresses bounds how many addresses are remembered.
+	// userSignInAttempts is how many failed sign-ins one user name may be
+	// given, from every address together, in userSignInWindow. It is what
+	// stops guessing the password of one user from many addresses.
+	userSignInAttempts = 30
+	userSignInWindow   = 15 * time.Minute
+	// signInAddresses bounds how many addresses, user names and known
+	// addresses of users are remembered, each.
 	signInAddresses = 10_000
+	// knownAddressHorizon is how long an address a user signed in from is
+	// remembered as theirs.
+	knownAddressHorizon = 30 * 24 * time.Hour
+	// ipv6SignInPrefix is how much of an IPv6 address is counted as one
+	// address: a /64 is what one subscriber is given, and every address in
+	// it is theirs to use.
+	ipv6SignInPrefix = 64
 )
 
-// attemptLimiter counts failed sign-ins per address. It lives in one node's
-// memory: it slows guessing down, it does not lock anybody out, and a
-// cluster allows as many attempts as it has gateways.
+// signInAddress is what the limiter counts the source of a request as: an
+// IPv4 address as it is, an IPv6 address by its /64, and no address as one
+// address of its own.
+func signInAddress(addr netip.Addr) string {
+	addr = addr.Unmap()
+	switch {
+	case !addr.IsValid():
+		return "unknown"
+	case addr.Is4():
+		return addr.String()
+	default:
+		prefix, err := addr.Prefix(ipv6SignInPrefix)
+		if err != nil {
+			return addr.String()
+		}
+		return prefix.String()
+	}
+}
+
+// attemptLimiter counts failed attempts per key - an address, a user name -
+// in windows of a fixed length. It lives in one node's memory: a cluster
+// allows as many attempts as it has gateways.
 type attemptLimiter struct {
 	mu     sync.Mutex
 	failed map[string]*attemptWindow
+	// limit is how many attempts a key may make in a window.
+	limit  int
+	window time.Duration
 }
 
 type attemptWindow struct {
@@ -205,45 +246,112 @@ type attemptWindow struct {
 	count int
 }
 
-// reserve counts an attempt from an address that is about to be checked,
-// and reports false when the address has used up its attempts.
-func (l *attemptLimiter) reserve(address string, now time.Time) bool {
+// newAttemptLimiter returns a limiter of limit attempts per key in window.
+func newAttemptLimiter(limit int, window time.Duration) attemptLimiter {
+	return attemptLimiter{failed: map[string]*attemptWindow{}, limit: limit, window: window}
+}
+
+// reserve counts an attempt of a key that is about to be checked, and
+// reports false when the key has used up its attempts.
+func (l *attemptLimiter) reserve(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.failed == nil {
-		l.failed = map[string]*attemptWindow{}
-	}
-	w, ok := l.failed[address]
-	if ok && now.Sub(w.since) < signInWindow {
-		if w.count >= signInAttempts {
+	w, ok := l.failed[key]
+	if ok && now.Sub(w.since) < l.window {
+		if w.count >= l.limit {
 			return false
 		}
 		w.count++
 		return true
 	}
 	if !ok && len(l.failed) >= signInAddresses {
-		// Full: forget the windows that have ended, and if none has,
-		// all of them. Forgetting errs towards letting people in.
-		for known, window := range l.failed {
-			if now.Sub(window.since) >= signInWindow {
-				delete(l.failed, known)
-			}
-		}
-		if len(l.failed) >= signInAddresses {
-			clear(l.failed)
-		}
+		l.makeRoom(now)
 	}
-	l.failed[address] = &attemptWindow{since: now, count: 1}
+	l.failed[key] = &attemptWindow{since: now, count: 1}
 	return true
 }
 
+// makeRoom forgets the windows that have ended and, if none has, the one
+// window that has counted the fewest failures, the oldest of those. A live
+// window is never forgotten wholesale: a key that has used up its attempts
+// gets them back only when every other key has failed as often - which
+// takes as many guesses as the window it frees allows.
+func (l *attemptLimiter) makeRoom(now time.Time) {
+	for key, window := range l.failed {
+		if now.Sub(window.since) >= l.window {
+			delete(l.failed, key)
+		}
+	}
+	if len(l.failed) < signInAddresses {
+		return
+	}
+	var victim string
+	var least *attemptWindow
+	for key, window := range l.failed {
+		if least == nil || window.count < least.count || (window.count == least.count && window.since.Before(least.since)) {
+			victim, least = key, window
+		}
+	}
+	delete(l.failed, victim)
+}
+
 // forgive takes back the count of an attempt that was not a wrong guess.
-func (l *attemptLimiter) forgive(address string) {
+func (l *attemptLimiter) forgive(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if w, ok := l.failed[address]; ok && w.count > 0 {
+	if w, ok := l.failed[key]; ok && w.count > 0 {
 		w.count--
 	}
+}
+
+// knownAddresses remembers, for each user, the addresses they signed in
+// from lately. An address a user is known at is not held to the budget of
+// the user name (userSignInAttempts): whoever guesses a user's password
+// from elsewhere can make the user wait to sign in from a new address, not
+// from the one they always use.
+type knownAddresses struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func knownKey(user, address string) string { return user + "\x00" + address }
+
+// remember notes that a user signed in from an address.
+func (k *knownAddresses) remember(user, address string, now time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.seen == nil {
+		k.seen = map[string]time.Time{}
+	}
+	key := knownKey(user, address)
+	if _, ok := k.seen[key]; !ok && len(k.seen) >= signInAddresses {
+		// Full: forget what is past the horizon and, if nothing is, the
+		// address seen the longest ago.
+		var oldest string
+		var at time.Time
+		for known, when := range k.seen {
+			if now.Sub(when) >= knownAddressHorizon {
+				delete(k.seen, known)
+				continue
+			}
+			if oldest == "" || when.Before(at) {
+				oldest, at = known, when
+			}
+		}
+		if len(k.seen) >= signInAddresses {
+			delete(k.seen, oldest)
+		}
+	}
+	k.seen[key] = now
+}
+
+// knows reports whether a user signed in from an address within the
+// horizon.
+func (k *knownAddresses) knows(user, address string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	when, ok := k.seen[knownKey(user, address)]
+	return ok && now.Sub(when) < knownAddressHorizon
 }
 
 // SessionServiceConfig lists what a SessionService depends on.
@@ -287,7 +395,9 @@ func NewSessionService(cfg SessionServiceConfig) *SessionService {
 	return &SessionService{
 		sessions: cfg.Sessions, users: cfg.Users, provider: cfg.Provider, auditor: cfg.Auditor, clock: cfg.Clock,
 		lifetime: lifetime, uploadGrace: grace, lockMax: lockMax, entropy: cfg.Entropy,
-		leases: uploadLeases{wake: make(chan struct{}, 1)},
+		leases:   uploadLeases{wake: make(chan struct{}, 1)},
+		attempts: newAttemptLimiter(signInAttempts, signInWindow),
+		names:    newAttemptLimiter(userSignInAttempts, userSignInWindow),
 	}
 }
 
@@ -422,18 +532,42 @@ func (s *SessionService) newToken() (string, error) {
 // An address that keeps failing is made to wait: the error then wraps
 // domain.ErrTooManyAttempts, and the password is not looked at.
 func (s *SessionService) SignIn(ctx context.Context, username, password string, session iam.Session) (SignedIn, error) {
-	from := session.SourceIP.String()
+	now := s.clock.Now()
+	from := signInAddress(session.SourceIP)
 	// The attempt is counted before the password is looked at: guesses
 	// made at the same moment count like guesses made one by one.
-	if !s.attempts.reserve(from, s.clock.Now()) {
+	if !s.attempts.reserve(from, now) {
 		s.auditor.AuthenticationFailed(ctx, string(ActionSignIn), "", session, "too many failed attempts from this address")
 		return SignedIn{}, fmt.Errorf("session.SignIn: %w", domain.ErrTooManyAttempts)
+	}
+	// And against the user name, from every address together: guesses at
+	// one user's password spread over many addresses are counted all the
+	// same. Any name that could be a user's is counted - whether the user
+	// exists is not told by this either. An address the user signed in
+	// from lately is not held to it: whoever spends the budget of a name
+	// makes its user wait to sign in from a new address, for as long as
+	// they keep guessing, and never from the one the user always uses.
+	claimed := username
+	if iam.ValidateName(claimed) != nil {
+		claimed = ""
+	}
+	counted := false
+	if claimed != "" {
+		counted = s.names.reserve(claimed, now)
+		if !counted && !s.known.knows(claimed, from, now) {
+			s.attempts.forgive(from)
+			s.auditor.AuthenticationFailed(ctx, string(ActionSignIn), claimed, session, "too many failed attempts for this user name")
+			return SignedIn{}, fmt.Errorf("session.SignIn: %w", domain.ErrTooManyAttempts)
+		}
 	}
 	failed := false
 	defer func() {
 		if !failed {
-			// Only a wrong guess counts against an address.
+			// Only a wrong guess counts against an address and a name.
 			s.attempts.forgive(from)
+			if counted {
+				s.names.forgive(claimed)
+			}
 		}
 	}()
 	// The session begins when the password is about to be checked, not
@@ -449,11 +583,11 @@ func (s *SessionService) SignIn(ctx context.Context, username, password string, 
 			failed = true
 			// What was typed into the user field is kept only if it
 			// could be a user name: people type passwords there.
-			claimed := username
-			if iam.ValidateName(claimed) != nil {
-				claimed = "(not a user name)"
+			recorded := claimed
+			if recorded == "" {
+				recorded = "(not a user name)"
 			}
-			s.auditor.AuthenticationFailed(ctx, string(ActionSignIn), claimed, session, "credentials not accepted")
+			s.auditor.AuthenticationFailed(ctx, string(ActionSignIn), recorded, session, "credentials not accepted")
 		}
 		return SignedIn{}, fmt.Errorf("session.SignIn: %w", err)
 	}
@@ -472,6 +606,7 @@ func (s *SessionService) SignIn(ctx context.Context, username, password string, 
 		return SignedIn{}, fmt.Errorf("session.SignIn: %w", err)
 	}
 	s.leases.remember(stored.TokenHash, stored.ExpiresAt, s.lockMax > 0)
+	s.known.remember(name, from, now)
 	return SignedIn{
 		Token: token, CSRFToken: csrf, User: name, ExpiresAt: stored.ExpiresAt, CookieExpires: s.cookieExpires(stored.ExpiresAt),
 	}, nil
@@ -586,9 +721,16 @@ func (u *unlockFailures) add(tokenHash string) int {
 	}
 	if _, ok := u.failed[tokenHash]; !ok && len(u.failed) >= signInAddresses {
 		// Full of sessions that were left with a wrong password or two.
-		// Forgetting them gives each its attempts back; the limiter of
-		// the address counts on.
-		clear(u.failed)
+		// The one with the fewest is forgotten, which gives it its
+		// attempts back - not every session at once; the limiter of the
+		// address counts on.
+		victim, least := "", 0
+		for hash, count := range u.failed {
+			if victim == "" || count < least {
+				victim, least = hash, count
+			}
+		}
+		delete(u.failed, victim)
 	}
 	u.failed[tokenHash]++
 	return u.failed[tokenHash]
@@ -634,7 +776,7 @@ func (s *SessionService) judgePassword(ctx context.Context, op string, action ia
 	if state == sessionEnded {
 		return judgedSession{}, ended
 	}
-	from := session.SourceIP.String()
+	from := signInAddress(session.SourceIP)
 	// Counted before the password is looked at, and by the counter of
 	// sign-in: an address has one budget of guesses, not two.
 	if !s.attempts.reserve(from, s.clock.Now()) {

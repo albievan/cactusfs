@@ -112,7 +112,7 @@ balancer. That address is used in four places:
 |---|---|
 | Audit records (failed authentication, denials, admin changes) | Every record names the balancer. Keep the balancer's own log, with timestamps, to tell clients apart |
 | `aws:SourceIp` conditions in policies | They test the balancer's address: a policy that allows a client network no longer matches, and one that allows the balancer allows everybody behind it |
-| The limit on failed console sign-ins and unlocks of locked sessions, counted together (10 in 5 minutes per address, per node) | All users share one allowance: a few people mistyping, or one person guessing, makes everybody wait (`429`). It also means the limit does not tell attackers apart |
+| The limit on failed console sign-ins and unlocks of locked sessions, counted together (10 in 5 minutes per address, per node; an IPv6 address by its /64) | All users share one allowance: a few people mistyping, or one person guessing, makes everybody wait (`429`). It also means the limit does not tell attackers apart. The budget of a user name (30 failed sign-ins in 15 minutes) is not held against an address the user signed in from lately; behind the balancer every client has the balancer's address, so the budget of a name holds back guesses only at users who have not signed in through it in the last 30 days, and the shared allowance of the address is what is left |
 | The node's log (`remote` of a failed authentication) | The balancer |
 
 Do not enable the PROXY protocol towards the nodes (`send-proxy` in HAProxy,

@@ -598,6 +598,89 @@ func TestANarrowedKeySetsNoPassword(t *testing.T) {
 	}
 }
 
+// TestSignInGuessingIsLimited: failed sign-ins are counted per address - an
+// IPv6 address by its /64, which one subscriber holds whole - and per user
+// name from every address together, so that a password is not guessed from
+// many addresses. The budget of a name keeps the user waiting only at an
+// address the user has not signed in from lately, and only for the window.
+// A limiter that is full forgets no address that is waiting.
+func TestSignInGuessingIsLimited(t *testing.T) {
+	t.Parallel()
+	const password = "correct horse battery staple"
+	v6 := func(i int) string { return fmt.Sprintf("2001:db8:0:7::%x", i+1) }
+	v4 := func(i int) string { return fmt.Sprintf("203.0.%d.%d", i/250, i%250+1) }
+	tests := []struct {
+		name string
+		// knownAt is where alice signed in before the guessing, if anywhere.
+		knownAt string
+		// guesses wrong passwords from the address of each number.
+		guesses int
+		from    func(int) string
+		// then alice signs in with her password from there, after wait.
+		then string
+		wait time.Duration
+		want error
+	}{
+		{"one /64, many addresses: its budget is one", "", app.SignInAttempts, v6, "2001:db8:0:7::ffff", 0, domain.ErrTooManyAttempts},
+		{"another /64 has a budget of its own", "", app.SignInAttempts, v6, "2001:db8:0:8::1", 0, nil},
+		{"one IPv4 address", "", app.SignInAttempts, func(int) string { return "203.0.113.9" }, "203.0.113.9", 0, domain.ErrTooManyAttempts},
+		{"the name's budget, spent from many addresses", "", app.UserSignInAttempts, v4, "198.51.100.200", 0, domain.ErrTooManyAttempts},
+		{"the name's budget is no lock at an address the user signs in from", "198.51.100.7", app.UserSignInAttempts, v4, "198.51.100.7", 0, nil},
+		{"the name's budget comes back with its window", "", app.UserSignInAttempts, v4, "198.51.100.200", app.UserSignInWindow, nil},
+		{"fewer guesses than the name's budget", "", app.UserSignInAttempts - 1, v4, "198.51.100.200", 0, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			f := newIAMFixture(t)
+			if _, err := f.iam.CreateUser(ctx, f.root, app.UserInput{Name: "alice", Roles: []string{iam.RoleReadOnly}, Password: password}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.knownAt != "" {
+				if _, err := f.sessions.SignIn(ctx, "alice", password, session(tt.knownAt)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := range tt.guesses {
+				if _, err := f.sessions.SignIn(ctx, "alice", fmt.Sprintf("wrong guess %d", i), session(tt.from(i))); !errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("guess %d from %s = %v, want refused", i, tt.from(i), err)
+				}
+			}
+			f.clock.Advance(tt.wait)
+			_, err := f.sessions.SignIn(ctx, "alice", password, session(tt.then))
+			if !errors.Is(err, tt.want) || (tt.want == nil) != (err == nil) {
+				t.Fatalf("signing in from %s = %v, want %v", tt.then, err, tt.want)
+			}
+		})
+	}
+
+	t.Run("a full limiter forgets no address that is waiting", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		f := newIAMFixture(t)
+		if _, err := f.iam.CreateUser(ctx, f.root, app.UserInput{Name: "alice", Roles: []string{iam.RoleReadOnly}, Password: password}); err != nil {
+			t.Fatal(err)
+		}
+		guesser := session("192.0.2.1")
+		for i := range app.SignInAttempts {
+			if _, err := f.sessions.SignIn(ctx, "alice", fmt.Sprintf("wrong guess %d", i), guesser); !errors.Is(err, domain.ErrAccessDenied) {
+				t.Fatalf("guess %d = %v", i, err)
+			}
+		}
+		// As many other addresses as the limiter remembers, each with one
+		// failure - of no user name, so that only the addresses count.
+		for i := range app.SignInAddresses {
+			if _, err := f.sessions.SignIn(ctx, "not a name", "wrong", session(v4(i))); !errors.Is(err, domain.ErrAccessDenied) {
+				t.Fatalf("filling, %s: %v", v4(i), err)
+			}
+		}
+		if _, err := f.sessions.SignIn(ctx, "alice", password, guesser); !errors.Is(err, domain.ErrTooManyAttempts) {
+			t.Fatalf("the guesser, once the limiter was full = %v, want %v", err, domain.ErrTooManyAttempts)
+		}
+	})
+}
+
 // TestKeyUseIsRecordedSparingly: when a key was last used is written to the
 // replicated state at most once in a while, and never on the request's time.
 func TestKeyUseIsRecordedSparingly(t *testing.T) {

@@ -50,6 +50,13 @@ React console that talks only to that API and holds no business or authorization
   one, and ten wrong guesses by anyone make all of them wait. Forwarded-for headers are
   not trusted. At most 32 password checks wait for one of the four hashing slots; beyond
   that sign-in answers 503.
+  *Amended 2026-11-12:* an IPv6 address is counted by its /64. Failed sign-ins are also
+  counted per user name, from every address together: 30 in 15 minutes, per node. An
+  address the user signed in from in the last 30 days is not held to that budget, so
+  whoever guesses at a name makes its user wait to sign in from a new address - for as
+  long as they keep guessing - and never from the user's usual one. A limiter that is
+  full forgets the windows that have ended and then the one with the fewest failures;
+  it never forgets every window at once.
 - **Public, by necessity:** signing in, the contract (`/api/v1/openapi.*`), the
   documentation (`/docs`) and the files of the console. They reveal nothing about a
   deployment. This is an exception to "every inbound request is authenticated".

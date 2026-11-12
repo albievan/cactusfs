@@ -116,6 +116,14 @@ const UnlockAttempts = unlockAttempts
 // before it has to wait.
 const SignInAttempts = signInAttempts
 
+// The budget of failed sign-ins of one user name, from every address, and
+// its window; how many addresses a limiter remembers.
+const (
+	UserSignInAttempts = userSignInAttempts
+	UserSignInWindow   = userSignInWindow
+	SignInAddresses    = signInAddresses
+)
+
 // HeldTargetNames returns how many names of targets have a lock that is held
 // or waited for.
 func HeldTargetNames(s *TargetService) int {
