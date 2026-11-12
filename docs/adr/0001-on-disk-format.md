@@ -94,9 +94,18 @@ PLAN 2.7 removes those.
 ### Operating systems
 
 - **Linux, macOS:** `flock(LOCK_EX|LOCK_NB)` on `lock`; directories are `fsync`ed.
-- **Windows:** `LockFileEx` on `lock`. A directory handle cannot be flushed; file
-  contents are flushed with `FlushFileBuffers` before the rename and NTFS journals the
-  rename itself. Directory sync is therefore a no-op there.
+- **Windows:** `LockFileEx` on `lock`. File contents are flushed with
+  `FlushFileBuffers` before the rename, and the directory is flushed after it, as on
+  the other systems. NTFS does record a rename in its log, but it writes that log
+  lazily: a rename that has returned can still be lost to a power loss, after which
+  the shard would be found in `tmp\` and removed by the next open — an acknowledged
+  object lost. (Corrected 2026-11-12, audit H29: this ADR used to say the journal made
+  the rename durable and that directory sync could be a no-op.) `FlushFileBuffers` on
+  a directory needs a handle with write access, and `os.Root` opens directories for
+  reading only, so the directory is opened through the `os.Root` — which keeps the
+  name confined to the drive — and that handle is reopened for writing with
+  `NtCreateFile` relative to it with an empty name, which names the directory itself.
+  No path is built outside the root.
 
 ## Consequences
 

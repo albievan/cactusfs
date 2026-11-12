@@ -53,3 +53,24 @@ func TestSyncDir(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncDirReachesTheDirectory proves SyncDir really opens and flushes the
+// directory on every operating system. On Windows it used to do nothing, so a
+// rename that had returned could be undone by a power loss (audit H29); a
+// no-op cannot tell a missing directory from a present one.
+func TestSyncDirReachesTheDirectory(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := fsutil.SyncDir(root, "missing"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("SyncDir of a missing directory: error = %v, want %v", err, os.ErrNotExist)
+	}
+	// The name stays confined to root.
+	if err := fsutil.SyncDir(root, "../outside"); err == nil {
+		t.Error("SyncDir of a name outside the root succeeded")
+	}
+}
