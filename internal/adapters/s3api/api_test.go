@@ -1559,6 +1559,45 @@ func TestBodiesThatDestroyMustBeSigned(t *testing.T) {
 	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
 }
 
+// TestAPlusInTheQueryMeansWhatWasSigned: a raw '+' in a query string is a
+// space to the signature as it is to the operation. A request signed for
+// the prefix "a+b" (sent as a%2Bb) cannot be turned into one for "a b" by
+// writing a raw '+' in its place.
+func TestAPlusInTheQueryMeansWhatWasSigned(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.putObject("/bkt/a+b", []byte("plus"))
+	s.putObject("/bkt/a%20b", []byte("space"))
+	rewrite := func(r *http.Request) { r.URL.RawQuery = strings.Replace(r.URL.RawQuery, "a%2Bb", "a+b", 1) }
+	presigned := s.presign(http.MethodGet, "/bkt?list-type=2&prefix=a%2Bb", serverNow, 600, nil)
+	tests := map[string]struct {
+		c      call
+		status int
+		listed string
+	}{
+		"signed for a plus":             {call{method: http.MethodGet, path: "/bkt?list-type=2&prefix=a%2Bb"}, 200, "<Key>a+b</Key>"},
+		"signed for a space as a plus":  {call{method: http.MethodGet, path: "/bkt?list-type=2&prefix=a+b"}, 200, "<Key>a b</Key>"},
+		"a plus rewritten to a space":   {call{method: http.MethodGet, path: "/bkt?list-type=2&prefix=a%2Bb", mutate: rewrite}, 403, ""},
+		"presigned for a plus":          {call{method: http.MethodGet, path: presigned, unsigned: true}, 200, "<Key>a+b</Key>"},
+		"presigned, rewritten to space": {call{method: http.MethodGet, path: strings.Replace(presigned, "a%2Bb", "a+b", 1), unsigned: true}, 403, ""},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := s.do(tt.c)
+			if tt.status != http.StatusOK {
+				s.expectError(r, tt.status, "SignatureDoesNotMatch")
+				return
+			}
+			s.mustStatus(r, http.StatusOK)
+			if body := string(r.body); !strings.Contains(body, tt.listed) || strings.Count(body, "<Key>") != 1 {
+				t.Errorf("listing = %s, want only %s", body, tt.listed)
+			}
+		})
+	}
+}
+
 // forgeCRC32 returns template with some of its bytes changed so that its
 // CRC32 is want: the bit 0 of each byte at positions is flipped or not, as
 // solving the linear system the CRC is over GF(2) says. It is what anybody

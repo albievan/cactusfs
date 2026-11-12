@@ -291,9 +291,14 @@ func TestCanonicalQuery(t *testing.T) {
 		"prefix=a%2Fb&x-id=GetObj":   "prefix=a%2Fb&x-id=GetObj",
 		"prefix=a/b":                 "prefix=a%2Fb",
 		"prefix=a%20b&delimiter=%2f": "delimiter=%2F&prefix=a%20b",
-		"k=a+b":                      "k=a%2Bb",
-		"&&a=1&":                     "a=1",
-		"k=%zz":                      "k=%25zz",
+		// A raw plus is a space, as url.ParseQuery reads it; a plus
+		// sign is sent encoded.
+		"k=a+b":   "k=a%20b",
+		"k=a%2Bb": "k=a%2Bb",
+		"k=a%20b": "k=a%20b",
+		"a+b=1":   "a%20b=1",
+		"&&a=1&":  "a=1",
+		"k=%zz":   "k=%25zz",
 	}
 	for raw, want := range tests {
 		if got := canonicalQuery(raw); got != want {

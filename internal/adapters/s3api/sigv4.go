@@ -246,8 +246,10 @@ func canonicalQuery(raw string) string {
 	return sigv4.CanonicalQuery(raw)
 }
 
+// unescape decodes one component of a query string as url.ParseQuery and
+// sigv4.CanonicalQuery do: a raw '+' is a space.
 func unescape(s string) string {
-	decoded, err := url.PathUnescape(s)
+	decoded, err := url.QueryUnescape(s)
 	if err != nil {
 		return s
 	}

@@ -95,9 +95,14 @@ func CanonicalRequest(r *http.Request, signedHeaders []string, signedHeadersRaw,
 	return b.String()
 }
 
-// CanonicalQuery re-encodes and sorts the query string. A component that is
-// not valid percent-encoding is kept as it is; a signature over it will then
-// simply not match what the client computed.
+// CanonicalQuery re-encodes and sorts the query string. Each name and value
+// is decoded as url.ParseQuery decodes it - a raw '+' is a space - so that
+// what a signature covers is what the request is taken to say: a client
+// that means a plus sign sends %2B, as UriEncode has it, and a '+' that is
+// put in its place in transit changes the canonical request. A component
+// that is not valid percent-encoding is kept as it is; a signature over it
+// will then simply not match what the client computed, and url.ParseQuery
+// refuses it.
 func CanonicalQuery(raw string) string {
 	if raw == "" {
 		return ""
@@ -115,8 +120,10 @@ func CanonicalQuery(raw string) string {
 	return strings.Join(pairs, "&")
 }
 
+// unescape decodes one component of a query string as
+// application/x-www-form-urlencoded, as url.ParseQuery does.
 func unescape(s string) string {
-	decoded, err := url.PathUnescape(s)
+	decoded, err := url.QueryUnescape(s)
 	if err != nil {
 		return s
 	}
