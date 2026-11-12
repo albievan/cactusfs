@@ -239,6 +239,11 @@ func (s *testServer) do(c call) reply {
 // signRequest signs r as an S3 client would: the host and every x-amz-* and
 // content-md5 header are covered.
 func signRequest(r *http.Request, keyID string, key []byte, signedAt time.Time, payloadHash string) {
+	signRequestIn(r, DefaultRegion, keyID, key, signedAt, payloadHash)
+}
+
+// signRequestIn is signRequest with a credential scope of region.
+func signRequestIn(r *http.Request, region, keyID string, key []byte, signedAt time.Time, payloadHash string) {
 	r.Header.Set(headerAmzDate, signedAt.UTC().Format(amzDateFormat))
 	r.Header.Set(headerContentSHA, payloadHash)
 
@@ -251,12 +256,26 @@ func signRequest(r *http.Request, keyID string, key []byte, signedAt time.Time, 
 	}
 	slices.Sort(signed)
 	sig := signature{
-		accessKeyID: keyID, scopeDate: signedAt.UTC().Format(scopeDateFormat), region: DefaultRegion,
+		accessKeyID: keyID, scopeDate: signedAt.UTC().Format(scopeDateFormat), region: region,
 		signedHeaders: signed, signedHeadersRaw: strings.Join(signed, ";"),
 	}
 	sig.signatureHex = expectedSignature(key, sig, r.Header.Get(headerAmzDate), canonicalRequest(r, sig, payloadHash))
 	r.Header.Set("Authorization", sigV4Algorithm+" Credential="+keyID+"/"+sig.scopeDate+"/"+sig.region+
 		"/s3/aws4_request, SignedHeaders="+sig.signedHeadersRaw+", Signature="+sig.signatureHex)
+}
+
+// answer returns the status of a reply and its S3 error code: "" when the
+// body is no error document. It fails nothing, so that a table that shares
+// one server judges its rows with t.Errorf.
+func answer(r reply) (int, string) {
+	if r.err != nil {
+		return 0, r.err.Error()
+	}
+	var e errorResponse
+	if xml.Unmarshal(r.body, &e) != nil {
+		return r.status, ""
+	}
+	return r.status, e.Code
 }
 
 // errorCode extracts the S3 error code of an error response.

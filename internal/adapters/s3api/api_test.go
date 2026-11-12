@@ -370,6 +370,12 @@ func TestBodyOfAnUnauthenticatedUploadIsNotRead(t *testing.T) {
 // presign returns path with a presigned query for the server's root key.
 func (s *testServer) presign(method, path string, signedAt time.Time, expires int, headers map[string]string) string {
 	s.t.Helper()
+	return s.presignIn(DefaultRegion, method, path, signedAt, expires, headers)
+}
+
+// presignIn is presign with a credential scope of region.
+func (s *testServer) presignIn(region, method, path string, signedAt time.Time, expires int, headers map[string]string) string {
+	s.t.Helper()
 	signed := []string{"host"}
 	for name := range headers {
 		signed = append(signed, strings.ToLower(name))
@@ -381,7 +387,7 @@ func (s *testServer) presign(method, path string, signedAt time.Time, expires in
 	}
 	scopeDate := signedAt.UTC().Format(scopeDateFormat)
 	target := path + separator + "X-Amz-Algorithm=" + sigV4Algorithm +
-		"&X-Amz-Credential=" + url.QueryEscape(s.keyID+"/"+scopeDate+"/"+DefaultRegion+"/s3/aws4_request") +
+		"&X-Amz-Credential=" + url.QueryEscape(s.keyID+"/"+scopeDate+"/"+region+"/s3/aws4_request") +
 		"&X-Amz-Date=" + signedAt.UTC().Format(amzDateFormat) + "&X-Amz-Expires=" + strconv.Itoa(expires) +
 		"&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";"))
 	r, err := http.NewRequestWithContext(s.t.Context(), method, s.URL+target, nil)
@@ -393,10 +399,49 @@ func (s *testServer) presign(method, path string, signedAt time.Time, expires in
 		r.Header.Set(name, value)
 	}
 	sig := signature{
-		accessKeyID: s.keyID, scopeDate: scopeDate, region: DefaultRegion,
+		accessKeyID: s.keyID, scopeDate: scopeDate, region: region,
 		signedHeaders: signed, signedHeadersRaw: strings.Join(signed, ";"),
 	}
 	return target + "&X-Amz-Signature=" + expectedSignature(s.key, sig, signedAt.UTC().Format(amzDateFormat), canonicalRequest(r, sig, payloadUnsigned))
+}
+
+// TestSignaturesAreForThisRegion: a signature whose credential scope names
+// another region than the one the endpoint serves is refused, though it is
+// a good signature by the key - in the header and in a presigned URL.
+func TestSignaturesAreForThisRegion(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.putObject("/bkt/k", []byte("here"))
+	inRegion := func(region string) func(r *http.Request) {
+		return func(r *http.Request) {
+			r.Header.Del("Authorization")
+			signRequestIn(r, region, s.keyID, s.key, serverNow, r.Header.Get(headerContentSHA))
+		}
+	}
+	tests := map[string]struct {
+		c      call
+		status int
+		code   string
+	}{
+		"the header, this region":    {call{method: http.MethodGet, path: "/bkt/k", mutate: inRegion(DefaultRegion)}, 200, ""},
+		"the header, another region": {call{method: http.MethodGet, path: "/bkt/k", mutate: inRegion("eu-west-1")}, 400, "AuthorizationHeaderMalformed"},
+		"the header, a region in another case": {
+			call{method: http.MethodGet, path: "/bkt/k", mutate: inRegion("US-EAST-1")}, 400, "AuthorizationHeaderMalformed",
+		},
+		"presigned, this region": {
+			call{method: http.MethodGet, path: s.presignIn(DefaultRegion, http.MethodGet, "/bkt/k", serverNow, 600, nil), unsigned: true}, 200, "",
+		},
+		"presigned, another region": {
+			call{method: http.MethodGet, path: s.presignIn("eu-west-1", http.MethodGet, "/bkt/k", serverNow, 600, nil), unsigned: true},
+			400, "AuthorizationQueryParametersError",
+		},
+	}
+	for name, tt := range tests {
+		if status, code := answer(s.do(tt.c)); status != tt.status || code != tt.code {
+			t.Errorf("%s: %d %s, want %d %s", name, status, code, tt.status, tt.code)
+		}
+	}
 }
 
 // TestPresignedURLs: a URL signed by the holder of a key lets whoever has it

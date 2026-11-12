@@ -338,6 +338,16 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 			return err
 		}
 	}
+	if sig.region != h.cfg.Region {
+		// A signature is for one region: one made for another is
+		// refused as the request of the wrong endpoint, before its key
+		// is looked up.
+		malformed := errAuthMalformed
+		if viaQuery {
+			malformed = errAuthQuery
+		}
+		return fmt.Errorf("%w: the region %q is wrong; expecting %q", malformed, sig.region, h.cfg.Region)
+	}
 	secret, principal, err := h.cfg.Identities.SecretFor(ctx, sig.accessKeyID)
 	if err != nil {
 		return err
