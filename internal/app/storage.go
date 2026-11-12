@@ -547,8 +547,11 @@ type streamReader struct {
 	readers  []ports.ShardReader
 	degraded bool
 	// offline counts the shards that could not be reached, as opposed to
-	// shards that are missing or bad.
-	offline int
+	// shards that are missing or bad. transient counts those that were
+	// reached but could not be used for a reason that says nothing about
+	// them: too many open files, a node that is shutting down or busy.
+	offline   int
+	transient int
 	// The stripe decoded last, for sequential reads.
 	cached int64
 	stripe []byte
@@ -558,9 +561,10 @@ type streamReader struct {
 //
 // When no shard can be found at all the error wraps domain.ErrShardNotFound,
 // which is what a version looks like just after it was replaced or deleted.
-// When too few are usable only because drives cannot be reached, it wraps
-// domain.ErrUnavailable: nothing is known to be wrong with the object. When
-// shards are missing or bad beyond what parity covers it wraps
+// When too few are usable only because drives cannot be reached, or because
+// shards could not be opened for a reason that says nothing about them, it
+// wraps domain.ErrUnavailable: nothing is known to be wrong with the object.
+// When shards are missing or bad beyond what parity covers it wraps
 // domain.ErrIntegrity: the object cannot be read.
 func (s *shardStorage) open(ctx context.Context, v object.Extent) (*streamReader, error) {
 	geometry, err := geometryOf(v.Layout)
@@ -584,8 +588,12 @@ func (s *shardStorage) open(ctx context.Context, v object.Extent) (*streamReader
 			switch {
 			case errors.Is(err, domain.ErrDriveOffline):
 				r.offline++
-			case !errors.Is(err, domain.ErrShardNotFound):
+			case errors.Is(err, domain.ErrShardNotFound):
+			case errors.Is(err, domain.ErrIntegrity), errors.Is(err, domain.ErrUnsupportedFormat):
+				// There, and not usable.
 				found++
+			default:
+				r.transient++
 			}
 			lastErr = err
 			r.degraded = true
@@ -600,15 +608,22 @@ func (s *shardStorage) open(ctx context.Context, v object.Extent) (*streamReader
 	}
 	_ = r.Close()
 	switch {
-	case usable+r.offline >= geometry.ReadQuorum():
-		return nil, fmt.Errorf("%w: %d of %d shards of %s are on drives that cannot be reached, %d are needed (last error: %w)",
-			domain.ErrUnavailable, r.offline, geometry.Total(), v.DataID, geometry.ReadQuorum(), lastErr)
-	case found == 0 && r.offline == 0:
+	case usable+r.unknown() >= geometry.ReadQuorum():
+		return nil, fmt.Errorf("%w: %d of %d shards of %s are on drives that cannot be reached and %d could not be opened for now, "+
+			"%d are needed (last error: %w)",
+			domain.ErrUnavailable, r.offline, geometry.Total(), v.DataID, r.transient, geometry.ReadQuorum(), lastErr)
+	case found == 0 && r.unknown() == 0:
 		return nil, fmt.Errorf("%w: no shard of %s is present", domain.ErrShardNotFound, v.DataID)
 	default:
 		return nil, fmt.Errorf("%w: %d of %d shards of %s are usable, %d are needed (last error: %w)",
 			domain.ErrIntegrity, usable, geometry.Total(), v.DataID, geometry.ReadQuorum(), lastErr)
 	}
+}
+
+// unknown is the number of shards that could not be used for a reason that
+// says nothing about whether they are intact.
+func (r *streamReader) unknown() int {
+	return r.offline + r.transient
 }
 
 // openShard opens one shard and checks that it has the size the layout
@@ -720,8 +735,12 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 			_ = r.readers[i].Close()
 			r.readers[i] = nil
 			r.degraded = true
-			if errors.Is(err, domain.ErrDriveOffline) {
+			switch {
+			case errors.Is(err, domain.ErrDriveOffline):
 				r.offline++
+			case isDamage(err), errors.Is(err, domain.ErrUnsupportedFormat):
+			default:
+				r.transient++
 			}
 			return false
 		}
@@ -751,10 +770,11 @@ func (r *streamReader) readStripe(stripe int64, all bool) ([][]byte, error) {
 				usable++
 			}
 		}
-		if usable+r.offline >= g.ReadQuorum() {
-			// Enough shards would be there if their drives could be reached.
-			return nil, fmt.Errorf("%w: stripe %d of %s: %d shards are on drives that cannot be reached",
-				domain.ErrUnavailable, stripe, r.extent.DataID, r.offline)
+		if usable+r.unknown() >= g.ReadQuorum() {
+			// Enough shards would be there if their drives could be
+			// reached, or read, now.
+			return nil, fmt.Errorf("%w: stripe %d of %s: %d shards are on drives that cannot be reached and %d could not be read for now",
+				domain.ErrUnavailable, stripe, r.extent.DataID, r.offline, r.transient)
 		}
 		return nil, fmt.Errorf("%w: stripe %d of %s cannot be rebuilt: %w", domain.ErrIntegrity, stripe, r.extent.DataID, err)
 	}

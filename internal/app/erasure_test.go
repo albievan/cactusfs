@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"slices"
 	"strings"
@@ -431,6 +432,82 @@ func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
 				t.Fatalf("Get: %v", err)
 			}
 		})
+	}
+}
+
+// flakyDrive is a drive that cannot open or read shards for now.
+type flakyDrive struct {
+	ports.ShardStore
+	openErr, readErr error
+}
+
+func (d flakyDrive) Open(ctx context.Context, id object.ShardID) (ports.ShardReader, error) {
+	if d.openErr != nil {
+		return nil, d.openErr
+	}
+	r, err := d.ShardStore.Open(ctx, id)
+	if err != nil || d.readErr == nil {
+		return r, err
+	}
+	return flakyReader{ShardReader: r, err: d.readErr}, nil
+}
+
+type flakyReader struct {
+	ports.ShardReader
+	err error
+}
+
+func (r flakyReader) ReadAt([]byte, int64) (int, error) { return 0, r.err }
+
+// TestTransientFailuresAreNotDamage: shards that cannot be opened or read
+// for a reason that says nothing about them - too many open files, a node
+// shutting down or busy - make a read unavailable, not the object damaged.
+// They used to be counted as present but unusable, and the client was told
+// the object failed verification (audit L33).
+func TestTransientFailuresAreNotDamage(t *testing.T) {
+	t.Parallel()
+
+	failures := map[string]error{
+		"too many open files": errors.New("open: too many open files"),
+		"shutting down":       fmt.Errorf("node storage-2: %w", domain.ErrShuttingDown),
+		"unavailable":         fmt.Errorf("node storage-2: %w", domain.ErrUnavailable),
+	}
+	for name, failure := range failures {
+		for _, step := range []string{"open", "read"} {
+			t.Run(name+" at "+step, func(t *testing.T) {
+				t.Parallel()
+				f := erasureFixture(t)
+				data := randomBytes(t, 50_000)
+				version := f.put(t, "b", "k", data)
+
+				// One shard more than parity covers.
+				failing := map[int]bool{}
+				for _, d := range f.shardsOf(t, version)[:sixParity+1] {
+					failing[slices.Index(f.drives, d)] = true
+				}
+				drives := make([]ports.ShardStore, len(f.drives))
+				for i, d := range f.drives {
+					drives[i] = d
+					if failing[i] && step == "open" {
+						drives[i] = flakyDrive{ShardStore: d, openErr: failure}
+					} else if failing[i] {
+						drives[i] = flakyDrive{ShardStore: d, readErr: failure}
+					}
+				}
+				objects := f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
+					cfg.Drives = fixed(t, f.topology, drives)
+				})
+
+				out, err := objects.Get(context.Background(), porttest.Root(), app.GetInput{Bucket: "b", Key: "k"})
+				if err == nil {
+					_, err = io.ReadAll(out.Body)
+					_ = out.Body.Close()
+				}
+				if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrIntegrity) {
+					t.Errorf("Get = %v, want %v and not %v", err, domain.ErrUnavailable, domain.ErrIntegrity)
+				}
+			})
+		}
 	}
 }
 
