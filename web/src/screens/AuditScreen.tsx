@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 import { api, unwrap, type AuditPage, type AuditRecord } from '../api/client';
 import { navigate, routeHref } from '../router';
@@ -11,8 +11,8 @@ const PAGE_SIZE = 50;
 // The most the API returns at once; used to walk to the end of the trail.
 const WALK_SIZE = 1000;
 
-function fetchPage(after: number, limit: number): Promise<AuditPage> {
-  return unwrap(api.GET('/audit', { params: { query: { after, limit } } }));
+function fetchPage(after: number, limit: number, signal?: AbortSignal): Promise<AuditPage> {
+  return unwrap(api.GET('/audit', { params: { query: { after, limit } }, signal }));
 }
 
 function auditHref(after: number): string {
@@ -34,18 +34,36 @@ export function AuditScreen({ after }: AuditScreenProps) {
   const page = useLoad(load);
   const action = useAction();
   const nextAfter = page.data?.next_after;
+  // The walk to the newest records while it goes on. It is given up when
+  // the screen goes away: its requests are aborted, and it goes nowhere.
+  const walking = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      walking.current?.abort();
+    },
+    [],
+  );
 
   // The API has no way to ask for the last page, so walk to it: follow
   // next_after in the largest steps allowed, then show the tail of the last
-  // step.
+  // step. A next_after that does not lie ahead of the step it came with
+  // ends the walk where it is: following it would ask for the same records
+  // for ever.
   const newest = () => {
+    walking.current?.abort();
+    const walk = new AbortController();
+    walking.current = walk;
     void action.run(async () => {
       let cursor = after;
-      let last = await fetchPage(cursor, WALK_SIZE);
-      while (last.next_after !== undefined) {
+      let last = await fetchPage(cursor, WALK_SIZE, walk.signal);
+      while (!walk.signal.aborted && last.next_after !== undefined && last.next_after > cursor) {
         cursor = last.next_after;
-        last = await fetchPage(cursor, WALK_SIZE);
+        last = await fetchPage(cursor, WALK_SIZE, walk.signal);
       }
+      if (walk.signal.aborted) {
+        return;
+      }
+      walking.current = null;
       const before = last.records.at(-PAGE_SIZE - 1);
       navigate(auditHref(before === undefined ? cursor : before.sequence));
     });

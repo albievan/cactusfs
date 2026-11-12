@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { App } from '../App';
 import { fakeApi, json, problem, signedIn } from '../test/fakeApi';
+import { AuditScreen } from './AuditScreen';
 import { ClusterScreen } from './ClusterScreen';
 
 const TIME = '2026-10-01T00:00:00Z';
@@ -149,6 +150,74 @@ describe('audit log', () => {
       .filter((call) => call.query.get('limit') === '1000')
       .map((call) => call.query.get('after'));
     expect(walked).toEqual(['0', '1000']);
+  });
+
+  it('ends the walk where next_after does not lie ahead, rather than asking for ever', async () => {
+    const api = signedIn({
+      'GET /audit': (call) => {
+        const after = Number(call.query.get('after'));
+        if (after === 0) {
+          const limit = Number(call.query.get('limit'));
+          return json(200, { records: records(1, limit), next_after: limit });
+        }
+        // A page that names itself as the next one.
+        return json(200, { records: records(1001, 1010), next_after: 1000 });
+      },
+    });
+    window.location.hash = '#/audit';
+    render(<App />);
+    await screen.findByText('user/u1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Newest' }));
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/audit?after=1000');
+    });
+    expect(await screen.findByText('user/u1010')).toBeDefined();
+    const walked = api
+      .callsTo('GET', '/audit')
+      .filter((call) => call.query.get('limit') === '1000')
+      .map((call) => call.query.get('after'));
+    expect(walked).toEqual(['0', '1000']);
+  });
+
+  it('gives the walk up when the screen goes away, and goes nowhere after', async () => {
+    fakeApi({ 'GET /audit': () => json(200, { records: records(1, 50), next_after: 50 }) });
+    // Every step of the walk is held until it is let go: the screen goes
+    // away while the first is on its way.
+    const held: { request: Request; release: () => void }[] = [];
+    const answer = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (new URL(request.url).searchParams.get('limit') !== '1000') {
+        return answer(request);
+      }
+      return new Promise<Response>((resolve) => {
+        held.push({
+          request,
+          release: () => {
+            resolve(json(200, { records: records(1, 1000), next_after: 1000 }));
+          },
+        });
+      });
+    });
+    window.location.hash = '#/audit';
+    const { unmount } = render(<AuditScreen after={0} />);
+    await screen.findByText('user/u1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Newest' }));
+    await waitFor(() => {
+      expect(held).toHaveLength(1);
+    });
+    unmount();
+
+    expect(held[0]?.request.signal.aborted).toBe(true);
+    // Should the answer come all the same, it leads nowhere: no next step,
+    // no other place in the console.
+    held[0]?.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(held).toHaveLength(1);
+    expect(window.location.hash).toBe('#/audit');
   });
 
   it('shows the details of a record', async () => {
