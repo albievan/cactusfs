@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -270,6 +271,143 @@ func TestUnwrapFailures(t *testing.T) {
 	if _, err := kms.UnwrapDataKey(cancelled, key.Wrapped, []byte("owner")); !errors.Is(err, context.Canceled) {
 		t.Errorf("UnwrapDataKey with a cancelled context: %v", err)
 	}
+}
+
+// TestEveryDataKeyIsWrappedUnderAKeyOfItsOwn: a wrapped key is of version 2,
+// sealed under a key derived from the master key and a random salt it
+// carries. Version 1 sealed every data key under the master key itself with
+// a random 96-bit nonce, which bounds how many keys may safely be wrapped
+// (audit L34, ADR-0031).
+func TestEveryDataKeyIsWrappedUnderAKeyOfItsOwn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	kms, err := local.Open(createKey(t), testPassphrase())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	const (
+		version  = 2
+		saltSize = 32
+		size     = 1 + saltSize + 12 + 32 + 16
+	)
+	salts := map[string]bool{}
+	for range 50 {
+		key, err := kms.GenerateDataKey(ctx, []byte("owner"))
+		if err != nil {
+			t.Fatalf("GenerateDataKey: %v", err)
+		}
+		if key.Wrapped[0] != version || len(key.Wrapped) != size {
+			t.Fatalf("wrapped key of version %d and %d bytes, want version %d and %d bytes", key.Wrapped[0], len(key.Wrapped), version, size)
+		}
+		salt := string(key.Wrapped[1 : 1+saltSize])
+		if salts[salt] {
+			t.Fatal("two data keys were wrapped with the same salt")
+		}
+		salts[salt] = true
+		got, err := kms.UnwrapDataKey(ctx, key.Wrapped, []byte("owner"))
+		if err != nil || !bytes.Equal(got, key.Plaintext) {
+			t.Fatalf("UnwrapDataKey = %x, %v; want the data key", got, err)
+		}
+		// The salt is bound in: another salt derives another key.
+		other := bytes.Clone(key.Wrapped)
+		other[1] ^= 1
+		if got, err := kms.UnwrapDataKey(ctx, other, []byte("owner")); !errors.Is(err, domain.ErrKeyUnavailable) || got != nil {
+			t.Fatalf("UnwrapDataKey with a changed salt = %x, %v; want %v", got, err, domain.ErrKeyUnavailable)
+		}
+		// A version 2 key read as version 1 does not open.
+		downgraded := bytes.Clone(key.Wrapped)
+		downgraded[0] = 1
+		if got, err := kms.UnwrapDataKey(ctx, downgraded, []byte("owner")); !errors.Is(err, domain.ErrKeyUnavailable) || got != nil {
+			t.Fatalf("UnwrapDataKey of a key relabelled version 1 = %x, %v; want %v", got, err, domain.ErrKeyUnavailable)
+		}
+	}
+	for _, cut := range []int{1, 1 + saltSize, 1 + saltSize + 11, size - 1} {
+		key, err := kms.GenerateDataKey(ctx, []byte("owner"))
+		if err != nil {
+			t.Fatalf("GenerateDataKey: %v", err)
+		}
+		if got, err := kms.UnwrapDataKey(ctx, key.Wrapped[:cut], []byte("owner")); !errors.Is(err, domain.ErrKeyUnavailable) || got != nil {
+			t.Errorf("UnwrapDataKey of %d bytes = %x, %v; want %v", cut, got, err, domain.ErrKeyUnavailable)
+		}
+	}
+}
+
+// TestWrappedKeysOfVersion1StillUnwrap is the upgrade test of ADR-0031: a key
+// file and a data key wrapped by the version 1 code, before the change, are
+// read by this one. testdata/wrap-v1 was written by that code and must never
+// be regenerated.
+func TestWrappedKeysOfVersion1StillUnwrap(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "wrap-v1", "wrapped.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct{ AAD, Wrapped, Plaintext string }
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	decode := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	aad, wrapped, want := decode(fixture.AAD), decode(fixture.Wrapped), decode(fixture.Plaintext)
+	if wrapped[0] != 1 {
+		t.Fatalf("the fixture is of version %d, not 1", wrapped[0])
+	}
+
+	kms, err := local.Open(filepath.Join("testdata", "wrap-v1", "kms.json"), testPassphrase())
+	if err != nil {
+		t.Fatalf("Open of the version 1 key file: %v", err)
+	}
+	got, err := kms.UnwrapDataKey(context.Background(), wrapped, aad)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("UnwrapDataKey of a version 1 key = %x, %v; want %x", got, err, want)
+	}
+	if _, err := kms.UnwrapDataKey(context.Background(), wrapped, []byte("intruder")); !errors.Is(err, domain.ErrKeyUnavailable) {
+		t.Errorf("a version 1 key unwrapped for another owner: %v", err)
+	}
+	// New keys from the same master key are of version 2.
+	key, err := kms.GenerateDataKey(context.Background(), aad)
+	if err != nil || key.Wrapped[0] != 2 {
+		t.Fatalf("GenerateDataKey = version %v, %v; want version 2", key.Wrapped, err)
+	}
+}
+
+// FuzzUnwrapDataKey: no wrapped key, however malformed, makes the adapter
+// panic or hand out a key it did not wrap for the owner.
+func FuzzUnwrapDataKey(f *testing.F) {
+	path := filepath.Join(f.TempDir(), "master.json")
+	if err := local.Create(path, testPassphrase(), testParams(), rand.Reader); err != nil {
+		f.Fatalf("Create: %v", err)
+	}
+	kms, err := local.Open(path, testPassphrase())
+	if err != nil {
+		f.Fatalf("Open: %v", err)
+	}
+	key, err := kms.GenerateDataKey(context.Background(), []byte("owner"))
+	if err != nil {
+		f.Fatalf("GenerateDataKey: %v", err)
+	}
+	f.Add(key.Wrapped, []byte("owner"))
+	f.Add(append([]byte{1}, key.Wrapped[1+32:]...), []byte("owner"))
+	f.Add([]byte{2}, []byte(nil))
+	f.Fuzz(func(t *testing.T, wrapped, aad []byte) {
+		got, err := kms.UnwrapDataKey(context.Background(), wrapped, aad)
+		if err != nil {
+			if !errors.Is(err, domain.ErrKeyUnavailable) || got != nil {
+				t.Fatalf("UnwrapDataKey = %x, %v; want nil, %v", got, err, domain.ErrKeyUnavailable)
+			}
+			return
+		}
+		if !bytes.Equal(wrapped, key.Wrapped) || !bytes.Equal(aad, []byte("owner")) || !bytes.Equal(got, key.Plaintext) {
+			t.Fatalf("UnwrapDataKey(%x, %q) opened to %x", wrapped, aad, got)
+		}
+	})
 }
 
 func TestExists(t *testing.T) {

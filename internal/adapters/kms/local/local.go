@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,8 +37,20 @@ const (
 	saltSize      = 16
 	keyIDSize     = 8
 	keyIDPrefix   = "local:"
-	wrapVersion   = 1
 	fileMode      = 0o600
+
+	// wrapVersion1 is the first format of a wrapped key: every data key
+	// sealed directly under the master key with a random nonce. It is
+	// still read; it is no longer written (ADR-0031).
+	wrapVersion1 = 1
+	// wrapVersion2 seals every data key under a key of its own, derived
+	// from the master key and a random salt carried in the wrapped key.
+	wrapVersion2 = 2
+	// wrapSaltSize is the size of the salt of a version 2 wrapped key.
+	wrapSaltSize = 32
+	// wrapInfo is the HKDF context of the key a version 2 wrapped key is
+	// sealed under; the key ID follows it.
+	wrapInfo = "cactusfs kms/local wrap v2 "
 
 	// MinPassphraseLength is the shortest passphrase accepted.
 	MinPassphraseLength = 12
@@ -85,7 +99,11 @@ type keyFile struct {
 // KMS is a ports.KMS backed by a sealed local key file.
 type KMS struct {
 	keyID string
-	aead  cipher.AEAD
+	// master is the master key; it never leaves the process.
+	master []byte
+	// aead is AES-256-GCM under the master key itself, which only
+	// version 1 wrapped keys use.
+	aead cipher.AEAD
 }
 
 var _ ports.KMS = (*KMS)(nil)
@@ -177,13 +195,12 @@ func Open(path string, passphrase []byte) (*KMS, error) {
 	if err != nil || len(master) != keySize {
 		return nil, fmt.Errorf("kms/local.Open: %w: wrong passphrase or modified key file", domain.ErrKeyUnavailable)
 	}
-	defer clear(master)
-
 	aead, err := newGCM(master)
 	if err != nil {
+		clear(master)
 		return nil, fmt.Errorf("kms/local.Open: %w", err)
 	}
-	return &KMS{keyID: file.KeyID, aead: aead}, nil
+	return &KMS{keyID: file.KeyID, master: master, aead: aead}, nil
 }
 
 // validKeyID reports whether id has the fixed form "local:" plus 16
@@ -256,45 +273,89 @@ func (k *KMS) KeyID() string {
 	return k.keyID
 }
 
-// GenerateDataKey implements ports.KMS. A wrapped key is
+// GenerateDataKey implements ports.KMS. A wrapped key is, in version 2
+// (ADR-0031),
 //
-//	version (1 byte) || nonce (12 bytes) || AES-256-GCM(master key, data key)
+//	version (1 byte, 2) || salt (32 bytes) || nonce (12 bytes) ||
+//	AES-256-GCM(HKDF-SHA256(master key, salt, info || key ID), data key)
 //
-// with the key ID and the caller's aad as associated data.
+// with the key ID and the caller's aad as associated data. Every data key is
+// sealed under a key of its own, so the number of keys wrapped under one
+// master key is not bounded by the 2^32 random nonces AES-GCM allows a key.
 func (k *KMS) GenerateDataKey(ctx context.Context, aad []byte) (ports.DataKey, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.DataKey{}, fmt.Errorf("kms/local.GenerateDataKey: %w", err)
 	}
-	// One read of the system source for the key and the nonce.
-	random := make([]byte, keySize+k.aead.NonceSize())
+	nonceSize := k.aead.NonceSize()
+	// One read of the system source for the key, the salt and the nonce.
+	random := make([]byte, keySize+wrapSaltSize+nonceSize)
 	if _, err := io.ReadFull(randomSource(), random); err != nil {
 		return ports.DataKey{}, fmt.Errorf("kms/local.GenerateDataKey: read randomness: %w", err)
 	}
-	plaintext, nonce := random[:keySize], random[keySize:]
+	plaintext, salt, nonce := random[:keySize], random[keySize:keySize+wrapSaltSize], random[keySize+wrapSaltSize:]
 
-	wrapped := make([]byte, 0, 1+len(nonce)+keySize+k.aead.Overhead())
-	wrapped = append(wrapped, wrapVersion)
+	sealer, err := k.wrappingAEAD(salt)
+	if err != nil {
+		return ports.DataKey{}, fmt.Errorf("kms/local.GenerateDataKey: %w", err)
+	}
+	wrapped := make([]byte, 0, 1+wrapSaltSize+nonceSize+keySize+sealer.Overhead())
+	wrapped = append(wrapped, wrapVersion2)
+	wrapped = append(wrapped, salt...)
 	wrapped = append(wrapped, nonce...)
-	wrapped = k.aead.Seal(wrapped, nonce, plaintext, k.wrapAAD(aad))
+	wrapped = sealer.Seal(wrapped, nonce, plaintext, k.wrapAAD(aad))
 	return ports.DataKey{Plaintext: plaintext, Wrapped: wrapped}, nil
 }
 
-// UnwrapDataKey implements ports.KMS.
+// UnwrapDataKey implements ports.KMS. It reads both versions of a wrapped
+// key.
 func (k *KMS) UnwrapDataKey(ctx context.Context, wrapped, aad []byte) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("kms/local.UnwrapDataKey: %w", err)
 	}
-	nonceSize := k.aead.NonceSize()
-	if len(wrapped) < 1+nonceSize || wrapped[0] != wrapVersion {
-		return nil, fmt.Errorf("kms/local.UnwrapDataKey: %w: malformed wrapped key", domain.ErrKeyUnavailable)
+	malformed := fmt.Errorf("kms/local.UnwrapDataKey: %w: malformed wrapped key", domain.ErrKeyUnavailable)
+	if len(wrapped) == 0 {
+		return nil, malformed
 	}
-	nonce, ciphertext := wrapped[1:1+nonceSize], wrapped[1+nonceSize:]
-	plaintext, err := k.aead.Open(nil, nonce, ciphertext, k.wrapAAD(aad))
+	nonceSize := k.aead.NonceSize()
+	var sealer cipher.AEAD
+	var rest []byte
+	switch wrapped[0] {
+	case wrapVersion1:
+		sealer, rest = k.aead, wrapped[1:]
+	case wrapVersion2:
+		if len(wrapped) < 1+wrapSaltSize {
+			return nil, malformed
+		}
+		var err error
+		if sealer, err = k.wrappingAEAD(wrapped[1 : 1+wrapSaltSize]); err != nil {
+			return nil, fmt.Errorf("kms/local.UnwrapDataKey: %w", err)
+		}
+		rest = wrapped[1+wrapSaltSize:]
+	default:
+		return nil, malformed
+	}
+	if len(rest) < nonceSize {
+		return nil, malformed
+	}
+	nonce, ciphertext := rest[:nonceSize], rest[nonceSize:]
+	plaintext, err := sealer.Open(nil, nonce, ciphertext, k.wrapAAD(aad))
 	if err != nil || len(plaintext) != keySize {
 		return nil, fmt.Errorf("kms/local.UnwrapDataKey: %w: key was not wrapped by %s for this owner",
 			domain.ErrKeyUnavailable, k.keyID)
 	}
 	return plaintext, nil
+}
+
+// wrappingAEAD returns AES-256-GCM under the key one version 2 wrapped key
+// is sealed under: HKDF-SHA256 of the master key with the wrapped key's salt,
+// bound to this KMS key by the context.
+func (k *KMS) wrappingAEAD(salt []byte) (cipher.AEAD, error) {
+	key, err := hkdf.Key(sha256.New, k.master, salt, wrapInfo+k.keyID, keySize)
+	if err != nil {
+		return nil, fmt.Errorf("derive wrapping key: %w", err)
+	}
+	defer clear(key)
+	return newGCM(key)
 }
 
 // wrapAAD binds a wrapped key to this KMS key and to its owner. The key ID
