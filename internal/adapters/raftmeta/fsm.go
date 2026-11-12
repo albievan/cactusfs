@@ -224,6 +224,10 @@ type fsm struct {
 	// beforeApply, when set by a test (under mu), runs before every
 	// command is applied; it stands in for a slow disk.
 	beforeApply func()
+	// beforeSwap, when set by a test (under mu), runs in Restore after the
+	// state has been closed and before the snapshot takes its place; it
+	// stands in for a disk that fails there.
+	beforeSwap func()
 
 	// seen is the index of the last command entry whose effect is in the
 	// state. Reads on any node wait for it to reach the leader's.
@@ -1010,23 +1014,39 @@ func (f *fsm) Restore(source io.ReadCloser) error {
 		return fmt.Errorf("raftmeta.Restore: %w", err)
 	}
 
-	if f.db != nil {
-		if err := f.db.Close(); err != nil {
-			return fmt.Errorf("raftmeta.Restore: %w", err)
+	// From here on the state is closed: a failure leaves the state machine
+	// without one, and it stops - as when an entry cannot be applied - so
+	// that the node neither answers nor counts itself ready.
+	stop := func(err error) error {
+		f.failed = fmt.Errorf("metadata state machine stopped restoring a snapshot: %w", err)
+		if f.onFail != nil {
+			f.onFail(f.failed)
 		}
+		return fmt.Errorf("raftmeta.Restore: %w", err)
+	}
+	if f.db != nil {
+		err := f.db.Close()
 		f.db = nil
+		if err != nil {
+			return stop(err)
+		}
+	}
+	if f.beforeSwap != nil {
+		f.beforeSwap()
 	}
 	if err := f.root.Rename(restoreFile, stateFile); err != nil {
-		return fmt.Errorf("raftmeta.Restore: %w", err)
+		return stop(err)
 	}
 	db, err := openState(f.path, uint64(f.supported))
 	if err != nil {
-		f.failed = fmt.Errorf("metadata state machine stopped: %w", err)
-		return fmt.Errorf("raftmeta.Restore: %w", err)
+		return stop(err)
 	}
 	f.db = db
 	f.failed = nil
-	return f.loadSeen()
+	if err := f.loadSeen(); err != nil {
+		return stop(err)
+	}
+	return nil
 }
 
 func (f *fsm) writeSnapshotFile(source io.Reader) error {

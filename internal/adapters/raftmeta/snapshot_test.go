@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,5 +115,55 @@ func TestASnapshotThatClaimsMoreThanItHoldsIsMadeUpFromTheLog(t *testing.T) {
 	}
 	if len(names) != 3 {
 		t.Errorf("buckets after the start = %v, want one, three and two: no entry the snapshot claimed may be skipped", names)
+	}
+}
+
+// TestARestoreThatFailsAfterTheStateWasClosedStopsTheStateMachine (L37): once
+// Restore has closed the state, a failure leaves the state machine without
+// one. It must stop - be unhealthy and tell onFail - not stay half alive and
+// be counted ready.
+func TestARestoreThatFailsAfterTheStateWasClosedStopsTheStateMachine(t *testing.T) {
+	t.Parallel()
+	source := newFSM(t)
+	if r := result(t, source.Apply(command(t, 1, createBucket("bkt")))); r.err != nil {
+		t.Fatalf("Apply: %v", r.err)
+	}
+	taken, err := source.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var image bytes.Buffer
+	if _, err := taken.(*snapshot).tx.WriteTo(&image); err != nil {
+		t.Fatal(err)
+	}
+	taken.Release()
+
+	cases := map[string]func(f *fsm) func(){
+		"the snapshot cannot take the place of the state": func(f *fsm) func() {
+			return func() { _ = f.root.Remove(restoreFile) }
+		},
+		"the snapshot in place of the state cannot be opened": func(f *fsm) func() {
+			return func() { _ = f.root.WriteFile(restoreFile, []byte("not a database"), stateFileMode) }
+		},
+	}
+	for name, fail := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFSM(t)
+			var told []error
+			f.mu.Lock()
+			f.onFail = func(err error) { told = append(told, err) }
+			f.beforeSwap = fail(f)
+			f.mu.Unlock()
+			if err := f.Restore(io.NopCloser(bytes.NewReader(image.Bytes()))); err == nil {
+				t.Fatal("Restore succeeded; want it to fail")
+			}
+			if f.health() == nil {
+				t.Error("the state machine is healthy without a state; want it stopped")
+			}
+			if len(told) != 1 {
+				t.Errorf("onFail was told %d times, want once", len(told))
+			}
+		})
 	}
 }
