@@ -35,15 +35,37 @@ var (
 )
 
 // bound reports whether the signature of the request covers the content of
-// the body: through its SHA-256, through signed chunks, or through a digest
-// in a header, which is signed like every x-amz-* header and Content-MD5.
+// the body: through its SHA-256, through signed chunks, or through a
+// cryptographic digest in a header - x-amz-checksum-sha256 or Content-MD5 -
+// which is signed like every x-amz-* header and Content-MD5.
 // The body of an upload may go unsigned over TLS. A body that says what to
 // destroy may not: whoever holds a presigned URL for it would choose.
+//
+// A CRC binds nothing. It detects accidents, not intent: for any body and
+// any CRC32, CRC32C or CRC64NVME a body that says something else and has
+// the same checksum is computed in microseconds, so a signed CRC header
+// would let the holder of a presigned DeleteObjects choose what it deletes.
 func (p *payload) bound(payloadHash string) bool {
 	if p.chunked != nil {
 		return p.chunked.signer != nil
 	}
-	return payloadHash != payloadUnsigned || len(p.expectations) > 0
+	if payloadHash != payloadUnsigned {
+		// newPayload accepted it, so it is the SHA-256 of the body.
+		return true
+	}
+	for _, e := range p.expectations {
+		if bindingDigests()[e.header] {
+			return true
+		}
+	}
+	return false
+}
+
+// bindingDigests are the headers whose digest binds a body to the
+// signature that covers them: a second body with the same digest cannot be
+// found. The CRC family is missing on purpose (bound).
+func bindingDigests() map[string]bool {
+	return map[string]bool{"content-md5": true, checksumHeaderPrefix + "sha256": true}
 }
 
 // newChecksum returns the hash of an S3 checksum algorithm, by the name used

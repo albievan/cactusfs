@@ -10,7 +10,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash"
 	"hash/crc32"
+	"hash/crc64"
 	"io"
 	"net"
 	"net/http"
@@ -1555,6 +1557,123 @@ func TestBodiesThatDestroyMustBeSigned(t *testing.T) {
 	})
 	s.mustStatus(withDigest, http.StatusOK)
 	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/k"}), http.StatusNotFound, "NoSuchKey")
+}
+
+// forgeCRC32 returns template with some of its bytes changed so that its
+// CRC32 is want: the bit 0 of each byte at positions is flipped or not, as
+// solving the linear system the CRC is over GF(2) says. It is what anybody
+// who holds a body and its signed CRC can do, and why a CRC binds nothing.
+func forgeCRC32(t *testing.T, template []byte, positions []int, want uint32) []byte {
+	t.Helper()
+	if len(positions) > 64 {
+		t.Fatal("forgeCRC32: at most 64 positions")
+	}
+	base := crc32.ChecksumIEEE(template)
+	// For bodies of one length, crc(a^b^c) = crc(a)^crc(b)^crc(c): the
+	// effect of each flip on the CRC adds up.
+	type row struct {
+		delta uint32
+		flips uint64
+	}
+	var basis [32]*row
+	for i, at := range positions {
+		flipped := bytes.Clone(template)
+		flipped[at] ^= 1
+		r := &row{delta: crc32.ChecksumIEEE(flipped) ^ base, flips: 1 << i}
+		for bit := 31; bit >= 0 && r.delta != 0; bit-- {
+			if r.delta&(1<<bit) == 0 {
+				continue
+			}
+			if basis[bit] == nil {
+				basis[bit] = r
+				break
+			}
+			r.delta ^= basis[bit].delta
+			r.flips ^= basis[bit].flips
+		}
+	}
+	need, flips := base^want, uint64(0)
+	for bit := 31; bit >= 0; bit-- {
+		if need&(1<<bit) == 0 {
+			continue
+		}
+		if basis[bit] == nil {
+			t.Fatal("forgeCRC32: the positions do not reach every CRC")
+		}
+		need ^= basis[bit].delta
+		flips ^= basis[bit].flips
+	}
+	forged := bytes.Clone(template)
+	for i, at := range positions {
+		if flips&(1<<i) != 0 {
+			forged[at] ^= 1
+		}
+	}
+	if crc32.ChecksumIEEE(forged) != want {
+		t.Fatal("forgeCRC32: the forgery does not hold")
+	}
+	return forged
+}
+
+// TestOnlyCryptographicDigestsBindABody: of the digests a client can sign
+// in a header, Content-MD5 and x-amz-checksum-sha256 bind the body that
+// decides what is destroyed. The CRCs do not: one is forged here, and the
+// forged body, sent with the signed CRC of another, is refused.
+func TestOnlyCryptographicDigestsBindABody(t *testing.T) {
+	t.Parallel()
+	signed := []byte(`<Delete><Object><Key>k</Key></Object></Delete>`)
+	// A key of 64 letters h, each of which may turn into an i.
+	template := []byte(`<Delete><Object><Key>victim-` + strings.Repeat("h", 64) + `</Key></Object></Delete>`)
+	first := bytes.IndexByte(template, 'h')
+	positions := make([]int, 64)
+	for i := range positions {
+		positions[i] = first + i
+	}
+	forged := forgeCRC32(t, template, positions, crc32.ChecksumIEEE(signed))
+	victim := string(forged[bytes.Index(forged, []byte("victim-")):bytes.Index(forged, []byte("</Key>"))])
+
+	sumOf := func(h hash.Hash, data []byte) string {
+		h.Write(data)
+		return base64.StdEncoding.EncodeToString(h.Sum(nil))
+	}
+	cases := map[string]struct {
+		header string
+		value  string
+		body   []byte
+		status int
+	}{
+		"a forged body with the CRC32 of another": {"X-Amz-Checksum-Crc32", crc32Of(signed), forged, 400},
+		"a CRC32":     {"X-Amz-Checksum-Crc32", crc32Of(signed), signed, 400},
+		"a CRC32C":    {"X-Amz-Checksum-Crc32c", sumOf(crc32.New(crc32.MakeTable(crc32.Castagnoli)), signed), signed, 400},
+		"a CRC64NVME": {"X-Amz-Checksum-Crc64nvme", sumOf(crc64.New(crc64.MakeTable(crc64NVMEPolynomial)), signed), signed, 400},
+		"a SHA-256":   {"X-Amz-Checksum-Sha256", sumOf(sha256.New(), signed), signed, 200},
+		"Content-MD5": {"Content-MD5", contentMD5(signed), signed, 200},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestServer(t, "")
+			s.createBucket("bkt")
+			s.putObject("/bkt/k", []byte("kept"))
+			s.putObject("/bkt/"+victim, []byte("kept"))
+			// Whoever holds the URL may send it, and chooses the body.
+			link := s.presign(http.MethodPost, "/bkt?delete", serverNow, 600, map[string]string{tt.header: tt.value})
+			r := s.do(call{method: http.MethodPost, path: link, body: tt.body, unsigned: true, headers: map[string]string{tt.header: tt.value}})
+			if tt.status != http.StatusOK {
+				s.expectError(r, tt.status, "InvalidRequest")
+			} else {
+				s.mustStatus(r, http.StatusOK)
+			}
+			if got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/" + victim}), http.StatusOK); string(got.body) != "kept" {
+				t.Fatal("a body that was not signed chose what was deleted")
+			}
+			// The header-signed form is judged the same way.
+			r = s.do(call{method: http.MethodPost, path: "/bkt?delete", body: tt.body, payloadHash: payloadUnsigned, headers: map[string]string{tt.header: tt.value}})
+			if tt.status != http.StatusOK {
+				s.expectError(r, tt.status, "InvalidRequest")
+			}
+		})
+	}
 }
 
 func retentionBody(mode string, until time.Time) []byte {
