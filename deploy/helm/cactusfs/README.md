@@ -130,7 +130,7 @@ Keys are kept in a KMS; there is no unencrypted fallback.
 | `kms.type: local` | A sealed key file, for a node on its own: `kms.local.keyFileSecret` (key `kms.json`) and `kms.local.passphraseSecret` (key `passphrase`). Several nodes sharing one file is a development arrangement and needs `dev.localKMS: true` |
 
 The chart refuses to render what must not run: a number of voters other than 3 or 5,
-fewer than four nodes that store, a shared local key file without `dev.localKMS`, Vault
+fewer than four nodes that store, no node with the role `gateway`, a shared local key file without `dev.localKMS`, Vault
 with a NetworkPolicy that lets the nodes reach nothing, a missing Secret name.
 
 `ci/` has value sets to start from: a cluster with Vault (`cluster-values.yaml`), five

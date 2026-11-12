@@ -53,7 +53,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "cactusfs.validate" -}}
 {{- $root := . -}}
 {{- if or (gt (len .Release.Name) 40) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Release.Name)) -}}{{- fail (printf "the release name %q names every node: lower-case letters, digits and hyphens, at most 40 characters" .Release.Name) -}}{{- end -}}
-{{- $voters := 0 -}}{{- $stores := 0 -}}{{- $total := 0 -}}{{- $names := dict -}}
+{{- $voters := 0 -}}{{- $stores := 0 -}}{{- $gateways := 0 -}}{{- $total := 0 -}}{{- $names := dict -}}
 {{- range .Values.pools -}}
 {{- if not (kindIs "string" (.roles | default "")) -}}{{- fail (printf "pools: roles of pool %q is a string of names separated by commas" .name) -}}{{- end -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (.name | default "")) -}}{{- fail (printf "pools: the name %q is not lower-case letters, digits and hyphens" (.name | default "")) -}}{{- end -}}
@@ -67,8 +67,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $total = add $total (int .replicas) -}}
 {{- if include "cactusfs.hasRole" (dict "roles" .roles "role" "meta") -}}{{- $voters = add $voters (int .replicas) -}}{{- end -}}
 {{- if include "cactusfs.hasRole" (dict "roles" .roles "role" "storage") -}}{{- $stores = add $stores (int .replicas) -}}{{- end -}}
+{{- if include "cactusfs.hasRole" (dict "roles" .roles "role" "gateway") -}}{{- $gateways = add $gateways (int .replicas) -}}{{- end -}}
 {{- end -}}
 {{- if lt (int $total) 1 -}}{{- fail "pools: the cluster has no node" -}}{{- end -}}
+{{- /* Only a gateway serves S3 and the admin API: a cluster without one renders, starts and can be reached by nobody. */ -}}
+{{- if lt (int $gateways) 1 -}}{{- fail "pools: no node has the role gateway; a cluster needs at least one to serve S3 and the admin API" -}}{{- end -}}
 {{- if eq (int $total) 1 -}}
 {{- range .Values.pools -}}{{- if and (gt (int .replicas) 0) .roles -}}{{- fail "pools: a node on its own has every role; leave its roles empty" -}}{{- end -}}{{- end -}}
 {{- else -}}

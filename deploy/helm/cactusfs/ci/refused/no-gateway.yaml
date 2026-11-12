@@ -1,0 +1,5 @@
+# expect: no node has the role gateway
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+pools:
+  - {name: meta, replicas: 3, roles: "meta,storage"}
+  - {name: data, replicas: 1, roles: "storage,console"}
