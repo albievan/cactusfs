@@ -142,6 +142,8 @@ upgrade_dir=/var/run/secrets/cactusfs.io/kubernetes
 # The files of the update source (ADR-0029), each from a Secret of its own.
 update_ca=$(q "$V" '.updates.caSecret // ""')
 update_root=$(q "$V" '.updates.trustedRootSecret // ""')
+# The Secret of the root credentials, mounted as files.
+root_secret=$(q "$V" '.secrets.root')
 # update_file <resource> <document> <volume> <variable> <key> <Secret or "">
 update_file() {
 	if [ -n "$6" ]; then
@@ -419,6 +421,17 @@ while read -r id voter stores gateway <&4; do
 	# the setting names it; without the value, neither.
 	update_file "$R" "$D" update-ca CACTUSFS_UPDATE_CA ca.crt "$update_ca"
 	update_file "$R" "$D" update-trusted-root CACTUSFS_UPDATE_TRUSTED_ROOT trusted_root.json "$update_root"
+
+	# The root credentials: files of secrets.root, 0440 and read-only, and
+	# never a variable of the environment, which whatever the node starts
+	# or whatever inspects it can read.
+	want "$R" "no root credential in the environment" "$D" "[$C | .env[] | select(.name == \"CACTUSFS_ROOT_ACCESS_KEY\" or .name == \"CACTUSFS_ROOT_SECRET_KEY\")] | length" "0"
+	want "$R" "no variable of the environment from secrets.root" "$D" "[$C | .env[] | select(.valueFrom.secretKeyRef.name == \"$root_secret\")] | length" "0"
+	want "$R" "CACTUSFS_ROOT_ACCESS_KEY_FILE names the file of secrets.root" "$D" "$C | .env[] | select(.name == \"CACTUSFS_ROOT_ACCESS_KEY_FILE\") | .value" "/etc/cactusfs/root/access-key"
+	want "$R" "CACTUSFS_ROOT_SECRET_KEY_FILE names the file of secrets.root" "$D" "$C | .env[] | select(.name == \"CACTUSFS_ROOT_SECRET_KEY_FILE\") | .value" "/etc/cactusfs/root/secret-key"
+	want "$R" "the volume root-credentials is the keys access-key and secret-key of secrets.root, mode 0440" "$D" "$P.volumes[] | select(.name == \"root-credentials\") | .secret | [.secretName, .defaultMode, (.items | length), (.items | map(.key + \"=\" + .path) | join(\";\"))] | join(\",\")" "$root_secret,0440,2,access-key=access-key;secret-key=secret-key"
+	want "$R" "root-credentials mounted read-only into the cactusfs container and no other" "$D" "[(($P.containers // []) + ($P.initContainers // []))[] | select([(.volumeMounts // [])[] | select(.name == \"root-credentials\")] | length > 0) | .name] | join(\",\")" "cactusfs"
+	want "$R" "root-credentials mounted read-only where the variables name it" "$D" "$C | .volumeMounts[] | select(.name == \"root-credentials\") | [.mountPath, .readOnly] | join(\",\")" "/etc/cactusfs/root,true"
 
 	# Every container.
 	want "$R" "the container cactusfs" "$D" "[$C | .name] | join(\",\")" "cactusfs"

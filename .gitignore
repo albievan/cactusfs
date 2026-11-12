@@ -9,6 +9,8 @@
 # local state
 /.cache/
 /.data/
+# the secrets of the compose cluster, written by scripts/compose-secrets.sh
+/deploy/compose/secrets/
 
 # environment files, in any directory: they hold a deployment's own values,
 # and too easily a secret. That is every file named .env, .env.<anything> or

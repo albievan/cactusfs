@@ -51,7 +51,7 @@ can issue the certificates, and nothing requires it.
 
 | Value | Secret |
 |---|---|
-| `secrets.root` | Root credentials: keys `access-key` and `secret-key` |
+| `secrets.root` | Root credentials: keys `access-key` and `secret-key`, mounted read-only (mode 0440) at `/etc/cactusfs/root/` into the cactusfs container and named by `CACTUSFS_ROOT_ACCESS_KEY_FILE` and `CACTUSFS_ROOT_SECRET_KEY_FILE` - never put into its environment |
 | `secrets.tls` | The certificate of the S3 and admin listeners (`kubernetes.io/tls`: keys `tls.crt` and `tls.key`) |
 | `secrets.nodeCA` | The CA of node certificates: key `ca.crt`. Not for a node on its own |
 | `<node ID>-node-tls` | One for every node (`kubernetes.io/tls`); the suffix is `secrets.nodeTLSSuffix`. The certificate carries one DNS name, the node ID, and no IP address. A pod mounts its own and no other node's. Not for a node on its own |

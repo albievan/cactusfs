@@ -1,16 +1,19 @@
 # CactusFS — a four-node DEVELOPMENT cluster on one machine.
 #
 #   export CACTUSFS_KMS_PASSPHRASE="$(openssl rand -hex 24)"   # keep it: it opens the cluster's key
-#   make up            # or: docker compose -f deploy/compose/compose.yaml up -d --build
+#   make up            # or: scripts/compose-secrets.sh && docker compose -f deploy/compose/compose.yaml up -d --build
 #   make down          # stop; the volumes, and so the data, are kept
 #
 # What else the cluster can be told - the log level, the intervals of the
 # background work, a trace collector - is listed in .env.example beside this
 # file. Copy it to .env (git ignores it; `make up` hands it to compose when it
 # exists, and `docker compose` finds it there by itself) or export the
-# variables; a variable of the shell wins. Nothing here is read by the nodes
-# from a file: compose puts the values into their environment. Secrets do not
-# belong in .env: export them.
+# variables; a variable of the shell wins. Compose puts those values into the
+# environment of the nodes. Secrets belong neither in .env nor in the
+# environment of a container, where `inspect` shows them: export them, and
+# scripts/compose-secrets.sh (which `make up` runs) writes them into files of
+# deploy/compose/secrets/ (git ignores it), which compose hands to the nodes
+# as secrets - /run/secrets/<name>, named by CACTUSFS_*_FILE.
 #
 # The same file works with `docker compose` and with rootless `podman compose`:
 # no privileged port, no host network, nothing privileged, named volumes only.
@@ -33,8 +36,9 @@
 # S3 is served over TLS on https://localhost:9000 (node 1) to :9030 (node 4).
 # The CA to trust is /var/lib/cactusfs/config/s3-ca.pem in the config volume:
 #   docker compose -f deploy/compose/compose.yaml cp node1:/var/lib/cactusfs/config/s3-ca.pem .
-# Root credentials: set CACTUSFS_ROOT_ACCESS_KEY and CACTUSFS_ROOT_SECRET_KEY
-# before the first `up`. Otherwise one node generates a pair and prints it,
+# Root credentials: export CACTUSFS_ROOT_ACCESS_KEY and CACTUSFS_ROOT_SECRET_KEY
+# before the first `up` (scripts/compose-secrets.sh writes them into their
+# files). Otherwise their files are empty and one node generates a pair and prints it,
 # once, on its standard error - which here is the container log, so prefer
 # setting them. To find a generated pair:
 #   docker compose -f deploy/compose/compose.yaml logs | grep -A5 'generated root credentials'
@@ -60,6 +64,7 @@ x-node: &node
   cap_drop: ["ALL"]
   security_opt: ["no-new-privileges:true"]
   stop_grace_period: 40s
+  secrets: [kms-passphrase, root-access-key, root-secret-key]
 
 x-environment: &environment
   CACTUSFS_PEERS: node1=node1:9002,node2=node2:9002,node3=node3:9002,node4=node4:9002
@@ -67,9 +72,10 @@ x-environment: &environment
   CACTUSFS_META_DIR: /var/lib/cactusfs/meta
   CACTUSFS_KMS: local
   CACTUSFS_KMS_KEY_FILE: /var/lib/cactusfs/config/kms.json
-  CACTUSFS_KMS_PASSPHRASE: ${CACTUSFS_KMS_PASSPHRASE:?set CACTUSFS_KMS_PASSPHRASE to a passphrase of at least 12 characters}
-  CACTUSFS_ROOT_ACCESS_KEY: ${CACTUSFS_ROOT_ACCESS_KEY:-}
-  CACTUSFS_ROOT_SECRET_KEY: ${CACTUSFS_ROOT_SECRET_KEY:-}
+  # The files of the secrets below, never their values.
+  CACTUSFS_KMS_PASSPHRASE_FILE: /run/secrets/kms-passphrase
+  CACTUSFS_ROOT_ACCESS_KEY_FILE: /run/secrets/root-access-key
+  CACTUSFS_ROOT_SECRET_KEY_FILE: /run/secrets/root-secret-key
   CACTUSFS_NODE_TLS_CA: /var/lib/cactusfs/config/node-ca.pem
   CACTUSFS_TLS_CERT: /var/lib/cactusfs/config/s3.pem
   CACTUSFS_TLS_KEY: /var/lib/cactusfs/config/s3.key
@@ -97,9 +103,15 @@ services:
     build:
       context: ../..
       args: *build-args
-    command: ["dev-init", "--dir", "/var/lib/cactusfs/config", "--nodes", "node1,node2,node3,node4"]
-    environment:
-      CACTUSFS_KMS_PASSPHRASE: ${CACTUSFS_KMS_PASSPHRASE:?set CACTUSFS_KMS_PASSPHRASE to a passphrase of at least 12 characters}
+    command:
+      - dev-init
+      - --dir
+      - /var/lib/cactusfs/config
+      - --nodes
+      - node1,node2,node3,node4
+      - --kms-passphrase-file
+      - /run/secrets/kms-passphrase
+    secrets: [kms-passphrase]
     restart: "no"
     read_only: true
     cap_drop: ["ALL"]
@@ -206,6 +218,17 @@ services:
       - node4-meta:/var/lib/cactusfs/meta
       - node4-data1:/var/lib/cactusfs/data1
       - node4-data2:/var/lib/cactusfs/data2
+
+# Files of this machine, written by scripts/compose-secrets.sh and mounted
+# read-only at /run/secrets/<name> into the services that name them. Docker
+# compose and podman compose both take a secret of a file without a swarm.
+secrets:
+  kms-passphrase:
+    file: ./secrets/kms-passphrase
+  root-access-key:
+    file: ./secrets/root-access-key
+  root-secret-key:
+    file: ./secrets/root-secret-key
 
 volumes:
   config:

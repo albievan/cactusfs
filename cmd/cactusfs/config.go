@@ -88,6 +88,8 @@ const (
 	envUpdateCA        = "CACTUSFS_UPDATE_CA"
 	envUpdateRoot      = "CACTUSFS_UPDATE_TRUSTED_ROOT"
 	envUpgradeMode     = "CACTUSFS_UPGRADE_MODE"
+	envRootKeyIDFile   = "CACTUSFS_ROOT_ACCESS_KEY_FILE"
+	envRootKeyFile     = "CACTUSFS_ROOT_SECRET_KEY_FILE"
 )
 
 // Secrets are read from the environment only. They have no flag, because a
@@ -198,6 +200,12 @@ type serverConfig struct {
 	VaultCACert     string
 	VaultServerName string
 	VaultNamespace  string
+	// RootAccessKeyFile and RootSecretKeyFile name files that hold the root
+	// credentials a new deployment begins with, instead of the variables
+	// $CACTUSFS_ROOT_ACCESS_KEY and $CACTUSFS_ROOT_SECRET_KEY: a file
+	// mounted from a secret store is not in the environment of the process.
+	RootAccessKeyFile string
+	RootSecretKeyFile string
 	// AuditExport writes every audit record to standard output as a JSON
 	// line, next to the log.
 	AuditExport bool
@@ -802,8 +810,8 @@ func (c *serverConfig) validateDriveLabels() error {
 }
 
 func (c *serverConfig) validateSecrets() error {
-	if (c.secrets.rootAccessKey == "") != (c.secrets.rootSecretKey == "") {
-		return errors.New("set both $" + envRootKeyID + " and $" + envRootKeyValue + ", or neither")
+	if err := c.validateRootSecrets(); err != nil {
+		return err
 	}
 	if c.KMS == kmsVault {
 		return nil
@@ -814,8 +822,23 @@ func (c *serverConfig) validateSecrets() error {
 	if c.secrets.kmsPassphrase == "" && c.KMSPassphraseFile == "" {
 		return errors.New("the local KMS needs a passphrase: set $" + envKMSPhrase + " or --kms-passphrase-file")
 	}
-	if (c.secrets.rootAccessKey == "") != (c.secrets.rootSecretKey == "") {
-		return errors.New("set both $" + envRootKeyID + " and $" + envRootKeyValue + ", or neither")
+	return nil
+}
+
+// validateRootSecrets checks how the root credentials are given: each part
+// from its variable or from its file, not both, and both parts or neither.
+func (c *serverConfig) validateRootSecrets() error {
+	if c.secrets.rootAccessKey != "" && c.RootAccessKeyFile != "" {
+		return errors.New("set either $" + envRootKeyID + " or --root-access-key-file, not both")
+	}
+	if c.secrets.rootSecretKey != "" && c.RootSecretKeyFile != "" {
+		return errors.New("set either $" + envRootKeyValue + " or --root-secret-key-file, not both")
+	}
+	id := c.secrets.rootAccessKey != "" || c.RootAccessKeyFile != ""
+	secret := c.secrets.rootSecretKey != "" || c.RootSecretKeyFile != ""
+	if id != secret {
+		return errors.New("set both the root access key ($" + envRootKeyID + " or --root-access-key-file) and the root secret key ($" +
+			envRootKeyValue + " or --root-secret-key-file), or neither")
 	}
 	return nil
 }

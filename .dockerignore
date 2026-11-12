@@ -18,3 +18,5 @@ web/coverage
 *.env
 **/*.env
 !**/.env*.example
+# Nor do the secrets of the compose cluster (scripts/compose-secrets.sh).
+deploy/compose/secrets

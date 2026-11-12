@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -264,6 +265,37 @@ func TestParseServerConfig(t *testing.T) {
 		{name: "root access key without secret", args: dev(), env: withPassphrase(map[string]string{envRootKeyID: "ROOTKEY"}), wantErr: "or neither"},
 		{name: "root secret without access key", args: dev(), env: withPassphrase(map[string]string{envRootKeyValue: "s"}), wantErr: "or neither"},
 		{
+			name: "root credentials from files, by variable", args: dev(),
+			env:  withPassphrase(map[string]string{envRootKeyIDFile: "id.txt", envRootKeyFile: "secret.txt"}),
+			want: base(func(c *serverConfig) { c.RootAccessKeyFile, c.RootSecretKeyFile = "id.txt", "secret.txt" }),
+		},
+		{
+			name: "root credentials from files, by flag", args: dev("--root-access-key-file", "id.txt", "--root-secret-key-file", "secret.txt"),
+			env:  passphrase,
+			want: base(func(c *serverConfig) { c.RootAccessKeyFile, c.RootSecretKeyFile = "id.txt", "secret.txt" }),
+		},
+		{
+			name: "root access key by variable, secret from a file", args: dev("--root-secret-key-file", "secret.txt"),
+			env:  withPassphrase(map[string]string{envRootKeyID: "ROOTKEY"}),
+			want: base(func(c *serverConfig) { c.secrets.rootAccessKey, c.RootSecretKeyFile = "ROOTKEY", "secret.txt" }),
+		},
+		{name: "root access key file without secret", args: dev("--root-access-key-file", "id.txt"), env: passphrase, wantErr: "or neither"},
+		{name: "root secret key file without access key", args: dev("--root-secret-key-file", "s.txt"), env: passphrase, wantErr: "or neither"},
+		{
+			name: "root access key twice", args: dev("--root-access-key-file", "id.txt"),
+			env: withPassphrase(map[string]string{envRootKeyID: "ROOTKEY", envRootKeyValue: "s"}), wantErr: "--root-access-key-file, not both",
+		},
+		{
+			name: "root secret key twice", args: dev(),
+			env:     withPassphrase(map[string]string{envRootKeyID: "ROOTKEY", envRootKeyValue: "s", envRootKeyFile: "s.txt"}),
+			wantErr: "--root-secret-key-file, not both",
+		},
+		{
+			name: "root credentials twice with Vault", args: []string{"--dev-plaintext", "--data", dataDir, "--kms", "vault", "--vault-addr", "https://vault.test:8200", "--vault-key", "k", "--vault-token-file", "t"},
+			env:     map[string]string{envRootKeyID: "ROOTKEY", envRootKeyIDFile: "id.txt", envRootKeyValue: "s"},
+			wantErr: "not both",
+		},
+		{
 			name: "background work switched off", args: dev("--scrub-interval", "0", "--gc-interval", "0", "--scrub-rate-mib", "0", "--lifecycle-interval", "0"), env: passphrase,
 			want: base(func(c *serverConfig) { c.ScrubInterval, c.GCInterval, c.ScrubRateMiB, c.LifecycleInterval = 0, 0, 0, 0 }),
 		},
@@ -470,12 +502,23 @@ func TestSecretsHaveNoFlags(t *testing.T) {
 	if err == nil {
 		t.Fatal("--help did not stop parsing")
 	}
-	for _, forbidden := range []string{"-kms-passphrase ", "-root-secret", "-root-access-key", "-secret"} {
-		if strings.Contains(usageText.String(), forbidden) {
-			t.Errorf("server has a flag that takes a secret: %q", forbidden)
+	// A flag may name a file that holds a secret (--root-secret-key-file),
+	// and nothing else that sounds like one.
+	flags := regexp.MustCompile(`(?m)^\s+-([a-z0-9-]+)`).FindAllStringSubmatch(usageText.String(), -1)
+	if len(flags) == 0 {
+		t.Fatal("the usage lists no flag")
+	}
+	for _, flagName := range flags {
+		name := flagName[1]
+		secretive := strings.Contains(name, "secret") || strings.Contains(name, "access-key") || strings.Contains(name, "passphrase")
+		if secretive && !strings.HasSuffix(name, "-file") {
+			t.Errorf("server has a flag that takes a secret: %q", name)
 		}
 	}
-	for _, flagName := range []string{"-data", "-meta-dir", "-kms", "-kms-key-file", "-kms-passphrase-file", "-s3-addr", "-s3-domain", "-region"} {
+	for _, flagName := range []string{
+		"-data", "-meta-dir", "-kms", "-kms-key-file", "-kms-passphrase-file", "-s3-addr", "-s3-domain", "-region",
+		"-root-access-key-file", "-root-secret-key-file",
+	} {
 		if !strings.Contains(usageText.String(), flagName+" ") {
 			t.Errorf("usage does not document %s", flagName)
 		}

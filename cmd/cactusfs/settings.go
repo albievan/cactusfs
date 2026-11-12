@@ -387,6 +387,16 @@ func serverSettings() []settingSpec {
 			Usage:       "secret key of the root credentials a new deployment begins with; set it together with $" + envRootKeyID,
 			bind:        func(t *settingTargets) any { return &t.cfg.secrets.rootSecretKey },
 		},
+		{
+			Name: "root-access-key-file", Env: envRootKeyIDFile, Flag: true, Group: groupBootstrap, Kind: secretFile, Scope: node,
+			Usage: "`path` of a file holding the access key ID of the root credentials, instead of $" + envRootKeyID,
+			bind:  func(t *settingTargets) any { return &t.cfg.RootAccessKeyFile },
+		},
+		{
+			Name: "root-secret-key-file", Env: envRootKeyFile, Flag: true, Group: groupBootstrap, Kind: secretFile, Scope: node,
+			Usage: "`path` of a file holding the secret key of the root credentials, instead of $" + envRootKeyValue,
+			bind:  func(t *settingTargets) any { return &t.cfg.RootSecretKeyFile },
+		},
 
 		// Console sessions (ADR-0027). The same on every node: any gateway
 		// may be asked what a session is.

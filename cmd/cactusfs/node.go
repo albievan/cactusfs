@@ -352,9 +352,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		Ready: n.meta.Check, InFlight: n.inFlightAnywhere,
 	})
 
-	var provided *app.Credentials
-	if cfg.secrets.rootAccessKey != "" {
-		provided = &app.Credentials{AccessKeyID: cfg.secrets.rootAccessKey, SecretKey: cfg.secrets.rootSecretKey}
+	provided, err := rootCredentials(cfg)
+	if err != nil {
+		return err
 	}
 	generated, err := n.identities.EnsureRoot(ctx, provided)
 	if err != nil {

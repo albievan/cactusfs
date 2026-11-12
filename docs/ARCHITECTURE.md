@@ -215,6 +215,8 @@ test. The binary reads no file of variables: what starts it hands it its environ
 |---|---|---|---|
 | — (no flag: a secret) | `CACTUSFS_ROOT_ACCESS_KEY` | generated, and shown once, by a new deployment | access key ID of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_SECRET_KEY. A secret: from the environment only, never shown |
 | — (no flag: a secret) | `CACTUSFS_ROOT_SECRET_KEY` | generated, and shown once, by a new deployment | secret key of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_ACCESS_KEY. A secret: from the environment only, never shown |
+| `--root-access-key-file` | `CACTUSFS_ROOT_ACCESS_KEY_FILE` | — | path of a file holding the access key ID of the root credentials, instead of $CACTUSFS_ROOT_ACCESS_KEY. The file holds a secret: its path is not shown with the node's settings |
+| `--root-secret-key-file` | `CACTUSFS_ROOT_SECRET_KEY_FILE` | — | path of a file holding the secret key of the root credentials, instead of $CACTUSFS_ROOT_SECRET_KEY. The file holds a secret: its path is not shown with the node's settings |
 
 **Console sessions: how long one lasts, and what becomes of it while it uploads**
 

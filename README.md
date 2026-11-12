@@ -203,7 +203,9 @@ the environment (or from a file, `--kms-passphrase-file`), never from the comman
 On its first start the node prints, **once** and on standard error, the root credentials
 it generated - an API key. Store them: they cannot be shown again. To choose them
 yourself, set `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY` before the first
-start (both, or neither).
+start (both, or neither) - or name files that hold them, `--root-access-key-file` and
+`--root-secret-key-file` (`CACTUSFS_ROOT_ACCESS_KEY_FILE`, `CACTUSFS_ROOT_SECRET_KEY_FILE`),
+which keeps them out of the environment of the process.
 
 ```sh
 export AWS_ACCESS_KEY_ID=…  AWS_SECRET_ACCESS_KEY=…  AWS_DEFAULT_REGION=us-east-1
@@ -235,8 +237,10 @@ A new deployment has two kinds of credentials, and they are not the same thing:
   users, policies. The audit trail shows whether anybody signed in first. The compose cluster publishes the admin port on `127.0.0.1` only for this
   reason, and the chart opens it to nobody until you say who.
 - **API: the root key.** Generated and printed once at the first start, or the pair you
-  set in `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY` (with the chart: the
-  Secret named in `secrets.root`, keys `access-key` and `secret-key`). It works for S3,
+  set in `CACTUSFS_ROOT_ACCESS_KEY` and `CACTUSFS_ROOT_SECRET_KEY`, or in the files
+  `CACTUSFS_ROOT_ACCESS_KEY_FILE` and `CACTUSFS_ROOT_SECRET_KEY_FILE` name (with the
+  chart: the Secret named in `secrets.root`, keys `access-key` and `secret-key`, mounted
+  as files; with compose: the files `scripts/compose-secrets.sh` writes). It works for S3,
   for the management API and in Swagger UI. **There is no default API key.**
 
 ## Addresses
@@ -406,6 +410,8 @@ there as "set" or "not set" and nothing else.
 |---|---|---|---|
 | — (no flag: a secret) | `CACTUSFS_ROOT_ACCESS_KEY` | generated, and shown once, by a new deployment | access key ID of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_SECRET_KEY. A secret: from the environment only, never shown |
 | — (no flag: a secret) | `CACTUSFS_ROOT_SECRET_KEY` | generated, and shown once, by a new deployment | secret key of the root credentials a new deployment begins with; set it together with $CACTUSFS_ROOT_ACCESS_KEY. A secret: from the environment only, never shown |
+| `--root-access-key-file` | `CACTUSFS_ROOT_ACCESS_KEY_FILE` | — | path of a file holding the access key ID of the root credentials, instead of $CACTUSFS_ROOT_ACCESS_KEY. The file holds a secret: its path is not shown with the node's settings |
+| `--root-secret-key-file` | `CACTUSFS_ROOT_SECRET_KEY_FILE` | — | path of a file holding the secret key of the root credentials, instead of $CACTUSFS_ROOT_SECRET_KEY. The file holds a secret: its path is not shown with the node's settings |
 
 **Console sessions: how long one lasts, and what becomes of it while it uploads**
 
@@ -506,7 +512,8 @@ besides runs what follows a space in a value as a command and expands `$`: use t
 Keep secrets out of that file: `CACTUSFS_KMS_PASSPHRASE` and the root credentials come
 from a secret store (a Kubernetes Secret, the secrets of the container engine, the
 service manager), and the files that hold a key or a token (`--tls-key`, `--node-tls-key`,
-`--kms-key-file`, `--kms-passphrase-file`, `--vault-token-file`) stay outside the
+`--kms-key-file`, `--kms-passphrase-file`, `--root-access-key-file`,
+`--root-secret-key-file`, `--vault-token-file`) stay outside the
 repository. A file named `.env`, `.env.<anything>` or `<anything>.env` - `cactusfs.env`,
 say - is ignored by git in every directory and is left out of the build context of the
 image (`.gitignore`, `.dockerignore`); `*.example` files are the exception, and hold no
@@ -565,8 +572,15 @@ aws --endpoint-url https://localhost:9030 --ca-bundle s3-ca.pem s3 ls        # a
 make down                                                   # stops it; the volumes, and so the data, stay
 ```
 
-The passphrase must be the same at every start. Without root credentials in the
-environment one node generates a pair and prints it once, into the container log:
+The passphrase must be the same at every start. No secret enters the environment of a
+container, where the engine's `inspect` would show it: `make up` first runs
+`scripts/compose-secrets.sh`, which writes the exported passphrase and root credentials
+into files of `deploy/compose/secrets/` (a directory of yours alone, ignored by git and
+left out of the build context), and compose hands those to the nodes as secrets, at
+`/run/secrets/<name>`. Without `make`, run the script before `docker compose up` or
+`podman compose up`. The files hold the secrets in plain text on this machine: this is
+a development cluster. Without root credentials one node generates a pair and prints it
+once, into the container log:
 `docker compose -f deploy/compose/compose.yaml logs | grep -A5 'generated root credentials'`.
 
 Published on this machine: S3 on `9000`, `9010`, `9020` and `9030` (nodes 1 to 4, on
@@ -584,9 +598,8 @@ background work, a trace collector, the ports on this machine - is listed in
 [`deploy/compose/.env.example`](deploy/compose/.env.example). Copy it to
 `deploy/compose/.env` and take the `#` off what you set: `make up` hands the file to
 compose when it exists, and starts the cluster the same without one. Compose puts the
-values into the environment of the nodes, which read no file themselves; a variable
-exported in the shell wins over the file, and the secrets are exported, not written into
-it. Each node is told the name of the volume behind each of its drives
+values into the environment of the nodes; a variable exported in the shell wins over the
+file, and the secrets are exported, not written into it. Each node is told the name of the volume behind each of its drives
 (`CACTUSFS_DRIVE_LABELS`: `cactusfs_node1-data1`, ...; with the chart, the claims
 `data1-<node>-0`, ...), which the Settings screen shows beside the directory.
 

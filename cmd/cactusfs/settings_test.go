@@ -91,7 +91,7 @@ func TestSettingsClassification(t *testing.T) {
 	t.Parallel()
 	kinds := map[cluster.SettingKind][]string{
 		cluster.SettingSecret:     {"kms-passphrase", "root-access-key", "root-secret-key"},
-		cluster.SettingSecretFile: {"kms-key-file", "kms-passphrase-file", "node-tls-key", "tls-key", "vault-token-file"},
+		cluster.SettingSecretFile: {"kms-key-file", "kms-passphrase-file", "node-tls-key", "root-access-key-file", "root-secret-key-file", "tls-key", "vault-token-file"},
 		cluster.SettingURL:        {"otlp-endpoint", "update-source", "vault-addr"},
 		cluster.SettingPath: {
 			"data", "meta-dir", "node-tls-ca", "node-tls-cert", "tls-cert", "update-ca", "update-trusted-root", "vault-ca-cert",

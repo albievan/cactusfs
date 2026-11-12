@@ -171,6 +171,8 @@ run: build
 # engine's own compose (docker compose, or podman compose). The KMS passphrase
 # comes from the environment and must be the same at every start:
 #   export CACTUSFS_KMS_PASSPHRASE='...'; make up
+# scripts/compose-secrets.sh writes it, and the root credentials when they are
+# exported, into the files compose hands to the nodes as secrets.
 # What else the cluster can be told is listed in deploy/compose/.env.example.
 # A copy of it named deploy/compose/.env (git ignores it) is handed to compose
 # when it exists, and only then: the cluster starts without one. A variable of
@@ -179,6 +181,7 @@ COMPOSE_ENV_FILE := deploy/compose/.env
 COMPOSE := $(ENGINE) compose $(if $(wildcard $(COMPOSE_ENV_FILE)),--env-file $(COMPOSE_ENV_FILE)) -f deploy/compose/compose.yaml
 
 up:
+	@scripts/compose-secrets.sh
 	CACTUSFS_BUILD=$(BUILD) CACTUSFS_COMMIT=$(COMMIT) $(COMPOSE) up -d --build
 	@echo "make up: S3 on https://localhost:9000 (node1), :9010, :9020, :9030 - see deploy/compose/compose.yaml"
 

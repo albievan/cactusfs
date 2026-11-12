@@ -176,7 +176,14 @@ func TestExamplesCarryNoSecret(t *testing.T) {
 				t.Errorf("%s: %s is a secret, or names a file that holds one, and has a value", example, name)
 			}
 		}
-		if found == 0 {
+		// The compose cluster's secrets reach its nodes as files of compose
+		// secrets (scripts/compose-secrets.sh), never through a variable
+		// compose reads: its example has no line of one to fill in.
+		compose := example == "deploy/compose/.env.example"
+		if compose && found != 0 {
+			t.Errorf("%s: %d lines of a secret - the compose cluster takes none from a variable", example, found)
+		}
+		if !compose && found == 0 {
 			t.Errorf("%s: no line of a secret was found - the test no longer reads the file as it is written", example)
 		}
 	}

@@ -63,6 +63,10 @@ Usage of cactusfs server:
     	how many versions are replicated to other sites at once, 1 to 32; no effect yet: read once notifications and replication exist (PLAN 8B, 8C) ($CACTUSFS_REPLICATION_WORKERS) (default 4)
   -roles roles
     	roles of this node: gateway, meta, storage, console; default all ($CACTUSFS_ROLES)
+  -root-access-key-file path
+    	path of a file holding the access key ID of the root credentials, instead of $CACTUSFS_ROOT_ACCESS_KEY ($CACTUSFS_ROOT_ACCESS_KEY_FILE)
+  -root-secret-key-file path
+    	path of a file holding the secret key of the root credentials, instead of $CACTUSFS_ROOT_SECRET_KEY ($CACTUSFS_ROOT_SECRET_KEY_FILE)
   -rpc-addr address
     	listen address of node RPC ($CACTUSFS_RPC_ADDR) (default ":9002")
   -s3-addr address

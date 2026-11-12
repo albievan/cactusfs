@@ -177,10 +177,10 @@ spec:
             - {name: CACTUSFS_KMS_KEY_FILE, value: /etc/cactusfs/kms/kms.json}
             - {name: CACTUSFS_KMS_PASSPHRASE_FILE, value: /etc/cactusfs/kms-passphrase/passphrase}
             {{- end }}
-            - name: CACTUSFS_ROOT_ACCESS_KEY
-              valueFrom: {secretKeyRef: {name: {{ $root.Values.secrets.root | quote }}, key: access-key}}
-            - name: CACTUSFS_ROOT_SECRET_KEY
-              valueFrom: {secretKeyRef: {name: {{ $root.Values.secrets.root | quote }}, key: secret-key}}
+            # Files, not variables: what is in the environment of a process
+            # is read by whatever it starts and shown by whatever inspects it.
+            - {name: CACTUSFS_ROOT_ACCESS_KEY_FILE, value: /etc/cactusfs/root/access-key}
+            - {name: CACTUSFS_ROOT_SECRET_KEY_FILE, value: /etc/cactusfs/root/secret-key}
             {{- range $key, $name := dict "region" "CACTUSFS_TOPOLOGY_REGION" "zone" "CACTUSFS_TOPOLOGY_ZONE" "rack" "CACTUSFS_TOPOLOGY_RACK" }}
             {{- with index ($pool.topology | default dict) $key }}
             - {name: {{ $name }}, value: {{ . | quote }}}
@@ -235,6 +235,7 @@ spec:
             {{- end }}
             {{- end }}
             - {name: tls, mountPath: /etc/cactusfs/tls, readOnly: true}
+            - {name: root-credentials, mountPath: /etc/cactusfs/root, readOnly: true}
             {{- if $clustered }}
             - {name: node-ca, mountPath: /etc/cactusfs/node-ca, readOnly: true}
             - {name: node-tls, mountPath: /etc/cactusfs/node-tls, readOnly: true}
@@ -260,6 +261,11 @@ spec:
       volumes:
         - name: tls
           secret: {secretName: {{ $root.Values.secrets.tls | quote }}, defaultMode: 0440}
+        - name: root-credentials
+          secret:
+            secretName: {{ $root.Values.secrets.root | quote }}
+            defaultMode: 0440
+            items: [{key: access-key, path: access-key}, {key: secret-key, path: secret-key}]
         {{- if $clustered }}
         - name: node-ca
           secret: {secretName: {{ $root.Values.secrets.nodeCA | quote }}, defaultMode: 0440, items: [{key: ca.crt, path: ca.crt}]}
