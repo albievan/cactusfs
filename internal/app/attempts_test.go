@@ -1,9 +1,9 @@
 package app_test
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"maps"
-	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -90,14 +90,20 @@ func TestTheAttemptLimiterForgetsAsBefore(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%d per window, %d windows, %d keys", tt.limit, tt.capacity, tt.keys), func(t *testing.T) {
 			t.Parallel()
-			random := rand.New(rand.NewPCG(uint64(tt.capacity), uint64(tt.keys)))
+			// The steps are drawn from a hash of the case and the step, so
+			// that every run takes the same ones.
+			draw := func(step int) (key, op int) {
+				h := sha256.Sum256(fmt.Appendf(nil, "%d/%d/%d", tt.capacity, tt.keys, step))
+				return int(h[0]) % tt.keys, int(h[1]) % 20
+			}
 			got := app.NewAttemptLimiter(tt.limit, tt.window, tt.capacity)
 			want := &referenceLimiter{limit: tt.limit, capacity: tt.capacity, window: tt.window, failed: map[string]*referenceWindow{}}
 			now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
 			for step := range 20_000 {
 				now = now.Add(time.Millisecond)
-				key := fmt.Sprintf("key-%d", random.IntN(tt.keys))
-				switch op := random.IntN(20); {
+				drawn, op := draw(step)
+				key := fmt.Sprintf("key-%d", drawn)
+				switch {
 				case op == 0:
 					now = now.Add(tt.window / 3)
 				case op < 4:

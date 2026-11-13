@@ -601,7 +601,7 @@ func (h *heard) Read(b []byte) (int, error) {
 	n, err := h.Conn.Read(b)
 	if n > 0 && !h.first {
 		h.first = true
-		if deadline := h.Conn.SetReadDeadline(h.until); deadline != nil && err == nil {
+		if deadline := h.SetReadDeadline(h.until); deadline != nil && err == nil {
 			err = deadline
 		}
 	}
