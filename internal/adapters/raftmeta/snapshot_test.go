@@ -62,7 +62,11 @@ func TestASnapshotThatClaimsMoreThanItHoldsIsMadeUpFromTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	var old bytes.Buffer
-	if _, err := held.(*snapshot).tx.WriteTo(&old); err != nil {
+	heldSnapshot, ok := held.(*snapshot)
+	if !ok {
+		t.Fatalf("the snapshot is a %T", held)
+	}
+	if _, err := heldSnapshot.tx.WriteTo(&old); err != nil {
 		t.Fatal(err)
 	}
 	held.Release()
@@ -133,7 +137,11 @@ func TestARestoreThatFailsAfterTheStateWasClosedStopsTheStateMachine(t *testing.
 		t.Fatal(err)
 	}
 	var image bytes.Buffer
-	if _, err := taken.(*snapshot).tx.WriteTo(&image); err != nil {
+	takenSnapshot, ok := taken.(*snapshot)
+	if !ok {
+		t.Fatalf("the snapshot is a %T", taken)
+	}
+	if _, err := takenSnapshot.tx.WriteTo(&image); err != nil {
 		t.Fatal(err)
 	}
 	taken.Release()
