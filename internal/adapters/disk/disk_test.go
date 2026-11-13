@@ -687,3 +687,33 @@ func TestMediaErrorsAreDamage(t *testing.T) {
 		})
 	}
 }
+
+// TestAWriterThatOutlivesItsDriveFails: a heal or a write that stopped waiting
+// for a drive may still commit to it while the node stops and closes it. That
+// commit, and anything else asked of the closed drive, fails; nothing panics.
+func TestAWriterThatOutlivesItsDriveFails(t *testing.T) {
+	t.Parallel()
+	d := openDrive(t, t.TempDir())
+	w, err := d.Create(context.Background(), shardID(7, 0))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte{1}, 1000)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := w.Commit(context.Background()); err == nil {
+		t.Fatal("a commit to a closed drive succeeded")
+	}
+	if _, err := d.Create(context.Background(), shardID(8, 0)); err == nil {
+		t.Fatal("a shard was created on a closed drive")
+	}
+	if _, err := readShard(d, shardID(7, 0)); err == nil {
+		t.Fatal("a shard was read from a closed drive")
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("a second Close: %v", err)
+	}
+}

@@ -68,6 +68,12 @@ type Drive struct {
 	// visible, which keeps shards immutable within this process; the drive
 	// lock keeps other processes out.
 	commit sync.Mutex
+	// closing makes Close happen once. Close closes root and does not clear
+	// it: a writer given up on - a heal or a write that stopped waiting for
+	// this drive - may still commit while the node stops, and then gets an
+	// error from the closed root, not a nil one.
+	closing  sync.Once
+	closeErr error
 	// seq numbers temporary files.
 	seq atomic.Uint64
 }
@@ -237,18 +243,20 @@ func (d *Drive) clearTmp() error {
 	return nil
 }
 
-// Close releases the drive lock and the directory handle.
+// Close releases the drive lock and the directory handle. It may be called
+// more than once, and while a shard is being written: that write then fails.
 func (d *Drive) Close() error {
-	var errs []error
-	if d.lock != nil {
-		errs = append(errs, unlock(d.lock), d.lock.Close())
-		d.lock = nil
-	}
-	if d.root != nil {
-		errs = append(errs, d.root.Close())
-		d.root = nil
-	}
-	return errors.Join(errs...)
+	d.closing.Do(func() {
+		var errs []error
+		if d.lock != nil {
+			errs = append(errs, unlock(d.lock), d.lock.Close())
+		}
+		if d.root != nil {
+			errs = append(errs, d.root.Close())
+		}
+		d.closeErr = errors.Join(errs...)
+	})
+	return d.closeErr
 }
 
 // Empty reports whether the drive held no shard when it was opened. It is a
