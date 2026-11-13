@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,6 +252,8 @@ type stallingDrive struct {
 	ports.ShardStore
 	step    string // "create", "write" or "commit"
 	release chan struct{}
+	// writes, when set, counts the calls of Write of the drive's writers.
+	writes *atomic.Int32
 }
 
 func (d stallingDrive) hang(ctx context.Context) error {
@@ -284,6 +287,9 @@ type stallingWriter struct {
 }
 
 func (w stallingWriter) Write(p []byte) (int, error) {
+	if w.drive.writes != nil {
+		w.drive.writes.Add(1)
+	}
 	if w.drive.step == "write" {
 		<-w.drive.release
 		return 0, errBoom
@@ -302,13 +308,20 @@ func (w stallingWriter) Commit(ctx context.Context) error {
 // which the drives listed hang at step, with short deadlines.
 func (f *fixture) stallingService(t *testing.T, step string, stalled ...int) *app.ObjectService {
 	t.Helper()
+	return f.countingStallingService(t, step, nil, stalled...)
+}
+
+// countingStallingService is stallingService, counting in writes the calls
+// of Write of the stalled drives' writers.
+func (f *fixture) countingStallingService(t *testing.T, step string, writes *atomic.Int32, stalled ...int) *app.ObjectService {
+	t.Helper()
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	drives := make([]ports.ShardStore, len(f.drives))
 	for i, d := range f.drives {
 		drives[i] = d
 		if slices.Contains(stalled, i) {
-			drives[i] = stallingDrive{ShardStore: d, step: step, release: release}
+			drives[i] = stallingDrive{ShardStore: d, step: step, release: release, writes: writes}
 		}
 	}
 	return f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
@@ -381,6 +394,34 @@ func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
 			}
 		})
 	}
+
+	// A shard whose Write missed its deadline in one stripe is dropped for
+	// the rest of the object: its writer is not handed a chunk of any later
+	// stripe, which would cost each stripe another deadline (review of
+	// 2026-11-13).
+	t.Run("write, several stripes", func(t *testing.T) {
+		t.Parallel()
+		f := erasureFixture(t)
+		var writes atomic.Int32
+		objects := f.countingStallingService(t, "write", &writes, 0)
+		data := randomBytes(t, multiStripe)
+		if _, err := within(t, "Put", func() (object.Version, error) {
+			return objects.Put(context.Background(), porttest.Root(), app.PutInput{
+				Bucket: "b", Key: "k", Body: bytes.NewReader(data), Size: int64(len(data)),
+			})
+		}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if n := writes.Load(); n != 1 {
+			t.Errorf("the hanging drive's writer was given %d writes over %d stripes, want 1", n, multiStripe/erasure.DefaultStripeSize+1)
+		}
+		if n := len(f.drives[0].IDs()); n != 0 {
+			t.Errorf("the hanging drive holds %d shards", n)
+		}
+		if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("Get: %v", err)
+		}
+	})
 
 	// Too many hanging drives still fail the write rather than store it
 	// below its write quorum.
