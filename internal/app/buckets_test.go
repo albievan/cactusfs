@@ -259,7 +259,7 @@ func TestAuthorizerAndBucketPolicies(t *testing.T) {
 	if err := buckets.SetPolicy(ctx, anonymous(), "site", policy); !errors.Is(err, domain.ErrAccessDenied) {
 		t.Errorf("SetPolicy by nobody = %v", err)
 	}
-	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", []byte(`{"Version":"2012-10-17"}`)); !errors.Is(err, domain.ErrInvalidArgument) {
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", []byte(`{"Version":"2012-10-17"}`)); !errors.Is(err, domain.ErrInvalidArgument) || !errors.Is(err, domain.ErrInvalidPolicy) {
 		t.Errorf("SetPolicy with a document that is none = %v", err)
 	}
 	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", policy); err != nil {
@@ -1057,5 +1057,54 @@ func TestListDetailedSummaries(t *testing.T) {
 				list(map[string]*iam.BucketPolicySummary{"alpha": {Statements: 2, OpenToAnyone: true}, "delta": {Statements: 3}})
 			})
 		}
+	}
+}
+
+// TestSetPolicyRefusesAPolicyThatCannotBeKept: every document the bucket
+// policy parser refuses is a domain.ErrInvalidPolicy - which the management
+// API answers 400 InvalidPolicy - and an argument error still; nothing is
+// stored, and the policy the bucket had is kept.
+func TestSetPolicyRefusesAPolicyThatCannotBeKept(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	meta := porttest.NewMemMetadata()
+	clock := porttest.NewClock(testNow)
+	if err := meta.CreateBucket(ctx, bucket.Bucket{Name: "site"}); err != nil {
+		t.Fatal(err)
+	}
+	authz := app.NewAuthorizer(slog.New(slog.DiscardHandler), clock, nil).WithBucketPolicies(meta)
+	buckets := app.NewBucketService(meta, authz, clock)
+	kept := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`)
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "site", kept); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		document string
+	}{
+		{"not JSON", `not a policy`},
+		{"no statement", `{"Version":"2012-10-17"}`},
+		{"no principal", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`},
+		{"another bucket", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::other/*"}]}`},
+		{"an action that is not S3's", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"admin:ListUsers","Resource":"arn:aws:s3:::site"}]}`},
+		{"governance bypass", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:BypassGovernanceRetention","Resource":"arn:aws:s3:::site/*"}]}`},
+		{"larger than allowed", `{"Version":"2012-10-17","Statement":[{"Sid":"` + strings.Repeat("x", iam.MaxPolicyBytes) + `","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := buckets.SetPolicy(ctx, porttest.Root(), "site", []byte(tt.document))
+			if !errors.Is(err, domain.ErrInvalidPolicy) || !errors.Is(err, domain.ErrInvalidArgument) {
+				t.Errorf("SetPolicy = %v, want an ErrInvalidPolicy", err)
+			}
+			if got, err := buckets.Policy(ctx, porttest.Root(), "site"); err != nil || string(got) != string(kept) {
+				t.Errorf("the policy after a refused one = %s, %v", got, err)
+			}
+		})
+	}
+	// Errors that are not about the document are not ErrInvalidPolicy.
+	elsewhere := bytes.ReplaceAll(kept, []byte(":::site/"), []byte(":::nowhere/"))
+	if err := buckets.SetPolicy(ctx, porttest.Root(), "nowhere", elsewhere); !errors.Is(err, domain.ErrBucketNotFound) || errors.Is(err, domain.ErrInvalidPolicy) {
+		t.Errorf("SetPolicy on a bucket that is not there = %v", err)
 	}
 }

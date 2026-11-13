@@ -261,8 +261,14 @@ export interface paths {
          * @description The sub-buckets of the bucket (ADR-0017), in name order, at most 10. A sub-bucket is a named
          *     first-level prefix of its bucket: its objects are the keys that begin with its name and a slash, and
          *     S3 clients address them as keys of the bucket. A caller who holds `s3:ListSubBuckets` on the bucket
-         *     is given every one; any other caller is given those whose keys they may list, which may be none -
-         *     an empty list, not a refusal.
+         *     is given every one. Any other caller is given those whose keys they may list; one they may not is
+         *     left out, and nothing says it is there. A list is never given a policy: `getSubBucket` reads one.
+         *
+         *     A caller who may list the bucket's keys and is shown none is given an empty list. A caller to whom
+         *     nothing of the bucket is visible - who may neither list its sub-buckets, nor its keys, nor the keys
+         *     of any of its sub-buckets - is refused with 403 (`code` is `AccessDenied`), and is not told whether
+         *     the bucket is there: they are refused so for a bucket that is not there too. A caller who may list
+         *     the bucket or its sub-buckets is told 404 (`code` is `NoSuchBucket`) for one that is not there.
          */
         get: operations["listSubBuckets"];
         put?: never;
@@ -2068,7 +2074,11 @@ export interface components {
         RoleUpdate: {
             policies: components["schemas"]["Name"][];
         };
-        /** @description A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). */
+        /**
+         * @description A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+         *     server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+         *     is larger than 20 KiB as sent, is refused.
+         */
         PolicyDocument: {
             [key: string]: unknown;
         };

@@ -447,8 +447,6 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucketNotifications", "putBucketNotifications", "deleteBucketNotifications",
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",
-		"getBucketPolicy", "putBucketPolicy", "deleteBucketPolicy",
-		"listSubBuckets", "getSubBucket", "putSubBucket", "deleteSubBucket",
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
 	// unlocking does: with a key they are asked as without one.

@@ -19,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -619,11 +620,7 @@ func documentOf(d iam.Document) (api.PolicyDocument, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out api.PolicyDocument
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return api.PolicyDocument(raw), nil
 }
 
 func keyOf(k iam.APIKey) (api.APIKey, error) {
@@ -662,11 +659,7 @@ func (o *operations) CreateAPIKey(ctx context.Context, request api.CreateAPIKeyR
 	if b := request.Body; b != nil {
 		in.Description, in.ExpiresAt = optional(b.Description), optional(b.ExpiresAt)
 		if b.InlinePolicy != nil {
-			raw, err := json.Marshal(*b.InlinePolicy)
-			if err != nil {
-				return nil, fmt.Errorf("%w: inline policy: %w", domain.ErrInvalidArgument, err)
-			}
-			in.InlinePolicy = raw
+			in.InlinePolicy = policyBytes(*b.InlinePolicy)
 		}
 	}
 	creds, key, err := o.h.cfg.IAM.CreateAPIKey(ctx, who(ctx), in)
@@ -856,11 +849,7 @@ func (o *operations) ListPolicies(ctx context.Context, _ api.ListPoliciesRequest
 }
 
 func (o *operations) putPolicy(ctx context.Context, name string, document api.PolicyDocument, create bool) (api.Policy, error) {
-	raw, err := json.Marshal(document)
-	if err != nil {
-		return api.Policy{}, fmt.Errorf("%w: policy document: %w", domain.ErrInvalidArgument, err)
-	}
-	if err := o.h.cfg.IAM.PutPolicy(ctx, who(ctx), name, raw, create); err != nil {
+	if err := o.h.cfg.IAM.PutPolicy(ctx, who(ctx), name, policyBytes(document), create); err != nil {
 		return api.Policy{}, err
 	}
 	p, err := o.h.cfg.IAM.GetPolicy(ctx, who(ctx), name)
@@ -1198,44 +1187,167 @@ func (o *operations) RecountBucketUsage(context.Context, api.RecountBucketUsageR
 	return nil, notYet("usage recount")
 }
 
-// --- bucket policies and sub-buckets (PLAN C.0) ---
+// --- bucket policies and sub-buckets (ADR-0017) ---
 //
-// In the contract ahead of their use cases (ADR-0017); each answers notYet
-// until PLAN C.6 writes it and puts the authorizer in front of it.
+// Who may read or change a bucket's policy, and which sub-buckets a caller
+// is shown, are the use cases' to decide (BucketService, SubBucketService):
+// each asks the single authorizer and records what it changes. These carry
+// the documents between JSON objects of the contract and the bytes the use
+// cases keep.
 
-// GetBucketPolicy implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) GetBucketPolicy(context.Context, api.GetBucketPolicyRequestObject) (api.GetBucketPolicyResponseObject, error) {
-	return nil, notYet("bucket policy")
+// policyBytes is the document of a request as the use cases take it: the
+// bytes the client sent, as the generated decoder found them
+// (api.PolicyDocument is a json.RawMessage). The parsers judge those - a
+// key given twice, the size as sent - and not a decoded and re-encoded
+// copy, which would keep one of two values. A document that is no policy is
+// the parser's to refuse.
+func policyBytes(document api.PolicyDocument) []byte {
+	return []byte(document)
 }
 
-// PutBucketPolicy implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) PutBucketPolicy(context.Context, api.PutBucketPolicyRequestObject) (api.PutBucketPolicyResponseObject, error) {
-	return nil, notYet("bucket policy")
+// policyDocumentOf is a stored document as the contract shows it, as it was
+// set; nil when there is none. A stored policy was parsed before it was
+// kept, so one that is not JSON is a fault of this node.
+func policyDocumentOf(raw []byte) (*api.PolicyDocument, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if !json.Valid(raw) {
+		return nil, errors.New("adminapi.policyDocumentOf: a stored policy is not JSON")
+	}
+	out := api.PolicyDocument(raw)
+	return &out, nil
 }
 
-// DeleteBucketPolicy implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) DeleteBucketPolicy(context.Context, api.DeleteBucketPolicyRequestObject) (api.DeleteBucketPolicyResponseObject, error) {
-	return nil, notYet("bucket policy")
+// subBuckets is the use case of sub-buckets, or the answer of a node that
+// was not given it.
+func (o *operations) subBuckets() (*app.SubBucketService, error) {
+	if o.h.cfg.SubBuckets == nil {
+		return nil, notYet("sub-buckets")
+	}
+	return o.h.cfg.SubBuckets, nil
 }
 
-// ListSubBuckets implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) ListSubBuckets(context.Context, api.ListSubBucketsRequestObject) (api.ListSubBucketsResponseObject, error) {
-	return nil, notYet("sub-buckets")
+// subBucketOf maps a sub-bucket, with its policy, to the contract.
+func subBucketOf(sub bucket.SubBucket) (api.SubBucket, error) {
+	policy, err := policyDocumentOf(sub.Policy)
+	if err != nil {
+		return api.SubBucket{}, err
+	}
+	return api.SubBucket{Name: sub.Name, CreatedAt: sub.CreatedAt, Policy: policy}, nil
 }
 
-// GetSubBucket implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) GetSubBucket(context.Context, api.GetSubBucketRequestObject) (api.GetSubBucketResponseObject, error) {
-	return nil, notYet("sub-buckets")
+// GetBucketPolicy implements api.StrictServerInterface: the document S3's
+// GetBucketPolicy answers too.
+func (o *operations) GetBucketPolicy(ctx context.Context, request api.GetBucketPolicyRequestObject) (api.GetBucketPolicyResponseObject, error) {
+	raw, err := o.h.cfg.Buckets.Policy(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	document, err := policyDocumentOf(raw)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketPolicy200JSONResponse{Document: document}, nil
 }
 
-// PutSubBucket implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) PutSubBucket(context.Context, api.PutSubBucketRequestObject) (api.PutSubBucketResponseObject, error) {
-	return nil, notYet("sub-buckets")
+// PutBucketPolicy implements api.StrictServerInterface. It answers the
+// document that was set, without asking to read it: whoever may set a
+// policy need not be allowed to read one.
+func (o *operations) PutBucketPolicy(ctx context.Context, request api.PutBucketPolicyRequestObject) (api.PutBucketPolicyResponseObject, error) {
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	raw := policyBytes(request.Body.Document)
+	if err := o.h.cfg.Buckets.SetPolicy(ctx, who(ctx), request.Bucket, raw); err != nil {
+		return nil, err
+	}
+	document, err := policyDocumentOf(raw)
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketPolicy200JSONResponse{Document: document}, nil
 }
 
-// DeleteSubBucket implements api.StrictServerInterface (PLAN C.6).
-func (o *operations) DeleteSubBucket(context.Context, api.DeleteSubBucketRequestObject) (api.DeleteSubBucketResponseObject, error) {
-	return nil, notYet("sub-buckets")
+// DeleteBucketPolicy implements api.StrictServerInterface.
+func (o *operations) DeleteBucketPolicy(ctx context.Context, request api.DeleteBucketPolicyRequestObject) (api.DeleteBucketPolicyResponseObject, error) {
+	if err := o.h.cfg.Buckets.SetPolicy(ctx, who(ctx), request.Bucket, nil); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketPolicy204Response{}, nil
+}
+
+// ListSubBuckets implements api.StrictServerInterface. A listing names the
+// sub-buckets and never shows a policy: SubBucketSummary has no field for
+// one.
+func (o *operations) ListSubBuckets(ctx context.Context, request api.ListSubBucketsRequestObject) (api.ListSubBucketsResponseObject, error) {
+	subBuckets, err := o.subBuckets()
+	if err != nil {
+		return nil, err
+	}
+	subs, err := subBuckets.List(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	out := make(api.ListSubBuckets200JSONResponse, len(subs))
+	for i, sub := range subs {
+		out[i] = api.SubBucketSummary{Name: sub.Name, CreatedAt: sub.CreatedAt}
+	}
+	return out, nil
+}
+
+// GetSubBucket implements api.StrictServerInterface.
+func (o *operations) GetSubBucket(ctx context.Context, request api.GetSubBucketRequestObject) (api.GetSubBucketResponseObject, error) {
+	subBuckets, err := o.subBuckets()
+	if err != nil {
+		return nil, err
+	}
+	sub, err := subBuckets.Get(ctx, who(ctx), request.Bucket, request.Name)
+	if err != nil {
+		return nil, err
+	}
+	out, err := subBucketOf(sub)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetSubBucket200JSONResponse(out), nil
+}
+
+// PutSubBucket implements api.StrictServerInterface. Without a policy in
+// the body the sub-bucket has none of its own.
+func (o *operations) PutSubBucket(ctx context.Context, request api.PutSubBucketRequestObject) (api.PutSubBucketResponseObject, error) {
+	subBuckets, err := o.subBuckets()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	var policy []byte
+	if request.Body.Policy != nil {
+		policy = policyBytes(*request.Body.Policy)
+	}
+	sub, err := subBuckets.Put(ctx, who(ctx), request.Bucket, request.Name, policy)
+	if err != nil {
+		return nil, err
+	}
+	out, err := subBucketOf(sub)
+	if err != nil {
+		return nil, err
+	}
+	return api.PutSubBucket200JSONResponse(out), nil
+}
+
+// DeleteSubBucket implements api.StrictServerInterface.
+func (o *operations) DeleteSubBucket(ctx context.Context, request api.DeleteSubBucketRequestObject) (api.DeleteSubBucketResponseObject, error) {
+	subBuckets, err := o.subBuckets()
+	if err != nil {
+		return nil, err
+	}
+	if err := subBuckets.Delete(ctx, who(ctx), request.Bucket, request.Name); err != nil {
+		return nil, err
+	}
+	return api.DeleteSubBucket204Response{}, nil
 }
 
 // --- targets ---

@@ -144,6 +144,10 @@ type Config struct {
 	// Settings answers how the nodes are configured. It may be nil on a
 	// node that was not given the use case: the operation then answers 501.
 	Settings *app.SettingsService
+	// SubBuckets holds the sub-buckets of buckets (ADR-0017). It may be
+	// nil on a node that was not given the use case: its operations then
+	// answer 501. The policies of buckets are Buckets'.
+	SubBuckets *app.SubBucketService
 	// Targets defines the places outside the deployment that it sends
 	// to. It may be nil on a node that was not given the use case: its
 	// operations then answer 501.
@@ -354,16 +358,24 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 				}
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-			if _, required := requiredFields()[r.Pattern]; required {
+			_, required := requiredFields()[r.Pattern]
+			_, policy := policyFields()[r.Pattern]
+			if required || policy {
 				// What the contract requires is there before anything is
 				// carried out, reserved or kept: the generated decoder
 				// would take a field that is missing for its zero value.
+				// A policy is given once: the decoder would keep the last
+				// of two.
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					h.fail(w, r, errors.Join(domain.ErrIncompleteBody, err))
 					return
 				}
 				if err := requireFields(r.Pattern, body); err != nil {
+					h.fail(w, r, err)
+					return
+				}
+				if err := refuseRepeatedPolicy(r.Pattern, body); err != nil {
 					h.fail(w, r, err)
 					return
 				}
@@ -672,6 +684,10 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusForbidden, code: "QuotaExceeded", title: "The bucket quota has been reached"}
 	case is(domain.ErrBucketNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchBucket", title: "No such bucket"}
+	case is(domain.ErrSubBucketNotFound):
+		// Not NotFound, which is kept for a path the contract does not
+		// name (PLAN C.0).
+		return problem{status: http.StatusNotFound, code: "NoSuchSubBucket", title: "No such sub-bucket"}
 	case is(domain.ErrObjectNotFound):
 		return problem{status: http.StatusNotFound, code: "NoSuchObject", title: "No such object"}
 	case is(domain.ErrVersionNotFound):
@@ -704,6 +720,10 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusConflict, code: "BucketAlreadyExists", title: "Bucket already exists"}
 	case is(domain.ErrBucketNotEmpty):
 		return problem{status: http.StatusConflict, code: "BucketNotEmpty", title: "Bucket is not empty"}
+	case is(domain.ErrTooManySubBuckets):
+		return problem{status: http.StatusConflict, code: "TooManySubBuckets", title: "The bucket has as many sub-buckets as it can have"}
+	case is(domain.ErrSubBucketNotEmpty):
+		return problem{status: http.StatusConflict, code: "SubBucketNotEmpty", title: "Sub-bucket is not empty"}
 	case is(domain.ErrEntityExists):
 		return problem{status: http.StatusConflict, code: "EntityAlreadyExists", title: "Entity already exists"}
 	case is(domain.ErrEntityInUse):

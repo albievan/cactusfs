@@ -525,7 +525,9 @@ type APIKey struct {
 	Description string     `json:"description"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 
-	// InlinePolicy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// InlinePolicy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	InlinePolicy *PolicyDocument `json:"inline_policy,omitempty"`
 	LastUsedAt   *time.Time      `json:"last_used_at,omitempty"`
 
@@ -538,7 +540,9 @@ type APIKeyCreate struct {
 	Description *string    `json:"description,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 
-	// InlinePolicy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// InlinePolicy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	InlinePolicy *PolicyDocument `json:"inline_policy,omitempty"`
 }
 
@@ -693,13 +697,17 @@ type BucketNotificationsPut struct {
 
 // BucketPolicy The policy of a bucket. `document` is absent when the bucket has none.
 type BucketPolicy struct {
-	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Document *PolicyDocument `json:"document,omitempty"`
 }
 
 // BucketPolicyPut defines model for BucketPolicyPut.
 type BucketPolicyPut struct {
-	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Document PolicyDocument `json:"document"`
 }
 
@@ -1220,7 +1228,9 @@ type Policy struct {
 	BuiltIn   bool      `json:"built_in"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Document PolicyDocument `json:"document"`
 
 	// Name The name of a user, group, role or policy.
@@ -1229,19 +1239,25 @@ type Policy struct {
 
 // PolicyCreate defines model for PolicyCreate.
 type PolicyCreate struct {
-	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Document PolicyDocument `json:"document"`
 
 	// Name The name of a user, group, role or policy.
 	Name Name `json:"name"`
 }
 
-// PolicyDocument A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
-type PolicyDocument map[string]interface{}
+// PolicyDocument A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+// is larger than 20 KiB as sent, is refused.
+type PolicyDocument = json.RawMessage
 
 // PolicyUpdate defines model for PolicyUpdate.
 type PolicyUpdate struct {
-	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Document PolicyDocument `json:"document"`
 }
 
@@ -1564,7 +1580,9 @@ type SubBucket struct {
 	// letter or digit. The first segment of the keys that belong to it.
 	Name SubBucketNameValue `json:"name"`
 
-	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Policy *PolicyDocument `json:"policy,omitempty"`
 }
 
@@ -1574,7 +1592,9 @@ type SubBucketNameValue = string
 
 // SubBucketPut What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own.
 type SubBucketPut struct {
-	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
 	Policy *PolicyDocument `json:"policy,omitempty"`
 }
 

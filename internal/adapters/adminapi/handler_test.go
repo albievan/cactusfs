@@ -139,7 +139,8 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	}
 	meta := porttest.NewMemMetadata()
 	f.auditor = app.NewAuditor(f.store, f.clock, logger)
-	authz := app.NewAuthorizer(logger, f.clock, f.auditor).WithBucketPolicies(meta)
+	// As a node's: the policy of a bucket is read with its sub-buckets.
+	authz := app.NewAuthorizer(logger, f.clock, f.auditor).WithSubBuckets(meta)
 	f.authz = authz
 	f.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: f.store, Trail: f.store, Authz: authz, Auditor: f.auditor, KMS: kms, Hasher: &porttest.Hasher{},
@@ -225,9 +226,10 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	}
 	f.updates = updates(f)
 	config := adminapi.Config{
-		Updates: f.updates,
-		Targets: targets,
-		Buckets: app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
+		Updates:    f.updates,
+		Targets:    targets,
+		SubBuckets: app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
+		Buckets:    app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz).WithHasher(f.concealer),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,

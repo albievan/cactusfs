@@ -27,3 +27,9 @@ func AskedFirst() map[string]bool {
 func ConcealedOperations() map[string]bool {
 	return concealedOperations()
 }
+
+// PolicyFields returns, for each operation whose body carries a policy
+// document, the field that holds it.
+func PolicyFields() map[string]string {
+	return policyFields()
+}

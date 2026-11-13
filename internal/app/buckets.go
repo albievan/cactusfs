@@ -545,7 +545,9 @@ func (s *BucketService) Policy(ctx context.Context, principal iam.Principal, nam
 
 // SetPolicy replaces the policy of a bucket; nil removes it. The change is
 // audited: a bucket policy is the one thing that can open a bucket to
-// callers who have not authenticated.
+// callers who have not authenticated. A document iam.ParseBucketPolicy
+// refuses is an error wrapping domain.ErrInvalidPolicy (and so
+// domain.ErrInvalidArgument), and the policy the bucket had is kept.
 func (s *BucketService) SetPolicy(ctx context.Context, principal iam.Principal, name string, document []byte) error {
 	action := iam.ActionPutBucketPolicy
 	if document == nil {
@@ -558,7 +560,7 @@ func (s *BucketService) SetPolicy(ctx context.Context, principal iam.Principal, 
 	if document != nil {
 		policy, err := iam.ParseBucketPolicy(document, name)
 		if err != nil {
-			return fmt.Errorf("bucket.SetPolicy: %w", err)
+			return fmt.Errorf("bucket.SetPolicy: %w", refusedPolicy{err})
 		}
 		details = map[string]string{"statements": strconv.Itoa(len(policy.Document.Statements)), "open_to_anyone": strconv.FormatBool(policy.OpenToAnyone())}
 	}
@@ -570,6 +572,20 @@ func (s *BucketService) SetPolicy(ctx context.Context, principal iam.Principal, 
 	}
 	return nil
 }
+
+// refusedPolicy is a bucket policy the parser refused: it reads as the
+// parser's reason, and is a domain.ErrInvalidPolicy as well as the
+// domain.ErrInvalidArgument the parser returns - as a sub-bucket's policy
+// that cannot be kept is - so that an inbound adapter can tell a policy
+// that cannot be kept from another argument that is wrong. The policies of
+// the identity use cases (IAMService.PutPolicy) are not wrapped so.
+type refusedPolicy struct{ err error }
+
+// Error returns the parser's reason.
+func (e refusedPolicy) Error() string { return e.err.Error() }
+
+// Unwrap returns domain.ErrInvalidPolicy and the parser's error.
+func (e refusedPolicy) Unwrap() []error { return []error{domain.ErrInvalidPolicy, e.err} }
 
 // CORS returns the cross-origin rules of a bucket, or nil when it has none.
 func (s *BucketService) CORS(ctx context.Context, principal iam.Principal, name string) (*bucket.CORS, error) {
