@@ -12,8 +12,8 @@ events to NATS and webhooks, replication between sites and quotas (milestone 8, 
 which entry schema 5, the domain, the ports, the replicated store and the contracts
 exist, and no use case, worker or adapter); sub-buckets (ADR-0017) and tag rules with a
 catalogue of tags (ADR-0018), of which only the domain rules, the ports and the
-replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`); none has
-been published.
+replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
+and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
 
 ## 1. Shape of the system
 

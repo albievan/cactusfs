@@ -5,7 +5,9 @@ web console. Data security comes first: encryption at rest that cannot be switch
 TLS on every listener, checksums verified on every read, self-healing, role-based access
 control and a hash-chained audit trail.
 
-> **Status: pre-release, version 0.7.0. No release has been published yet.**
+> **Status: pre-release, version 0.7.0.** Its image `ghcr.io/albievan/cactusfs:0.7.0` and
+> chart `ghcr.io/albievan/charts/cactusfs:0.7.0` are published and signed; 0.7.0 has no
+> GitHub Release with binaries (that last step failed), so build the binary from source.
 > Milestones 0 to 7 of [`PLAN.md`](PLAN.md) are done: the standalone store, erasure
 > coding, the cluster, identities and policies, the management API with its console, the
 > S3 depth listed below, and deployment hardening (the Helm chart, certificate rotation,
