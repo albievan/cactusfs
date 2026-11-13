@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1199,6 +1201,71 @@ func TestAUserMadeAgainIsAnotherCaller(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestARepeatAcrossTheUpgradeOfTheScopeRunsOnce: the release before scoped
+// a console user's idempotency keys by the name alone. A request it
+// reserved, repeated to a node of this release during a rolling upgrade, is
+// not carried out a second time (review of 2026-11-13). Here the record the
+// release before would have left - in progress under "session:frank" - is
+// put in place of the one this release made.
+func TestARepeatAcrossTheUpgradeOfTheScopeRunsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newFixture(t)
+	frank := consoleOf(t, f, "frank", iam.RoleClusterAdmin)
+	makeKey := call{
+		method: "POST", path: "/users/frank/keys", client: frank.client, body: map[string]any{"description": "laptop"},
+		headers: frank.changing("make-a-key"),
+	}
+	f.must(http.StatusCreated, makeKey)
+	ids := f.store.IdempotentIDs()
+	if len(ids) != 1 {
+		t.Fatalf("%d idempotency records, want 1", len(ids))
+	}
+	made, err := f.store.GetIdempotent(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.DeleteIdempotent(ctx, made.ID, made.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	// The record of the release before: the ID of its scope and the key,
+	// the same fingerprint (the body holds no secret, so the scope is not in
+	// it), still in progress on that node.
+	legacyID := lengthPrefixedSHA256("session:frank", "make-a-key")
+	if err := f.store.BeginIdempotent(ctx, ports.IdempotencyRecord{
+		ID: legacyID, Fingerprint: made.Fingerprint, CreatedAt: f.clock.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keys := func() int {
+		listed := f.must(http.StatusOK, call{method: "GET", path: "/users/frank/keys"})
+		var items []any
+		if err := json.Unmarshal(listed.body, &items); err != nil {
+			t.Fatalf("list of keys: %v: %s", err, listed.body)
+		}
+		return len(items)
+	}
+	before := keys()
+	r := f.do(makeKey)
+	if r.status != http.StatusConflict || r.problem(t)["code"] != "RequestInProgress" {
+		t.Errorf("the repeat of a request the release before is carrying out = %d %s, want 409 RequestInProgress", r.status, r.body)
+	}
+	if after := keys(); after != before {
+		t.Errorf("the repeat made a key: %d keys, then %d", before, after)
+	}
+}
+
+// lengthPrefixedSHA256 is how the idempotency use case names a record by
+// its scope and key.
+func lengthPrefixedSHA256(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(h, "%d:", len(part))
+		_, _ = h.Write([]byte(part))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func withBearer(c call, bearer string) call {

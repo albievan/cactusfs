@@ -448,6 +448,18 @@ func (h *Handler) authenticate(r *http.Request, info *requestInfo) error {
 	return refuse("", "no credential")
 }
 
+// legacyScopeOf is the scope the release before gave a console user's keys
+// - the name alone - and the time from which a record under it is this
+// user's; it is only read (app.IdempotentRequest.LegacyScope), so that a
+// repeat during a rolling upgrade is not carried out twice. Empty for an
+// API key, whose scope did not change.
+func legacyScopeOf(info *requestInfo) (string, time.Time) {
+	if info.token == "" {
+		return "", time.Time{}
+	}
+	return "session:" + info.principal.User, info.principal.UserCreatedAt
+}
+
 // scopeOf names whose idempotency keys a request's key belongs with. The
 // scope of a console user names the user and when the user was made: a user
 // who is deleted and made again under the same name is another caller, and
@@ -534,8 +546,9 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		action, resource = firstQuestion(r, body)
 	}
+	legacyScope, legacySince := legacyScopeOf(info)
 	answer, reservation, err := h.cfg.Idempotency.Begin(ctx, app.IdempotentRequest{
-		Scope: scopeOf(info), Key: key, Fingerprint: strings.Join([]string{r.Method, r.URL.Path, r.URL.RawQuery, content}, "\n"),
+		Scope: scopeOf(info), LegacyScope: legacyScope, LegacySince: legacySince, Key: key, Fingerprint: strings.Join([]string{r.Method, r.URL.Path, r.URL.RawQuery, content}, "\n"),
 		Operation: r.Method + " " + r.URL.Path, Concealed: concealed,
 		// Who asks, whether for an upload, and what the operation will ask
 		// the authorizer: what follows from that is the use case's to say.

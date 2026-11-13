@@ -693,6 +693,93 @@ func TestIdempotencyConcealsSecrets(t *testing.T) {
 	}
 }
 
+// TestIdempotencyHonoursTheScopeOfTheReleaseBefore: the release before
+// scoped a console user's keys by the name alone. During a rolling upgrade a
+// request reserved under that scope by a node of that release, and repeated
+// to a node of this one, is not carried out twice: its answer is given, its
+// being in progress or its key's reuse is said, read only (review of
+// 2026-11-13). A record of the legacy scope made before the user was is
+// another user's, and is not honoured.
+func TestIdempotencyHonoursTheScopeOfTheReleaseBefore(t *testing.T) {
+	t.Parallel()
+	const legacyScope, scope = "session:alice", "session:alice@2026-11-01T00:00:00Z"
+	madeAt := testNow.Add(-time.Hour)
+	answer := app.IdempotentAnswer{Status: 201, ContentType: "application/json", Body: []byte(`{"secret_key":"shown once"}`)}
+	request := app.IdempotentRequest{
+		Key: "k-1", Operation: "PUT /api/v1/targets/hook", Fingerprint: "PUT /api/v1/targets/hook {redacted}",
+		Concealed: []string{"auth.secret=s3cret"},
+	}
+	tests := map[string]struct {
+		// before is what a node of the release before did with the request
+		// under the legacy scope: "" nothing, "begun" or "done".
+		before string
+		// fingerprint, when set, is another request's under the same key.
+		fingerprint string
+		// since is when the user of the session was made.
+		since      time.Time
+		wantAnswer bool
+		wantErr    error
+	}{
+		"answered by the release before":           {before: "done", since: madeAt, wantAnswer: true},
+		"in progress on the release before":        {before: "begun", since: madeAt, wantErr: domain.ErrRequestInProgress},
+		"another request under the key before":     {before: "done", fingerprint: "PUT /api/v1/targets/other {redacted}", since: madeAt, wantErr: domain.ErrIdempotencyKeyReused},
+		"a record of a user of the name before":    {before: "done", since: testNow.Add(time.Minute)},
+		"nothing under the scope before":           {since: madeAt},
+		"a user made at an unknown time, answered": {before: "done", wantAnswer: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			store, clock := porttest.NewMemIAM(), porttest.NewClock(testNow)
+			kms, err := porttest.NewKMS("test:1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := app.NewIdempotencyService(store, kms, clock, rand.Reader).WithHasher(&porttest.Hasher{})
+			if tt.before != "" {
+				old := request
+				old.Scope = legacyScope
+				if tt.fingerprint != "" {
+					old.Fingerprint = tt.fingerprint
+				}
+				_, reservation, err := s.Begin(ctx, old)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tt.before == "done" {
+					if err := s.Complete(ctx, reservation, answer); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			now := request
+			now.Scope, now.LegacyScope, now.LegacySince = scope, legacyScope, tt.since
+			replay, reservation, err := s.Begin(ctx, now)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("Begin = %v, want %v", err, tt.wantErr)
+			}
+			switch {
+			case tt.wantAnswer:
+				if replay == nil || replay.Status != 201 || !bytes.Equal(replay.Body, answer.Body) {
+					t.Fatalf("Begin = %+v; want the answer the release before gave", replay)
+				}
+			case replay != nil:
+				t.Fatalf("Begin gave an answer it should not: %+v", replay)
+			}
+			// Nothing was reserved under the new scope unless the request is
+			// carried out now; then it was, and only there.
+			carried := tt.wantErr == nil && !tt.wantAnswer
+			if _, _, again := s.Begin(ctx, app.IdempotentRequest{
+				Scope: scope, Key: now.Key, Operation: now.Operation, Fingerprint: now.Fingerprint, Concealed: now.Concealed,
+			}); errors.Is(again, domain.ErrRequestInProgress) != carried {
+				t.Errorf("reserved under the new scope = %v, want %v (reservation %+v)", !carried, carried, reservation)
+			}
+		})
+	}
+}
+
 // failingHasher conceals nothing: it answers err.
 type failingHasher struct {
 	porttest.Hasher

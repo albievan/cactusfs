@@ -34,6 +34,15 @@ type IdempotentRequest struct {
 	// Scope is who the key belongs to: keys of different callers never
 	// meet.
 	Scope string
+	// LegacyScope, when set, is the scope the release before named the same
+	// caller by. During a rolling upgrade a request may have been reserved
+	// under it by a node of that release; Begin honours such a record, read
+	// only, so that a repeat that reaches a node of this release is not
+	// carried out twice. Nothing is ever written under it. Only a record
+	// made at or after LegacySince is taken: one made earlier is of another
+	// caller who had the same legacy scope (a user deleted and made again).
+	LegacyScope string
+	LegacySince time.Time
 	// Key is the idempotency key as sent.
 	Key string
 	// Fingerprint describes the request, so that the same key with
@@ -274,6 +283,9 @@ func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (
 	if err != nil {
 		return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", err)
 	}
+	if answer, err := s.legacy(ctx, req); answer != nil || err != nil {
+		return answer, Reservation{}, err
+	}
 	reservation := Reservation{id: hashHex(req.Scope, req.Key), fingerprint: fingerprint}
 	// A stale record is removed and the key reserved again: twice at
 	// most, then somebody else is quicker and the caller is told to wait.
@@ -316,6 +328,48 @@ func (s *IdempotencyService) Begin(ctx context.Context, req IdempotentRequest) (
 		return &IdempotentAnswer{Status: existing.Status, ContentType: existing.ContentType, Body: body}, Reservation{}, nil
 	}
 	return nil, Reservation{}, fmt.Errorf("idempotency.Begin: %w", domain.ErrRequestInProgress)
+}
+
+// legacy looks for the request under its LegacyScope, as a node of the
+// release before reserved it. It returns the stored answer, or an error
+// wrapping domain.ErrRequestInProgress or domain.ErrIdempotencyKeyReused as
+// Begin does; nil and nil when there is no such record to honour - none, a
+// stale one, or one older than LegacySince - and the request is reserved
+// under its own scope. It changes nothing.
+func (s *IdempotencyService) legacy(ctx context.Context, req IdempotentRequest) (*IdempotentAnswer, error) {
+	if req.LegacyScope == "" || req.LegacyScope == req.Scope {
+		return nil, nil
+	}
+	id := hashHex(req.LegacyScope, req.Key)
+	existing, err := s.store.GetIdempotent(ctx, id)
+	if errors.Is(err, domain.ErrEntityNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("idempotency.Begin: %w", err)
+	}
+	age := s.clock.Now().UTC().Sub(existing.CreatedAt)
+	if age > IdempotencyTTL || (!existing.Done && age > idempotencyPending) || existing.CreatedAt.Before(req.LegacySince) {
+		return nil, nil
+	}
+	// The release before salted what it concealed with its scope.
+	asBefore := req
+	asBefore.Scope = req.LegacyScope
+	fingerprint, err := s.fingerprint(ctx, asBefore)
+	if err != nil {
+		return nil, fmt.Errorf("idempotency.Begin: %w", err)
+	}
+	switch {
+	case existing.Fingerprint != fingerprint:
+		return nil, fmt.Errorf("idempotency.Begin: %w", domain.ErrIdempotencyKeyReused)
+	case !existing.Done:
+		return nil, fmt.Errorf("idempotency.Begin: %w", domain.ErrRequestInProgress)
+	}
+	body, err := s.open(ctx, id, existing.Body)
+	if err != nil {
+		return nil, fmt.Errorf("idempotency.Begin: %w", err)
+	}
+	return &IdempotentAnswer{Status: existing.Status, ContentType: existing.ContentType, Body: body}, nil
 }
 
 // Complete leaves the answer of a request for its repeats. An answer that
