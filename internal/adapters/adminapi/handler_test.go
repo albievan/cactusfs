@@ -2978,7 +2978,8 @@ func (h *busyHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, e
 }
 
 // TestARefusedCallerReservesNothing: a caller who may not carry out an
-// operation on a user, group, role, policy or target, and sends it with an
+// operation on a user, group, role, policy or target, or have the node check
+// for releases now, and sends it with an
 // idempotency key, is refused before the key is reserved or the body
 // concealed - no replicated write, no Argon2id - and is refused as the
 // operation itself refuses: the denial in the trail names the action and
@@ -3009,6 +3010,7 @@ func TestARefusedCallerReservesNothing(t *testing.T) {
 		{"DELETE", "/policies/photos", nil},
 		{"PUT", "/targets/hook", map[string]any{"kind": "webhook", "endpoint": "https://hooks.example.test/in", "buckets": []string{}}},
 		{"DELETE", "/targets/hook", nil},
+		{"POST", "/updates/check", map[string]any{}},
 	}
 	if len(tests) != len(adminapi.AskedFirst()) {
 		t.Fatalf("%d operations are tested, %d are asked first", len(tests), len(adminapi.AskedFirst()))
