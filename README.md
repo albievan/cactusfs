@@ -122,8 +122,10 @@ Said plainly, so that nobody finds out by trying:
 - **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON, and a
   bucket's policy through the S3 API only.
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
-  the port and the replicated store exist. No use case, no API and no console screen
-  does: the authorizer does not read a sub-bucket's policy, and nothing can create one.
+  the replicated store, the authorizer's reading of a sub-bucket's policy and search
+  narrowed to sub-buckets exist; the paths of the management API are in its contract
+  and answer `501`. No use case and no console screen does yet, so nothing can create
+  a sub-bucket.
 - **Tag rules, lower-cased tags and a catalogue of tags**
   ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The same: domain and store
   only. Tags of buckets and objects as S3 has them do work; tags given with a multipart

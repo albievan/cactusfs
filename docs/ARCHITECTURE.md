@@ -10,9 +10,10 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
 events to NATS and webhooks, replication between sites and quotas (milestone 8, of
 which entry schema 5, the domain, the ports, the replicated store and the contracts
-exist, and no use case, worker or adapter); sub-buckets (ADR-0017) and tag rules with a
-catalogue of tags (ADR-0018), of which only the domain rules, the ports and the
-replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
+exist, and no use case, worker or adapter); sub-buckets (ADR-0017), of which the domain
+rules, the store, the contract and the authorizer's side exist and the use cases do
+not; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
+the ports and the replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
 and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
 
 ## 1. Shape of the system
@@ -725,12 +726,14 @@ four at a time.
   `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`,
   `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status`
   and `/resync`), `/buckets/{bucket}/replica`, `/targets`, `/targets/{name}` and
-  `/targets/{name}/status`. There is no path yet for a bucket's policy, for sub-buckets or
-  for tags: bucket policies, CORS, tags and lifecycle rules are set through the S3 API.
+  `/targets/{name}/status`. The paths of a bucket's policy (`/buckets/{bucket}/policy`)
+  and of sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`) are in the contract and
+  answer `501` until their use cases exist (PLAN C.4, C.6); there is none for tags.
+  Bucket policies, CORS, tags and lifecycle rules are set through the S3 API.
   The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
-- **Search (implemented; sub-buckets to come).** `GET /api/v1/search?q=` and the field
+- **Search (implemented).** `GET /api/v1/search?q=` and the field
   at the top of the console's navigation find buckets by name and objects by key. The
   query language is `internal/domain/search`: plain text is a case-insensitive
   substring, `*` and `?` make a wildcard over the whole name, `rx:` begins an RE2
@@ -799,7 +802,9 @@ four at a time.
   The token is validated - `b` must be a valid bucket name - and not signed: it is
   looked at only after every bucket was decided, among those the caller may see, so a
   made-up token can only skip ahead in what that caller would have been shown.
-  Sub-bucket scope plugs in at one marked place, `searchWalk.mayList`.
+  A bucket the caller may not list is narrowed to the sub-buckets they may list
+  (`Allowed`, no audit record), read from the node's own copy of the state; only when
+  they may see nothing of a bucket they named is the audited refusal made.
 - **Who uploaded and who downloaded (implemented, ADR-0016).** Every version records who
   committed it (`created_by` on a put, a copy's destination and the completion of a
   multipart upload), in the words of the audit trail. Downloads are counted by the node
@@ -965,12 +970,21 @@ four at a time.
   that leaves (`Leave`) is revoked through Raft (entry schema 6, ADR-0030): no member
   serves it, lets it join again or keeps its Raft connections afterwards. Only the node
   itself can ask to leave; an operator's command to remove another node is not built.
-- **Sub-buckets and tag rules (not implemented).** ADR-0017 and ADR-0018 are accepted,
-  and entry schema 3 carries their commands: the domain rules
+- **Sub-buckets (partly implemented) and tag rules (not implemented).** ADR-0017 and
+  ADR-0018 are accepted, and entry schema 3 carries their commands: the domain rules
   (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,
-  `TagDefinitionStore`) and the metadata store's side of them exist and are tested. No
-  use case, no path of the management API and no screen of the console uses them, and
-  the authorizer does not read a sub-bucket's policy (`PLAN.md`, Goals C and D).
+  `TagDefinitionStore`) and the metadata store's side of them exist and are tested.
+  The authorizer reads a sub-bucket's policy: the sub-bucket of a request is the first
+  segment of its key, or of a listing's prefix (only a prefix beginning `<name>/`
+  counts), and its policy is read with the bucket's in one consistent read a request
+  scope (`ports.BucketAccessReader`, which the node's local copy does not implement).
+  A sub-bucket policy is confined (`iam.ParseSubBucketPolicy`: its own keys and the
+  bucket's listings, named actions only, no governance bypass, no Allow to `*`); a
+  Deny in any of the three sources refuses - an anonymous caller too - and an Allow in
+  any allows, within an API key's bound. One that does not parse refuses requests in
+  that sub-bucket (`ErrIntegrity`, its text never logged). No use case and no screen
+  of the console creates a sub-bucket yet, and tag rules are used by nothing
+  (`PLAN.md`, Goals C and D).
 
 ## 7. Security **(see the threat model for what is implemented)**
 

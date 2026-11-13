@@ -1,8 +1,12 @@
 # ADR-0017: Sub-buckets
 
-- **Status:** accepted; not implemented beyond the domain rules, the port and the
-  replicated store (PLAN C.1, C.2, S.3). The authorizer, the use cases, the API and the
-  console are to come (PLAN C.3, C.4, C.6-C.8)
+- **Status:** accepted; partly implemented. The domain rules, the confined policy and
+  the decision from three sources (PLAN C.1, C.1b), the port and the replicated store
+  (C.2, S.3), the contract (C.0, its operations answer 501 until C.6) and the
+  authorizer, which reads a sub-bucket's policy with the bucket's in one consistent
+  read, and search narrowed to sub-buckets (C.3, C.3b) exist. The use cases, the API's
+  handlers and the console are to come (PLAN C.4, C.6-C.8), so nothing can create a
+  sub-bucket yet
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)
