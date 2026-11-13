@@ -1,6 +1,7 @@
 package nodetls_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -204,5 +205,156 @@ func TestListenerClosesTheConnectionsOfANodeNoLongerAdmitted(t *testing.T) {
 	_ = staying.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	if _, err := staying.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Errorf("the connection of an admitted node: read = %v, want it open", err)
+	}
+}
+
+// TestOneSourceCannotTakeEveryHandshake: one host that can reach the Raft
+// port and opens connections that say nothing holds at most the handshakes
+// of one source; a node calling from another source still gets through
+// (review of 2026-11-13: a single global bound let one host refuse every
+// peer and stall elections). The source of a connection is injected: every
+// connection here comes from 127.0.0.1, and 127.0.0.2 is not on every host.
+func TestOneSourceCannotTakeEveryHandshake(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	ca := authority(t)
+	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
+	var fromPeer atomic.Bool
+	source := func(net.Addr) string {
+		if fromPeer.Load() {
+			return "peer"
+		}
+		return "attacker"
+	}
+	const perSource, extra = 4, 3
+	// The silent callers are not turned away for their silence while the
+	// node calls: only the bound of their source holds them back.
+	listener := server.ListenLimited(ctx, tcpListener(t), 64, perSource, time.Minute, source)
+	t.Cleanup(func() { _ = listener.Close() })
+	address := listener.Addr().String()
+
+	for range perSource + extra {
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	// Every silent caller has been counted once the extra ones are refused.
+	deadline := time.Now().Add(10 * time.Second)
+	for server.PeersRefused(nodetls.PeerRefusedHandshake) < extra {
+		if time.Now().After(deadline) {
+			t.Fatalf("handshakes refused = %d, want %d: callers past their source's bound were not turned away",
+				server.PeersRefused(nodetls.PeerRefusedHandshake), extra)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	fromPeer.Store(true)
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := client.Dial(dialCtx, nodetls.Address("meta-1", address))
+	if err != nil {
+		t.Fatalf("a node from another source was refused while one source held its handshakes: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	select {
+	case held := <-accepted:
+		_ = held.Close()
+	case <-time.After(10 * time.Second):
+		t.Fatal("the node was not handed out")
+	}
+	if got := server.PeersRefused(nodetls.PeerRefusedHandshake); got != extra {
+		t.Errorf("handshakes refused = %d, want %d", got, extra)
+	}
+}
+
+// TestASilentCallerIsTurnedAwayAtTheFirstByteDeadline: a caller that sends
+// no ClientHello is closed after the short wait for its first byte, not
+// after the whole handshake's ten seconds; a node that speaks at once is
+// not hurried by it.
+func TestASilentCallerIsTurnedAwayAtTheFirstByteDeadline(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	ca := authority(t)
+	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
+	listener := server.ListenLimited(ctx, tcpListener(t), 64, 64, 200*time.Millisecond, nodetls.SourceOf)
+	t.Cleanup(func() { _ = listener.Close() })
+	address := listener.Addr().String()
+
+	silent, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = silent.Close() }()
+	start := time.Now()
+	_ = silent.SetReadDeadline(time.Now().Add(9 * time.Second))
+	if _, err := silent.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a silent caller: read = %v, want it closed", err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("a silent caller was held %v; the first-byte wait is 200ms", waited)
+	}
+	if got := server.PeersRefused(nodetls.PeerRefusedTimeout); got != 1 {
+		t.Errorf("timeouts = %d, want 1", got)
+	}
+
+	// A node's handshake is unaffected, and the connection it gets carries
+	// no deadline of the handshake.
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	conn, err := client.Dial(ctx, nodetls.Address("meta-1", address))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	var held net.Conn
+	select {
+	case held = <-accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the node was not handed out")
+	}
+	defer func() { _ = held.Close() }()
+	time.Sleep(400 * time.Millisecond) // past the first-byte wait
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = held.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := held.Read(make([]byte, 1)); err != nil {
+		t.Errorf("a node's connection after the first-byte wait: read = %v", err)
+	}
+}
+
+// TestSourceOf: IPv4 is counted by address, IPv6 by /64.
+func TestSourceOf(t *testing.T) {
+	t.Parallel()
+	tcp := func(ip string) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: 1234} }
+	for _, tc := range []struct {
+		name string
+		a, b net.Addr
+		same bool
+	}{
+		{"one IPv4 address, two ports", tcp("192.0.2.1"), &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 9}, true},
+		{"two IPv4 addresses", tcp("192.0.2.1"), tcp("192.0.2.2"), false},
+		{"IPv4 and the same mapped into IPv6", tcp("192.0.2.1"), tcp("::ffff:192.0.2.1"), true},
+		{"one IPv6 /64", tcp("2001:db8:1:2::1"), tcp("2001:db8:1:2:ffff:ffff:ffff:ffff"), true},
+		{"two IPv6 /64s", tcp("2001:db8:1:2::1"), tcp("2001:db8:1:3::1"), false},
+	} {
+		if got := nodetls.SourceOf(tc.a) == nodetls.SourceOf(tc.b); got != tc.same {
+			t.Errorf("%s: %s and %s are one source = %v, want %v",
+				tc.name, nodetls.SourceOf(tc.a), nodetls.SourceOf(tc.b), got, tc.same)
+		}
 	}
 }

@@ -291,12 +291,24 @@ func PeerNodeID(state tls.ConnectionState) (string, error) {
 // that a peer that connects and says nothing holds nothing for long.
 const handshakeTimeout = 10 * time.Second
 
-// maxHandshakes bounds the handshakes a listener has under way at once. A
-// connection that arrives while that many are is closed at once, and counted
-// as PeerRefusedHandshake: callers that connect and say nothing can hold a
-// goroutine and a socket each for handshakeTimeout, and no more than this
-// many of them.
-const maxHandshakes = 256
+// firstByteTimeout bounds how long an accepted connection may stay silent
+// before it sends the first byte of its ClientHello. A node sends it at
+// once; a caller that connects and says nothing is closed after this long,
+// not after handshakeTimeout.
+const firstByteTimeout = 2 * time.Second
+
+// maxHandshakesPerSource bounds the handshakes under way at once from one
+// source: one IPv4 address, or one IPv6 /64 (a host is commonly given a
+// whole /64). A connection from a source that has that many under way is
+// closed at once and counted as PeerRefusedHandshake. One host that can
+// reach the port can therefore hold no more than this many, and never the
+// slots of the nodes that replicate (audit M10, review of 2026-11-13).
+const maxHandshakesPerSource = 16
+
+// maxHandshakes bounds the handshakes a listener has under way at once,
+// from every source together: the last guard of the goroutines and sockets
+// of a listener that many sources call at once.
+const maxHandshakes = 4096
 
 // The pause after a failed Accept: the first, and the longest it grows to.
 // A failure such as running out of file descriptors passes; until it does,
@@ -324,23 +336,82 @@ func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID
 	if err != nil {
 		return nil, fmt.Errorf("nodetls.Listen: %w", err)
 	}
-	return i.serve(ctx, inner, allow, maxHandshakes, recheckInterval), nil
+	return i.serve(ctx, inner, allow, defaultLimits()), nil
+}
+
+// limits are what a listener lets callers hold, and how often it asks
+// again about the connections it handed out.
+type limits struct {
+	// total and perSource bound the handshakes under way at once: in all,
+	// and from one source.
+	total, perSource int
+	// firstByte bounds the wait for a caller's first byte; handshake bounds
+	// the whole handshake.
+	firstByte, handshake time.Duration
+	// recheck is how often allow is asked again about open connections.
+	recheck time.Duration
+	// source names the source a caller's address belongs to.
+	source func(net.Addr) string
+}
+
+func defaultLimits() limits {
+	return limits{
+		total: maxHandshakes, perSource: maxHandshakesPerSource, firstByte: firstByteTimeout,
+		handshake: handshakeTimeout, recheck: recheckInterval, source: SourceOf,
+	}
+}
+
+// SourceOf names the source an address belongs to, as the listener counts
+// handshakes by it: an IPv4 address (an IPv4 address mapped into IPv6 too),
+// or the /64 an IPv6 address is in. An address that is not TCP is its own
+// source.
+func SourceOf(addr net.Addr) string {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || tcp.IP == nil {
+		return addr.String()
+	}
+	if v4 := tcp.IP.To4(); v4 != nil {
+		return v4.String()
+	}
+	return tcp.IP.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // serve hands out the connections of inner that are authenticated and
-// admitted, with at most handshakes handshakes under way at once, and asks
-// allow again about the open ones every recheck.
-func (i *Identity) serve(
-	ctx context.Context, inner net.Listener, allow func(nodeID string) bool, handshakes int, recheck time.Duration,
-) *listener {
+// admitted, within the limits, and asks allow again about the open ones
+// every limits.recheck.
+func (i *Identity) serve(ctx context.Context, inner net.Listener, allow func(nodeID string) bool, limits limits) *listener {
 	l := &listener{
 		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
-		refuse: i.refuse, open: map[*tracked]struct{}{}, handshakes: make(chan struct{}, handshakes),
+		refuse: i.refuse, open: map[*tracked]struct{}{}, limits: limits, sources: map[string]int{},
 	}
 	// The listener outlives the call that opened it.
 	go l.run(context.WithoutCancel(ctx))
-	go l.recheck(recheck)
+	go l.recheck(limits.recheck)
 	return l
+}
+
+// reserve takes a handshake slot for a caller from source, and reports
+// whether there was one: under the bound of the source and under the bound
+// of the listener.
+func (l *listener) reserve(source string) bool {
+	l.slots.Lock()
+	defer l.slots.Unlock()
+	if l.handshakes >= l.limits.total || l.sources[source] >= l.limits.perSource {
+		return false
+	}
+	l.handshakes++
+	l.sources[source]++
+	return true
+}
+
+// release gives back a slot reserve took.
+func (l *listener) release(source string) {
+	l.slots.Lock()
+	defer l.slots.Unlock()
+	l.handshakes--
+	if l.sources[source]--; l.sources[source] <= 0 {
+		delete(l.sources, source)
+	}
 }
 
 // recheck closes, every interval until the listener is closed, the
@@ -380,8 +451,13 @@ type listener struct {
 	accepted chan net.Conn
 	closed   chan struct{}
 	once     sync.Once
-	// handshakes holds a token for each handshake under way.
-	handshakes chan struct{}
+	limits   limits
+
+	// handshakes counts the handshakes under way, and sources counts them
+	// by source.
+	slots      sync.Mutex
+	handshakes int
+	sources    map[string]int
 
 	// open holds the connections that were handed out and are not closed
 	// yet. Closing the listener closes them: a node that stops must not
@@ -434,19 +510,19 @@ func (l *listener) run(ctx context.Context) {
 			continue
 		}
 		pause = acceptRetryFirst
-		select {
-		case l.handshakes <- struct{}{}:
-			// Handshakes run side by side: a slow one must not hold up the next.
-			go l.admit(ctx, raw)
-		default:
+		source := l.limits.source(raw.RemoteAddr())
+		if !l.reserve(source) {
 			l.refuse(PeerRefusedHandshake)
 			_ = raw.Close()
+			continue
 		}
+		// Handshakes run side by side: a slow one must not hold up the next.
+		go l.admit(ctx, raw, source)
 	}
 }
 
-func (l *listener) admit(ctx context.Context, raw net.Conn) {
-	conn, nodeID := l.handshake(ctx, raw)
+func (l *listener) admit(ctx context.Context, raw net.Conn, source string) {
+	conn, nodeID := l.handshake(ctx, raw, source)
 	if conn == nil {
 		return
 	}
@@ -463,15 +539,28 @@ func (l *listener) admit(ctx context.Context, raw net.Conn) {
 
 // handshake authenticates and admits the caller of raw, and returns the
 // connection and the node it is of, or nil when the caller was turned away.
-// It gives back the token of the handshake when it returns: a node that has
-// been admitted and waits to be accepted no longer holds one.
-func (l *listener) handshake(ctx context.Context, raw net.Conn) (*tls.Conn, string) {
-	defer func() { <-l.handshakes }()
-	conn := tls.Server(raw, l.config)
-	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+// It gives back the slot of the handshake when it returns: a node that has
+// been admitted and waits to be accepted no longer holds one. A caller that
+// sends nothing within limits.firstByte is turned away then.
+func (l *listener) handshake(ctx context.Context, raw net.Conn, source string) (*tls.Conn, string) {
+	defer l.release(source)
+	deadline := time.Now().Add(l.limits.handshake)
+	if err := raw.SetReadDeadline(time.Now().Add(l.limits.firstByte)); err != nil {
+		l.refuse(PeerRefusedHandshake)
+		_ = raw.Close()
+		return nil, ""
+	}
+	conn := tls.Server(&heard{Conn: raw, until: deadline}, l.config)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if err := conn.HandshakeContext(ctx); err != nil {
 		l.refuse(peerRefusalOf(err))
+		_ = conn.Close()
+		return nil, ""
+	}
+	// The connection is handed out with no deadline: Raft sets its own.
+	if err := raw.SetReadDeadline(time.Time{}); err != nil {
+		l.refuse(PeerRefusedHandshake)
 		_ = conn.Close()
 		return nil, ""
 	}
@@ -487,6 +576,27 @@ func (l *listener) handshake(ctx context.Context, raw net.Conn) (*tls.Conn, stri
 		return nil, ""
 	}
 	return conn, nodeID
+}
+
+// heard is a connection that, once it has read its first byte, moves its
+// read deadline from the wait for that byte to the end of the handshake. It
+// is read by one goroutine at a time, as a net.Conn of a tls.Conn is.
+type heard struct {
+	net.Conn
+	until time.Time
+	first bool
+}
+
+// Read implements net.Conn.
+func (h *heard) Read(b []byte) (int, error) {
+	n, err := h.Conn.Read(b)
+	if n > 0 && !h.first {
+		h.first = true
+		if deadline := h.Conn.SetReadDeadline(h.until); deadline != nil && err == nil {
+			err = deadline
+		}
+	}
+	return n, err
 }
 
 // Accept implements net.Listener.
