@@ -42,7 +42,7 @@ func identity(t *testing.T, a *nodetls.Authority, nodeID string) *nodetls.Identi
 // the name of the node that called.
 func echo(t *testing.T, id *nodetls.Identity) string {
 	t.Helper()
-	listener, err := id.Listen(t.Context(), "127.0.0.1:0", func(nodeID string) bool { return nodeID != "banned-1" })
+	listener, err := id.Listen(t.Context(), "127.0.0.1:0", func(nodeID string) (bool, error) { return nodeID != "banned-1", nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestClosingTheListenerClosesItsConnections(t *testing.T) {
 	ctx := t.Context()
 	ca := authority(t)
 	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
-	listener, err := server.Listen(ctx, "127.0.0.1:0", func(string) bool { return true })
+	listener, err := server.Listen(ctx, "127.0.0.1:0", func(string) (bool, error) { return true, nil })
 	if err != nil {
 		t.Fatal(err)
 	}

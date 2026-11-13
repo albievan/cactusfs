@@ -331,7 +331,13 @@ const recheckInterval = 5 * time.Second
 // the Raft listener admits only the nodes that vote. allow is asked again,
 // every few seconds, about every connection that is open, and a connection
 // of a node it no longer admits is closed.
-func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID string) bool) (net.Listener, error) {
+//
+// allow answers whether it admits the node, or an error when it cannot
+// tell for now. A caller allow cannot judge is turned away; a connection
+// that is open is kept until allow says, without error, that its node is
+// not admitted: a passing failure of whatever allow asks must not cut every
+// node off from the others.
+func (i *Identity) Listen(ctx context.Context, address string, allow func(nodeID string) (bool, error)) (net.Listener, error) {
 	inner, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("nodetls.Listen: %w", err)
@@ -379,7 +385,7 @@ func SourceOf(addr net.Addr) string {
 // serve hands out the connections of inner that are authenticated and
 // admitted, within the limits, and asks allow again about the open ones
 // every limits.recheck.
-func (i *Identity) serve(ctx context.Context, inner net.Listener, allow func(nodeID string) bool, limits limits) *listener {
+func (i *Identity) serve(ctx context.Context, inner net.Listener, allow func(nodeID string) (bool, error), limits limits) *listener {
 	l := &listener{
 		Listener: inner, config: i.Server(), allow: allow, accepted: make(chan net.Conn), closed: make(chan struct{}),
 		refuse: i.refuse, open: map[*tracked]struct{}{}, limits: limits, sources: map[string]int{},
@@ -432,9 +438,10 @@ func (l *listener) recheck(interval time.Duration) {
 		}
 		l.mu.Unlock()
 		// allow is asked outside the lock: it may take a moment, and a
-		// connection that is closed meanwhile only leaves the map.
+		// connection that is closed meanwhile only leaves the map. Only a
+		// definite no closes one; an error is asked again next time.
 		for _, conn := range open {
-			if !l.allow(conn.nodeID) {
+			if admitted, err := l.allow(conn.nodeID); err == nil && !admitted {
 				_ = conn.Close()
 			}
 		}
@@ -445,7 +452,7 @@ func (l *listener) recheck(interval time.Duration) {
 type listener struct {
 	net.Listener
 	config *tls.Config
-	allow  func(nodeID string) bool
+	allow  func(nodeID string) (bool, error)
 	// refuse is told why a caller was turned away.
 	refuse   func(PeerRefusal)
 	accepted chan net.Conn
@@ -570,7 +577,9 @@ func (l *listener) handshake(ctx context.Context, raw net.Conn, source string) (
 		_ = conn.Close()
 		return nil, ""
 	}
-	if !l.allow(nodeID) {
+	// A node allow cannot judge for now is not admitted for now: it will
+	// call again.
+	if admitted, err := l.allow(nodeID); err != nil || !admitted {
 		l.refuse(PeerRefusedNotAdmitted)
 		_ = conn.Close()
 		return nil, ""

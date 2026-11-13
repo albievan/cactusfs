@@ -729,7 +729,7 @@ func TestReloadSwapsUnderConcurrentHandshakes(t *testing.T) {
 // writes the serial number of the certificate the caller showed, then echoes.
 func serveNode(t *testing.T, id *nodetls.Identity, allow func(string) bool) string {
 	t.Helper()
-	listener, err := id.Listen(t.Context(), "127.0.0.1:0", allow)
+	listener, err := id.Listen(t.Context(), "127.0.0.1:0", func(nodeID string) (bool, error) { return allow(nodeID), nil })
 	if err != nil {
 		t.Fatal(err)
 	}

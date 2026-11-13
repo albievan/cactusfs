@@ -46,7 +46,7 @@ func TestListenerOutlivesFailedAccepts(t *testing.T) {
 	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
 	inner := &failing{Listener: tcpListener(t)}
 	inner.failures.Store(8) // 5 ms doubling: some 1.3 s of failures
-	listener := server.ListenOn(ctx, inner, func(string) bool { return true }, 4, time.Hour)
+	listener := server.ListenOn(ctx, inner, func(string) (bool, error) { return true, nil }, 4, time.Hour)
 	t.Cleanup(func() { _ = listener.Close() })
 
 	accepted := make(chan net.Conn, 1)
@@ -89,7 +89,7 @@ func TestListenerBoundsHandshakes(t *testing.T) {
 	ctx := t.Context()
 	ca := authority(t)
 	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
-	listener := server.ListenOn(ctx, tcpListener(t), func(string) bool { return true }, 1, time.Hour)
+	listener := server.ListenOn(ctx, tcpListener(t), func(string) (bool, error) { return true, nil }, 1, time.Hour)
 	t.Cleanup(func() { _ = listener.Close() })
 	address := listener.Addr().String()
 
@@ -166,7 +166,7 @@ func TestListenerClosesTheConnectionsOfANodeNoLongerAdmitted(t *testing.T) {
 	ca := authority(t)
 	server := identity(t, ca, "meta-1")
 	var removed atomic.Bool
-	allow := func(nodeID string) bool { return nodeID != "meta-2" || !removed.Load() }
+	allow := func(nodeID string) (bool, error) { return nodeID != "meta-2" || !removed.Load(), nil }
 	listener := server.ListenOn(ctx, tcpListener(t), allow, 4, 20*time.Millisecond)
 	t.Cleanup(func() { _ = listener.Close() })
 	address := listener.Addr().String()
@@ -356,5 +356,88 @@ func TestSourceOf(t *testing.T) {
 			t.Errorf("%s: %s and %s are one source = %v, want %v",
 				tc.name, nodetls.SourceOf(tc.a), nodetls.SourceOf(tc.b), got, tc.same)
 		}
+	}
+}
+
+// TestAnErrorOfAllowClosesNoOpenConnection: a store that cannot tell for a
+// moment whether a node is admitted must not cut every node off from the
+// others (review of 2026-11-13). An open connection is kept while allow
+// fails and closed when it says no; a new caller allow cannot judge is
+// turned away.
+func TestAnErrorOfAllowClosesNoOpenConnection(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	ca := authority(t)
+	server, client := identity(t, ca, "meta-1"), identity(t, ca, "meta-2")
+	const (
+		admitted = iota
+		failing
+		refused
+	)
+	var state atomic.Int32
+	var asked atomic.Int32
+	allow := func(string) (bool, error) {
+		asked.Add(1)
+		switch state.Load() {
+		case failing:
+			return false, errors.New("the store cannot tell for now")
+		case refused:
+			return false, nil
+		}
+		return true, nil
+	}
+	listener := server.ListenOn(ctx, tcpListener(t), allow, 4, 20*time.Millisecond)
+	t.Cleanup(func() { _ = listener.Close() })
+	address := listener.Addr().String()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	conn, err := client.Dial(ctx, nodetls.Address("meta-1", address))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	select {
+	case held := <-accepted:
+		defer func() { _ = held.Close() }()
+	case <-time.After(10 * time.Second):
+		t.Fatal("the node was not handed out")
+	}
+
+	// allow fails for several rechecks: the connection stays open.
+	state.Store(failing)
+	before := asked.Load()
+	for asked.Load() < before+5 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("an open connection while allow fails: read = %v, want it open", err)
+	}
+
+	// A new caller is not admitted while allow cannot judge it. (TLS 1.3
+	// completes the client's side before the server judges; the server
+	// closes the connection then.)
+	refusedBefore := server.PeersRefused(nodetls.PeerRefusedNotAdmitted)
+	if other, err := identity(t, ca, "meta-3").Dial(ctx, nodetls.Address("meta-1", address)); err == nil {
+		_ = other.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if _, err := other.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("a caller allow could not judge: read = %v, want it closed", err)
+		}
+		_ = other.Close()
+	}
+	if got := server.PeersRefused(nodetls.PeerRefusedNotAdmitted) - refusedBefore; got != 1 {
+		t.Errorf("not admitted = %d, want 1", got)
+	}
+
+	// A definite no closes it.
+	state.Store(refused)
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the connection of a node no longer admitted: read = %v, want it closed", err)
 	}
 }

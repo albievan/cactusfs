@@ -116,7 +116,7 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 	// node it turns away is counted by the identity, with every other
 	// handshake the listener refuses - not here, or it would be counted
 	// twice.
-	raftListener, err := identity.Listen(ctx, cfg.RaftAddr, func(nodeID string) bool {
+	raftListener, err := identity.Listen(ctx, cfg.RaftAddr, func(nodeID string) (bool, error) {
 		return n.mayReplicate(cfg, nodeID)
 	})
 	if err != nil {
@@ -376,29 +376,35 @@ func (m metaRPC) Leave(ctx context.Context, nodeID string) error {
 // mayReplicate reports whether a node may open a Raft connection to this
 // one, or keep one open: a voter of the metadata group as this node knows
 // it, or - while this node knows no group yet - a node of the list it was
-// started with; never a node that was revoked (ADR-0030).
-func (n *node) mayReplicate(cfg serverConfig, nodeID string) bool {
+// started with; never a node that was revoked (ADR-0030). It returns an
+// error when the metadata store cannot tell for now: the listener turns a
+// new caller away for it, and keeps the connections that are open.
+func (n *node) mayReplicate(cfg serverConfig, nodeID string) (bool, error) {
 	meta := n.started.Load()
 	if meta == nil {
-		return false
+		return false, nil
 	}
-	if revoked, err := meta.NodeRevoked(nodeID); err != nil || revoked {
-		return false
+	revoked, err := meta.NodeRevoked(nodeID)
+	if err != nil {
+		return false, fmt.Errorf("mayReplicate: %w", err)
+	}
+	if revoked {
+		return false, nil
 	}
 	members, err := meta.Members()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("mayReplicate: %w", err)
 	}
 	if len(members) == 0 {
 		_, listed := cfg.Peers[nodeID]
-		return listed
+		return listed, nil
 	}
 	for _, member := range members {
 		if member.ID == nodeID {
-			return member.Voter
+			return member.Voter, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // peerInfos asks every other node of the --peers list to describe itself.

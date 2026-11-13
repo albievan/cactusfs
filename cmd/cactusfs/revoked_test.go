@@ -57,8 +57,8 @@ func TestANodeThatLeftIsRefusedEverywhere(t *testing.T) {
 		if revoked, err := n.revoked("n4"); err != nil || revoked {
 			t.Errorf("%s says n4 was revoked: %v, %v", id, revoked, err)
 		}
-		if n.mayReplicate(c.configs[id], "g5") {
-			t.Errorf("the Raft port of %s admits g5", id)
+		if admitted, err := n.mayReplicate(c.configs[id], "g5"); err != nil || admitted {
+			t.Errorf("the Raft port of %s admits g5: %v, %v", id, admitted, err)
 		}
 	}
 	for _, id := range stayed {

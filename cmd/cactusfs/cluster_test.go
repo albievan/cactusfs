@@ -390,9 +390,14 @@ func TestClusterStoresObjectsAcrossNodes(t *testing.T) {
 		}
 		_ = conn.Close()
 	}
-	if !c.node("n4").mayReplicate(c.configs["n4"], "n2") || c.node("n1").mayReplicate(c.configs["n1"], "n4") ||
-		c.node("n1").mayReplicate(c.configs["n1"], "stranger") {
-		t.Error("mayReplicate does not follow the voters of the metadata group")
+	for _, tc := range []struct {
+		at, of string
+		want   bool
+	}{{"n4", "n2", true}, {"n1", "n4", false}, {"n1", "stranger", false}} {
+		if got, err := c.node(tc.at).mayReplicate(c.configs[tc.at], tc.of); err != nil || got != tc.want {
+			t.Errorf("mayReplicate on %s of %s = %v, %v; want %v: it does not follow the voters of the metadata group",
+				tc.at, tc.of, got, err, tc.want)
+		}
 	}
 
 	if err := c.node("n4").buckets.Create(ctx, root(), "bkt"); err != nil {

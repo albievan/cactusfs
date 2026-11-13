@@ -22,7 +22,7 @@ func PeerRefusalOf(err error) PeerRefusal {
 // one source or from all, and asks allow again about the open ones every
 // recheck.
 func (i *Identity) ListenOn(
-	ctx context.Context, inner net.Listener, allow func(string) bool, handshakes int, recheck time.Duration,
+	ctx context.Context, inner net.Listener, allow func(string) (bool, error), handshakes int, recheck time.Duration,
 ) net.Listener {
 	limits := defaultLimits()
 	limits.total, limits.perSource, limits.recheck = handshakes, handshakes, recheck
@@ -37,5 +37,5 @@ func (i *Identity) ListenLimited(
 ) net.Listener {
 	limits := defaultLimits()
 	limits.total, limits.perSource, limits.firstByte, limits.source = total, perSource, firstByte, source
-	return i.serve(ctx, inner, func(string) bool { return true }, limits)
+	return i.serve(ctx, inner, func(string) (bool, error) { return true, nil }, limits)
 }
