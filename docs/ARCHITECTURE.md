@@ -11,8 +11,8 @@ said where it belongs, with the milestone or goal of `PLAN.md` that holds it: de
 events to NATS and webhooks, replication between sites and quotas (milestone 8, of
 which entry schema 5, the domain, the ports, the replicated store and the contracts
 exist, and no use case, worker or adapter); sub-buckets (ADR-0017), of which the domain
-rules, the store, the contract, the authorizer's side and the use cases exist and the
-API's handlers and the console do not; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
+rules, the store, the contract, the authorizer's side, the use cases and the
+management API's handlers exist and the console does not; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
 the ports and the replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
 and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
 
@@ -726,10 +726,14 @@ four at a time.
   `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`,
   `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status`
   and `/resync`), `/buckets/{bucket}/replica`, `/targets`, `/targets/{name}` and
-  `/targets/{name}/status`. The paths of a bucket's policy (`/buckets/{bucket}/policy`)
-  and of sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`) are in the contract and
-  answer `501` until their use cases exist (PLAN C.4, C.6); there is none for tags.
-  Bucket policies, CORS, tags and lifecycle rules are set through the S3 API.
+  `/targets/{name}/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
+  keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
+  `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
+  `SubBucketNotEmpty`) are served (PLAN C.6): the use cases authorize and audit, the
+  handlers translate. A node without the use case of sub-buckets answers their paths
+  `501`. There is no path for tags. CORS, tags and lifecycle rules are set through the
+  S3 API.
   The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
@@ -984,8 +988,8 @@ four at a time.
   any allows, within an API key's bound. One that does not parse refuses requests in
   that sub-bucket (`ErrIntegrity`, its text never logged). `app.SubBucketService` lists
   (names and ages, never a policy; filtered to what the caller may list), gets, puts and
-  deletes them, audited; no handler of the management API and no screen of the console
-  calls it yet, and tag rules are used by nothing
+  deletes them, audited; the management API serves it (PLAN C.6), no screen of the
+  console calls it yet, and tag rules are used by nothing
   (`PLAN.md`, Goals C and D).
 
 ## 7. Security **(see the threat model for what is implemented)**

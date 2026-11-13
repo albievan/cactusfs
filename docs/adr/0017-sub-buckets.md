@@ -2,10 +2,10 @@
 
 - **Status:** accepted; partly implemented. The domain rules, the confined policy and
   the decision from three sources (PLAN C.1, C.1b), the port and the replicated store
-  (C.2, S.3), the contract (C.0, its operations answer 501 until C.6) and the
-  authorizer, which reads a sub-bucket's policy with the bucket's in one consistent
-  read, and search narrowed to sub-buckets (C.3, C.3b) exist. The use cases exist and
-  are wired (C.4); the API's handlers and the console are to come (C.6-C.8)
+  (C.2, S.3), the contract (C.0) and the authorizer, which reads a sub-bucket's policy
+  with the bucket's in one consistent read, and search narrowed to sub-buckets (C.3,
+  C.3b) exist. The use cases exist and are wired (C.4), and the management API serves
+  them (C.6); the four-node test and the console are to come (C.7, C.8)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)
