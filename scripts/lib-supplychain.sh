@@ -520,7 +520,10 @@ sc_verify_attestation() {
 sc_sign_blob() {
 	[ "$SC_MODE" = keyless ] || sc_fail "sc_sign_blob: a file is signed in a release only"
 	# shellcheck disable=SC2086 # the flags are split on purpose
-	sc_cosign sign-blob $SC_KEYLESS_SIGN_FLAGS $SC_KEYLESS_BUNDLE_FLAGS --bundle "$2" "$1"
+	# cosign writes the bundle for its owner only, the builder's user, and the
+	# runner that attaches it to the GitHub Release is another: it is public.
+	sc_cosign sign-blob $SC_KEYLESS_SIGN_FLAGS $SC_KEYLESS_BUNDLE_FLAGS --bundle "$2" "$1" &&
+		chmod 0644 "$2"
 }
 
 sc_verify_blob() {

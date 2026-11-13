@@ -396,6 +396,10 @@ console reads the digest from. Each digest is also signed itself. The \`*.spdx.j
 files are the SBOMs of the two images and of the console's packages.
 EOF
 
+# Everything here is published: the runner, another user than the builder's,
+# attaches it to the GitHub Release.
+chmod -R a+rX "$out"
+
 cat <<EOF
 release: published $name:$VERSION and :$release ($list),
 release: the chart $RELEASE_REGISTRY/$chart_repo:$VERSION ($chart), signed as
