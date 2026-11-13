@@ -71,6 +71,20 @@ check)
 	if [ -s "$work/regressions.txt" ]; then
 		echo "s3-compat: FAIL - baseline tests that no longer pass:" >&2
 		cat "$work/regressions.txt" >&2
+		# What each said, so that a failure seen once - in CI, say - can be
+		# understood without running the suite again: its own lines, of its
+		# package only, then the lines of that package that name no test (a
+		# timeout's panic is told there).
+		while read -r pkg test; do
+			echo "--- output of $pkg $test:" >&2
+			grep -F "\"Package\":\"$pkg\"" "$work/events.json" | grep '"Action":"output"' |
+				grep "\"Test\":\"${test}[\"/]" |
+				sed 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
+			echo "--- output of $pkg outside its tests:" >&2
+			grep -F "\"Package\":\"$pkg\"" "$work/events.json" | grep '"Action":"output"' |
+				grep -v '"Test":' |
+				sed 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
+		done <"$work/regressions.txt"
 		exit 1
 	fi
 	# The tool tests are part of the contract wherever they are built: a
