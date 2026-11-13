@@ -124,8 +124,8 @@ Said plainly, so that nobody finds out by trying:
 - **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
   the replicated store, the authorizer's reading of a sub-bucket's policy and search
   narrowed to sub-buckets exist; the paths of the management API are in its contract
-  and answer `501`. No use case and no console screen does yet, so nothing can create
-  a sub-bucket.
+  and answer `501`; the use cases exist. No handler of the management API and no console
+  screen does yet, so nobody can create a sub-bucket.
 - **Tag rules, lower-cased tags and a catalogue of tags**
   ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The same: domain and store
   only. Tags of buckets and objects as S3 has them do work; tags given with a multipart

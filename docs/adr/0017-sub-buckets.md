@@ -4,9 +4,8 @@
   the decision from three sources (PLAN C.1, C.1b), the port and the replicated store
   (C.2, S.3), the contract (C.0, its operations answer 501 until C.6) and the
   authorizer, which reads a sub-bucket's policy with the bucket's in one consistent
-  read, and search narrowed to sub-buckets (C.3, C.3b) exist. The use cases, the API's
-  handlers and the console are to come (PLAN C.4, C.6-C.8), so nothing can create a
-  sub-bucket yet
+  read, and search narrowed to sub-buckets (C.3, C.3b) exist. The use cases exist and
+  are wired (C.4); the API's handlers and the console are to come (C.6-C.8)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)
@@ -43,7 +42,12 @@ policies." S3 has no such thing; a bucket has keys, and a key may contain slashe
 - **Actions:** `s3:ListSubBuckets`, `s3:PutSubBucket` (create, and set its policy),
   `s3:DeleteSubBucket`, `s3:GetSubBucketPolicy`. Whoever holds `s3:*` holds them. Who
   may list a bucket's sub-buckets sees all; who may not sees those whose keys they may
-  list.
+  list - an empty list when they may list the bucket and there is none to show. A
+  listing shows names and ages, never a policy (that needs `s3:GetSubBucketPolicy`).
+  Who can see nothing of the bucket - neither its sub-buckets, nor the bucket, nor the
+  keys of any sub-bucket - is refused `s3:ListSubBuckets` (403, audited) and is not
+  told whether the bucket exists (stricter than the contract's first wording; pending
+  Albie, PLAN Decisions 2026-11-13).
 - "Each bucket must be controlled by policies" is taken to mean: **a policy can be
   attached to every bucket and every sub-bucket, and edited in the console** (the
   management API gains the endpoints for both). Access is denied by default without
