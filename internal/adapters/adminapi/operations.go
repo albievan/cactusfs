@@ -1198,6 +1198,46 @@ func (o *operations) RecountBucketUsage(context.Context, api.RecountBucketUsageR
 	return nil, notYet("usage recount")
 }
 
+// --- bucket policies and sub-buckets (PLAN C.0) ---
+//
+// In the contract ahead of their use cases (ADR-0017); each answers notYet
+// until PLAN C.6 writes it and puts the authorizer in front of it.
+
+// GetBucketPolicy implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) GetBucketPolicy(context.Context, api.GetBucketPolicyRequestObject) (api.GetBucketPolicyResponseObject, error) {
+	return nil, notYet("bucket policy")
+}
+
+// PutBucketPolicy implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) PutBucketPolicy(context.Context, api.PutBucketPolicyRequestObject) (api.PutBucketPolicyResponseObject, error) {
+	return nil, notYet("bucket policy")
+}
+
+// DeleteBucketPolicy implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) DeleteBucketPolicy(context.Context, api.DeleteBucketPolicyRequestObject) (api.DeleteBucketPolicyResponseObject, error) {
+	return nil, notYet("bucket policy")
+}
+
+// ListSubBuckets implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) ListSubBuckets(context.Context, api.ListSubBucketsRequestObject) (api.ListSubBucketsResponseObject, error) {
+	return nil, notYet("sub-buckets")
+}
+
+// GetSubBucket implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) GetSubBucket(context.Context, api.GetSubBucketRequestObject) (api.GetSubBucketResponseObject, error) {
+	return nil, notYet("sub-buckets")
+}
+
+// PutSubBucket implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) PutSubBucket(context.Context, api.PutSubBucketRequestObject) (api.PutSubBucketResponseObject, error) {
+	return nil, notYet("sub-buckets")
+}
+
+// DeleteSubBucket implements api.StrictServerInterface (PLAN C.6).
+func (o *operations) DeleteSubBucket(context.Context, api.DeleteSubBucketRequestObject) (api.DeleteSubBucketResponseObject, error) {
+	return nil, notYet("sub-buckets")
+}
+
 // --- targets ---
 
 // targetOf maps a target, as the use case shows it, to the contract. There

@@ -214,6 +214,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/buckets/{bucket}/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the policy of a bucket
+         * @description The bucket's policy (ADR-0011), as it was set - through this API or through S3's `PutBucketPolicy`,
+         *     which set the same document. A bucket without a policy is answered too: `document` is then absent.
+         */
+        get: operations["getBucketPolicy"];
+        /**
+         * Set the policy of a bucket
+         * @description Sets the bucket's policy, in place of the one it had: the document S3's `GetBucketPolicy` answers
+         *     from then on. The language is that of identity policies with `Principal` (ADR-0011); every resource
+         *     is the bucket or keys in it; no statement may allow `s3:BypassGovernanceRetention`, and nothing that
+         *     writes, deletes or configures is ever allowed to a caller who has not authenticated, whatever the
+         *     document says. A document of more than 20 KiB, or one that does not keep to these rules, is refused
+         *     with 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept.
+         */
+        put: operations["putBucketPolicy"];
+        post?: never;
+        /**
+         * Remove the policy of a bucket
+         * @description Removes the bucket's policy. What it allowed is refused from then on, unless the caller's own
+         *     policies allow it; what it denied is no longer denied by it.
+         */
+        delete: operations["deleteBucketPolicy"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/subbuckets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the sub-buckets of a bucket
+         * @description The sub-buckets of the bucket (ADR-0017), in name order, at most 10. A sub-bucket is a named
+         *     first-level prefix of its bucket: its objects are the keys that begin with its name and a slash, and
+         *     S3 clients address them as keys of the bucket. A caller who holds `s3:ListSubBuckets` on the bucket
+         *     is given every one; any other caller is given those whose keys they may list, which may be none -
+         *     an empty list, not a refusal.
+         */
+        get: operations["listSubBuckets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/subbuckets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a sub-bucket and its policy */
+        get: operations["getSubBucket"];
+        /**
+         * Create a sub-bucket, or set its policy
+         * @description Registers a sub-bucket of the bucket with the policy in the body, or - when the bucket has one of
+         *     this name - sets its policy in place of the one it had; it keeps the time it was created. Without
+         *     `policy` the sub-bucket has no policy of its own, and one it had is removed. Registering a sub-bucket
+         *     over keys that exist adopts them: nothing is moved, copied or renamed.
+         *
+         *     A bucket has at most 10 sub-buckets: an 11th is refused with 409 and the problem code
+         *     `TooManySubBuckets`, decided when the change is committed. A name is 1 to 63 lower-case letters,
+         *     digits and hyphens, beginning and ending with a letter or digit; sub-buckets do not nest.
+         *
+         *     The policy is written in the language of bucket policies (ADR-0011) and confined to the sub-bucket:
+         *     every resource is its keys (`arn:aws:s3:::<bucket>/<name>/*`), or the bucket for listing; its actions
+         *     are those on objects and listing. It cannot allow `s3:BypassGovernanceRetention`, cannot allow
+         *     anything to a caller who has not authenticated, and cannot deny listing. A document that does not
+         *     keep to these rules, or is larger than 20 KiB, is refused with 400 and the problem code
+         *     `InvalidPolicy`, and nothing is changed.
+         *
+         *     The authorizer judges a request on a key of the sub-bucket by the caller's own policies, the
+         *     bucket's policy and this one together: a deny in any refuses, an allow in any allows. Having this
+         *     action is worth what `s3:PutBucketPolicy` is, for the sub-bucket's keys.
+         */
+        put: operations["putSubBucket"];
+        post?: never;
+        /**
+         * Delete an empty sub-bucket
+         * @description Removes the sub-bucket and its policy. Only an empty one is deleted: one under whose name the bucket
+         *     holds no object, no older version, no delete marker and no upload in progress - decided when the
+         *     change is committed, as for a bucket. Its keys are not deleted with it.
+         */
+        delete: operations["deleteSubBucket"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/buckets/{bucket}/notifications": {
         parameters: {
             query?: never;
@@ -1324,6 +1428,38 @@ export interface components {
              *     without authenticating.
              */
             open_to_anyone: boolean;
+        };
+        /** @description The policy of a bucket. `document` is absent when the bucket has none. */
+        BucketPolicy: {
+            document?: components["schemas"]["PolicyDocument"];
+        };
+        BucketPolicyPut: {
+            document: components["schemas"]["PolicyDocument"];
+        };
+        /**
+         * @description The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+         *     letter or digit. The first segment of the keys that belong to it.
+         */
+        SubBucketNameValue: string;
+        /** @description A sub-bucket of a bucket, without its policy. */
+        SubBucketSummary: {
+            name: components["schemas"]["SubBucketNameValue"];
+            /** Format: date-time */
+            created_at: string;
+        };
+        /** @description A sub-bucket of a bucket and its policy. `policy` is absent when it has none of its own. */
+        SubBucket: {
+            name: components["schemas"]["SubBucketNameValue"];
+            /**
+             * Format: date-time
+             * @description When the sub-bucket was registered; setting its policy does not change it.
+             */
+            created_at: string;
+            policy?: components["schemas"]["PolicyDocument"];
+        };
+        /** @description What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own. */
+        SubBucketPut: {
+            policy?: components["schemas"]["PolicyDocument"];
         };
         BucketCreate: {
             name: string;
@@ -2445,6 +2581,8 @@ export interface components {
         BucketName: string;
         /** @description The key of the object. */
         ObjectKey: string;
+        /** @description The name of the sub-bucket. */
+        SubBucketName: components["schemas"]["SubBucketNameValue"];
         EntityName: components["schemas"]["Name"];
         TargetName: components["schemas"]["TargetNameValue"];
     };
@@ -2817,6 +2955,263 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The policy, or that there is none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketPolicy"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketPolicy: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketPolicyPut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketPolicy"];
+                };
+            };
+            /**
+             * @description The document is not a bucket policy that can be kept (`code` is `InvalidPolicy`); `detail` says
+             *     what is wrong with it.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketPolicy: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there was none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    listSubBuckets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sub-buckets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubBucketSummary"][];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getSubBucket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+                /** @description The name of the sub-bucket. */
+                name: components["parameters"]["SubBucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sub-bucket. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubBucket"];
+                };
+            };
+            /**
+             * @description The bucket is not there (`code` is `NoSuchBucket`), or it has no sub-bucket of this name (`code` is
+             *     `NoSuchSubBucket`).
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putSubBucket: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+                /** @description The name of the sub-bucket. */
+                name: components["parameters"]["SubBucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubBucketPut"];
+            };
+        };
+        responses: {
+            /** @description Created, or its policy set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubBucket"];
+                };
+            };
+            /**
+             * @description The policy is not one a sub-bucket can have (`code` is `InvalidPolicy`; `detail` says what is
+             *     wrong with it), or the name is not one a sub-bucket can have (`code` is `InvalidArgument`).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The bucket has 10 sub-buckets already (`code` is `TooManySubBuckets`). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteSubBucket: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+                /** @description The name of the sub-bucket. */
+                name: components["parameters"]["SubBucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description The bucket is not there (`code` is `NoSuchBucket`), or it has no sub-bucket of this name (`code` is
+             *     `NoSuchSubBucket`).
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The bucket holds keys under the sub-bucket's name (`code` is `SubBucketNotEmpty`). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
             };
             default: components["responses"]["Problem"];
         };

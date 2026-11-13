@@ -363,6 +363,13 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucketQuota":             {path: "/buckets/some-bucket/quota"},
 		"putBucketQuota":             {path: "/buckets/some-bucket/quota", body: map[string]any{"quota_bytes": 1}},
 		"deleteBucketQuota":          {path: "/buckets/some-bucket/quota"},
+		"getBucketPolicy":            {path: "/buckets/some-bucket/policy"},
+		"putBucketPolicy":            {path: "/buckets/some-bucket/policy", body: map[string]any{"document": document}},
+		"deleteBucketPolicy":         {path: "/buckets/some-bucket/policy"},
+		"listSubBuckets":             {path: "/buckets/some-bucket/subbuckets"},
+		"getSubBucket":               {path: "/buckets/some-bucket/subbuckets/reports"},
+		"putSubBucket":               {path: "/buckets/some-bucket/subbuckets/reports", body: map[string]any{"policy": document}},
+		"deleteSubBucket":            {path: "/buckets/some-bucket/subbuckets/reports"},
 		"getBucketNotifications":     {path: "/buckets/some-bucket/notifications"},
 		"putBucketNotifications":     {path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},
 		"deleteBucketNotifications":  {path: "/buckets/some-bucket/notifications"},
@@ -440,6 +447,8 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucketNotifications", "putBucketNotifications", "deleteBucketNotifications",
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",
+		"getBucketPolicy", "putBucketPolicy", "deleteBucketPolicy",
+		"listSubBuckets", "getSubBucket", "putSubBucket", "deleteSubBucket",
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
 	// unlocking does: with a key they are asked as without one.

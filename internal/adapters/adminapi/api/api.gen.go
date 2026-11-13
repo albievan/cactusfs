@@ -691,6 +691,18 @@ type BucketNotificationsPut struct {
 	Rules []NotificationRulePut `json:"rules"`
 }
 
+// BucketPolicy The policy of a bucket. `document` is absent when the bucket has none.
+type BucketPolicy struct {
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	Document *PolicyDocument `json:"document,omitempty"`
+}
+
+// BucketPolicyPut defines model for BucketPolicyPut.
+type BucketPolicyPut struct {
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	Document PolicyDocument `json:"document"`
+}
+
 // BucketPolicySummary What a bucket's policy is, without what it says.
 type BucketPolicySummary struct {
 	// OpenToAnyone True when some statement of the policy allows something to every caller: an `Allow` whose
@@ -1543,6 +1555,38 @@ type SignInRequest struct {
 	Username string `json:"username"`
 }
 
+// SubBucket A sub-bucket of a bucket and its policy. `policy` is absent when it has none of its own.
+type SubBucket struct {
+	// CreatedAt When the sub-bucket was registered; setting its policy does not change it.
+	CreatedAt time.Time `json:"created_at"`
+
+	// Name The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+	// letter or digit. The first segment of the keys that belong to it.
+	Name SubBucketNameValue `json:"name"`
+
+	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	Policy *PolicyDocument `json:"policy,omitempty"`
+}
+
+// SubBucketNameValue The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+// letter or digit. The first segment of the keys that belong to it.
+type SubBucketNameValue = string
+
+// SubBucketPut What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own.
+type SubBucketPut struct {
+	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition).
+	Policy *PolicyDocument `json:"policy,omitempty"`
+}
+
+// SubBucketSummary A sub-bucket of a bucket, without its policy.
+type SubBucketSummary struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Name The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+	// letter or digit. The first segment of the keys that belong to it.
+	Name SubBucketNameValue `json:"name"`
+}
+
 // Target A place outside the deployment that it sends to, as it may be shown - with no credential, and
 // without the path of its endpoint, which may be one.
 type Target struct {
@@ -1895,6 +1939,10 @@ type IdempotencyKey = string
 // ObjectKey defines model for ObjectKey.
 type ObjectKey = string
 
+// SubBucketName The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+// letter or digit. The first segment of the keys that belong to it.
+type SubBucketName = SubBucketNameValue
+
 // TargetName The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
 type TargetName = TargetNameValue
 
@@ -2029,6 +2077,24 @@ type ListObjectsParams struct {
 	Access *bool `form:"access,omitempty" json:"access,omitempty"`
 }
 
+// DeleteBucketPolicyParams defines parameters for DeleteBucketPolicy.
+type DeleteBucketPolicyParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketPolicyParams defines parameters for PutBucketPolicy.
+type PutBucketPolicyParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // DeleteBucketQuotaParams defines parameters for DeleteBucketQuota.
 type DeleteBucketQuotaParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -2076,6 +2142,24 @@ type PutBucketReplicationParams struct {
 
 // ResyncBucketReplicationParams defines parameters for ResyncBucketReplication.
 type ResyncBucketReplicationParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteSubBucketParams defines parameters for DeleteSubBucket.
+type DeleteSubBucketParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutSubBucketParams defines parameters for PutSubBucket.
+type PutSubBucketParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -2299,6 +2383,9 @@ type CreateBucketJSONRequestBody = BucketCreate
 // PutBucketNotificationsJSONRequestBody defines body for PutBucketNotifications for application/json ContentType.
 type PutBucketNotificationsJSONRequestBody = BucketNotificationsPut
 
+// PutBucketPolicyJSONRequestBody defines body for PutBucketPolicy for application/json ContentType.
+type PutBucketPolicyJSONRequestBody = BucketPolicyPut
+
 // PutBucketQuotaJSONRequestBody defines body for PutBucketQuota for application/json ContentType.
 type PutBucketQuotaJSONRequestBody = BucketQuotaPut
 
@@ -2307,6 +2394,9 @@ type PutBucketReplicaModeJSONRequestBody = BucketReplicaModePut
 
 // PutBucketReplicationJSONRequestBody defines body for PutBucketReplication for application/json ContentType.
 type PutBucketReplicationJSONRequestBody = BucketReplicationPut
+
+// PutSubBucketJSONRequestBody defines body for PutSubBucket for application/json ContentType.
+type PutSubBucketJSONRequestBody = SubBucketPut
 
 // CreateGroupJSONRequestBody defines body for CreateGroup for application/json ContentType.
 type CreateGroupJSONRequestBody = GroupCreate
@@ -2394,6 +2484,15 @@ type ServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(w http.ResponseWriter, r *http.Request, bucket BucketName, params ListObjectsParams)
+	// DeleteBucketPolicy Remove the policy of a bucket
+	// (DELETE /buckets/{bucket}/policy)
+	DeleteBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketPolicyParams)
+	// GetBucketPolicy Get the policy of a bucket
+	// (GET /buckets/{bucket}/policy)
+	GetBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketPolicy Set the policy of a bucket
+	// (PUT /buckets/{bucket}/policy)
+	PutBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketPolicyParams)
 	// DeleteBucketQuota Remove the quota of a bucket
 	// (DELETE /buckets/{bucket}/quota)
 	DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams)
@@ -2424,6 +2523,18 @@ type ServerInterface interface {
 	// GetBucketReplicationStatus How far the replication of a bucket has come
 	// (GET /buckets/{bucket}/replication/status)
 	GetBucketReplicationStatus(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// ListSubBuckets List the sub-buckets of a bucket
+	// (GET /buckets/{bucket}/subbuckets)
+	ListSubBuckets(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// DeleteSubBucket Delete an empty sub-bucket
+	// (DELETE /buckets/{bucket}/subbuckets/{name})
+	DeleteSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params DeleteSubBucketParams)
+	// GetSubBucket Get a sub-bucket and its policy
+	// (GET /buckets/{bucket}/subbuckets/{name})
+	GetSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName)
+	// PutSubBucket Create a sub-bucket, or set its policy
+	// (PUT /buckets/{bucket}/subbuckets/{name})
+	PutSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params PutSubBucketParams)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName)
@@ -3535,6 +3646,191 @@ func (siw *ServerInterfaceWrapper) ListObjects(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// DeleteBucketPolicy operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketPolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketPolicyParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketPolicy(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketPolicy operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketPolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketPolicy(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketPolicy operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketPolicyParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketPolicy(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DeleteBucketQuota operation middleware
 func (siw *ServerInterfaceWrapper) DeleteBucketQuota(w http.ResponseWriter, r *http.Request) {
 	var err error
@@ -4114,6 +4410,251 @@ func (siw *ServerInterfaceWrapper) GetBucketReplicationStatus(w http.ResponseWri
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetBucketReplicationStatus(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListSubBuckets operation middleware
+func (siw *ServerInterfaceWrapper) ListSubBuckets(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListSubBuckets(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteSubBucket operation middleware
+func (siw *ServerInterfaceWrapper) DeleteSubBucket(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name SubBucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteSubBucketParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteSubBucket(w, r, bucket, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetSubBucket operation middleware
+func (siw *ServerInterfaceWrapper) GetSubBucket(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name SubBucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSubBucket(w, r, bucket, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutSubBucket operation middleware
+func (siw *ServerInterfaceWrapper) PutSubBucket(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name SubBucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutSubBucketParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutSubBucket(w, r, bucket, name, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6392,6 +6933,13 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.DeleteBucketQuota)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.GetBucketQuota)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/quota", wrapper.PutBucketQuota)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.DeleteBucketPolicy)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.GetBucketPolicy)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.PutBucketPolicy)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/subbuckets", wrapper.ListSubBuckets)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.DeleteSubBucket)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.GetSubBucket)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.PutSubBucket)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.DeleteBucketNotifications)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.GetBucketNotifications)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.PutBucketNotifications)
@@ -7166,6 +7714,127 @@ func (response ListObjectsdefaultApplicationProblemPlusJSONResponse) VisitListOb
 	return err
 }
 
+type DeleteBucketPolicyRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketPolicyParams
+}
+
+type DeleteBucketPolicyResponseObject interface {
+	VisitDeleteBucketPolicyResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketPolicy204Response struct{}
+
+func (response DeleteBucketPolicy204Response) VisitDeleteBucketPolicyResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketPolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketPolicyRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketPolicyResponseObject interface {
+	VisitGetBucketPolicyResponse(w http.ResponseWriter) error
+}
+
+type GetBucketPolicy200JSONResponse BucketPolicy
+
+func (response GetBucketPolicy200JSONResponse) VisitGetBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketPolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitGetBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketPolicyRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketPolicyParams
+	Body   *PutBucketPolicyJSONRequestBody
+}
+
+type PutBucketPolicyResponseObject interface {
+	VisitPutBucketPolicyResponse(w http.ResponseWriter) error
+}
+
+type PutBucketPolicy200JSONResponse BucketPolicy
+
+func (response PutBucketPolicy200JSONResponse) VisitPutBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketPolicy400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutBucketPolicy400ApplicationProblemPlusJSONResponse) VisitPutBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketPolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitPutBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DeleteBucketQuotaRequestObject struct {
 	Bucket BucketName `json:"bucket"`
 	Params DeleteBucketQuotaParams
@@ -7549,6 +8218,219 @@ type GetBucketReplicationStatusdefaultApplicationProblemPlusJSONResponse struct 
 }
 
 func (response GetBucketReplicationStatusdefaultApplicationProblemPlusJSONResponse) VisitGetBucketReplicationStatusResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListSubBucketsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type ListSubBucketsResponseObject interface {
+	VisitListSubBucketsResponse(w http.ResponseWriter) error
+}
+
+type ListSubBuckets200JSONResponse []SubBucketSummary
+
+func (response ListSubBuckets200JSONResponse) VisitListSubBucketsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListSubBucketsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ListSubBucketsdefaultApplicationProblemPlusJSONResponse) VisitListSubBucketsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSubBucketRequestObject struct {
+	Bucket BucketName    `json:"bucket"`
+	Name   SubBucketName `json:"name"`
+	Params DeleteSubBucketParams
+}
+
+type DeleteSubBucketResponseObject interface {
+	VisitDeleteSubBucketResponse(w http.ResponseWriter) error
+}
+
+type DeleteSubBucket204Response struct{}
+
+func (response DeleteSubBucket204Response) VisitDeleteSubBucketResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteSubBucket404ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteSubBucket404ApplicationProblemPlusJSONResponse) VisitDeleteSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSubBucket409ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteSubBucket409ApplicationProblemPlusJSONResponse) VisitDeleteSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSubBucketdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteSubBucketdefaultApplicationProblemPlusJSONResponse) VisitDeleteSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSubBucketRequestObject struct {
+	Bucket BucketName    `json:"bucket"`
+	Name   SubBucketName `json:"name"`
+}
+
+type GetSubBucketResponseObject interface {
+	VisitGetSubBucketResponse(w http.ResponseWriter) error
+}
+
+type GetSubBucket200JSONResponse SubBucket
+
+func (response GetSubBucket200JSONResponse) VisitGetSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSubBucket404ApplicationProblemPlusJSONResponse Problem
+
+func (response GetSubBucket404ApplicationProblemPlusJSONResponse) VisitGetSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSubBucketdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetSubBucketdefaultApplicationProblemPlusJSONResponse) VisitGetSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutSubBucketRequestObject struct {
+	Bucket BucketName    `json:"bucket"`
+	Name   SubBucketName `json:"name"`
+	Params PutSubBucketParams
+	Body   *PutSubBucketJSONRequestBody
+}
+
+type PutSubBucketResponseObject interface {
+	VisitPutSubBucketResponse(w http.ResponseWriter) error
+}
+
+type PutSubBucket200JSONResponse SubBucket
+
+func (response PutSubBucket200JSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutSubBucket400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutSubBucket400ApplicationProblemPlusJSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutSubBucket409ApplicationProblemPlusJSONResponse Problem
+
+func (response PutSubBucket409ApplicationProblemPlusJSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutSubBucketdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutSubBucketdefaultApplicationProblemPlusJSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -9423,6 +10305,15 @@ type StrictServerInterface interface {
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(ctx context.Context, request ListObjectsRequestObject) (ListObjectsResponseObject, error)
+	// DeleteBucketPolicy Remove the policy of a bucket
+	// (DELETE /buckets/{bucket}/policy)
+	DeleteBucketPolicy(ctx context.Context, request DeleteBucketPolicyRequestObject) (DeleteBucketPolicyResponseObject, error)
+	// GetBucketPolicy Get the policy of a bucket
+	// (GET /buckets/{bucket}/policy)
+	GetBucketPolicy(ctx context.Context, request GetBucketPolicyRequestObject) (GetBucketPolicyResponseObject, error)
+	// PutBucketPolicy Set the policy of a bucket
+	// (PUT /buckets/{bucket}/policy)
+	PutBucketPolicy(ctx context.Context, request PutBucketPolicyRequestObject) (PutBucketPolicyResponseObject, error)
 	// DeleteBucketQuota Remove the quota of a bucket
 	// (DELETE /buckets/{bucket}/quota)
 	DeleteBucketQuota(ctx context.Context, request DeleteBucketQuotaRequestObject) (DeleteBucketQuotaResponseObject, error)
@@ -9453,6 +10344,18 @@ type StrictServerInterface interface {
 	// GetBucketReplicationStatus How far the replication of a bucket has come
 	// (GET /buckets/{bucket}/replication/status)
 	GetBucketReplicationStatus(ctx context.Context, request GetBucketReplicationStatusRequestObject) (GetBucketReplicationStatusResponseObject, error)
+	// ListSubBuckets List the sub-buckets of a bucket
+	// (GET /buckets/{bucket}/subbuckets)
+	ListSubBuckets(ctx context.Context, request ListSubBucketsRequestObject) (ListSubBucketsResponseObject, error)
+	// DeleteSubBucket Delete an empty sub-bucket
+	// (DELETE /buckets/{bucket}/subbuckets/{name})
+	DeleteSubBucket(ctx context.Context, request DeleteSubBucketRequestObject) (DeleteSubBucketResponseObject, error)
+	// GetSubBucket Get a sub-bucket and its policy
+	// (GET /buckets/{bucket}/subbuckets/{name})
+	GetSubBucket(ctx context.Context, request GetSubBucketRequestObject) (GetSubBucketResponseObject, error)
+	// PutSubBucket Create a sub-bucket, or set its policy
+	// (PUT /buckets/{bucket}/subbuckets/{name})
+	PutSubBucket(ctx context.Context, request PutSubBucketRequestObject) (PutSubBucketResponseObject, error)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(ctx context.Context, request GetBucketUsageRequestObject) (GetBucketUsageResponseObject, error)
@@ -10038,6 +10941,93 @@ func (sh *strictHandler) ListObjects(w http.ResponseWriter, r *http.Request, buc
 	}
 }
 
+// DeleteBucketPolicy operation middleware
+func (sh *strictHandler) DeleteBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketPolicyParams) {
+	var request DeleteBucketPolicyRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketPolicy(ctx, request.(DeleteBucketPolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketPolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketPolicyResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketPolicyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketPolicy operation middleware
+func (sh *strictHandler) GetBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketPolicyRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketPolicy(ctx, request.(GetBucketPolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketPolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketPolicyResponseObject); ok {
+		if err := validResponse.VisitGetBucketPolicyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketPolicy operation middleware
+func (sh *strictHandler) PutBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketPolicyParams) {
+	var request PutBucketPolicyRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketPolicyJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketPolicy(ctx, request.(PutBucketPolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketPolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketPolicyResponseObject); ok {
+		if err := validResponse.VisitPutBucketPolicyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // DeleteBucketQuota operation middleware
 func (sh *strictHandler) DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams) {
 	var request DeleteBucketQuotaRequestObject
@@ -10318,6 +11308,122 @@ func (sh *strictHandler) GetBucketReplicationStatus(w http.ResponseWriter, r *ht
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetBucketReplicationStatusResponseObject); ok {
 		if err := validResponse.VisitGetBucketReplicationStatusResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListSubBuckets operation middleware
+func (sh *strictHandler) ListSubBuckets(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request ListSubBucketsRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListSubBuckets(ctx, request.(ListSubBucketsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListSubBuckets")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListSubBucketsResponseObject); ok {
+		if err := validResponse.VisitListSubBucketsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteSubBucket operation middleware
+func (sh *strictHandler) DeleteSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params DeleteSubBucketParams) {
+	var request DeleteSubBucketRequestObject
+
+	request.Bucket = bucket
+	request.Name = name
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteSubBucket(ctx, request.(DeleteSubBucketRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteSubBucket")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteSubBucketResponseObject); ok {
+		if err := validResponse.VisitDeleteSubBucketResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetSubBucket operation middleware
+func (sh *strictHandler) GetSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName) {
+	var request GetSubBucketRequestObject
+
+	request.Bucket = bucket
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetSubBucket(ctx, request.(GetSubBucketRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetSubBucket")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetSubBucketResponseObject); ok {
+		if err := validResponse.VisitGetSubBucketResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutSubBucket operation middleware
+func (sh *strictHandler) PutSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params PutSubBucketParams) {
+	var request PutSubBucketRequestObject
+
+	request.Bucket = bucket
+	request.Name = name
+	request.Params = params
+
+	var body PutSubBucketJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutSubBucket(ctx, request.(PutSubBucketRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutSubBucket")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutSubBucketResponseObject); ok {
+		if err := validResponse.VisitPutSubBucketResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

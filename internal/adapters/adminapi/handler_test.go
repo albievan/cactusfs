@@ -448,6 +448,67 @@ func TestTheContractIsServed(t *testing.T) {
 	}
 }
 
+// TestAPathTheContractDoesNotNameIsNotFound holds the adapter to what the
+// contract says of a request under /api/v1/ that is none of its operations
+// (PLAN X.7): 404, problem+json, the code NotFound - whatever the method,
+// with a credential or without, before anybody is asked who sent it. The
+// console takes NotFound for a node of an older release (ADR-0028), so it
+// must not be answered for anything that is merely not there.
+func TestAPathTheContractDoesNotNameIsNotFound(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
+	tests := []struct {
+		name string
+		c    call
+	}{
+		{"a path it does not name", call{method: "GET", path: "/no-such-thing"}},
+		{"the root of the API", call{method: "GET", path: "/"}},
+		{"deeper than a path it names", call{method: "GET", path: "/buckets/some-bucket/usage/deeper"}},
+		{"a trailing slash", call{method: "GET", path: "/buckets/"}},
+		{"under the contract itself", call{method: "GET", path: "/openapi.json/more"}},
+		{"a change to a path it does not name", call{method: "POST", path: "/no-such-thing", body: map[string]any{}}},
+		{"a method a named path does not have", call{method: "PUT", path: "/buckets/some-bucket/usage", body: map[string]any{}}},
+		{"a method no path has", call{method: "PATCH", path: "/buckets"}},
+		{"OPTIONS", call{method: "OPTIONS", path: "/buckets"}},
+		{"DELETE of a list", call{method: "DELETE", path: "/buckets"}},
+	}
+	for _, tt := range tests {
+		for _, bearer := range []string{"", "AKIDNOBODY:not-a-secret", f.root} {
+			c := tt.c
+			c.bearer = bearer
+			r := f.do(c)
+			if r.status != http.StatusNotFound {
+				t.Errorf("%s (%s %s, credential %v) = %d, want 404: %s", tt.name, c.method, c.path, bearer != "", r.status, r.body)
+				continue
+			}
+			p := r.problem(t)
+			if p["code"] != "NotFound" || p["status"] != float64(http.StatusNotFound) || p["title"] == "" || p["detail"] != nil {
+				t.Errorf("%s (%s %s): problem = %s", tt.name, c.method, c.path, r.body)
+			}
+			if r.header.Get("WWW-Authenticate") != "" {
+				t.Errorf("%s (%s %s): asked who sent it: WWW-Authenticate %q", tt.name, c.method, c.path, r.header.Get("WWW-Authenticate"))
+			}
+		}
+	}
+	// What is not there, of a path the contract names, has a code of its own.
+	for path, code := range map[string]string{
+		"/buckets/no-such-bucket":           "NoSuchBucket",
+		"/buckets/some-bucket/object?key=k": "NoSuchObject",
+		"/users/nobody":                     "NoSuchEntity",
+	} {
+		r := f.must(http.StatusNotFound, call{method: "GET", path: path})
+		if p := r.problem(t); p["code"] != code {
+			t.Errorf("GET %s: problem = %s, want the code %s", path, r.body, code)
+		}
+	}
+	// HEAD of a path that has a GET is that GET; of the object, 405.
+	f.must(http.StatusOK, call{method: "HEAD", path: "/buckets"})
+	if r := f.must(http.StatusMethodNotAllowed, call{method: "HEAD", path: "/buckets/some-bucket/object?key=k"}); r.header.Get("Allow") != http.MethodGet {
+		t.Errorf("HEAD of an object: Allow %q", r.header.Get("Allow"))
+	}
+}
+
 // TestEveryRequestIsAuthenticated: without a credential that checks out,
 // nothing but signing in and the contract answers, and every refusal is in
 // the audit trail.

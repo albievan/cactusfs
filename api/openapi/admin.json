@@ -3,7 +3,7 @@
   "info": {
     "title": "CactusFS management API",
     "version": "1.0.0",
-    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`. One that does not is answered 403 with the\nproblem code `CSRFTokenInvalid` - not 401: the session is there, and\n`getSession` returns its CSRF token (`csrf_token`). The cookie belongs to\nthe browser and the token to one tab of it: a tab whose token is not that\nof the session the cookie stands for now - another tab signed in, say -\nasks `getSession` again.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever. A request whose body may hold a secret\n(`createUser`, `updateUser`, `putTarget`) is recognised again by a slow\nhash of the body, never by the body or a plain hash of it; when that hash\ncannot be made at once the request is answered 429 with `Retry-After`,\nand nothing is reserved.\n"
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`. One that does not is answered 403 with the\nproblem code `CSRFTokenInvalid` - not 401: the session is there, and\n`getSession` returns its CSRF token (`csrf_token`). The cookie belongs to\nthe browser and the token to one tab of it: a tab whose token is not that\nof the session the cookie stands for now - another tab signed in, say -\nasks `getSession` again.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A path this document does not name.** A request whose path begins with\n`/api/v1/` and that is none of the operations of this document - a path\nit does not name, or a method that a path it names does not have - is\nanswered 404 `application/problem+json` with the problem code `NotFound`,\nwhatever its method, and whether or not it carries a credential: it is\nanswered before anybody is asked who sent it, and says nothing that this\ndocument does not. (`HEAD` of a path that has a `GET` is that `GET`\nwithout its body, as HTTP has it; the object and its preview answer it\n405 `MethodNotAllowed`.) `NotFound` is answered for nothing else: a\nbucket, object, version, user or other entity that is not there has a\ncode of its own (`NoSuchBucket`, `NoSuchObject`, `NoSuchVersion`,\n`NoSuchEntity`, `NoSuchSubBucket`), so a client answered `NotFound` for an\noperation of this document is talking to a node of a release that does\nnot have that operation yet.\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever. A request whose body may hold a secret\n(`createUser`, `updateUser`, `putTarget`) is recognised again by a slow\nhash of the body, never by the body or a plain hash of it; when that hash\ncannot be made at once the request is answered 429 with `Retry-After`,\nand nothing is reserved.\n"
   },
   "servers": [
     {
@@ -543,6 +543,317 @@
         "responses": {
           "204": {
             "description": "Removed, or there was none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/policy": {
+      "get": {
+        "operationId": "getBucketPolicy",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the policy of a bucket",
+        "description": "The bucket's policy (ADR-0011), as it was set - through this API or through S3's `PutBucketPolicy`,\nwhich set the same document. A bucket without a policy is answered too: `document` is then absent.\n",
+        "x-cactusfs-action": "s3:GetBucketPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy, or that there is none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketPolicy"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketPolicy",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the policy of a bucket",
+        "description": "Sets the bucket's policy, in place of the one it had: the document S3's `GetBucketPolicy` answers\nfrom then on. The language is that of identity policies with `Principal` (ADR-0011); every resource\nis the bucket or keys in it; no statement may allow `s3:BypassGovernanceRetention`, and nothing that\nwrites, deletes or configures is ever allowed to a caller who has not authenticated, whatever the\ndocument says. A document of more than 20 KiB, or one that does not keep to these rules, is refused\nwith 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept.\n",
+        "x-cactusfs-action": "s3:PutBucketPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketPolicyPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The document is not a bucket policy that can be kept (`code` is `InvalidPolicy`); `detail` says\nwhat is wrong with it.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketPolicy",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the policy of a bucket",
+        "description": "Removes the bucket's policy. What it allowed is refused from then on, unless the caller's own\npolicies allow it; what it denied is no longer denied by it.\n",
+        "x-cactusfs-action": "s3:DeleteBucketPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there was none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/subbuckets": {
+      "get": {
+        "operationId": "listSubBuckets",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "List the sub-buckets of a bucket",
+        "description": "The sub-buckets of the bucket (ADR-0017), in name order, at most 10. A sub-bucket is a named\nfirst-level prefix of its bucket: its objects are the keys that begin with its name and a slash, and\nS3 clients address them as keys of the bucket. A caller who holds `s3:ListSubBuckets` on the bucket\nis given every one; any other caller is given those whose keys they may list, which may be none -\nan empty list, not a refusal.\n",
+        "x-cactusfs-action": "s3:ListSubBuckets",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sub-buckets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 10,
+                  "items": {
+                    "$ref": "#/components/schemas/SubBucketSummary"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/subbuckets/{name}": {
+      "get": {
+        "operationId": "getSubBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get a sub-bucket and its policy",
+        "x-cactusfs-action": "s3:GetSubBucketPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/SubBucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sub-bucket.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubBucket"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The bucket is not there (`code` is `NoSuchBucket`), or it has no sub-bucket of this name (`code` is\n`NoSuchSubBucket`).\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putSubBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Create a sub-bucket, or set its policy",
+        "description": "Registers a sub-bucket of the bucket with the policy in the body, or - when the bucket has one of\nthis name - sets its policy in place of the one it had; it keeps the time it was created. Without\n`policy` the sub-bucket has no policy of its own, and one it had is removed. Registering a sub-bucket\nover keys that exist adopts them: nothing is moved, copied or renamed.\n\nA bucket has at most 10 sub-buckets: an 11th is refused with 409 and the problem code\n`TooManySubBuckets`, decided when the change is committed. A name is 1 to 63 lower-case letters,\ndigits and hyphens, beginning and ending with a letter or digit; sub-buckets do not nest.\n\nThe policy is written in the language of bucket policies (ADR-0011) and confined to the sub-bucket:\nevery resource is its keys (`arn:aws:s3:::<bucket>/<name>/*`), or the bucket for listing; its actions\nare those on objects and listing. It cannot allow `s3:BypassGovernanceRetention`, cannot allow\nanything to a caller who has not authenticated, and cannot deny listing. A document that does not\nkeep to these rules, or is larger than 20 KiB, is refused with 400 and the problem code\n`InvalidPolicy`, and nothing is changed.\n\nThe authorizer judges a request on a key of the sub-bucket by the caller's own policies, the\nbucket's policy and this one together: a deny in any refuses, an allow in any allows. Having this\naction is worth what `s3:PutBucketPolicy` is, for the sub-bucket's keys.\n",
+        "x-cactusfs-action": "s3:PutSubBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/SubBucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubBucketPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created, or its policy set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubBucket"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The policy is not one a sub-bucket can have (`code` is `InvalidPolicy`; `detail` says what is\nwrong with it), or the name is not one a sub-bucket can have (`code` is `InvalidArgument`).\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The bucket has 10 sub-buckets already (`code` is `TooManySubBuckets`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSubBucket",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Delete an empty sub-bucket",
+        "description": "Removes the sub-bucket and its policy. Only an empty one is deleted: one under whose name the bucket\nholds no object, no older version, no delete marker and no upload in progress - decided when the\nchange is committed, as for a bucket. Its keys are not deleted with it.\n",
+        "x-cactusfs-action": "s3:DeleteSubBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/SubBucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "404": {
+            "description": "The bucket is not there (`code` is `NoSuchBucket`), or it has no sub-bucket of this name (`code` is\n`NoSuchSubBucket`).\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The bucket holds keys under the sub-bucket's name (`code` is `SubBucketNotEmpty`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "default": {
             "$ref": "#/components/responses/Problem"
@@ -2996,6 +3307,15 @@
           "maxLength": 1024
         }
       },
+      "SubBucketName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "description": "The name of the sub-bucket.",
+        "schema": {
+          "$ref": "#/components/schemas/SubBucketNameValue"
+        }
+      },
       "EntityName": {
         "name": "name",
         "in": "path",
@@ -3331,6 +3651,80 @@
           "open_to_anyone": {
             "type": "boolean",
             "description": "True when some statement of the policy allows something to every caller: an `Allow` whose\nprincipal is `*`. It classifies the document and decides nothing - conditions and `Deny`\nstatements are not weighed, and it does not say that callers who have not authenticated are\nlet in: a statement that allows every caller `s3:PutObject` sets it, and nobody writes\nwithout authenticating.\n"
+          }
+        }
+      },
+      "BucketPolicy": {
+        "type": "object",
+        "description": "The policy of a bucket. `document` is absent when the bucket has none.",
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "BucketPolicyPut": {
+        "type": "object",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "SubBucketNameValue": {
+        "type": "string",
+        "description": "The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a\nletter or digit. The first segment of the keys that belong to it.\n",
+        "minLength": 1,
+        "maxLength": 63,
+        "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+      },
+      "SubBucketSummary": {
+        "type": "object",
+        "description": "A sub-bucket of a bucket, without its policy.",
+        "required": [
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/SubBucketNameValue"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SubBucket": {
+        "type": "object",
+        "description": "A sub-bucket of a bucket and its policy. `policy` is absent when it has none of its own.",
+        "required": [
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/SubBucketNameValue"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the sub-bucket was registered; setting its policy does not change it."
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "SubBucketPut": {
+        "type": "object",
+        "description": "What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own.\n",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/PolicyDocument"
           }
         }
       },

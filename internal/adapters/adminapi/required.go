@@ -23,6 +23,7 @@ func requiredFields() map[string][]string {
 		"POST " + BasePath + "/session/unlock":                {"password"},
 		"POST " + BasePath + "/buckets":                       {"name"},
 		"PUT " + BasePath + "/buckets/{bucket}/quota":         {"quota_bytes"},
+		"PUT " + BasePath + "/buckets/{bucket}/policy":        {"document"},
 		"PUT " + BasePath + "/buckets/{bucket}/notifications": {"rules"},
 		"PUT " + BasePath + "/buckets/{bucket}/replication":   {"target", "destination_bucket", "rules"},
 		"PUT " + BasePath + "/buckets/{bucket}/replica":       {"source"},
