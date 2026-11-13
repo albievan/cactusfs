@@ -233,22 +233,44 @@ func signInAddress(addr netip.Addr) string {
 // attemptLimiter counts failed attempts per key - an address, a user name -
 // in windows of a fixed length. It lives in one node's memory: a cluster
 // allows as many attempts as it has gateways.
+//
+// It remembers at most capacity windows. When it is full, a new key takes
+// the place of a window that has ended or, if none has, of the window that
+// has counted the fewest failures, the oldest of those. Both are found in
+// logarithmic time - the windows are kept in two heaps, by start and by
+// count - so that a caller who makes a new key at every attempt holds the
+// lock for no more than that (review of 2026-11-13).
 type attemptLimiter struct {
 	mu     sync.Mutex
 	failed map[string]*attemptWindow
+	// byStart orders the windows by when they began; byCount by how many
+	// failures they counted, then by when they began.
+	byStart, byCount windowHeap
 	// limit is how many attempts a key may make in a window.
-	limit  int
-	window time.Duration
+	limit    int
+	window   time.Duration
+	capacity int
 }
 
 type attemptWindow struct {
+	key   string
 	since time.Time
 	count int
+	// at is the window's position in each heap: byStart, byCount.
+	at [2]int
 }
 
 // newAttemptLimiter returns a limiter of limit attempts per key in window.
 func newAttemptLimiter(limit int, window time.Duration) attemptLimiter {
-	return attemptLimiter{failed: map[string]*attemptWindow{}, limit: limit, window: window}
+	return newAttemptLimiterOf(limit, window, signInAddresses)
+}
+
+// newAttemptLimiterOf is newAttemptLimiter remembering capacity windows.
+func newAttemptLimiterOf(limit int, window time.Duration, capacity int) attemptLimiter {
+	return attemptLimiter{
+		failed: map[string]*attemptWindow{}, limit: limit, window: window, capacity: capacity,
+		byStart: windowHeap{order: byStartOrder}, byCount: windowHeap{order: byCountOrder},
+	}
 }
 
 // reserve counts an attempt of a key that is about to be checked, and
@@ -262,37 +284,41 @@ func (l *attemptLimiter) reserve(key string, now time.Time) bool {
 			return false
 		}
 		w.count++
+		l.byCount.fix(w)
 		return true
 	}
-	if !ok && len(l.failed) >= signInAddresses {
+	if ok {
+		l.remove(w)
+	} else if len(l.failed) >= l.capacity {
 		l.makeRoom(now)
 	}
-	l.failed[key] = &attemptWindow{since: now, count: 1}
+	w = &attemptWindow{key: key, since: now, count: 1}
+	l.failed[key] = w
+	l.byStart.push(w)
+	l.byCount.push(w)
 	return true
 }
 
-// makeRoom forgets the windows that have ended and, if none has, the one
-// window that has counted the fewest failures, the oldest of those. A live
-// window is never forgotten wholesale: a key that has used up its attempts
-// gets them back only when every other key has failed as often - which
-// takes as many guesses as the window it frees allows.
+// makeRoom forgets a window that has ended or, if none has, the one window
+// that has counted the fewest failures, the oldest of those. A live window
+// is never forgotten wholesale: a key that has used up its attempts gets
+// them back only when every other key has failed as often - which takes as
+// many guesses as the window it frees allows.
 func (l *attemptLimiter) makeRoom(now time.Time) {
-	for key, window := range l.failed {
-		if now.Sub(window.since) >= l.window {
-			delete(l.failed, key)
-		}
-	}
-	if len(l.failed) < signInAddresses {
+	if oldest := l.byStart.top(); oldest != nil && now.Sub(oldest.since) >= l.window {
+		l.remove(oldest)
 		return
 	}
-	var victim string
-	var least *attemptWindow
-	for key, window := range l.failed {
-		if least == nil || window.count < least.count || (window.count == least.count && window.since.Before(least.since)) {
-			victim, least = key, window
-		}
+	if least := l.byCount.top(); least != nil {
+		l.remove(least)
 	}
-	delete(l.failed, victim)
+}
+
+// remove forgets a window.
+func (l *attemptLimiter) remove(w *attemptWindow) {
+	delete(l.failed, w.key)
+	l.byStart.remove(w)
+	l.byCount.remove(w)
 }
 
 // forgive takes back the count of an attempt that was not a wrong guess.
@@ -301,6 +327,7 @@ func (l *attemptLimiter) forgive(key string) {
 	defer l.mu.Unlock()
 	if w, ok := l.failed[key]; ok && w.count > 0 {
 		w.count--
+		l.byCount.fix(w)
 	}
 }
 

@@ -139,3 +139,32 @@ func HeldTargetNames(s *TargetService) int {
 	defer s.names.mu.Unlock()
 	return len(s.names.held)
 }
+
+// AttemptLimiter is the limiter of failed sign-ins, for a test of how it
+// chooses what to forget.
+type AttemptLimiter struct{ l attemptLimiter }
+
+// NewAttemptLimiter returns a limiter of limit attempts per key in window
+// that remembers capacity windows.
+func NewAttemptLimiter(limit int, window time.Duration, capacity int) *AttemptLimiter {
+	return &AttemptLimiter{l: newAttemptLimiterOf(limit, window, capacity)}
+}
+
+// Reserve counts an attempt of key.
+func (a *AttemptLimiter) Reserve(key string, now time.Time) bool { return a.l.reserve(key, now) }
+
+// Forgive takes an attempt of key back.
+func (a *AttemptLimiter) Forgive(key string) { a.l.forgive(key) }
+
+// Live returns the count of every window that has not ended at now.
+func (a *AttemptLimiter) Live(now time.Time) map[string]int {
+	a.l.mu.Lock()
+	defer a.l.mu.Unlock()
+	live := map[string]int{}
+	for key, w := range a.l.failed {
+		if now.Sub(w.since) < a.l.window {
+			live[key] = w.count
+		}
+	}
+	return live
+}
