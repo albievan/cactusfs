@@ -196,7 +196,7 @@ var wiredKinds = []string{
 	"ports.BucketStore", "ports.ObjectIndex", "ports.UploadStore", "ports.RootCredentialStore", "ports.BucketPolicies",
 	"ports.BucketActivityStore", "ports.ObjectAccessStore", "ports.ShardStore", "ports.KMS", "ports.IAMStore",
 	"ports.AuditLog", "ports.SessionStore", "ports.IdempotencyStore", "ports.PasswordHasher", "ports.IdentityProvider",
-	"ports.EventPublisher", "ports.ClusterView", "app.BucketPolicySource", "ports.TargetStore", "ports.SubBucketLister",
+	"ports.EventPublisher", "ports.ClusterView", "app.BucketPolicySource", "ports.TargetStore", "ports.SubBucketLister", "ports.SubBucketStore",
 	"ports.ReleaseVerifier", "ports.Upgrader",
 }
 

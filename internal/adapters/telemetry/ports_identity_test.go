@@ -262,6 +262,35 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 		t.Fatalf("error not passed through: %v", err)
 	}
 
+	store := tel.InstrumentSubBucketStore(mem)
+	if _, ok := store.(ports.BucketAccessReader); ok {
+		t.Fatal("the decorator of the store of sub-buckets reads for the authorizer")
+	}
+	if err := store.PutSubBucket(ctx, "bucket-sentinel", bucket.SubBucket{Name: "put-sentinel", Policy: []byte("doc-sentinel")}, audit.Record{}); err != nil {
+		t.Fatalf("PutSubBucket: %v", err)
+	}
+	if err := store.PutSubBucket(ctx, "absent-sentinel", bucket.SubBucket{Name: "put-sentinel"}, audit.Record{}); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	if got, err := store.GetSubBucket(ctx, "bucket-sentinel", "put-sentinel"); err != nil || string(got.Policy) != "doc-sentinel" {
+		t.Fatalf("GetSubBucket = %+v, %v", got, err)
+	}
+	if _, err := store.GetSubBucket(ctx, "bucket-sentinel", "absent-sentinel"); !errors.Is(err, domain.ErrSubBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	if listed, err := store.ListSubBuckets(ctx, "bucket-sentinel"); err != nil || len(listed) != 2 {
+		t.Fatalf("ListSubBuckets = %+v, %v", listed, err)
+	}
+	if _, err := store.ListSubBuckets(ctx, "absent-sentinel"); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	if err := store.DeleteSubBucket(ctx, "bucket-sentinel", "put-sentinel", audit.Record{}); err != nil {
+		t.Fatalf("DeleteSubBucket: %v", err)
+	}
+	if err := store.DeleteSubBucket(ctx, "bucket-sentinel", "put-sentinel", audit.Record{}); !errors.Is(err, domain.ErrSubBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+
 	view := tel.InstrumentClusterView(fixedView{})
 	if topology, err := view.Topology(ctx); err != nil || topology.DeploymentID != "dep-sentinel" {
 		t.Fatalf("Topology = %+v, %v", topology, err)
@@ -297,6 +326,14 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 		"cactusfs_port_calls_total method=ListSubBuckets port=local_config result=error",
 		"cactusfs_port_calls_total method=GetBucketAccess port=metadata result=ok",
 		"cactusfs_port_calls_total method=GetBucketAccess port=metadata result=error",
+		"cactusfs_port_calls_total method=PutSubBucket port=metadata result=ok",
+		"cactusfs_port_calls_total method=PutSubBucket port=metadata result=error",
+		"cactusfs_port_calls_total method=DeleteSubBucket port=metadata result=ok",
+		"cactusfs_port_calls_total method=DeleteSubBucket port=metadata result=error",
+		"cactusfs_port_calls_total method=GetSubBucket port=metadata result=ok",
+		"cactusfs_port_calls_total method=GetSubBucket port=metadata result=error",
+		"cactusfs_port_calls_total method=ListSubBuckets port=metadata result=ok",
+		"cactusfs_port_calls_total method=ListSubBuckets port=metadata result=error",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Errorf("metrics lack %q", want)
@@ -305,7 +342,8 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 	names := spanNames(recorder)
 	for _, want := range []string{
 		"events.Publish", "identity_provider.Authenticate", "cluster_view.Topology", "cluster_view.Nodes", "local_config.GetBucketConfig",
-		"local_config.ListSubBuckets", "metadata.GetBucketAccess",
+		"local_config.ListSubBuckets", "metadata.GetBucketAccess", "metadata.PutSubBucket", "metadata.DeleteSubBucket",
+		"metadata.GetSubBucket", "metadata.ListSubBuckets",
 	} {
 		if !contains(names, want) {
 			t.Errorf("no span named %q among %v", want, names)

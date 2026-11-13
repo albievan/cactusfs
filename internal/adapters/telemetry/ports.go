@@ -541,6 +541,54 @@ func (b *bucketAccess) GetBucketAccess(ctx context.Context, bucketName string) (
 	return access, err
 }
 
+// InstrumentSubBucketStore returns the replicated store of sub-buckets
+// wrapped so that every call is traced and counted as one of the metadata
+// store. Neither a name nor a policy is a label or an attribute. It is no
+// ports.BucketAccessReader: the authorizer reads through
+// InstrumentSubBuckets.
+func (t *Telemetry) InstrumentSubBucketStore(next ports.SubBucketStore) ports.SubBucketStore {
+	return &subBucketStore{t: t, next: next}
+}
+
+type subBucketStore struct {
+	t    *Telemetry
+	next ports.SubBucketStore
+}
+
+func (*subBucketStore) instrumented() {}
+
+// PutSubBucket implements ports.SubBucketStore.
+func (s *subBucketStore) PutSubBucket(ctx context.Context, bucketName string, sub bucket.SubBucket, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portMetadata, "PutSubBucket")
+	err := s.next.PutSubBucket(ctx, bucketName, sub, record)
+	done(err)
+	return err
+}
+
+// DeleteSubBucket implements ports.SubBucketStore.
+func (s *subBucketStore) DeleteSubBucket(ctx context.Context, bucketName, name string, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portMetadata, "DeleteSubBucket")
+	err := s.next.DeleteSubBucket(ctx, bucketName, name, record)
+	done(err)
+	return err
+}
+
+// GetSubBucket implements ports.SubBucketStore.
+func (s *subBucketStore) GetSubBucket(ctx context.Context, bucketName, name string) (bucket.SubBucket, error) {
+	ctx, done := s.t.call(ctx, portMetadata, "GetSubBucket")
+	sub, err := s.next.GetSubBucket(ctx, bucketName, name)
+	done(err)
+	return sub, err
+}
+
+// ListSubBuckets implements ports.SubBucketStore.
+func (s *subBucketStore) ListSubBuckets(ctx context.Context, bucketName string) ([]bucket.SubBucket, error) {
+	ctx, done := s.t.call(ctx, portMetadata, "ListSubBuckets")
+	subs, err := s.next.ListSubBuckets(ctx, bucketName)
+	done(err)
+	return subs, err
+}
+
 // InstrumentLocalSubBuckets returns a lister of sub-buckets that reads this
 // node's own copy of the state wrapped so that every call is traced and
 // counted under the port of such reads, as InstrumentLocalConfig does.

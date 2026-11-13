@@ -75,6 +75,7 @@ type node struct {
 	started  atomic.Pointer[raftmeta.Store]
 
 	buckets    *app.BucketService
+	subBuckets *app.SubBucketService
 	objects    *app.ObjectService
 	search     *app.SearchService
 	identities *app.IdentityService
@@ -189,8 +190,11 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// consistently: one question to the leader a request and bucket, and a
 	// Deny just put holds for the next request. The authorizer takes only a
 	// reader that confirms with the leader; this node's own copy cannot be
-	// given to it.
-	n.authorizer.WithBucketPolicies(meta).WithSubBuckets(n.telemetry.InstrumentSubBuckets(n.meta))
+	// given to it. It is given no source of bucket policies alone
+	// (WithBucketPolicies): that decides without the policies of
+	// sub-buckets, and nothing on this node may.
+	// TestTheNodeAuthorizerReadsSubBucketPolicies holds it.
+	n.authorizer.WithSubBuckets(n.telemetry.InstrumentSubBuckets(n.meta))
 
 	if cfg.clustered() {
 		if err := n.joinCluster(ctx, cfg, logger); err != nil {
@@ -226,6 +230,9 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	bucketPolicies := n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig())
 	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.telemetry.InstrumentLocalConfig(n.meta.LocalConfig())).
 		WithDetails(bucketPolicies, n.telemetry.InstrumentBucketActivity(n.meta))
+	// The sub-buckets of buckets and their policies (ADR-0017), changed
+	// through Raft with the audit record in the same entry.
+	n.subBuckets = app.NewSubBucketService(n.telemetry.InstrumentSubBucketStore(n.meta), n.authorizer, n.auditor, n.clock, logger)
 	// Who read what: counted in memory and handed to the metadata store in
 	// the background, by this node under its own name (ADR-0016).
 	accessStore := n.telemetry.InstrumentObjectAccess(n.meta)

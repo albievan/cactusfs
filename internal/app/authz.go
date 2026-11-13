@@ -52,6 +52,11 @@ type BucketPolicySource interface {
 // by WithSubBuckets, it reads the policy of a bucket from that reader, with
 // the sub-buckets, and no longer from source. It may be called while the
 // authorizer is in use.
+//
+// Given alone, it decides without the policies of sub-buckets: a
+// sub-bucket's Deny does not hold. It is for an authorizer over a store that
+// has no sub-buckets - a test of bucket policies alone - and never for a
+// node, which gives WithSubBuckets only (ADR-0017).
 func (a *Authorizer) WithBucketPolicies(source BucketPolicySource) *Authorizer {
 	a.policies.Store(&source)
 	return a
