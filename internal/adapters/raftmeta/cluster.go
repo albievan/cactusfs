@@ -62,11 +62,76 @@ type Member struct {
 }
 
 // streamLayer adapts a listener and a dialer to Raft's network transport.
+//
+// Closing it closes the connections it accepted as well as the listener.
+// Raft's transport closes only the listener when it closes, and keeps reading
+// commands from the connections it has, each on its own goroutine: a node
+// that has stopped would go on taking heartbeats, which write Raft's term.
 type streamLayer struct {
 	net.Listener
 	dial func(ctx context.Context, address string) (net.Conn, error)
 	// advertise is where the other nodes reach this one.
 	advertise raft.ServerAddress
+
+	// mu guards closed and open: the connections accepted and not closed
+	// yet.
+	mu     sync.Mutex
+	closed bool
+	open   map[*streamConn]struct{}
+}
+
+// newStreamLayer returns the stream layer of listener and dial.
+func newStreamLayer(listener net.Listener, dial func(ctx context.Context, address string) (net.Conn, error), advertise raft.ServerAddress) *streamLayer {
+	return &streamLayer{Listener: listener, dial: dial, advertise: advertise, open: map[*streamConn]struct{}{}}
+}
+
+// streamConn is a connection the stream layer accepted.
+type streamConn struct {
+	net.Conn
+	owner *streamLayer
+}
+
+// Close implements net.Conn.
+func (c *streamConn) Close() error {
+	c.owner.mu.Lock()
+	delete(c.owner.open, c)
+	c.owner.mu.Unlock()
+	return c.Conn.Close()
+}
+
+// Accept implements net.Listener. A connection accepted as the layer closes
+// is closed at once.
+func (l *streamLayer) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	accepted := &streamConn{Conn: conn, owner: l}
+	l.open[accepted] = struct{}{}
+	return accepted, nil
+}
+
+// Close implements net.Listener: it closes the listener and every connection
+// accepted from it.
+func (l *streamLayer) Close() error {
+	err := l.Listener.Close()
+	l.mu.Lock()
+	l.closed = true
+	open := make([]*streamConn, 0, len(l.open))
+	for conn := range l.open {
+		open = append(open, conn)
+	}
+	l.mu.Unlock()
+	for _, conn := range open {
+		_ = conn.Close()
+	}
+	return err
 }
 
 // Dial implements raft.StreamLayer.

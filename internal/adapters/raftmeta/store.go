@@ -125,8 +125,10 @@ type Store struct {
 	closed bool
 	root   *os.Root
 	fsm    *fsm
-	logs   *raftboltdb.BoltStore
-	raft   *raft.Raft
+	// logs is Raft's log and stable store, gated so that it is never used
+	// after Close has closed it.
+	logs *gatedStore
+	raft *raft.Raft
 
 	logger *slog.Logger
 	// leader reaches the leader of the group from a node that is not it;
@@ -260,13 +262,14 @@ func (s *Store) start(ctx context.Context, cfg Config) error {
 		s.stopOnce.Do(func() { close(s.stopped) })
 	}
 	dir := s.root.Name()
-	s.logs, err = raftboltdb.New(raftboltdb.Options{
+	logs, err := raftboltdb.New(raftboltdb.Options{
 		Path:        filepath.Join(dir, raftLogFile),
 		BoltOptions: &bbolt.Options{Timeout: lockTimeout},
 	})
 	if err != nil {
 		return fmt.Errorf("open raft log: %w", err)
 	}
+	s.logs = newGatedStore(logs)
 	logger := newHCLogger(cfg.Logger.With(slog.String("component", "raft")))
 	snapshots, err := raft.NewFileSnapshotStoreWithLogger(dir, retainedSnapshots, logger)
 	if err != nil {
@@ -302,7 +305,7 @@ func (s *Store) start(ctx context.Context, cfg Config) error {
 		s.leader = c.Leader
 		address = raft.ServerAddress(c.Advertise)
 		s.transport = raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
-			Stream:  &streamLayer{Listener: c.Listener, dial: c.Dial, advertise: address},
+			Stream:  newStreamLayer(c.Listener, c.Dial, address),
 			MaxPool: raftConnectionPool,
 			// One request at a time per follower. Raft's pipelined mode sends
 			// ahead without waiting; a follower that takes what it is sent and
@@ -489,6 +492,9 @@ func (s *Store) Close() error {
 		errs = append(errs, s.transport.Close())
 	}
 	if s.logs != nil {
+		// Waits for the calls under way; a heartbeat the transport was
+		// still answering when Raft stopped cannot reach the closed
+		// database (see gatedStore).
 		errs = append(errs, s.logs.Close())
 	}
 	if s.fsm != nil {
