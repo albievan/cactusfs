@@ -407,8 +407,6 @@ func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
 // gives up on a shard whose drive hangs, rather than wait for it forever.
 func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-
 	for _, step := range []string{"create", "write", "commit"} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
@@ -416,13 +414,13 @@ func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
 			data := randomBytes(t, multiStripe)
 			version := f.put(t, "b", "k", data)
 			drives := f.shardsOf(t, version)
-			_ = drives[1].Delete(ctx, shardID(version, 1))
-			_ = drives[4].Delete(ctx, shardID(version, 4))
+			_ = drives[1].Delete(t.Context(), shardID(version, 1))
+			_ = drives[4].Delete(t.Context(), shardID(version, 4))
 			hanging := slices.Index(f.drives, drives[4])
 
 			objects := f.stallingService(t, step, hanging)
 			result, err := within(t, "HealObject", func() (app.HealResult, error) {
-				return objects.Healer().HealObject(ctx, "b", "k")
+				return objects.Healer().HealObject(t.Context(), "b", "k")
 			})
 			if result.Damaged != 2 || result.Rebuilt != 1 || !errors.Is(err, domain.ErrUnavailable) {
 				t.Errorf("HealObject = %+v, %v; want two damaged shards, the one on the drive that answers rebuilt, and %v",

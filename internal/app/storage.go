@@ -97,10 +97,11 @@ type stepOutcome struct {
 // then are given up on. drop is called for each of them at once - it cancels
 // whatever the shard's step is waiting for - and the step, whenever it does
 // return, aborts the writer it returns. When ctx ends every step still
-// running is given up on.
+// running is given up on. step is given ctx; a step that waits on a drive
+// waits with the shard's own context, which drop cancels.
 func runShards(
 	ctx context.Context, indexes []int, timeout time.Duration, need int,
-	step func(i int) (ports.ShardWriter, error), drop func(i int),
+	step func(ctx context.Context, i int) (ports.ShardWriter, error), drop func(i int),
 ) map[int]stepOutcome {
 	type result struct {
 		index int
@@ -113,7 +114,7 @@ func runShards(
 	results := make(chan result, len(indexes))
 	for _, i := range indexes {
 		go func() {
-			writer, err := step(i)
+			writer, err := step(ctx, i)
 			mu.Lock()
 			if late[i] {
 				mu.Unlock()
@@ -354,8 +355,8 @@ func (s *shardStorage) create(ctx context.Context, dataID object.ID) (*streamWri
 	// The shards are created at once, so that a drive that does not
 	// answer holds the write up for one deadline, not forever.
 	created := runShards(ctx, reachable, s.deadlines.create, w.geometry.WriteQuorum(),
-		func(i int) (ports.ShardWriter, error) {
-			return drives[i].Create(w.contexts[i], object.ShardID{DataID: dataID, Index: i})
+		func(ctx context.Context, i int) (ports.ShardWriter, error) {
+			return drives[i].Create(w.shardContext(ctx, i), object.ShardID{DataID: dataID, Index: i})
 		}, w.drop)
 	for _, i := range reachable {
 		outcome := created[i]
@@ -454,7 +455,7 @@ func (w *streamWriter) flush(ctx context.Context) error {
 	// does not hold up the stripe buffer.
 	indexes, writers := w.live()
 	wrote := runShards(ctx, indexes, w.storage.deadlines.write, w.geometry.WriteQuorum(),
-		func(i int) (ports.ShardWriter, error) {
+		func(_ context.Context, i int) (ports.ShardWriter, error) {
 			_, err := writers[i].Write(chunks[i])
 			return writers[i], err
 		}, w.drop)
@@ -484,8 +485,8 @@ func (w *streamWriter) commit(ctx context.Context) (layout object.Layout, degrad
 	shardSize := w.geometry.ShardSize(w.written)
 	indexes, writers := w.live()
 	committed := runShards(ctx, indexes, w.storage.deadlines.commitFor(shardSize), w.geometry.WriteQuorum(),
-		func(i int) (ports.ShardWriter, error) {
-			return writers[i], writers[i].Commit(w.contexts[i])
+		func(ctx context.Context, i int) (ports.ShardWriter, error) {
+			return writers[i], writers[i].Commit(w.shardContext(ctx, i))
 		}, w.drop)
 	for _, i := range indexes {
 		if outcome := committed[i]; outcome.err != nil {
@@ -944,8 +945,8 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 		rebuild.contexts[i], rebuild.cancels[i] = context.WithCancel(ctx)
 		reachable = append(reachable, i)
 	}
-	created := runShards(ctx, reachable, s.deadlines.create, 0, func(i int) (ports.ShardWriter, error) {
-		return drives[i].Rewrite(rebuild.context(i), object.ShardID{DataID: v.DataID, Index: i})
+	created := runShards(ctx, reachable, s.deadlines.create, 0, func(ctx context.Context, i int) (ports.ShardWriter, error) {
+		return drives[i].Rewrite(rebuild.context(ctx, i), object.ShardID{DataID: v.DataID, Index: i})
 	}, rebuild.drop)
 	for _, i := range reachable {
 		if outcome := created[i]; outcome.err != nil {
@@ -963,7 +964,7 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 			return result, err
 		}
 		indexes, writers := rebuild.live()
-		wrote := runShards(ctx, indexes, s.deadlines.write, 0, func(i int) (ports.ShardWriter, error) {
+		wrote := runShards(ctx, indexes, s.deadlines.write, 0, func(_ context.Context, i int) (ports.ShardWriter, error) {
 			_, err := writers[i].Write(chunks[i])
 			return writers[i], err
 		}, rebuild.drop)
@@ -974,8 +975,8 @@ func (s *shardStorage) heal(ctx context.Context, v object.Extent, slow throttle)
 		}
 	}
 	indexes, writers := rebuild.live()
-	committed := runShards(ctx, indexes, s.deadlines.commitFor(shardSize), 0, func(i int) (ports.ShardWriter, error) {
-		return writers[i], writers[i].Commit(rebuild.context(i))
+	committed := runShards(ctx, indexes, s.deadlines.commitFor(shardSize), 0, func(ctx context.Context, i int) (ports.ShardWriter, error) {
+		return writers[i], writers[i].Commit(rebuild.context(ctx, i))
 	}, rebuild.drop)
 	for _, i := range indexes {
 		if outcome := committed[i]; outcome.err != nil {
@@ -1013,10 +1014,17 @@ func (s *shardStorage) newRebuild(ctx context.Context, dataID object.ID) *rebuil
 	}
 }
 
-// context returns the context shard i is written under. It is made before
-// any step runs, in the goroutine that runs the heal.
-func (r *rebuild) context(i int) context.Context {
+// context returns the context shard i is written under: one made from ctx
+// before any step runs, in the goroutine that runs the heal, and ended by
+// drop.
+func (r *rebuild) context(_ context.Context, i int) context.Context {
 	return r.contexts[i]
+}
+
+// shardContext returns the context shard i is written under: one made from
+// ctx when the write began, and ended by drop.
+func (w *streamWriter) shardContext(_ context.Context, i int) context.Context {
+	return w.contexts[i]
 }
 
 // drop cuts a shard that missed its deadline loose.

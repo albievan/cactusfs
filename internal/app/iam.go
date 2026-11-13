@@ -151,9 +151,9 @@ func (s *IAMService) EnsureDefaultAdmin(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// reasonBoundedPassword is why a principal narrowed by a policy of its own
+// reasonBoundedSignIn is why a principal narrowed by a policy of its own
 // sets no password.
-const reasonBoundedPassword = "an API key with a policy of its own cannot set a password"
+const reasonBoundedSignIn = "an API key with a policy of its own cannot set a password"
 
 // boundedPassword refuses a principal that is narrowed by a policy of its
 // own - an API key with an inline policy - setting a console password, of
@@ -164,8 +164,8 @@ func (s *IAMService) boundedPassword(ctx context.Context, p iam.Principal, in Us
 	if p.Boundary == nil || in.Password == "" {
 		return nil
 	}
-	s.auditor.Denied(ctx, iam.Request{Principal: p, Action: iam.ActionPutUser, Resource: iam.Resource{Admin: "user/" + in.Name}}, reasonBoundedPassword)
-	return fmt.Errorf("%w: %s", domain.ErrAccessDenied, reasonBoundedPassword)
+	s.auditor.Denied(ctx, iam.Request{Principal: p, Action: iam.ActionPutUser, Resource: iam.Resource{Admin: "user/" + in.Name}}, reasonBoundedSignIn)
+	return fmt.Errorf("%w: %s", domain.ErrAccessDenied, reasonBoundedSignIn)
 }
 
 // CreateUser adds a user.
