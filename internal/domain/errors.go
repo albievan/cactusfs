@@ -50,6 +50,11 @@ var (
 	// required tag is missing, or a tag is not one the bucket takes. It is
 	// an ErrInvalidTag.
 	ErrTagRule = fmt.Errorf("%w: against the bucket's tag rules", ErrInvalidTag)
+	// ErrInvalidPolicy reports a policy document that cannot be kept where
+	// it was sent: malformed, too large, or - for the policy of a
+	// sub-bucket - not confined to the sub-bucket (ADR-0017). It is an
+	// ErrInvalidArgument, and crosses a node boundary as one.
+	ErrInvalidPolicy = fmt.Errorf("%w: invalid policy", ErrInvalidArgument)
 	// ErrAccessDenied reports that the authorizer refused the request.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrCredentialNotFound reports an access key ID that does not exist or
@@ -370,6 +375,7 @@ func LocalSentinels() []error {
 		ErrInvalidTag,
 		ErrTagRule,
 		ErrObjectKeyTooLong,
+		ErrInvalidPolicy,
 		ErrIdempotencyKeyReused,
 		ErrRequestInProgress,
 		ErrTooManyAttempts,

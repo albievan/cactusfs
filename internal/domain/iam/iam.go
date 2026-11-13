@@ -49,6 +49,23 @@ const (
 	ActionGetObjectTagging    Action = "s3:GetObjectTagging"
 	ActionPutObjectTagging    Action = "s3:PutObjectTagging"
 	ActionDeleteObjectTagging Action = "s3:DeleteObjectTagging"
+	// Sub-buckets (ADR-0017), asked on the bucket. They are S3 actions, so
+	// that whoever holds "s3:*" on a bucket - the built-in bucket-admin -
+	// holds them, as it holds the bucket's policy; no other built-in role
+	// does, as none holds s3:GetBucketPolicy.
+	//
+	// ActionListSubBuckets allows listing every sub-bucket of a bucket.
+	// Without it a caller is shown those whose keys they may list.
+	ActionListSubBuckets Action = "s3:ListSubBuckets"
+	// ActionPutSubBucket allows registering a sub-bucket and setting its
+	// policy: it is worth what s3:PutBucketPolicy is, for the sub-bucket's
+	// keys.
+	ActionPutSubBucket Action = "s3:PutSubBucket"
+	// ActionDeleteSubBucket allows removing an empty sub-bucket and its
+	// policy.
+	ActionDeleteSubBucket Action = "s3:DeleteSubBucket"
+	// ActionGetSubBucketPolicy allows reading a sub-bucket and its policy.
+	ActionGetSubBucketPolicy Action = "s3:GetSubBucketPolicy"
 	// Lifecycle rules.
 	ActionGetLifecycle Action = "s3:GetLifecycleConfiguration"
 	ActionPutLifecycle Action = "s3:PutLifecycleConfiguration"
@@ -405,7 +422,46 @@ type Request struct {
 	// version it has resolved, never from what a caller sent, and is
 	// never stored or sent anywhere.
 	ObjectCreator string
+	// SubBucketPolicy is the policy of the registered sub-bucket the
+	// request is in, if it has one (ADR-0017): the sub-bucket of
+	// Resource.Key, or of ListPrefix for a listing. Decide checks that the
+	// request is in it - a policy of another bucket or sub-bucket, or a
+	// request it does not cover, is not consulted. For a caller who has not
+	// authenticated only its Deny counts: it never lets one in.
+	SubBucketPolicy *SubBucketPolicy
+	// ListPrefix is the prefix of a listing (s3:ListBucket,
+	// s3:ListBucketVersions, s3:ListBucketMultipartUploads), or empty. Only
+	// a prefix that begins with a sub-bucket's name and a slash lets that
+	// sub-bucket's policy have a say: "sub/" does, "sub" and "sub-x/" do
+	// not.
+	ListPrefix string
 }
+
+// Source names where the answer to a Request came from, for the log of the
+// decision (ADR-0017: three sources of permission are three places to look).
+type Source string
+
+// The sources of a decision.
+const (
+	// SourceNone is the default deny: nothing allowed the request.
+	SourceNone Source = "none"
+	// SourceRule is a rule of Decide itself, which no policy has a say in:
+	// root, nodes, services, a locked session, an anonymous caller asking
+	// what no policy can open to one.
+	SourceRule Source = "rule"
+	// SourceIdentity is the caller's own policies: those of their roles.
+	SourceIdentity Source = "identity-policy"
+	// SourceBucket is the policy of the bucket.
+	SourceBucket Source = "bucket-policy"
+	// SourceSubBucket is the policy of the sub-bucket the request is in.
+	SourceSubBucket Source = "sub-bucket-policy"
+	// SourceKeyBound is the inline policy of the API key, which did not
+	// allow what the key's owner may do.
+	SourceKeyBound Source = "api-key-policy"
+	// SourceOwner is the ownership of an object version: its creator
+	// previews it when no policy speaks of it (ADR-0028).
+	SourceOwner Source = "owner"
+)
 
 // Decide answers an authorization request. The rule is default deny.
 //
@@ -419,8 +475,11 @@ type Request struct {
 //     everything else, without a statement that names the action. What root
 //     cannot do is what the state refuses to everybody - remove a version
 //     under compliance, write a replica into a bucket that is none.
-//   - A user may do what some policy of theirs allows and none denies. An
-//     explicit Deny wins over every Allow.
+//   - A user may do what some policy allows and none denies. The policies
+//     are three sources (ADR-0017): the user's own, the bucket's and the
+//     sub-bucket's, for a key of a registered sub-bucket or a listing whose
+//     prefix lies in one. An explicit Deny in any of them wins over every
+//     Allow; an Allow in any of them allows.
 //   - An API key with an inline policy may do what its owner may do AND the
 //     inline policy allows: a key never exceeds its owner.
 //   - The user who committed an object version (Request.ObjectCreator is
@@ -432,25 +491,50 @@ type Request struct {
 //     nothing else, whatever its user is allowed: every other action is
 //     refused before a policy is read. Storing an object is then decided as
 //     for the same user with a session that is not locked.
+//   - A caller who has not authenticated is let in by the bucket's policy
+//     alone, to read: never by a sub-bucket's, whose Deny refuses them all
+//     the same.
 //
 // A refusal wraps domain.ErrAccessDenied - but the refusal of a locked
 // session, which wraps domain.ErrSessionLocked and not ErrAccessDenied: it
 // says nothing of what the user may do.
 func Decide(req Request) error {
+	_, err := Evaluate(req)
+	return err
+}
+
+// Evaluate answers an authorization request as Decide does, and names the
+// source of the answer: of an Allow, the first source that allowed it (the
+// caller's own policies before the bucket's, the bucket's before the
+// sub-bucket's); of a refusal, the source that denied it, or SourceNone when
+// nothing allowed it.
+func Evaluate(req Request) (Source, error) {
 	if req.Principal.LockedSession && req.Action != ActionPutObject {
 		// First of all: no policy, no kind of principal and no kind of
 		// action has a say in it.
-		return fmt.Errorf("%w: %s may not %s on %s until it is unlocked", domain.ErrSessionLocked, req.Principal.Name(), req.Action, req.Resource)
+		return SourceRule, fmt.Errorf("%w: %s may not %s on %s until it is unlocked", domain.ErrSessionLocked, req.Principal.Name(), req.Action, req.Resource)
 	}
 	if req.Principal.Anonymous() {
 		// Only the policy of a bucket lets anybody in unauthenticated,
-		// and only to read.
+		// and only to read. The policy of a sub-bucket allows nobody
+		// anonymous, but its Deny holds for them as for anybody: a
+		// private sub-bucket of a public bucket stays private.
 		session := Context{SourceIP: req.Principal.Session.SourceIP, SecureTransport: req.Principal.Session.SecureTransport, Now: req.Now}
-		if req.BucketPolicy != nil && anonymousReadable(req.Action) &&
-			req.BucketPolicy.judge(req.Principal, req.Action, req.Resource.String(), session) == allowed {
-			return nil
+		if req.SubBucketPolicy != nil && req.SubBucketPolicy.judge(req, req.Resource.String(), session) == denied {
+			return SourceSubBucket, fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 		}
-		return fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+		source := SourceRule
+		if req.BucketPolicy != nil && anonymousReadable(req.Action) {
+			switch req.BucketPolicy.judge(req.Principal, req.Action, req.Resource.String(), session) {
+			case allowed:
+				return SourceBucket, nil
+			case denied:
+				source = SourceBucket
+			default:
+				source = SourceNone
+			}
+		}
+		return source, fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
 	refused := fmt.Errorf("%w: %s may not %s on %s", domain.ErrAccessDenied, req.Principal.Name(), req.Action, req.Resource)
 	if service := req.Principal.Service; service != "" {
@@ -458,9 +542,9 @@ func Decide(req Request) error {
 		// what it may do is fixed here.
 		p := req.Principal
 		if p.AccessKeyID == "" && !p.Root && p.NodeID == "" && p.User == "" && serviceMay(service, req.Action) {
-			return nil
+			return SourceRule, nil
 		}
-		return refused
+		return SourceRule, refused
 	}
 	if node := req.Principal.NodeID; node != "" || req.Action.cluster() {
 		// A node adds, records and removes itself only, and reports no
@@ -469,40 +553,59 @@ func Decide(req Request) error {
 		own := req.Action == ActionNodeRPC || req.Resource.Node == node
 		if node != "" && !req.Principal.NodeRevoked && req.Principal.AccessKeyID == "" && !req.Principal.Root &&
 			req.Principal.User == "" && req.Action.cluster() && own {
-			return nil
+			return SourceRule, nil
 		}
-		return refused
+		return SourceRule, refused
 	}
 	if req.Principal.Root {
 		if req.Principal.User != "" {
-			return refused
+			return SourceRule, refused
 		}
-		return nil
+		return SourceRule, nil
 	}
 	if req.Principal.User == "" {
-		return refused
+		return SourceRule, refused
 	}
 	ctx := Context{
 		SourceIP: req.Principal.Session.SourceIP, SecureTransport: req.Principal.Session.SecureTransport,
 		Now: req.Now, Username: req.Principal.User,
 	}
 	resource := req.Resource.String()
-	// The user's own policies and the bucket's: either may allow, and a
-	// Deny in either wins over every Allow.
-	own, bucket := judge(req.Principal.Policies, req.Action, resource, ctx), silent
+	// The user's own policies, the bucket's and the sub-bucket's: any may
+	// allow, and a Deny in any wins over every Allow. The sub-bucket's has
+	// a say only in what it covers.
+	verdicts := []struct {
+		source  Source
+		verdict verdict
+	}{{SourceIdentity, judge(req.Principal.Policies, req.Action, resource, ctx)}, {SourceBucket, silent}, {SourceSubBucket, silent}}
 	if req.BucketPolicy != nil {
-		bucket = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx)
+		verdicts[1].verdict = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx)
 	}
-	if own == denied || bucket == denied {
-		return refused
+	if req.SubBucketPolicy != nil {
+		verdicts[2].verdict = req.SubBucketPolicy.judge(req, resource, ctx)
 	}
-	if own != allowed && bucket != allowed && !owns(req) {
-		return refused
+	for _, v := range verdicts {
+		if v.verdict == denied {
+			return v.source, refused
+		}
+	}
+	source := SourceNone
+	for _, v := range verdicts {
+		if v.verdict == allowed {
+			source = v.source
+			break
+		}
+	}
+	if source == SourceNone && owns(req) {
+		source = SourceOwner
+	}
+	if source == SourceNone {
+		return SourceNone, refused
 	}
 	if boundary := req.Principal.Boundary; boundary != nil && judge([]Document{*boundary}, req.Action, resource, ctx) != allowed {
-		return fmt.Errorf("%w: the API key's own policy does not allow %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+		return SourceKeyBound, fmt.Errorf("%w: the API key's own policy does not allow %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
-	return nil
+	return source, nil
 }
 
 // owns reports whether the request is the preview of an object version by

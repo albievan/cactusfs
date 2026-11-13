@@ -718,6 +718,10 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusBadRequest, code: "InvalidBucketName", title: "Invalid bucket name"}
 	case is(domain.ErrInvalidObjectKey):
 		return problem{status: http.StatusBadRequest, code: "InvalidObjectKey", title: "Invalid object key"}
+	case is(domain.ErrInvalidPolicy):
+		// Before the argument error it is one of: the contract names the
+		// policies a bucket and a sub-bucket cannot keep apart.
+		return problem{status: http.StatusBadRequest, code: "InvalidPolicy", title: "Invalid policy"}
 	case is(domain.ErrInvalidArgument), is(domain.ErrIncompleteBody), is(domain.ErrBadDigest), is(domain.ErrInvalidRange),
 		is(domain.ErrCustomerKeyRequired):
 		return problem{status: http.StatusBadRequest, code: "InvalidArgument", title: "Invalid request"}
