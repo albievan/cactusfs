@@ -324,6 +324,9 @@ Behaviour:
   pair is held to the same checks at start, where a failure is logged at `ERROR` and
   the node starts all the same. A refusal that stands is logged again every hour, and
   is `cactusfs_tls_reload_pending` = 1 for as long as it stands.
+  The node ports (node RPC and Raft) take at most 16 handshakes in flight from one
+  source (an IPv4 address or an IPv6 /64) and 4096 in all; a caller that sends nothing
+  within 2 s is closed, and a handshake has 10 s to finish.
 - **Probes.** `GET /healthz` answers 200 while the process can serve HTTP. `GET /readyz`
   answers 200 when every `ports.ReadinessCheck` passes and 503 otherwise. The probes are
   unauthenticated, so a response is only `{"status":"ok"}` or `{"status":"unavailable"}`;
