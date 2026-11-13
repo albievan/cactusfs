@@ -317,8 +317,11 @@ Questions, with the default that was accepted:
     object browser; and the Settings screen shows an auditor the directories,
     addresses, drive labels and builds of every node. Decide both: whether the role may
     list, and whether it should read the settings in that detail.
-12. **Local KMS wrap bound.** The local KMS wraps every data key under one master key
-    with a random 96-bit nonce, which is safe for about 2^32 wraps. There is no key
+12. **Local KMS wrap bound.** Version 1 wrapped keys of the local KMS were sealed under
+    one master key with a random 96-bit nonce, safe for about 2^32 wraps. Version 2
+    (ADR-0031) seals each data key under a key of its own; a cluster writes it once every
+    member reads it, so keys made before that and during a rolling upgrade from the
+    release before stay version 1 and count against the old bound. There is no key
     rotation yet; Vault Transit does not have this bound.
 13. **Conditional writes** (`If-None-Match: *` and `If-Match` on a PUT, "create only
     if absent") answer `501` rather than being ignored: the condition would have to be

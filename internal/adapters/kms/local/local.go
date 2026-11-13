@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/crypto/argon2"
 
@@ -41,7 +42,8 @@ const (
 
 	// wrapVersion1 is the first format of a wrapped key: every data key
 	// sealed directly under the master key with a random nonce. It is
-	// still read; it is no longer written (ADR-0031).
+	// always read, and written only until every node of the cluster reads
+	// version 2 (ADR-0031).
 	wrapVersion1 = 1
 	// wrapVersion2 seals every data key under a key of its own, derived
 	// from the master key and a random salt carried in the wrapped key.
@@ -104,6 +106,39 @@ type KMS struct {
 	// aead is AES-256-GCM under the master key itself, which only
 	// version 1 wrapped keys use.
 	aead cipher.AEAD
+	// version2Ready, when set, says whether every node that may read a
+	// wrapped key reads version 2; until it does, keys are wrapped in
+	// version 1. version2 records that it once did: no node that reads only
+	// version 1 can join again after that.
+	version2Ready atomic.Pointer[func() bool]
+	version2      atomic.Bool
+}
+
+// WriteVersion2When makes the KMS wrap new data keys in version 1 until
+// ready reports true, and in version 2 from then on, whatever ready reports
+// later (ADR-0031). The composition root of a cluster sets it from the
+// metadata group's level, so that a node of the release before version 2,
+// sharing the key file during a rolling upgrade, can open every key wrapped
+// while it is still a member. Without it, every key is wrapped in version 2.
+// ready is asked for every new data key until it reports true, and must be
+// quick and safe to call from any goroutine. Keys of both versions are
+// always read.
+func (k *KMS) WriteVersion2When(ready func() bool) {
+	k.version2.Store(false)
+	k.version2Ready.Store(&ready)
+}
+
+// writesVersion2 reports whether a new data key is wrapped in version 2.
+func (k *KMS) writesVersion2() bool {
+	if k.version2.Load() {
+		return true
+	}
+	ready := k.version2Ready.Load()
+	if ready == nil || (*ready)() {
+		k.version2.Store(true)
+		return true
+	}
+	return false
 }
 
 var _ ports.KMS = (*KMS)(nil)
@@ -282,11 +317,27 @@ func (k *KMS) KeyID() string {
 // with the key ID and the caller's aad as associated data. Every data key is
 // sealed under a key of its own, so the number of keys wrapped under one
 // master key is not bounded by the 2^32 random nonces AES-GCM allows a key.
+// Until WriteVersion2When's ready says otherwise, a key is wrapped in
+// version 1:
+//
+//	version (1 byte, 1) || nonce (12 bytes) || AES-256-GCM(master key, data key)
 func (k *KMS) GenerateDataKey(ctx context.Context, aad []byte) (ports.DataKey, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.DataKey{}, fmt.Errorf("kms/local.GenerateDataKey: %w", err)
 	}
 	nonceSize := k.aead.NonceSize()
+	if !k.writesVersion2() {
+		random := make([]byte, keySize+nonceSize)
+		if _, err := io.ReadFull(randomSource(), random); err != nil {
+			return ports.DataKey{}, fmt.Errorf("kms/local.GenerateDataKey: read randomness: %w", err)
+		}
+		plaintext, nonce := random[:keySize], random[keySize:]
+		wrapped := make([]byte, 0, 1+nonceSize+keySize+k.aead.Overhead())
+		wrapped = append(wrapped, wrapVersion1)
+		wrapped = append(wrapped, nonce...)
+		wrapped = k.aead.Seal(wrapped, nonce, plaintext, k.wrapAAD(aad))
+		return ports.DataKey{Plaintext: plaintext, Wrapped: wrapped}, nil
+	}
 	// One read of the system source for the key, the salt and the nonce.
 	random := make([]byte, keySize+wrapSaltSize+nonceSize)
 	if _, err := io.ReadFull(randomSource(), random); err != nil {

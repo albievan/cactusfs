@@ -266,6 +266,11 @@ func TestRollingUpgradeToSchema6(t *testing.T) {
 			if err := c.store(id).CanRevoke(); !errors.Is(err, domain.ErrUnavailable) {
 				t.Errorf("%s: CanRevoke on %s = %v, want %v", step, id, err, domain.ErrUnavailable)
 			}
+			// The local KMS keeps wrapping keys a node of schema 5 opens
+			// (ADR-0031).
+			if level, err := c.store(id).MetadataLevel(); err != nil || level != entrySchema5 {
+				t.Errorf("%s: MetadataLevel on %s = %d, %v; want %d", step, id, level, err, entrySchema5)
+			}
 		}
 		err := c.store("m2").RevokeNode(ctx, "s4")
 		if !errors.Is(err, domain.ErrUnavailable) || errors.Is(err, domain.ErrOutcomeUnknown) {
@@ -299,6 +304,11 @@ func TestRollingUpgradeToSchema6(t *testing.T) {
 
 	if err := c.store(c.leader()).CanRevoke(); err != nil {
 		t.Fatalf("CanRevoke at level 6: %v", err)
+	}
+	for _, id := range nodes {
+		if level, err := c.store(id).MetadataLevel(); err != nil || level != entrySchema6 {
+			t.Errorf("MetadataLevel on %s = %d, %v; want %d", id, level, err, entrySchema6)
+		}
 	}
 	if err := c.store("m2").RevokeNode(ctx, "s4"); err != nil {
 		t.Fatalf("RevokeNode at level 6: %v", err)

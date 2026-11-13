@@ -132,6 +132,26 @@ func TestNewDeploymentGeneratesRootCredentialsOnce(t *testing.T) {
 	}
 }
 
+// TestWrapVersion2FollowsTheMetadataLevel: the local KMS wraps in version 2
+// only once every member of the metadata group reads it (ADR-0031). A node
+// on its own is every member, and does at once; a node whose store is not
+// open cannot tell, and says no.
+func TestWrapVersion2FollowsTheMetadataLevel(t *testing.T) {
+	t.Parallel()
+	if (&node{}).everyMemberReadsWrapVersion2() {
+		t.Error("a node with no metadata store says every member reads version 2")
+	}
+	standalone := mustStart(t, nodeConfig(t.TempDir()))
+	if !standalone.node.everyMemberReadsWrapVersion2() {
+		level, err := standalone.node.meta.MetadataLevel()
+		t.Errorf("a standalone node at level %d (%v) keeps wrapping in version 1", level, err)
+	}
+	if raftmeta.MetadataVersion < wrapVersion2Level {
+		t.Errorf("this release applies schema %d, below the level %d its own KMS format needs",
+			raftmeta.MetadataVersion, wrapVersion2Level)
+	}
+}
+
 func TestSuppliedRootCredentials(t *testing.T) {
 	t.Parallel()
 	cfg := nodeConfig(t.TempDir())

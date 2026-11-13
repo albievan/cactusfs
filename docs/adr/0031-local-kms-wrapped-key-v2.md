@@ -1,6 +1,6 @@
 # ADR-0031: Wrapped keys of the local KMS, version 2 - a key of its own for every data key
 
-- **Status:** accepted and implemented (audit finding L34, 2026-11-12)
+- **Status:** accepted and implemented (audit finding L34, 2026-11-12); amended 2026-11-13 (rolling upgrades)
 - **Date:** 2026-11-12
 - **Changes:** the wrapped-key format of `internal/adapters/kms/local` (ADR-0002, "Keys")
 
@@ -56,21 +56,41 @@ rewrapping every object version would rewrite the metadata of the whole deployme
 nothing. A version byte that is neither is refused, as before. A version 2 key relabelled
 as version 1 does not open (the tests check it).
 
-**Writing.** Every key wrapped from this release on is of version 2.
+**Writing.** A key is wrapped in version 2 once every node that may read it reads
+version 2, and in version 1 until then (amended 2026-11-13, below). A node on its own -
+standalone - is every node there is, and writes version 2 from its first key.
 
 ## Rolling upgrades
 
-The local KMS is for a single node, and for a cluster only in development (the chart
-requires `dev.localKMS`; the compose cluster uses it). In a cluster that shares one key
-file and is upgraded one node at a time, a node of the new release writes version 2 keys
-that a node of the old one cannot open until it is upgraded too: such a node fails to
-read the new objects with `ErrKeyUnavailable`, and nothing is lost or damaged. Production
-clusters use Vault Transit, whose format this does not touch. Writing version 1 until
-every node is upgraded would need the adapter to know the versions of the other nodes,
-which a KMS adapter has no port for; for a development-only mode it was not judged worth
-one. **Open for Albie:** whether a development cluster on the local KMS must be rollable
-across this change; if so, a setting that keeps writing version 1 until the last node is
-upgraded is the way.
+*Amended 2026-11-13 (review of the audit fixes).* As first accepted, every key was
+wrapped in version 2 at once, so in a cluster sharing one key file (the compose
+cluster runs `CACTUSFS_KMS=local`) and upgraded one node at a time, a node of the
+release before could not open keys wrapped by an upgraded node until it was upgraded
+too. That broke the rule that release N runs alongside N+1. Now:
+
+- Version 2 came with the release of metadata entry schema 6 (ADR-0030). A cluster whose
+  metadata level - the oldest `MetadataVersion` every member of the Raft group has
+  registered, `raftmeta.Store.MetadataLevel` - is 6 or more has no member that cannot
+  read version 2.
+- `local.KMS.WriteVersion2When(ready)` makes the adapter wrap in version 1 until `ready`
+  says yes, and in version 2 from then on, for good: a member of the release before
+  cannot join a cluster at level 6 (it stops at the first entry of schema 6). The
+  composition root (`cmd/cactusfs/node.go`) sets `ready` to "the metadata store is open
+  and its level is at least 6", before any key is made. While the store cannot tell, the
+  answer is no: version 1 is read by every release.
+- The adapter keeps no port of its own for this; the composition root, which sees both
+  the KMS and the metadata store, decides. A `KMS` nobody gates (tools, tests) writes
+  version 2.
+- Version 1 keys written during an upgrade are not rewrapped later, for the reason given
+  under **Reading**; a cluster is at most one upgrade's worth of keys behind the
+  bound this ADR is about.
+- `TestVersion1NodesKeepWorkingMidUpgrade` (a stand-in for the release before, reading
+  version 1 only, opens every key made mid-upgrade; version 2 after, for good),
+  `TestRollingUpgradeToSchema6` (the level stays 5 until the last node registers 6) and
+  `TestWrapVersion2FollowsTheMetadataLevel` (a standalone node writes version 2 at once)
+  check it.
+
+Production clusters use Vault Transit, whose format this does not touch.
 
 ## Consequences
 

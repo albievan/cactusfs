@@ -152,6 +152,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	if err != nil {
 		return err
 	}
+	// A key file shared by the nodes of a cluster is wrapped into in the
+	// format every member reads: version 2 only once the last node of the
+	// release before it has been upgraded (ADR-0031).
+	if shared, ok := opened.(*local.KMS); ok {
+		shared.WriteVersion2When(n.everyMemberReadsWrapVersion2)
+	}
 	kms := n.telemetry.InstrumentKMS(opened)
 	// What the node says of its settings, to its own management API and to
 	// the nodes that ask. It is there before node RPC is, and redacted from
@@ -556,6 +562,24 @@ To choose the credentials yourself, set %s and %s
 before the first start.
 
 `, creds.AccessKeyID, creds.SecretKey, envRootKeyID, envRootKeyValue)
+}
+
+// wrapVersion2Level is the metadata level from which every member of the
+// group reads the version 2 wrapped keys of the local KMS: they came with
+// the release of entry schema 6 (ADR-0031).
+const wrapVersion2Level = 6
+
+// everyMemberReadsWrapVersion2 reports whether every member of the metadata
+// group reads the version 2 wrapped keys of the local KMS. It says no while
+// the node's metadata store is not open, or cannot tell: a version 1 key is
+// read by every release.
+func (n *node) everyMemberReadsWrapVersion2() bool {
+	meta := n.started.Load()
+	if meta == nil {
+		return false
+	}
+	level, err := meta.MetadataLevel()
+	return err == nil && level >= wrapVersion2Level
 }
 
 // openKMS opens the configured KMS. The key file of the local KMS is created

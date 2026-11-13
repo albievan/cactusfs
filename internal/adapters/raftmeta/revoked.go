@@ -102,6 +102,24 @@ func (s *Store) CanRevoke() error {
 	})
 }
 
+// MetadataLevel returns the newest metadata entry schema every member of
+// the group understands, which is the oldest release among them: a binary
+// of MetadataVersion n understands every format that release introduced,
+// in the metadata and beside it. A member that has not registered its
+// version yet counts as the oldest. A node on its own is every member there
+// is.
+func (s *Store) MetadataLevel() (int, error) {
+	var level byte
+	err := s.use(func() (err error) {
+		level, err = s.entryVersion()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("raftmeta.MetadataLevel: %w", err)
+	}
+	return int(level), nil
+}
+
 // NodeRevoked reports whether this node's copy of the state records the node
 // as revoked. It asks nobody: it is read for every call of another node, and
 // a revocation reaches this node as soon as this node has applied it.

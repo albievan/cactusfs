@@ -9,11 +9,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 
 	"github.com/albievan/cactusfs/internal/adapters/kms/local"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // testParams is the cheapest parameter set the adapter accepts.
@@ -375,6 +377,86 @@ func TestWrappedKeysOfVersion1StillUnwrap(t *testing.T) {
 	key, err := kms.GenerateDataKey(context.Background(), aad)
 	if err != nil || key.Wrapped[0] != 2 {
 		t.Fatalf("GenerateDataKey = version %v, %v; want version 2", key.Wrapped, err)
+	}
+}
+
+// TestVersion1NodesKeepWorkingMidUpgrade: in a cluster sharing one key file
+// and upgraded one node at a time, a node of the release before version 2
+// must open every key wrapped while it is a member (review of 2026-11-13).
+// Until ready says every member reads version 2, keys are wrapped in
+// version 1; from then on in version 2, even if ready later says no; keys of
+// both versions are read throughout.
+func TestVersion1NodesKeepWorkingMidUpgrade(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := createKey(t)
+	upgraded, err := local.Open(path, testPassphrase())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := local.Open(path, testPassphrase())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var everyMemberReads2 atomic.Bool
+	asked := atomic.Int32{}
+	upgraded.WriteVersion2When(func() bool {
+		asked.Add(1)
+		return everyMemberReads2.Load()
+	})
+
+	aad := []byte("bucket/object/version")
+	wrap := func() ports.DataKey {
+		t.Helper()
+		key, err := upgraded.GenerateDataKey(ctx, aad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	opens := func(name string, key ports.DataKey, unwrap func([]byte, []byte) ([]byte, error)) {
+		t.Helper()
+		got, err := unwrap(key.Wrapped, aad)
+		if err != nil || !bytes.Equal(got, key.Plaintext) {
+			t.Errorf("%s: unwrap = %v; want the data key", name, err)
+		}
+	}
+	upgradedUnwrap := func(w, a []byte) ([]byte, error) { return upgraded.UnwrapDataKey(ctx, w, a) }
+
+	// Mid-upgrade: version 1, which both releases open.
+	before := wrap()
+	if before.Wrapped[0] != 1 {
+		t.Fatalf("mid-upgrade a key was wrapped in version %d, want 1", before.Wrapped[0])
+	}
+	opens("a node of the release before, mid-upgrade", before, old.UnwrapAsAVersion1Node)
+	opens("an upgraded node, mid-upgrade", before, upgradedUnwrap)
+	if _, err := upgraded.UnwrapDataKey(ctx, before.Wrapped, []byte("intruder")); !errors.Is(err, domain.ErrKeyUnavailable) {
+		t.Errorf("a version 1 key opened for another owner: %v", err)
+	}
+
+	// Every member reads version 2: version 2 from now on, for good.
+	everyMemberReads2.Store(true)
+	after := wrap()
+	if after.Wrapped[0] != 2 {
+		t.Fatalf("after the upgrade a key was wrapped in version %d, want 2", after.Wrapped[0])
+	}
+	opens("an upgraded node, after", after, upgradedUnwrap)
+	opens("an upgraded node, a key of before", before, upgradedUnwrap)
+	if _, err := old.UnwrapAsAVersion1Node(after.Wrapped, aad); err == nil {
+		t.Error("the stand-in for the release before opened a version 2 key: it proves nothing")
+	}
+	everyMemberReads2.Store(false)
+	askedThen := asked.Load()
+	if again := wrap(); again.Wrapped[0] != 2 {
+		t.Errorf("a key was wrapped in version %d after version 2 was in use, want 2", again.Wrapped[0])
+	}
+	if asked.Load() != askedThen {
+		t.Error("ready was asked again after it said yes")
+	}
+
+	// A KMS nobody gates writes version 2 at once.
+	if key, err := old.GenerateDataKey(ctx, aad); err != nil || key.Wrapped[0] != 2 {
+		t.Errorf("ungated GenerateDataKey = %v, %v; want version 2", key.Wrapped, err)
 	}
 }
 
