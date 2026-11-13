@@ -326,7 +326,16 @@ describe('the session of the browser, which every tab shares', () => {
     user = 'bob';
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
     try {
-      document.dispatchEvent(new Event('visibilitychange'));
+      // The tab listens from an effect that runs after the screen shows
+      // "alice", and on a loaded machine that can be after the first look
+      // for it: the tab is shown again until it has asked, and no more
+      // (a second ask while one is out is not made).
+      await waitFor(() => {
+        if (fake.callsTo('GET', '/session').length < 2) {
+          document.dispatchEvent(new Event('visibilitychange'));
+        }
+        expect(fake.callsTo('GET', '/session')).toHaveLength(2);
+      });
       expect(await screen.findByText('Signed in as bob')).toBeDefined();
     } finally {
       Reflect.deleteProperty(document, 'visibilityState');
