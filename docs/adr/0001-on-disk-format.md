@@ -107,6 +107,18 @@ PLAN 2.7 removes those.
   `NtCreateFile` relative to it with an empty name, which names the directory itself.
   No path is built outside the root.
 
+  *Fail-safe (noted 2026-11-13).* A file system that refuses `FlushFileBuffers` on a
+  directory handle, or refuses to open one for writing - some network and filter-driver
+  file systems do - now makes every shard commit and removal, and the formatting and
+  claiming of a drive, fail with the error of that call: the write is not acknowledged unless a write quorum of
+  other drives took it, and a drive on such a file system cannot be used. Before H29
+  such a drive was used and its renames were not durable; refusing it is the stricter
+  reading of "durable before acknowledged" (CLAUDE.md §2). NTFS and ReFS on local disks
+  accept the flush. `TestSyncDir` and `TestSyncDirReachesTheDirectory`
+  (`internal/adapters/fsutil`) run on the `windows-latest` unit job of CI, which runs
+  `go test ./...` without the race detector, as do the disk adapter's tests through
+  `SyncDir`.
+
 ## Consequences
 
 - A reader refuses an intact header of another version with `ErrUnsupportedFormat`
