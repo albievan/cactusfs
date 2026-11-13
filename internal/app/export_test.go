@@ -55,6 +55,15 @@ func (a *Authorizer) ParsedPolicy(bucketName string) *iam.BucketPolicy {
 	return a.parsed.entries[bucketName].policy
 }
 
+// ParsedSubBucketPolicy returns the parsed policy the authorizer remembers
+// of a sub-bucket, or nil. Two calls return the same pointer for as long as
+// the policy was not parsed again.
+func (a *Authorizer) ParsedSubBucketPolicy(bucketName, name string) *iam.SubBucketPolicy {
+	a.parsed.mu.Lock()
+	defer a.parsed.mu.Unlock()
+	return a.parsed.subBuckets[bucketName][name].subBucket
+}
+
 // WithParsedPolicyBounds gives the authorizer's memory of parsed bucket
 // policies bounds a test can reach.
 func (a *Authorizer) WithParsedPolicyBounds(entries, size int) *Authorizer {

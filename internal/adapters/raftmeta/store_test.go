@@ -16,6 +16,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -475,6 +476,53 @@ func TestLocalBucketPolicies(t *testing.T) {
 	cancel()
 	if _, err := local.BucketPolicies(cancelled, "", func(string, []byte) error { return nil }); !errors.Is(err, context.Canceled) {
 		t.Errorf("BucketPolicies of a request that is gone = %v", err)
+	}
+}
+
+// TestLocalSubBuckets: the sub-buckets of a bucket, read from this node's
+// copy of the state, are those the consistent read lists, policies
+// included, and follow what is put and deleted; a bucket that is not there
+// is said to be so. The reader of this node's copy is not one the
+// authorizer takes - a ports.BucketAccessReader - and the store is.
+func TestLocalSubBuckets(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store := open(t, t.TempDir())
+	var local ports.SubBucketLister = store.LocalConfig()
+	if _, ok := any(local).(ports.BucketAccessReader); ok {
+		t.Fatal("LocalConfig reads for the authorizer, without confirming with the leader")
+	}
+	if _, ok := any(store).(ports.BucketAccessReader); !ok {
+		t.Fatal("the store does not read for the authorizer")
+	}
+	if _, err := local.ListSubBuckets(ctx, "nowhere"); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("ListSubBuckets of no bucket = %v", err)
+	}
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: time.Unix(1, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if subs, err := local.ListSubBuckets(ctx, "b"); err != nil || len(subs) != 0 {
+		t.Fatalf("ListSubBuckets of a bucket without = %v, %v", subs, err)
+	}
+	for _, name := range []string{"reports", "archive"} {
+		sub := bucket.SubBucket{Name: name, CreatedAt: time.Unix(2, 0), Policy: []byte(`{"policy":"` + name + `"}`)}
+		if err := store.PutSubBucket(ctx, "b", sub, audit.Record{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.DeleteSubBucket(ctx, "b", "archive", audit.Record{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := local.ListSubBuckets(ctx, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := store.ListSubBuckets(ctx, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) || len(got) != 1 || got[0].Name != "reports" || string(got[0].Policy) != `{"policy":"reports"}` {
+		t.Errorf("ListSubBuckets from this node = %+v, consistently = %+v", got, want)
 	}
 }
 

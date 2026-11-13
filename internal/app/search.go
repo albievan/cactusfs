@@ -116,9 +116,14 @@ type SearchServiceConfig struct {
 	// Policies gives the policies of all buckets from this node's state, a
 	// page at a time, for the authorizer to decide every bucket from.
 	Policies ports.BucketPolicies
-	Authz    ports.Authorizer
-	Clock    ports.Clock
-	Logger   *slog.Logger
+	// SubBuckets, when given, lists the sub-buckets of a bucket from this
+	// node's state, with their policies: a bucket the caller may not list
+	// is then searched in the sub-buckets they may (ADR-0017). Without it
+	// such a bucket is left out whole.
+	SubBuckets ports.SubBucketLister
+	Authz      ports.Authorizer
+	Clock      ports.Clock
+	Logger     *slog.Logger
 }
 
 // searchBounds are the bounds of a call; a test makes them small.
@@ -135,8 +140,11 @@ type searchBounds struct {
 // A search is a read, like a listing, and shows nothing a listing would not:
 // the name of a bucket only to who may list the buckets, the keys of a
 // bucket only to who may list that bucket - each bucket decided by the
-// authorizer, the bucket's own policy included. Nothing is written to the
-// audit trail for a search, nor for the buckets it leaves out.
+// authorizer, the bucket's own policy included - and, of a bucket the caller
+// may not list, the keys of each of its sub-buckets they may list, as a
+// listing with the sub-bucket's prefix would show them. Nothing is written
+// to the audit trail for a search, nor for the buckets and sub-buckets it
+// leaves out.
 //
 // What a call costs before it looks at a key does not depend on what the
 // caller may see nor on the continuation it brings: one consistent listing
@@ -146,13 +154,14 @@ type searchBounds struct {
 // every bucket there is. The root identity, bound by no bucket policy, causes
 // no walk.
 type SearchService struct {
-	buckets  ports.BucketStore
-	index    ports.ObjectIndex
-	policies ports.BucketPolicies
-	authz    ports.Authorizer
-	clock    ports.Clock
-	logger   *slog.Logger
-	bounds   searchBounds
+	buckets    ports.BucketStore
+	index      ports.ObjectIndex
+	policies   ports.BucketPolicies
+	subBuckets ports.SubBucketLister
+	authz      ports.Authorizer
+	clock      ports.Clock
+	logger     *slog.Logger
+	bounds     searchBounds
 
 	// running holds who is searching on this node right now.
 	mu      sync.Mutex
@@ -165,7 +174,8 @@ func NewSearchService(cfg SearchServiceConfig) (*SearchService, error) {
 		return nil, fmt.Errorf("search.New: %w: a dependency is missing", domain.ErrInvalidArgument)
 	}
 	return &SearchService{
-		buckets: cfg.Buckets, index: cfg.Index, policies: cfg.Policies, authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger,
+		buckets: cfg.Buckets, index: cfg.Index, policies: cfg.Policies, subBuckets: cfg.SubBuckets,
+		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger,
 		bounds:  searchBounds{examined: MaxSearchExamined, buckets: MaxSearchBuckets, chunk: searchChunk, time: MaxSearchTime},
 		running: map[string]struct{}{},
 	}, nil
@@ -305,21 +315,31 @@ func (s *SearchService) Search(ctx context.Context, principal iam.Principal, in 
 	ctx = WithRequestScope(ctx)
 	w := &searchWalk{
 		s: s, principal: principal, query: query, limit: limit, started: s.clock.Now(),
-		may: map[string]bool{}, out: SearchOutput{MatchKind: query.Kind(), Results: []SearchResult{}},
+		may: map[string]searchScope{}, out: SearchOutput{MatchKind: query.Kind(), Results: []SearchResult{}},
 	}
 	var names []string
 	if in.Bucket != "" {
-		// A bucket the caller names is asked for, not filtered: the gate
-		// is the one a listing of it passes, and a refusal is audited. It
-		// comes before the look at the bucket, so that who may not list it
-		// does not learn whether it is there.
-		if err = s.authz.Authorize(ctx, listRequest(principal, in.Bucket)); err != nil {
+		// A bucket the caller names is searched in what they may list of
+		// it: all of it, or the sub-buckets they may list. Who may list
+		// neither is asked for, not filtered: the gate is the one a
+		// listing of the bucket passes, and a refusal is audited. It comes
+		// before the look at the bucket, so that who may not list it does
+		// not learn whether it is there - a bucket that is not there has
+		// no sub-buckets either.
+		var into searchScope
+		if into, err = w.mayList(ctx, in.Bucket); err != nil {
 			return SearchOutput{}, fmt.Errorf("search.Search: %w", err)
+		}
+		if !into.some() {
+			if err = s.authz.Authorize(ctx, listRequest(principal, in.Bucket)); err != nil {
+				return SearchOutput{}, fmt.Errorf("search.Search: %w", err)
+			}
+			into = searchScope{whole: true}
 		}
 		if _, err = s.buckets.GetBucket(ctx, in.Bucket); err != nil {
 			return SearchOutput{}, fmt.Errorf("search.Search: %w", err)
 		}
-		names, w.may[in.Bucket], w.objectsOnly = []string{in.Bucket}, true, true
+		names, w.may[in.Bucket], w.objectsOnly = []string{in.Bucket}, into, true
 	} else if names, err = w.visible(ctx); err != nil {
 		return SearchOutput{}, fmt.Errorf("search.Search: %w", err)
 	}
@@ -364,13 +384,25 @@ type searchWalk struct {
 	// result.
 	listAll     bool
 	objectsOnly bool
-	// may remembers which buckets the caller may list.
-	may map[string]bool
+	// may remembers what of each bucket the caller may list.
+	may map[string]searchScope
 	// visited counts the buckets looked at or into, chunks the walks of
 	// the index.
 	visited int
 	chunks  int
 }
+
+// searchScope is what of a bucket a caller may see into: all of it, the keys
+// of some of its sub-buckets, or nothing.
+type searchScope struct {
+	whole bool
+	// prefixes are those of the sub-buckets the caller may list, in
+	// order, when they may not list the bucket.
+	prefixes []string
+}
+
+// some reports whether the caller may see into the bucket at all.
+func (s searchScope) some() bool { return s.whole || len(s.prefixes) > 0 }
 
 // searchStop is where a walk stopped: at a bucket, having looked at its keys
 // up to and including key.
@@ -404,7 +436,7 @@ func (w *searchWalk) visible(ctx context.Context) ([]string, error) {
 	}
 	// The store lists in name order; the walk depends on it.
 	sort.Strings(names)
-	w.may = make(map[string]bool, len(names))
+	w.may = make(map[string]searchScope, len(names))
 	// From here on the authorizer takes the policies of the buckets from a
 	// walk of them all, begun after the listing above.
 	primeBucketPolicies(ctx, w.s.policies)
@@ -429,11 +461,11 @@ func (w *searchWalk) visible(ctx context.Context) ([]string, error) {
 		if w.s.clock.Now().Sub(deciding) >= w.s.bounds.time {
 			return nil, fmt.Errorf("%w: %w: the buckets could not be decided in the time of a search", domain.ErrUnavailable, domain.ErrTooManyBuckets)
 		}
-		var allowed bool
-		if allowed, err = w.mayList(ctx, name); err != nil {
+		var into searchScope
+		if into, err = w.mayList(ctx, name); err != nil {
 			return nil, err
 		}
-		if allowed || w.listAll {
+		if into.some() || w.listAll {
 			seen = append(seen, name)
 		}
 	}
@@ -448,23 +480,20 @@ func (w *searchWalk) visible(ctx context.Context) ([]string, error) {
 	return seen, nil
 }
 
-// mayList reports whether the caller may list a bucket. It filters and does
-// not gate: a bucket that is left out leaves no record.
-func (w *searchWalk) mayList(ctx context.Context, bucketName string) (bool, error) {
-	if allowed, known := w.may[bucketName]; known {
-		return allowed, nil
+// mayList reports what of a bucket the caller may list: all of it, or the
+// sub-buckets they may list, or nothing. This is the one place where the
+// scope of a search is decided. It filters and does not gate: a bucket or a
+// sub-bucket that is left out leaves no record.
+//
+// In a search of all buckets the policy this decision reads is the one the
+// walk of this node's state comes by, and so are the sub-buckets; nothing
+// is asked of the leader.
+func (w *searchWalk) mayList(ctx context.Context, bucketName string) (searchScope, error) {
+	if into, known := w.may[bucketName]; known {
+		return into, nil
 	}
-	// SUB-BUCKETS (PLAN C.3, C.4): this is the one place where the scope of
-	// a search is decided. When sub-buckets exist, a caller who may not
-	// list the bucket but may list one of its sub-buckets is to be let in
-	// here for the keys of that sub-bucket only - the request then carries
-	// the prefix, as a listing's will, and the walk below is confined to
-	// that range of keys.
-	//
-	// In a search of all buckets the policy this decision reads is the one
-	// the walk of this node's state comes by; nothing is asked of the
-	// leader.
 	allowed, err := w.s.authz.Allowed(ctx, listRequest(w.principal, bucketName))
+	damaged := false
 	switch {
 	case errors.Is(err, domain.ErrIntegrity):
 		// The stored policy of this bucket is damaged, which the
@@ -473,12 +502,65 @@ func (w *searchWalk) mayList(ctx context.Context, bucketName string) (bool, erro
 		// bucket there is. Only a damaged document reads so: when the
 		// policies cannot be read at all - damage to the store included -
 		// the authorizer says domain.ErrUnavailable, and the search fails.
-		allowed = false
+		// Its sub-buckets are not looked at: every decision about them
+		// reads the same damaged policy.
+		allowed, damaged = false, true
 	case err != nil:
-		return false, err
+		return searchScope{}, err
 	}
-	w.may[bucketName] = allowed
-	return allowed, nil
+	into := searchScope{whole: allowed}
+	if !allowed && !damaged {
+		if into.prefixes, err = w.subBucketsMayList(ctx, bucketName); err != nil {
+			return searchScope{}, err
+		}
+	}
+	w.may[bucketName] = into
+	return into, nil
+}
+
+// subBucketsMayList returns, in order, the prefixes of the sub-buckets of a
+// bucket the caller may list. Each is decided by the authorizer as a listing
+// of the bucket with that prefix is (ObjectService.List), from the
+// sub-buckets as they were read here: the bucket's policy and the
+// sub-bucket's both have their say, and a Deny in either wins.
+func (w *searchWalk) subBucketsMayList(ctx context.Context, bucketName string) ([]string, error) {
+	if w.s.subBuckets == nil {
+		return nil, nil
+	}
+	subs, err := w.s.subBuckets.ListSubBuckets(ctx, bucketName)
+	switch {
+	case errors.Is(err, domain.ErrBucketNotFound):
+		// Deleted since the buckets were listed.
+		return nil, nil
+	case errors.Is(err, domain.ErrIntegrity):
+		// The stored sub-buckets of this bucket are damaged: the search
+		// goes on without them, as without a bucket whose policy is.
+		w.s.logger.ErrorContext(ctx, "the sub-buckets of a bucket cannot be read; a search leaves them out",
+			slog.String("bucket", bucketName), slog.Any("error", err))
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	// The authorizer decides from the same reading.
+	primeSubBuckets(ctx, bucketName, subs)
+	var prefixes []string
+	for _, sub := range subs {
+		listing := listRequest(w.principal, bucketName)
+		listing.ListPrefix = sub.Prefix()
+		allowed, err := w.s.authz.Allowed(ctx, listing)
+		switch {
+		case errors.Is(err, domain.ErrIntegrity):
+			// The stored policy of this sub-bucket is damaged, which the
+			// authorizer has logged; a listing of it is refused.
+			continue
+		case err != nil:
+			return nil, err
+		case allowed:
+			prefixes = append(prefixes, sub.Prefix())
+		}
+	}
+	sort.Strings(prefixes)
+	return prefixes, nil
 }
 
 // full reports whether the call has as many results as it was asked for.
@@ -509,10 +591,11 @@ func (w *searchWalk) walk(ctx context.Context, names []string, at searchToken) (
 		if w.listAll && !w.objectsOnly && !named && w.query.Match(name) {
 			w.out.Results = append(w.out.Results, SearchResult{Kind: SearchResultBucket, Bucket: name})
 		}
-		if !w.may[name] {
+		into := w.may[name]
+		if !into.some() {
 			continue
 		}
-		last, finished, err := w.objects(ctx, name, after)
+		last, finished, err := w.into(ctx, name, after, into)
 		if err != nil {
 			return nil, err
 		}
@@ -532,14 +615,39 @@ type searchKey struct {
 	marker     bool
 }
 
-// objects looks at the keys of a bucket after the given one, a chunk at a
-// time. It returns the last key it looked at and whether it reached the end
-// of the bucket.
-func (w *searchWalk) objects(ctx context.Context, bucketName, after string) (last string, finished bool, err error) {
+// into looks at the keys of a bucket the caller may see into, after the
+// given one: all of them, or those of each sub-bucket they may list, one
+// range of keys after the other. It returns the last key it looked at and
+// whether it reached the end of what it may look at.
+func (w *searchWalk) into(ctx context.Context, bucketName, after string, into searchScope) (last string, finished bool, err error) {
+	if into.whole {
+		return w.objects(ctx, bucketName, after, "")
+	}
+	last = after
+	for _, prefix := range into.prefixes {
+		if end, more := object.PrefixEnd(prefix); more && last >= end {
+			// Looked at already.
+			continue
+		}
+		if last, finished, err = w.objects(ctx, bucketName, last, prefix); err != nil || !finished {
+			return last, false, err
+		}
+	}
+	return last, true, nil
+}
+
+// objects looks at the keys of a bucket that begin with prefix after the
+// given one, a chunk at a time. It returns the last key it looked at and
+// whether it reached the end of those keys.
+func (w *searchWalk) objects(ctx context.Context, bucketName, after, prefix string) (last string, finished bool, err error) {
 	last = after
 	var chunk []searchKey
 	visit := func(room int, more *bool) func(object.Version) ports.ScanControl {
 		return func(v object.Version) ports.ScanControl {
+			if !strings.HasPrefix(v.Key, prefix) {
+				// Keys are ordered: past the prefix nothing can match.
+				return ports.ScanControl{Stop: true}
+			}
 			if len(chunk) == room {
 				*more = true
 				return ports.ScanControl{Stop: true}
@@ -557,6 +665,9 @@ func (w *searchWalk) objects(ctx context.Context, bucketName, after string) (las
 		if last != "" {
 			// The first key after the last one looked at.
 			start = last + "\x00"
+		}
+		if start < prefix {
+			start = prefix
 		}
 		// Each walk is a consistent read of its own, and the store's lock
 		// is let go between two of them. The walk only copies what it

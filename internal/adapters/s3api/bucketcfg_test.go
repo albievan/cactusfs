@@ -11,6 +11,7 @@ import (
 	"testing/quick"
 
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/object"
 )
@@ -19,6 +20,60 @@ const sitePolicy = `{"Version":"2012-10-17","Statement":[
 	{"Sid":"public","Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:ListBucket","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::site","arn:aws:s3:::site/*"]},
 	{"Sid":"drafts","Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/drafts/*"},
 	{"Sid":"editor","Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/editor"},"Action":"s3:PutObject","Resource":"arn:aws:s3:::site/*"}]}`
+
+// TestSubBucketPolicyOverHTTP: over the S3 API, the policy of a sub-bucket
+// (ADR-0017) keeps a part of a public bucket private from readers who have
+// not authenticated, and lets a user list and read a sub-bucket - with the
+// prefix of a listing that begins with its name and a slash, and nothing
+// beyond it.
+func TestSubBucketPolicyOverHTTP(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestServer(t, "")
+	s.createBucket("site")
+	for _, key := range []string{"index.html", "private/salaries.csv", "reports/q1.csv", "reports-x/q2.csv"} {
+		s.putObject("/site/"+key, []byte(key))
+	}
+	public := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/site?policy", body: []byte(public)}), http.StatusNoContent)
+	subs := map[string]string{
+		"private": `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/private/*"}]}`,
+		"reports": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/analyst"},` +
+			`"Action":"s3:ListBucket","Resource":"arn:aws:s3:::site"}]}`,
+	}
+	for name, policy := range subs {
+		if err := s.meta.PutSubBucket(ctx, "site", bucket.SubBucket{Name: name, Policy: []byte(policy)}, audit.Record{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	anon := func(path string) reply { return s.do(call{method: http.MethodGet, path: path, unsigned: true}) }
+	s.mustStatus(anon("/site/index.html"), http.StatusOK)
+	s.mustStatus(anon("/site/reports/q1.csv"), http.StatusOK)
+	s.expectError(anon("/site/private/salaries.csv"), http.StatusForbidden, "AccessDenied")
+
+	root := s.principal()
+	if _, err := s.iam.CreateUser(ctx, root, app.UserInput{Name: "analyst"}); err != nil {
+		t.Fatal(err)
+	}
+	creds, _, err := s.iam.CreateAPIKey(ctx, root, app.APIKeyInput{Owner: "analyst"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyst := func(path string) reply {
+		return s.do(call{method: http.MethodGet, path: path, keyID: creds.AccessKeyID, key: []byte(creds.SecretKey)})
+	}
+	listing := s.mustStatus(analyst("/site?list-type=2&prefix=reports%2F"), http.StatusOK)
+	if !bytes.Contains(listing.body, []byte("<Key>reports/q1.csv</Key>")) || bytes.Contains(listing.body, []byte("reports-x")) {
+		t.Errorf("the analyst's listing of reports/ = %s", listing.body)
+	}
+	listing = s.mustStatus(analyst("/site?prefix=reports%2F"), http.StatusOK)
+	if !bytes.Contains(listing.body, []byte("<Key>reports/q1.csv</Key>")) || bytes.Contains(listing.body, []byte("reports-x")) {
+		t.Errorf("the analyst's listing of reports/, version 1 = %s", listing.body)
+	}
+	s.expectError(analyst("/site?list-type=2"), http.StatusForbidden, "AccessDenied")
+	s.expectError(analyst("/site?list-type=2&prefix=reports"), http.StatusForbidden, "AccessDenied")
+	s.expectError(analyst("/site?list-type=2&prefix=reports-x%2F"), http.StatusForbidden, "AccessDenied")
+}
 
 // TestBucketPolicyOverHTTP: a bucket policy opens a bucket to readers who
 // have not authenticated, and to nothing more, whatever it says.

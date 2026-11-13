@@ -925,7 +925,10 @@ func (s *ObjectService) ListVersions(
 	ctx context.Context, principal iam.Principal, bucketName string, opts VersionListOptions,
 ) (VersionListPage, error) {
 	resource := iam.Resource{Bucket: bucketName}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucketVersions, Resource: resource}); err != nil {
+	// The prefix is the listing's: a sub-bucket's policy has a say in a
+	// listing of its keys only (ADR-0017).
+	listing := iam.Request{Principal: principal, Action: iam.ActionListBucketVersions, Resource: resource, ListPrefix: opts.Prefix}
+	if err := s.authz.Authorize(ctx, listing); err != nil {
 		return VersionListPage{}, fmt.Errorf("object.ListVersions: %w", err)
 	}
 	if opts.MaxKeys < 0 {
@@ -1190,7 +1193,10 @@ func (s *ObjectService) List(
 	ctx context.Context, principal iam.Principal, bucketName string, opts object.ListOptions,
 ) (object.ListPage, error) {
 	resource := iam.Resource{Bucket: bucketName}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucket, Resource: resource}); err != nil {
+	// The prefix is the listing's: a sub-bucket's policy has a say in a
+	// listing of its keys only (ADR-0017).
+	listing := iam.Request{Principal: principal, Action: iam.ActionListBucket, Resource: resource, ListPrefix: opts.Prefix}
+	if err := s.authz.Authorize(ctx, listing); err != nil {
 		return object.ListPage{}, fmt.Errorf("object.List: %w", err)
 	}
 	if opts.MaxKeys < 0 {

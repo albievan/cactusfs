@@ -520,7 +520,10 @@ type ListUploadsOutput struct {
 // of key and, for one key, of upload ID.
 func (s *ObjectService) ListUploads(ctx context.Context, principal iam.Principal, in ListUploadsInput) (ListUploadsOutput, error) {
 	resource := iam.Resource{Bucket: in.Bucket}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucketMultipartUploads, Resource: resource}); err != nil {
+	// The prefix is the listing's: a sub-bucket's policy has a say in a
+	// listing of its uploads only (ADR-0017).
+	listing := iam.Request{Principal: principal, Action: iam.ActionListBucketMultipartUploads, Resource: resource, ListPrefix: in.Prefix}
+	if err := s.authz.Authorize(ctx, listing); err != nil {
 		return ListUploadsOutput{}, fmt.Errorf("object.ListUploads: %w", err)
 	}
 	limit := min(max(in.Max, 0), object.MaxListKeys)

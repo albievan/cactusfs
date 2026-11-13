@@ -27,6 +27,7 @@ type Schema3 interface {
 	Metadata
 	ports.ObjectAccessStore
 	ports.SubBucketStore
+	ports.BucketAccessReader
 	ports.TagDefinitionStore
 	ports.AuditLog
 }
@@ -729,6 +730,49 @@ func Schema3Contract(t *testing.T, open func(t *testing.T) Schema3) {
 		}
 		if err := s.DeleteSubBucket(ctx, "b", "never", noAudit); !errors.Is(err, domain.ErrSubBucketNotFound) {
 			t.Errorf("DeleteSubBucket of one that is not = %v", err)
+		}
+	})
+
+	t.Run("the policy and the sub-buckets of a bucket are read together", func(t *testing.T) {
+		t.Parallel()
+		s := withBucket(t, "b", "other")
+		if access, err := s.GetBucketAccess(ctx, "b"); err != nil || len(access.Policy) != 0 || len(access.SubBuckets) != 0 {
+			t.Errorf("GetBucketAccess of a bucket without = %+v, %v", access, err)
+		}
+		policy := []byte(`{"Version":"2012-10-17","Statement":[]}`)
+		if err := s.SetBucketConfig(ctx, "b", bucket.ConfigPolicy, policy); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetBucketConfig(ctx, "b", bucket.ConfigCORS, []byte(`<CORSConfiguration/>`)); err != nil {
+			t.Fatal(err)
+		}
+		subPolicy := []byte(`{"policy":"reports"}`)
+		for _, sub := range []bucket.SubBucket{{Name: "reports", Policy: subPolicy}, {Name: "archive"}} {
+			sub.CreatedAt = contractTime
+			if err := s.PutSubBucket(ctx, "b", sub, noAudit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		access, err := s.GetBucketAccess(ctx, "b")
+		if err != nil || !bytes.Equal(access.Policy, policy) || len(access.SubBuckets) != 2 ||
+			access.SubBuckets[0].Name != "archive" || len(access.SubBuckets[0].Policy) != 0 ||
+			access.SubBuckets[1].Name != "reports" || !bytes.Equal(access.SubBuckets[1].Policy, subPolicy) {
+			t.Fatalf("GetBucketAccess = %+v, %v; want the policy and two sub-buckets in name order", access, err)
+		}
+		listed, err := s.ListSubBuckets(ctx, "b")
+		if err != nil || !reflect.DeepEqual(listed, access.SubBuckets) {
+			t.Errorf("GetBucketAccess lists %+v, ListSubBuckets %+v, %v", access.SubBuckets, listed, err)
+		}
+		// What was read is the caller's: changing it changes nothing kept.
+		access.Policy[0] = 'x'
+		if again, err := s.GetBucketAccess(ctx, "b"); err != nil || !bytes.Equal(again.Policy, policy) {
+			t.Errorf("the policy after the caller changed its copy = %q, %v", again.Policy, err)
+		}
+		if access, err := s.GetBucketAccess(ctx, "other"); err != nil || len(access.Policy) != 0 || len(access.SubBuckets) != 0 {
+			t.Errorf("GetBucketAccess of another bucket = %+v, %v", access, err)
+		}
+		if _, err := s.GetBucketAccess(ctx, "missing"); !errors.Is(err, domain.ErrBucketNotFound) {
+			t.Errorf("GetBucketAccess of a bucket that is not = %v, want %v", err, domain.ErrBucketNotFound)
 		}
 	})
 

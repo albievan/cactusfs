@@ -24,6 +24,7 @@ import (
 var (
 	_ ports.ObjectAccessStore  = (*MemMetadata)(nil)
 	_ ports.SubBucketStore     = (*MemMetadata)(nil)
+	_ ports.BucketAccessReader = (*MemMetadata)(nil)
 	_ ports.TagDefinitionStore = (*MemMetadata)(nil)
 )
 
@@ -230,6 +231,24 @@ func (m *MemMetadata) ListSubBuckets(_ context.Context, bucketName string) ([]bu
 		out = append(out, cloneSubBucket(m.subs[bucketName][name]))
 	}
 	return out, nil
+}
+
+// GetBucketAccess implements ports.BucketAccessReader: the policy and the
+// sub-buckets of a bucket, under one hold of the lock.
+func (m *MemMetadata) GetBucketAccess(_ context.Context, bucketName string) (ports.BucketAccess, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.buckets[bucketName]; !ok {
+		return ports.BucketAccess{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	}
+	var access ports.BucketAccess
+	if document := m.config[bucketName][bucket.ConfigPolicy]; len(document) > 0 {
+		access.Policy = append([]byte(nil), document...)
+	}
+	for _, name := range slices.Sorted(maps.Keys(m.subs[bucketName])) {
+		access.SubBuckets = append(access.SubBuckets, cloneSubBucket(m.subs[bucketName][name]))
+	}
+	return access, nil
 }
 
 // PutTagDefinition implements ports.TagDefinitionStore.

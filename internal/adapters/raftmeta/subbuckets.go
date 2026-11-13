@@ -283,3 +283,53 @@ func (s *Store) ListSubBuckets(ctx context.Context, bucketName string) ([]bucket
 	}
 	return out, nil
 }
+
+// GetBucketAccess implements ports.BucketAccessReader: the policy of a
+// bucket and its sub-buckets, read in one read transaction once the state
+// reflects everything committed before the call - one question to the
+// leader for both. LocalConfig has no such method, and must not: what it
+// reads may lag.
+func (s *Store) GetBucketAccess(ctx context.Context, bucketName string) (ports.BucketAccess, error) {
+	var access ports.BucketAccess
+	err := s.view(ctx, func(tx *bbolt.Tx) error {
+		access = ports.BucketAccess{}
+		b, err := readBucket(tx, bucketName)
+		if err != nil {
+			return err
+		}
+		if b == nil {
+			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+		}
+		if document := b.Config[bucket.ConfigPolicy]; len(document) > 0 {
+			access.Policy = append([]byte(nil), document...)
+		}
+		return readSubBuckets(tx, bucketName, func(record subBucketRecord) {
+			access.SubBuckets = append(access.SubBuckets, record.toDomain())
+		})
+	})
+	if err != nil {
+		return ports.BucketAccess{}, fmt.Errorf("raftmeta.GetBucketAccess: %w", err)
+	}
+	return access, nil
+}
+
+var _ ports.BucketAccessReader = (*Store)(nil)
+
+// ListSubBuckets implements ports.SubBucketLister from this node's own copy
+// of the state, without confirming with the leader that it is current - as
+// LocalConfig.BucketPolicies reads the policies of buckets, and for the same
+// reader: a search, which has just made a consistent read, and finds the
+// copy at least as new as that read.
+func (l LocalConfig) ListSubBuckets(_ context.Context, bucketName string) ([]bucket.SubBucket, error) {
+	var out []bucket.SubBucket
+	err := l.store.peek(func(tx *bbolt.Tx) error {
+		out = nil
+		return readSubBuckets(tx, bucketName, func(record subBucketRecord) { out = append(out, record.toDomain()) })
+	})
+	if err != nil {
+		return nil, fmt.Errorf("raftmeta.LocalConfig.ListSubBuckets: %w", err)
+	}
+	return out, nil
+}
+
+var _ ports.SubBucketLister = LocalConfig{}

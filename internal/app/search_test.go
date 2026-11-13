@@ -1712,3 +1712,235 @@ func TestSearchesRememberPoliciesTogether(t *testing.T) {
 		t.Errorf("the authorizer remembers %d policies of at most 41", entries)
 	}
 }
+
+// countingSubBucketLister counts the listings of sub-buckets read through it,
+// and the readings of the policy and the sub-buckets of a bucket together -
+// the authorizer's consistent reads - and can fail the listings.
+type countingSubBucketLister struct {
+	meta  *porttest.MemMetadata
+	reads atomic.Int64
+	err   error
+}
+
+func (c *countingSubBucketLister) ListSubBuckets(ctx context.Context, bucketName string) ([]bucket.SubBucket, error) {
+	c.reads.Add(1)
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.meta.ListSubBuckets(ctx, bucketName)
+}
+
+func (c *countingSubBucketLister) GetBucketAccess(ctx context.Context, bucketName string) (ports.BucketAccess, error) {
+	c.reads.Add(1)
+	return c.meta.GetBucketAccess(ctx, bucketName)
+}
+
+// TestSearchNarrowedToSubBuckets: a bucket bob may not list is searched in the
+// sub-buckets he may list, and only there (ADR-0017): its results are keys of
+// those sub-buckets - never of the bucket's top, of another sub-bucket, of
+// "reports-x/", or of a sub-bucket where the bucket's policy denies him or
+// the sub-bucket's own policy does not parse. A search of all buckets and a
+// search of one are narrowed alike, page by page as at once; who may see
+// nothing is refused once, and nothing is audited for what is filtered out.
+// The sub-buckets are read from the lister the search was given - this
+// node's state - and the authorizer decides from that reading. Its own,
+// consistent source is asked once a page of a search of one bucket - for the
+// gate of that bucket, the policy and the sub-buckets together - and never
+// in a search of all buckets, which takes the policies from this node's
+// state; the policy of a bucket alone is never read.
+func TestSearchNarrowedToSubBuckets(t *testing.T) {
+	t.Parallel()
+	data := map[string][]string{
+		"alpha": {"reports/q1.csv", "reports/q2.csv", "reports/deep/q3.csv", "private/q4.csv", "q-top.csv", "reports-x/q5.csv"},
+		"beta":  {"q-beta.csv"},
+		"delta": {"reports/q-delta.csv"},
+		"eps":   {"broken/q-broken.csv", "ok/q-ok.csv"},
+		"gamma": {"reports/q-gamma.csv"},
+		// "a-b/" comes before "a/", and "a-c/" - no sub-bucket - between
+		// them: the ranges of keys bob may see are not in the order of
+		// the names, and a walk of them must skip neither nor go back.
+		"theta": {"a-b/q1.csv", "a-b/q2.csv", "a-c/q6.csv", "a/q3.csv", "a/q4.csv", "ab/q5.csv"},
+	}
+	bobLists := func(bucketName string) string {
+		return `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/bob"},` +
+			`"Action":"s3:ListBucket","Resource":"arn:aws:s3:::` + bucketName + `"}]}`
+	}
+	bucketPolicies := map[string]string{
+		"beta": bobLists("beta"),
+		"delta": `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"AWS":"arn:aws:iam:::user/bob"},` +
+			`"Action":"s3:ListBucket","Resource":"arn:aws:s3:::delta"}]}`,
+	}
+	subBuckets := map[string]map[string]string{
+		"alpha": {"reports": bobLists("alpha"), "private": "", "reports-x": ""},
+		"delta": {"reports": bobLists("delta")},
+		"eps":   {"broken": `{"Version":`, "ok": bobLists("eps")},
+		"theta": {"a-b": bobLists("theta"), "a": bobLists("theta"), "ab": ""},
+	}
+	bob := iam.Principal{AccessKeyID: "B", User: "bob"}
+	carol := iam.Principal{AccessKeyID: "C", User: "carol"}
+	allOfBobs := []string{
+		"o:alpha/reports/deep/q3.csv", "o:alpha/reports/q1.csv", "o:alpha/reports/q2.csv", "o:beta/q-beta.csv", "o:eps/ok/q-ok.csv",
+		"o:theta/a-b/q1.csv", "o:theta/a-b/q2.csv", "o:theta/a/q3.csv", "o:theta/a/q4.csv",
+	}
+
+	tests := map[string]struct {
+		principal iam.Principal
+		bucket    string
+		limit     int
+		// want is what is found in the end; nil when the search is
+		// refused, and then once in the audit trail.
+		want []string
+	}{
+		"all buckets":                             {principal: bob, want: allOfBobs},
+		"all buckets, a result a page":            {principal: bob, limit: 1, want: allOfBobs},
+		"a bucket bob may list a sub-bucket of":   {principal: bob, bucket: "alpha", want: allOfBobs[:3]},
+		"the same, a result a page":               {principal: bob, bucket: "alpha", limit: 1, want: allOfBobs[:3]},
+		"a bucket bob may list":                   {principal: bob, bucket: "beta", want: []string{"o:beta/q-beta.csv"}},
+		"a bucket that denies bob its sub-bucket": {principal: bob, bucket: "delta"},
+		"a bucket without sub-buckets":            {principal: bob, bucket: "gamma"},
+		"a bucket that is not there":              {principal: bob, bucket: "zeta"},
+		"a sub-bucket whose policy is damaged":    {principal: bob, bucket: "eps", want: []string{"o:eps/ok/q-ok.csv"}},
+		"two sub-buckets, a-b/ before a/":         {principal: bob, bucket: "theta", want: allOfBobs[5:]},
+		"theta, a result a page":                  {principal: bob, bucket: "theta", limit: 1, want: allOfBobs[5:]},
+		"theta, two results a page":               {principal: bob, bucket: "theta", limit: 2, want: allOfBobs[5:]},
+		"who may list nothing":                    {principal: carol},
+		"root": {principal: porttest.Root(), want: []string{
+			"o:alpha/private/q4.csv", "o:alpha/q-top.csv", "o:alpha/reports-x/q5.csv", "o:alpha/reports/deep/q3.csv", "o:alpha/reports/q1.csv",
+			"o:alpha/reports/q2.csv", "o:beta/q-beta.csv", "o:delta/reports/q-delta.csv", "o:eps/broken/q-broken.csv", "o:eps/ok/q-ok.csv",
+			"o:gamma/reports/q-gamma.csv", "o:theta/a-b/q1.csv", "o:theta/a-b/q2.csv", "o:theta/a-c/q6.csv", "o:theta/a/q3.csv",
+			"o:theta/a/q4.csv", "o:theta/ab/q5.csv",
+		}},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			f := newSearchFixture(ctx, t, data, nil)
+			for bucketName, policy := range bucketPolicies {
+				if err := f.base.meta.SetBucketConfig(ctx, bucketName, bucket.ConfigPolicy, []byte(policy)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for bucketName, subs := range subBuckets {
+				for sub, policy := range subs {
+					if err := f.base.meta.PutSubBucket(ctx, bucketName, bucket.SubBucket{Name: sub, Policy: []byte(policy), CreatedAt: testNow}, audit.Record{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			consistent, local := &countingSubBucketLister{meta: f.base.meta}, &countingSubBucketLister{meta: f.base.meta}
+			f.authz.WithSubBuckets(consistent)
+			s, err := app.NewSearchService(app.SearchServiceConfig{
+				Buckets: f.base.meta, Index: f.base.meta, Policies: f.policies, SubBuckets: local,
+				Authz: f.authz, Clock: f.base.clock, Logger: slog.New(slog.NewJSONHandler(f.base.logs, nil)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			in := app.SearchInput{Query: "q", Bucket: tt.bucket, Limit: tt.limit}
+			if tt.want == nil {
+				if _, err := s.Search(ctx, tt.principal, in); !errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("Search = %v, want it refused", err)
+				}
+				if denied := f.denials(ctx, t); len(denied) != 1 {
+					t.Errorf("the refusal left %d records: %+v", len(denied), denied)
+				}
+				return
+			}
+			got, pages := drain(ctx, t, s, tt.principal, in)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("found %v\nwant  %v", got, tt.want)
+			}
+			if denied := f.denials(ctx, t); len(denied) != 0 {
+				t.Errorf("what was filtered out left records: %+v", denied)
+			}
+			wantReads := int64(0)
+			if tt.bucket != "" && !tt.principal.Root {
+				wantReads = int64(len(pages))
+			}
+			if reads := consistent.reads.Load(); reads != wantReads || f.policies.one.Load() != 0 {
+				t.Errorf("the authorizer read the store consistently %d and %d times in %d pages, want %d and none",
+					reads, f.policies.one.Load(), len(pages), wantReads)
+			}
+			if tt.principal.Root && local.reads.Load() != 0 {
+				t.Errorf("a search by root read the sub-buckets %d times", local.reads.Load())
+			}
+		})
+	}
+}
+
+// TestSearchWhenTheSubBucketsCannotBeRead: a bucket bob may not list, whose
+// sub-buckets this node cannot list, is left out of a search - it was deleted
+// since the buckets were listed, or what is stored of its sub-buckets is
+// damaged, which is logged - and the search goes on with the others; named,
+// it is refused as a listing of it is. Any other failure fails the search.
+func TestSearchWhenTheSubBucketsCannotBeRead(t *testing.T) {
+	t.Parallel()
+	data := map[string][]string{"alpha": {"reports/q1.csv"}, "beta": {"q-beta.csv"}}
+	tests := map[string]struct {
+		err error
+		// logged is what the log says, when anything.
+		logged string
+		// fails is what a search fails with; nil when it goes on.
+		fails error
+	}{
+		"deleted since":  {err: fmt.Errorf("%w: alpha", domain.ErrBucketNotFound)},
+		"damaged":        {err: fmt.Errorf("%w: stored sub-bucket", domain.ErrIntegrity), logged: "the sub-buckets of a bucket cannot be read; a search leaves them out"},
+		"no leader":      {err: fmt.Errorf("%w: no leader", domain.ErrUnavailable), fails: domain.ErrUnavailable},
+		"read as stored": {},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			f := newSearchFixture(ctx, t, data, nil)
+			bobLists := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/bob"},` +
+				`"Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s"}]}`
+			if err := f.base.meta.SetBucketConfig(ctx, "beta", bucket.ConfigPolicy, fmt.Appendf(nil, bobLists, "beta")); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.base.meta.PutSubBucket(ctx, "alpha", bucket.SubBucket{Name: "reports", Policy: fmt.Appendf(nil, bobLists, "alpha"), CreatedAt: testNow}, audit.Record{}); err != nil {
+				t.Fatal(err)
+			}
+			f.authz.WithSubBuckets(f.base.meta)
+			local := &countingSubBucketLister{meta: f.base.meta, err: tt.err}
+			s, err := app.NewSearchService(app.SearchServiceConfig{
+				Buckets: f.base.meta, Index: f.base.meta, Policies: f.policies, SubBuckets: local,
+				Authz: f.authz, Clock: f.base.clock, Logger: slog.New(slog.NewJSONHandler(f.base.logs, nil)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bob := iam.Principal{AccessKeyID: "B", User: "bob"}
+			all := app.SearchInput{Query: "q"}
+			if tt.fails != nil {
+				if _, err := s.Search(ctx, bob, all); !errors.Is(err, tt.fails) {
+					t.Fatalf("Search = %v, want %v", err, tt.fails)
+				}
+				return
+			}
+			want := []string{"o:alpha/reports/q1.csv", "o:beta/q-beta.csv"}
+			if tt.err != nil {
+				want = want[1:]
+			}
+			if got, _ := drain(ctx, t, s, bob, all); !slices.Equal(got, want) {
+				t.Errorf("a search of all buckets found %v, want %v", got, want)
+			}
+			named := app.SearchInput{Query: "q", Bucket: "alpha"}
+			if tt.err == nil {
+				if got, _ := drain(ctx, t, s, bob, named); !slices.Equal(got, want[:1]) {
+					t.Errorf("a search of alpha found %v, want %v", got, want[:1])
+				}
+			} else if _, err := s.Search(ctx, bob, named); !errors.Is(err, domain.ErrAccessDenied) {
+				t.Errorf("a search of alpha = %v, want it refused", err)
+			}
+			logs := f.base.logs.String()
+			if tt.logged != "" && (!strings.Contains(logs, tt.logged) || !strings.Contains(logs, `"bucket":"alpha"`)) {
+				t.Errorf("the log does not say %q of alpha: %s", tt.logged, logs)
+			}
+			if tt.logged == "" && strings.Contains(logs, "cannot be read") {
+				t.Errorf("the log says something cannot be read: %s", logs)
+			}
+		})
+	}
+}

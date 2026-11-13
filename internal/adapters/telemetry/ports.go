@@ -517,6 +517,52 @@ func (c *localConfig) GetBucketConfig(ctx context.Context, name, kind string) ([
 	return document, err
 }
 
+// InstrumentSubBuckets returns a reader of the policy and the sub-buckets
+// of a bucket that reads consistently - the authorizer's - wrapped so that
+// every call is traced and counted as a read of the metadata store. It takes
+// and gives a ports.BucketAccessReader, which a reader of this node's own
+// copy of the state is not: that one cannot be wired here.
+func (t *Telemetry) InstrumentSubBuckets(next ports.BucketAccessReader) ports.BucketAccessReader {
+	return &bucketAccess{t: t, next: next}
+}
+
+type bucketAccess struct {
+	t    *Telemetry
+	next ports.BucketAccessReader
+}
+
+func (*bucketAccess) instrumented() {}
+
+// GetBucketAccess implements ports.BucketAccessReader.
+func (b *bucketAccess) GetBucketAccess(ctx context.Context, bucketName string) (ports.BucketAccess, error) {
+	ctx, done := b.t.call(ctx, portMetadata, "GetBucketAccess")
+	access, err := b.next.GetBucketAccess(ctx, bucketName)
+	done(err)
+	return access, err
+}
+
+// InstrumentLocalSubBuckets returns a lister of sub-buckets that reads this
+// node's own copy of the state wrapped so that every call is traced and
+// counted under the port of such reads, as InstrumentLocalConfig does.
+func (t *Telemetry) InstrumentLocalSubBuckets(next ports.SubBucketLister) ports.SubBucketLister {
+	return &subBuckets{t: t, next: next}
+}
+
+type subBuckets struct {
+	t    *Telemetry
+	next ports.SubBucketLister
+}
+
+func (*subBuckets) instrumented() {}
+
+// ListSubBuckets implements ports.SubBucketLister.
+func (s *subBuckets) ListSubBuckets(ctx context.Context, bucketName string) ([]bucket.SubBucket, error) {
+	ctx, done := s.t.call(ctx, portLocalConfig, "ListSubBuckets")
+	subs, err := s.next.ListSubBuckets(ctx, bucketName)
+	done(err)
+	return subs, err
+}
+
 // InstrumentNodeSettings returns next wrapped so that every question to
 // another node about its settings is traced and counted. The node that is
 // asked is neither a label nor an attribute, and nothing of its answer is:

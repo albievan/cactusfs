@@ -118,7 +118,7 @@ func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
 	s.meta.Now = clock.Now
 	s.iamStore = porttest.NewMemIAM()
 	s.auditor = app.NewAuditor(s.iamStore, clock, logger)
-	authz := app.NewAuthorizer(logger, clock, s.auditor).WithBucketPolicies(s.meta)
+	authz := app.NewAuthorizer(logger, clock, s.auditor).WithBucketPolicies(s.meta).WithSubBuckets(s.meta)
 	s.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: s.iamStore, Trail: s.iamStore, Authz: authz, Auditor: s.auditor, KMS: kms, Hasher: &porttest.Hasher{},
 		Clock: clock, Entropy: rand.Reader,

@@ -3,10 +3,15 @@ package app_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -249,5 +254,90 @@ func TestListCapsThePageAtOneThousand(t *testing.T) {
 	}
 	if len(page.Objects) != object.MaxListKeys || !page.Truncated {
 		t.Errorf("page holds %d objects, truncated = %v; want %d, true", len(page.Objects), page.Truncated, object.MaxListKeys)
+	}
+}
+
+// TestListingsOfASubBucket: the listings - of objects (ListObjects and
+// ListObjectsV2 alike), of versions and of uploads in progress - hand their
+// prefix to the authorizer, so that the policy of a sub-bucket lets a caller
+// list its keys and nothing else: only a prefix that begins with the
+// sub-bucket's name and a slash counts, and what is listed under it is
+// confined to it.
+func TestListingsOfASubBucket(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newFixture(t)
+	f.createBucket(t, "site")
+	for _, key := range []string{"reports/a.csv", "reports/b.csv", "reports-x/c.csv", "top.txt"} {
+		f.put(t, "site", key, []byte(key))
+	}
+	for _, key := range []string{"reports/d.csv", "top-upload.bin"} {
+		if _, err := f.objects.CreateUpload(ctx, porttest.Root(), app.CreateUploadInput{Bucket: "site", Key: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/bob"},` +
+		`"Action":["s3:ListBucket","s3:ListBucketVersions","s3:ListBucketMultipartUploads"],"Resource":"arn:aws:s3:::site"}]}`
+	if err := f.meta.PutSubBucket(ctx, "site", bucket.SubBucket{Name: "reports", Policy: []byte(policy), CreatedAt: testNow}, audit.Record{}); err != nil {
+		t.Fatal(err)
+	}
+	authz := app.NewAuthorizer(slog.New(slog.DiscardHandler), f.clock, nil).WithBucketPolicies(f.meta).WithSubBuckets(f.meta)
+	objects := f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) { cfg.Authz = authz })
+	bob := iam.Principal{AccessKeyID: "B", User: "bob"}
+
+	list := func(prefix string) ([]string, error) {
+		page, err := objects.List(ctx, bob, "site", object.ListOptions{Prefix: prefix, MaxKeys: 1000})
+		return keysOf(page), err
+	}
+	versions := func(prefix string) ([]string, error) {
+		page, err := objects.ListVersions(ctx, bob, "site", app.VersionListOptions{Prefix: prefix, MaxKeys: 1000})
+		var keys []string
+		for _, v := range page.Versions {
+			keys = append(keys, v.Version.Key)
+		}
+		return keys, err
+	}
+	uploads := func(prefix string) ([]string, error) {
+		out, err := objects.ListUploads(ctx, bob, app.ListUploadsInput{Bucket: "site", Prefix: prefix, Max: 1000})
+		var keys []string
+		for _, u := range out.Uploads {
+			keys = append(keys, u.Key)
+		}
+		return keys, err
+	}
+	tests := []struct {
+		name    string
+		listing func(prefix string) ([]string, error)
+		prefix  string
+		// want is nil when the listing is refused.
+		want []string
+	}{
+		{name: "objects of the sub-bucket", listing: list, prefix: "reports/", want: []string{"reports/a.csv", "reports/b.csv"}},
+		{name: "objects deeper in the sub-bucket", listing: list, prefix: "reports/b", want: []string{"reports/b.csv"}},
+		{name: "objects of the bucket", listing: list, prefix: ""},
+		{name: "objects of a prefix without the slash", listing: list, prefix: "reports"},
+		{name: "objects of another prefix", listing: list, prefix: "reports-x/"},
+		{name: "objects of the top", listing: list, prefix: "top"},
+		{name: "versions of the sub-bucket", listing: versions, prefix: "reports/", want: []string{"reports/a.csv", "reports/b.csv"}},
+		{name: "versions of the bucket", listing: versions, prefix: ""},
+		{name: "versions of a prefix without the slash", listing: versions, prefix: "reports"},
+		{name: "uploads of the sub-bucket", listing: uploads, prefix: "reports/", want: []string{"reports/d.csv"}},
+		{name: "uploads of the bucket", listing: uploads, prefix: ""},
+		{name: "uploads of another prefix", listing: uploads, prefix: "top"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.listing(tt.prefix)
+			if tt.want == nil {
+				if !errors.Is(err, domain.ErrAccessDenied) {
+					t.Fatalf("listing %q = %v, %v; want it refused", tt.prefix, got, err)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tt.want) {
+				t.Errorf("listing %q = %v, %v; want %v", tt.prefix, got, err, tt.want)
+			}
+		})
 	}
 }

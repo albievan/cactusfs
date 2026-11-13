@@ -7,6 +7,39 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 )
 
+// BucketAccess is what a bucket says of who may do what in it, beside the
+// caller's own policies: the policy of the bucket and the sub-buckets it has,
+// each with its policy (ADR-0017), as one reading of the state has them.
+type BucketAccess struct {
+	// Policy is the bucket's policy document; empty when it has none.
+	Policy []byte
+	// SubBuckets are the bucket's sub-buckets in name order.
+	SubBuckets []bucket.SubBucket
+}
+
+// BucketAccessReader reads the policy of a bucket and its sub-buckets in
+// one strongly consistent read: what the authorizer decides a request about
+// a bucket from, with one question to the leader and not one for each. A
+// reader of a node's own copy of the state must never be one - a Deny just
+// put must hold for the next request on every node - and that is why it is
+// a port of its own, which SubBucketLister is not.
+type BucketAccessReader interface {
+	// GetBucketAccess returns the policy and the sub-buckets of a bucket,
+	// read together. The error wraps domain.ErrBucketNotFound.
+	GetBucketAccess(ctx context.Context, bucketName string) (BucketAccess, error)
+}
+
+// SubBucketLister lists the sub-buckets of a bucket, with their policies.
+// Every SubBucketStore is one, and reads consistently; a reader of a node's
+// own copy of the state is one too, for a search, which reads the policies
+// of buckets from that copy as well. The authorizer does not take one: it
+// reads through a BucketAccessReader.
+type SubBucketLister interface {
+	// ListSubBuckets returns the sub-buckets of a bucket in name order.
+	// The error wraps domain.ErrBucketNotFound.
+	ListSubBuckets(ctx context.Context, bucketName string) ([]bucket.SubBucket, error)
+}
+
 // SubBucketStore is the replicated store of the sub-buckets of buckets
 // (ADR-0017). Every change is committed through Raft before the call
 // returns and carries its audit record in the same entry, as changes to

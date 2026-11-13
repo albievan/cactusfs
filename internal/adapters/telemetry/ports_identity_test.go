@@ -14,6 +14,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -236,6 +237,30 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 	if _, err := local.GetBucketConfig(ctx, "absent-sentinel", "cors"); !errors.Is(err, domain.ErrBucketNotFound) {
 		t.Fatalf("error not passed through: %v", err)
 	}
+	if err := mem.PutSubBucket(ctx, "bucket-sentinel", bucket.SubBucket{Name: "sub-sentinel"}, audit.Record{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.SetBucketConfig(ctx, "bucket-sentinel", bucket.ConfigPolicy, []byte("policy-sentinel")); err != nil {
+		t.Fatal(err)
+	}
+	access := tel.InstrumentSubBuckets(mem)
+	if read, err := access.GetBucketAccess(ctx, "bucket-sentinel"); err != nil || string(read.Policy) != "policy-sentinel" ||
+		len(read.SubBuckets) != 1 || read.SubBuckets[0].Name != "sub-sentinel" {
+		t.Fatalf("GetBucketAccess = %+v, %v", read, err)
+	}
+	if _, err := access.GetBucketAccess(ctx, "absent-sentinel"); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
+	subs := tel.InstrumentLocalSubBuckets(mem)
+	if _, ok := subs.(ports.BucketAccessReader); ok {
+		t.Fatal("the decorator of this node's sub-buckets reads for the authorizer")
+	}
+	if listed, err := subs.ListSubBuckets(ctx, "bucket-sentinel"); err != nil || len(listed) != 1 || listed[0].Name != "sub-sentinel" {
+		t.Fatalf("ListSubBuckets = %+v, %v", listed, err)
+	}
+	if _, err := subs.ListSubBuckets(ctx, "absent-sentinel"); !errors.Is(err, domain.ErrBucketNotFound) {
+		t.Fatalf("error not passed through: %v", err)
+	}
 
 	view := tel.InstrumentClusterView(fixedView{})
 	if topology, err := view.Topology(ctx); err != nil || topology.DeploymentID != "dep-sentinel" {
@@ -268,13 +293,20 @@ func TestRemainingPortsAreCountedAndTraced(t *testing.T) {
 		"cactusfs_port_calls_total method=Topology port=cluster_view result=error",
 		"cactusfs_port_calls_total method=GetBucketConfig port=local_config result=ok",
 		"cactusfs_port_calls_total method=GetBucketConfig port=local_config result=error",
+		"cactusfs_port_calls_total method=ListSubBuckets port=local_config result=ok",
+		"cactusfs_port_calls_total method=ListSubBuckets port=local_config result=error",
+		"cactusfs_port_calls_total method=GetBucketAccess port=metadata result=ok",
+		"cactusfs_port_calls_total method=GetBucketAccess port=metadata result=error",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Errorf("metrics lack %q", want)
 		}
 	}
 	names := spanNames(recorder)
-	for _, want := range []string{"events.Publish", "identity_provider.Authenticate", "cluster_view.Topology", "cluster_view.Nodes", "local_config.GetBucketConfig"} {
+	for _, want := range []string{
+		"events.Publish", "identity_provider.Authenticate", "cluster_view.Topology", "cluster_view.Nodes", "local_config.GetBucketConfig",
+		"local_config.ListSubBuckets", "metadata.GetBucketAccess",
+	} {
 		if !contains(names, want) {
 			t.Errorf("no span named %q among %v", want, names)
 		}
@@ -376,6 +408,7 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"AuditLog": tel.InstrumentAuditLog(identities), "EventPublisher": tel.InstrumentEventPublisher(refusing{}),
 		"IdentityProvider": tel.InstrumentIdentityProvider(fixedProvider{}), "Passwords": tel.InstrumentPasswords(fixedHasher{}),
 		"ClusterView": tel.InstrumentClusterView(fixedView{}), "LocalConfig": tel.InstrumentLocalConfig(mem),
+		"SubBuckets": tel.InstrumentSubBuckets(mem), "LocalSubBuckets": tel.InstrumentLocalSubBuckets(mem),
 		"NodeSettings":    tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
 		"ReleaseSource":   tel.InstrumentReleaseSource(porttest.NewReleaseSource(nil, nil)),
 		"ReleaseVerifier": tel.InstrumentReleaseVerifier(&porttest.ReleaseVerifier{}),

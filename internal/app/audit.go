@@ -151,7 +151,13 @@ func (a *Auditor) Succeeded(ctx context.Context, record audit.Record) {
 
 // Denied records that the authorizer refused a request.
 func (a *Auditor) Denied(ctx context.Context, req iam.Request, reason string) {
-	record := a.Record(req.Principal, req.Action, req.Resource, audit.Denied, map[string]string{"reason": reason})
+	a.denied(ctx, req, map[string]string{"reason": reason})
+}
+
+// denied records that the authorizer refused a request, with the details
+// given: the reason and, from the authorizer, the source of the decision.
+func (a *Auditor) denied(ctx context.Context, req iam.Request, details map[string]string) {
+	record := a.Record(req.Principal, req.Action, req.Resource, audit.Denied, details)
 	// Repeats are counted per actor, action and address - not per
 	// resource, or somebody refused once could write a record for every
 	// name they can think of.

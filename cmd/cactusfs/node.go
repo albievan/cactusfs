@@ -185,7 +185,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// How the node is, read when its metrics are scraped.
 	n.telemetry.ObserveRaft(raftGauges{store: n.meta})
 	n.telemetry.ObserveDrives(driveGauges(n.drives))
-	n.authorizer.WithBucketPolicies(meta)
+	// The policies of buckets and of their sub-buckets, read together and
+	// consistently: one question to the leader a request and bucket, and a
+	// Deny just put holds for the next request. The authorizer takes only a
+	// reader that confirms with the leader; this node's own copy cannot be
+	// given to it.
+	n.authorizer.WithBucketPolicies(meta).WithSubBuckets(n.telemetry.InstrumentSubBuckets(n.meta))
 
 	if cfg.clustered() {
 		if err := n.joinCluster(ctx, cfg, logger); err != nil {
@@ -253,9 +258,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// the buckets: one question to the leader a page of a search, not one a
 	// bucket. The authorizer remembers what they say from one search to the
 	// next.
+	// The sub-buckets of a bucket the caller may not list are read from
+	// this node's state as well.
 	n.search, err = app.NewSearchService(app.SearchServiceConfig{
 		Buckets: meta, Index: meta, Policies: bucketPolicies,
-		Authz: n.authorizer, Clock: n.clock, Logger: logger,
+		SubBuckets: n.telemetry.InstrumentLocalSubBuckets(n.meta.LocalConfig()),
+		Authz:      n.authorizer, Clock: n.clock, Logger: logger,
 	})
 	if err != nil {
 		return err
