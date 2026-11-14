@@ -103,7 +103,17 @@ jobs:
       - run: go vet ./...
       # The limit is the runner's slowest: on Windows the tests of the metadata
       # store, which sync to disk at every step, pass the default ten minutes.
-      - run: go test -count=1 -timeout 30m ./...
+      - if: runner.os != 'Windows'
+        run: go test -count=1 -timeout 30m ./...
+      # On Windows the metadata store's clusters, run four at once, starve each
+      # other's elections past their waits (PLAN, Decisions 2026-11-13 and
+      # -14): fewer at once there, never longer waits.
+      - if: runner.os == 'Windows'
+        run: go test -count=1 -timeout 30m $(go list ./... | grep -v /internal/adapters/raftmeta)
+        shell: bash
+      - if: runner.os == 'Windows'
+        run: go test -count=1 -timeout 60m -parallel 2 ./internal/adapters/raftmeta/...
+        shell: bash
       - name: go test -race
         if: runner.os != 'Windows'
         # The same limit: under the race detector the tests of the metadata
