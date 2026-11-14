@@ -35,7 +35,7 @@ type iamFixture struct {
 	iam        *app.IAMService
 	identities *app.IdentityService
 	sessions   *app.SessionService
-	logs       *bytes.Buffer
+	logs       *syncBuffer
 	root       iam.Principal
 }
 
@@ -47,7 +47,7 @@ func newIAMFixture(t *testing.T) *iamFixture {
 	}
 	f := &iamFixture{
 		store: porttest.NewMemIAM(), meta: porttest.NewMemMetadata(), kms: kms, clock: porttest.NewClock(testNow),
-		hasher: &porttest.Hasher{}, logs: &bytes.Buffer{},
+		hasher: &porttest.Hasher{}, logs: &syncBuffer{},
 	}
 	logger := slog.New(slog.NewJSONHandler(f.logs, nil))
 	f.auditor = app.NewAuditor(f.store, f.clock, logger)
