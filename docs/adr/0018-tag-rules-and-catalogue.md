@@ -5,7 +5,9 @@
   enforce the rules on S3's every way an object comes to have tags (PLAN D.2-D.3), and
   the management API's handlers - tags, tag rules, the catalogue, an upload's tags,
   and a bucket made through the API lower-casing its tags (PLAN D.4) - are implemented.
-  The four-node tests and the console are to come (PLAN D.5-D.6)
+  The four-node test, `TestTagRulesAcrossTheCluster`, and an S3 compatibility test of
+  tags on a multipart upload are written (PLAN D.5); they count once the gate on the
+  test host has passed them. The console is to come (PLAN D.6)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0011 (tags of buckets and objects), ADR-0016 (entry schema 3),
   ADR-0017 (sub-buckets)
