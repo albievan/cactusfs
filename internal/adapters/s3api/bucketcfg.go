@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -175,9 +176,9 @@ type tagXML struct {
 	Value string `xml:"Value"`
 }
 
-// readTags reads a Tagging document. A key given twice is refused: which
-// value it has must not be ours to choose.
-func (h *Handler) readTags(req *request) (map[string]string, error) {
+// readTags reads a Tagging document as the list it is. A key given twice is
+// passed on as it was sent, for the use case to refuse.
+func (h *Handler) readTags(req *request) ([]object.Tag, error) {
 	raw, err := h.configBody(req)
 	if err != nil {
 		return nil, err
@@ -186,12 +187,9 @@ func (h *Handler) readTags(req *request) (map[string]string, error) {
 	if err := decodeShapedXML(strings.NewReader(string(raw)), maxConfigBody, &in, taggingShape()); err != nil {
 		return nil, err
 	}
-	tags := map[string]string{}
-	for _, tag := range in.Tags {
-		if _, twice := tags[tag.Key]; twice {
-			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidTag, tag.Key)
-		}
-		tags[tag.Key] = tag.Value
+	tags := make([]object.Tag, len(in.Tags))
+	for i, tag := range in.Tags {
+		tags[i] = object.Tag{Key: tag.Key, Value: tag.Value}
 	}
 	return tags, nil
 }
@@ -225,7 +223,7 @@ func (h *Handler) putBucketTagging(ctx context.Context, req *request) error {
 	if err != nil {
 		return err
 	}
-	if err := h.cfg.Buckets.SetTags(ctx, req.principal, req.bucket, tags); err != nil {
+	if _, err := h.cfg.Buckets.SetTags(ctx, req.principal, req.bucket, tags); err != nil {
 		return err
 	}
 	req.w.WriteHeader(http.StatusNoContent)
@@ -245,7 +243,7 @@ func (h *Handler) getBucketTagging(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) deleteBucketTagging(ctx context.Context, req *request) error {
-	if err := h.cfg.Buckets.SetTags(ctx, req.principal, req.bucket, nil); err != nil {
+	if _, err := h.cfg.Buckets.SetTags(ctx, req.principal, req.bucket, nil); err != nil {
 		return err
 	}
 	req.w.WriteHeader(http.StatusNoContent)
@@ -287,8 +285,10 @@ func (h *Handler) deleteObjectTagging(ctx context.Context, req *request) error {
 }
 
 // tagsOf reads the x-amz-tagging header of a request that creates an
-// object: tags as a URL query string.
-func tagsOf(header http.Header) (map[string]string, error) {
+// object: tags as a URL query string, passed on as a list in the order of
+// their keys. A key given twice is passed on twice, for the use case to
+// refuse; whether the tags can be kept is the use case's to say too.
+func tagsOf(header http.Header) ([]object.Tag, error) {
 	values := header.Values(headerTagging)
 	if len(values) == 0 {
 		return nil, nil
@@ -300,15 +300,13 @@ func tagsOf(header http.Header) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s is not a query string", domain.ErrInvalidArgument, headerTagging)
 	}
-	tags := map[string]string{}
-	for key, list := range parsed {
-		if len(list) != 1 {
-			return nil, fmt.Errorf("%w: tag %q is given twice", domain.ErrInvalidTag, key)
+	keys := slices.Sorted(maps.Keys(parsed))
+	// Not nil: the header was given, if empty.
+	tags := make([]object.Tag, 0, len(keys))
+	for _, key := range keys {
+		for _, value := range parsed[key] {
+			tags = append(tags, object.Tag{Key: key, Value: value})
 		}
-		tags[key] = list[0]
-	}
-	if err := object.ValidateTags(tags, object.MaxObjectTags); err != nil {
-		return nil, err
 	}
 	return tags, nil
 }

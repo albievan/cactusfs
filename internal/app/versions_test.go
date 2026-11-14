@@ -790,7 +790,7 @@ func TestObjectTags(t *testing.T) {
 		return iam.Principal{AccessKeyID: "K", User: "u", Policies: []iam.Document{doc}}
 	}
 	put := func(p iam.Principal, bucketName, key string, tags map[string]string, lock object.Lock) (object.Version, error) {
-		return f.objects.Put(ctx, p, app.PutInput{Bucket: bucketName, Key: key, Body: bytes.NewReader([]byte("x")), Size: 1, Tags: tags, Lock: lock})
+		return f.objects.Put(ctx, p, app.PutInput{Bucket: bucketName, Key: key, Body: bytes.NewReader([]byte("x")), Size: 1, Tags: object.TagList(tags), Lock: lock})
 	}
 	tags := map[string]string{"project": "apollo"}
 
@@ -823,7 +823,7 @@ func TestObjectTags(t *testing.T) {
 		with []string
 	}{
 		{"reading tags", func(p iam.Principal) error { _, err := f.objects.Tags(ctx, p, in); return err }, []string{"s3:GetObject", "s3:PutObjectTagging", "s3:DeleteObjectTagging"}},
-		{"setting tags", func(p iam.Principal) error { _, err := f.objects.SetTags(ctx, p, in, tags); return err }, []string{"s3:PutObject", "s3:GetObjectTagging", "s3:DeleteObjectTagging"}},
+		{"setting tags", func(p iam.Principal) error { _, err := f.objects.SetTags(ctx, p, in, object.TagList(tags)); return err }, []string{"s3:PutObject", "s3:GetObjectTagging", "s3:DeleteObjectTagging"}},
 		{"removing tags", func(p iam.Principal) error { _, err := f.objects.SetTags(ctx, p, in, nil); return err }, []string{"s3:PutObject", "s3:GetObjectTagging", "s3:PutObjectTagging"}},
 	}
 	for _, tt := range denied {
@@ -837,7 +837,7 @@ func TestObjectTags(t *testing.T) {
 	if got, err := f.objects.Tags(ctx, may("s3:GetObjectTagging"), in); err != nil || got.Tags["project"] != "apollo" {
 		t.Errorf("Tags = %v, %v", got.Tags, err)
 	}
-	if got, err := f.objects.SetTags(ctx, may("s3:PutObjectTagging"), in, map[string]string{"stage": "final"}); err != nil || len(got.Tags) != 1 || got.Tags["stage"] != "final" {
+	if got, err := f.objects.SetTags(ctx, may("s3:PutObjectTagging"), in, []object.Tag{{Key: "stage", Value: "final"}}); err != nil || len(got.Tags) != 1 || got.Tags["stage"] != "final" {
 		t.Errorf("SetTags = %v, %v", got.Tags, err)
 	}
 	if got, err := f.objects.SetTags(ctx, may("s3:DeleteObjectTagging"), in, nil); err != nil || len(got.Tags) != 0 {
@@ -859,7 +859,7 @@ func TestObjectTags(t *testing.T) {
 		"eleven tags":            {in, eleven, domain.ErrInvalidArgument},
 		"a tag that is not text": {in, map[string]string{"\x00": "x"}, domain.ErrInvalidArgument},
 	} {
-		if _, err := f.objects.SetTags(ctx, porttest.Root(), tt.in, tt.tags); !errors.Is(err, tt.want) {
+		if _, err := f.objects.SetTags(ctx, porttest.Root(), tt.in, object.TagList(tt.tags)); !errors.Is(err, tt.want) {
 			t.Errorf("SetTags with %s = %v, want %v", name, err, tt.want)
 		}
 	}
@@ -873,7 +873,7 @@ func TestObjectTags(t *testing.T) {
 	}
 	ref := locked.Ref()
 	byVersion := app.LockInput{Bucket: "vault", Key: "ledger", Version: &ref}
-	tagged, err := f.objects.SetTags(ctx, porttest.Root(), byVersion, tags)
+	tagged, err := f.objects.SetTags(ctx, porttest.Root(), byVersion, object.TagList(tags))
 	if err != nil || tagged.Tags["project"] != "apollo" || tagged.Lock.Retention == nil || !tagged.Lock.Retention.Until.Equal(lock.Retention.Until) {
 		t.Errorf("tagging a locked version = %+v, %v", tagged, err)
 	}
@@ -882,7 +882,7 @@ func TestObjectTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := deleted.Marker.Ref()
-	if _, err := f.objects.SetTags(ctx, porttest.Root(), app.LockInput{Bucket: "vault", Key: "ledger", Version: &marker}, tags); !errors.Is(err, domain.ErrMethodNotAllowed) {
+	if _, err := f.objects.SetTags(ctx, porttest.Root(), app.LockInput{Bucket: "vault", Key: "ledger", Version: &marker}, object.TagList(tags)); !errors.Is(err, domain.ErrMethodNotAllowed) {
 		t.Errorf("tagging a delete marker = %v", err)
 	}
 	if got, err := f.objects.Tags(ctx, porttest.Root(), byVersion); err != nil || got.Tags["project"] != "apollo" {

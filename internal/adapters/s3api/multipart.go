@@ -175,8 +175,12 @@ func (h *Handler) createMultipartUpload(ctx context.Context, req *request) error
 		return err
 	}
 	defer clear(sse.CustomerKey)
+	tags, err := tagsOf(req.Header)
+	if err != nil {
+		return err
+	}
 	upload, err := h.cfg.Objects.CreateUpload(ctx, req.principal, app.CreateUploadInput{
-		Bucket: req.bucket, Key: req.key, Lock: lock, SSE: sse,
+		Bucket: req.bucket, Key: req.key, Lock: lock, SSE: sse, Tags: tags,
 		ContentType:        req.Header.Get("Content-Type"),
 		ContentEncoding:    req.Header.Get("Content-Encoding"),
 		ContentDisposition: req.Header.Get("Content-Disposition"),

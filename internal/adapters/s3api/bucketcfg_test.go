@@ -3,6 +3,7 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"testing/quick"
 
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -351,9 +353,12 @@ func TestTaggingOverHTTP(t *testing.T) {
 		"a header with eleven":  {call{method: http.MethodPut, path: "/bkt/x", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "a=1&b=1&c=1&d=1&e=1&f=1&g=1&h=1&i=1&j=1&k=1"}}, 400},
 		"a header with a twice": {call{method: http.MethodPut, path: "/bkt/x", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "a=1&a=2"}}, 400},
 		"a header that is none": {call{method: http.MethodPut, path: "/bkt/x", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "a=%zz"}}, 400},
-		"tags on an upload":     {call{method: http.MethodPost, path: "/bkt/x?uploads", headers: map[string]string{"x-amz-tagging": "a=1"}}, 501},
-		"tags on a read":        {call{method: http.MethodGet, path: "/bkt/report", headers: map[string]string{"x-amz-tagging": "a=1"}}, 501},
-		"without credentials":   {call{method: http.MethodPut, path: "/bkt/report?tagging", body: tagBody("a", "1"), unsigned: true}, 403},
+		// Tags on CreateMultipartUpload are taken since PLAN D.2c (they
+		// were 501 before): the completed object is given them.
+		"tags on an upload":       {call{method: http.MethodPost, path: "/bkt/x?uploads", headers: map[string]string{"x-amz-tagging": "a=1"}}, 200},
+		"tags on a list of parts": {call{method: http.MethodGet, path: "/bkt/x?uploads", headers: map[string]string{"x-amz-tagging": "a=1"}}, 501},
+		"tags on a read":          {call{method: http.MethodGet, path: "/bkt/report", headers: map[string]string{"x-amz-tagging": "a=1"}}, 501},
+		"without credentials":     {call{method: http.MethodPut, path: "/bkt/report?tagging", body: tagBody("a", "1"), unsigned: true}, 403},
 	} {
 		if r := s.do(tt.c); r.status != tt.status {
 			t.Errorf("%s = %d, want %d", name, r.status, tt.status)
@@ -507,7 +512,9 @@ func FuzzCORSConfiguration(f *testing.F) {
 }
 
 // FuzzTagging: tags are read from a document and from the header that
-// creates an object alike: no key twice, and nothing the domain refuses.
+// creates an object alike. Every pair of the header is passed on - none is
+// dropped, so a key given twice reaches the domain, which refuses it - and
+// what the domain keeps has no control character.
 func FuzzTagging(f *testing.F) {
 	f.Add(string(tagBody("a", "1", "b", "2")), "a=1&b=2")
 	f.Add(string(tagBody("a", "1", "a", "2")), "a=1&a=2")
@@ -523,10 +530,25 @@ func FuzzTagging(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if object.ValidateTags(tags, object.MaxObjectTags) != nil {
-			t.Fatalf("the header %q gave tags the domain refuses: %v", header, tags)
+		parsed, err := url.ParseQuery(header)
+		pairs := 0
+		for _, values := range parsed {
+			pairs += len(values)
 		}
-		for key, value := range tags {
+		if err != nil || len(tags) != pairs {
+			t.Fatalf("the header %q gave %d tags of %d pairs (%v)", header, len(tags), pairs, err)
+		}
+		kept, err := object.TagMap(tags)
+		if err == nil {
+			err = object.ValidateTags(kept, object.MaxObjectTags)
+		}
+		if err != nil {
+			if !errors.Is(err, domain.ErrInvalidTag) {
+				t.Fatalf("the header %q: %v, want %v", header, err, domain.ErrInvalidTag)
+			}
+			return
+		}
+		for key, value := range kept {
 			if strings.ContainsAny(key+value, "\x00\r\n") {
 				t.Fatalf("a tag with a control character: %q=%q", key, value)
 			}
@@ -591,4 +613,108 @@ func TestEncodeName(t *testing.T) {
 	if err := quick.Check(property, nil); err != nil {
 		t.Error(err)
 	}
+}
+
+// TestTagRulesOverHTTP: a bucket's tag rules hold for S3's every way an
+// object comes to have tags - PutObject, CopyObject, PutObjectTagging,
+// DeleteObjectTagging, and a multipart upload when it begins and when it
+// completes - and a refusal is S3's 400 InvalidTag, which tells no value.
+func TestTagRulesOverHTTP(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	s.createBucket("src")
+	s.putObject("/bkt/before", []byte("x"))
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/src/source", body: []byte("s"), headers: map[string]string{"x-amz-tagging": "Stage=Final"}}), http.StatusOK)
+	s.putObject("/src/untagged", []byte("s"))
+	rules := bucket.TagRules{Lowercase: true, Required: []bucket.RequiredTag{{Key: "stage", Values: []string{"draft", "final"}}}}
+	document, err := rules.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.meta.SetBucketConfig(ctx, "bkt", bucket.ConfigTagRules, document); err != nil {
+		t.Fatal(err)
+	}
+	tagsOfObject := func(path string) []byte {
+		t.Helper()
+		return s.mustStatus(s.do(call{method: http.MethodGet, path: path + "?tagging"}), http.StatusOK).body
+	}
+	copyHeaders := func(source string, more ...string) map[string]string {
+		h := map[string]string{"x-amz-copy-source": source}
+		for i := 0; i+1 < len(more); i += 2 {
+			h[more[i]] = more[i+1]
+		}
+		return h
+	}
+
+	// Kept in lower case, as S3's every way.
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt/put", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "Stage=Draft"}}), http.StatusOK)
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt/copy", headers: copyHeaders("/src/source")}), http.StatusOK)
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt/replaced", headers: copyHeaders("/src/untagged", "x-amz-tagging-directive", "REPLACE", "x-amz-tagging", "STAGE=DRAFT")}), http.StatusOK)
+	s.mustStatus(s.do(call{method: http.MethodPut, path: "/bkt/before?tagging", body: tagBody("Stage", "Final")}), http.StatusOK)
+	id := s.createUpload("/bkt/big", map[string]string{"x-amz-tagging": "Stage=Draft"})
+	etag := s.uploadPart("/bkt/big", id, 1, []byte("part"))
+	s.mustStatus(s.do(call{method: http.MethodPost, path: "/bkt/big?uploadId=" + id, body: completeBody(listedPart(1, etag))}), http.StatusOK)
+	for path, want := range map[string]string{
+		"/bkt/put": "draft", "/bkt/copy": "final", "/bkt/replaced": "draft", "/bkt/before": "final", "/bkt/big": "draft",
+	} {
+		if got := tagsOfObject(path); !bytes.Contains(got, []byte("<Key>stage</Key><Value>"+want+"</Value>")) {
+			t.Errorf("the tags of %s = %s", path, got)
+		}
+	}
+
+	// Refused, with S3's code, telling no value; nothing is changed.
+	for name, c := range map[string]call{
+		"a put without tags":        {method: http.MethodPut, path: "/bkt/refused", body: []byte("x")},
+		"a put with a value":        {method: http.MethodPut, path: "/bkt/refused", body: []byte("x"), headers: map[string]string{"x-amz-tagging": "stage=" + "secret-value"}},
+		"a copy of an untagged one": {method: http.MethodPut, path: "/bkt/refused", headers: copyHeaders("/src/untagged")},
+		"a copy with other tags":    {method: http.MethodPut, path: "/bkt/refused", headers: copyHeaders("/src/source", "x-amz-tagging-directive", "REPLACE", "x-amz-tagging", "other=1")},
+		"tags without the required": {method: http.MethodPut, path: "/bkt/put?tagging", body: tagBody("other", "1")},
+		"the removal of the tags":   {method: http.MethodDelete, path: "/bkt/put?tagging"},
+		"an upload without tags":    {method: http.MethodPost, path: "/bkt/refused?uploads"},
+	} {
+		r := s.do(c)
+		if r.status != http.StatusBadRequest || !bytes.Contains(r.body, []byte("<Code>InvalidTag</Code>")) || bytes.Contains(r.body, []byte("secret-value")) {
+			t.Errorf("%s = %d %s, want 400 InvalidTag", name, r.status, r.body)
+		}
+	}
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/refused"}), http.StatusNotFound, "NoSuchKey")
+	if got := tagsOfObject("/bkt/put"); !bytes.Contains(got, []byte("<Key>stage</Key><Value>draft</Value>")) {
+		t.Errorf("the tags of a refused change = %s", got)
+	}
+
+	// An upload begun under the rules, and completed under rules it no
+	// longer keeps, is not completed.
+	id = s.createUpload("/bkt/late", map[string]string{"x-amz-tagging": "stage=draft"})
+	etag = s.uploadPart("/bkt/late", id, 1, []byte("part"))
+	stricter, err := bucket.TagRules{Lowercase: true, Required: []bucket.RequiredTag{{Key: "stage", Values: []string{"final"}}}}.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.meta.SetBucketConfig(ctx, "bkt", bucket.ConfigTagRules, stricter); err != nil {
+		t.Fatal(err)
+	}
+	s.expectError(s.do(call{method: http.MethodPost, path: "/bkt/late?uploadId=" + id, body: completeBody(listedPart(1, etag))}), http.StatusBadRequest, "InvalidTag")
+	s.expectError(s.do(call{method: http.MethodGet, path: "/bkt/late"}), http.StatusNotFound, "NoSuchKey")
+}
+
+// TestTagsOnAMultipartUpload: tags given when an upload begins are the
+// completed object's, as S3 keeps them; a key given twice is refused.
+func TestTagsOnAMultipartUpload(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, "")
+	s.createBucket("bkt")
+	id := s.createUpload("/bkt/big", map[string]string{"x-amz-tagging": "Project=Apollo&stage=draft%20one"})
+	etag := s.uploadPart("/bkt/big", id, 1, []byte("part"))
+	s.mustStatus(s.do(call{method: http.MethodPost, path: "/bkt/big?uploadId=" + id, body: completeBody(listedPart(1, etag))}), http.StatusOK)
+	got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/bkt/big?tagging"}), http.StatusOK)
+	if !bytes.Contains(got.body, []byte("<Key>Project</Key><Value>Apollo</Value>")) || !bytes.Contains(got.body, []byte("<Key>stage</Key><Value>draft one</Value>")) {
+		t.Errorf("the tags of the completed object = %s", got.body)
+	}
+	if head := s.mustStatus(s.do(call{method: http.MethodHead, path: "/bkt/big"}), http.StatusOK); head.header.Get("x-amz-tagging-count") != "2" {
+		t.Errorf("x-amz-tagging-count = %q", head.header.Get("x-amz-tagging-count"))
+	}
+	s.expectError(s.do(call{method: http.MethodPost, path: "/bkt/other?uploads", headers: map[string]string{"x-amz-tagging": "a=1&a=2"}}), http.StatusBadRequest, "InvalidTag")
+	s.expectError(s.do(call{method: http.MethodPost, path: "/bkt/other?uploads", headers: map[string]string{"x-amz-tagging": "a=1&b=1&c=1&d=1&e=1&f=1&g=1&h=1&i=1&j=1&k=1"}}), http.StatusBadRequest, "InvalidTag")
 }

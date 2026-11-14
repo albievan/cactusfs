@@ -245,8 +245,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	if err != nil {
 		return err
 	}
+	// The catalogue of tags, read where a bucket's tag rules take only its
+	// tags (ADR-0018).
+	tagDefinitions := n.telemetry.InstrumentTagDefinitions(n.meta)
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
+		TagDefinitions: tagDefinitions,
 		OnHeal: func(r app.HealResult) {
 			n.telemetry.ObserveHeal(r)
 			n.maintenance.ObserveHeal(r)

@@ -35,6 +35,9 @@ type ObjectService struct {
 	// may be nil: then nothing is counted, or nothing can be asked.
 	access      *AccessRecorder
 	accessStore ports.ObjectAccessStore
+	// tagDefinitions is the deployment's catalogue of tags, read where a
+	// bucket's tag rules take only tags of it; nil cannot read it.
+	tagDefinitions ports.TagDefinitionStore
 
 	// entropy is the source of identifiers and nonce prefixes. It is read
 	// under entropyMu because a source need not be safe for concurrent use.
@@ -77,6 +80,10 @@ type ObjectServiceConfig struct {
 	// a version (ADR-0016).
 	Access      *AccessRecorder
 	AccessStore ports.ObjectAccessStore
+	// TagDefinitions is the deployment's catalogue of tags (ADR-0018). It
+	// is read where a bucket's tag rules take only tags of it; without it
+	// such a bucket takes no tags (domain.ErrUnavailable).
+	TagDefinitions ports.TagDefinitionStore
 	// PreviewMaxSize is the largest object previewed, but for text, CSV
 	// and JSON, of which the beginning is shown whatever their size: from
 	// MinPreviewMaxSize to MaxPreviewMaxSize bytes, or 0 for
@@ -101,7 +108,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
-		access: cfg.Access, accessStore: cfg.AccessStore, previewMaxSize: previewMaxSize,
+		access: cfg.Access, accessStore: cfg.AccessStore, tagDefinitions: cfg.TagDefinitions, previewMaxSize: previewMaxSize,
 		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
@@ -141,9 +148,11 @@ type PutInput struct {
 	// SSE says whose key it takes to read the object. The zero value is
 	// the default: the deployment's KMS.
 	SSE object.SSE
-	// Tags are the tags of the new version. Setting them is a permission
-	// of its own.
-	Tags map[string]string
+	// Tags are the tags of the new version, as they were given: a key
+	// given twice is refused. Setting them is a permission of its own, and
+	// the bucket's tag rules (ADR-0018) decide how they are kept and
+	// whether the version may be stored with them.
+	Tags []object.Tag
 
 	// Verify is called once Body has been read to its end and before
 	// anything becomes durable. It returns the entity tag of the content,
@@ -157,14 +166,21 @@ type PutInput struct {
 // write path of the architecture: encrypt, write the shards and flush them to
 // stable storage, commit the version through Raft, and only then return.
 func (s *ObjectService) Put(ctx context.Context, principal iam.Principal, in PutInput) (object.Version, error) {
-	version, err := s.put(ctx, principal, in)
+	tags, err := object.TagMap(in.Tags)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.Put: %w", err)
+	}
+	version, err := s.put(ctx, principal, in, tags)
 	if err != nil {
 		return object.Version{}, fmt.Errorf("object.Put: %w", err)
 	}
 	return version, nil
 }
 
-func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in PutInput) (object.Version, error) {
+// put stores an object with the tags given, as a map: those of in are not
+// read. The tags are kept as the bucket's tag rules say, and the version is
+// refused when they break them.
+func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in PutInput, tags map[string]string) (object.Version, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
 	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
 		return object.Version{}, err
@@ -176,16 +192,12 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		return object.Version{}, err
 	}
 
-	if len(in.Tags) > 0 {
-		if err := object.ValidateTags(in.Tags, object.MaxObjectTags); err != nil {
-			return object.Version{}, err
-		}
-		if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObjectTagging, Resource: resource}); err != nil {
-			return object.Version{}, err
-		}
+	tags, err := s.admitTags(ctx, principal, resource, tags)
+	if err != nil {
+		return object.Version{}, err
 	}
 	version := object.Version{
-		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock, Tags: in.Tags,
+		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock, Tags: tags,
 		// Who commits the version, in the words of the audit trail. What
 		// the store kept of it is what the answer says (ADR-0016).
 		CreatedBy:   actorOf(principal),
@@ -1256,17 +1268,32 @@ func (s *ObjectService) Tags(ctx context.Context, principal iam.Principal, in Lo
 	return version, nil
 }
 
-// SetTags replaces the tags of a version; none removes them.
-func (s *ObjectService) SetTags(ctx context.Context, principal iam.Principal, in LockInput, tags map[string]string) (object.Version, error) {
+// SetTags replaces the tags of a version; none removes them, and is asked as
+// s3:DeleteObjectTagging. A key given twice is refused. The bucket's tag
+// rules (ADR-0018) hold as for a put: the tags are kept in lower case where
+// they say so, and tags they do not allow are refused (domain.ErrTagRule) -
+// none included, where a tag is required of the key.
+func (s *ObjectService) SetTags(ctx context.Context, principal iam.Principal, in LockInput, list []object.Tag) (object.Version, error) {
 	action := iam.ActionPutObjectTagging
-	if len(tags) == 0 {
+	if len(list) == 0 {
 		action = iam.ActionDeleteObjectTagging
+	}
+	tags, err := object.TagMap(list)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
 	}
 	if err := object.ValidateTags(tags, object.MaxObjectTags); err != nil {
 		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
 	}
 	version, err := s.tagTarget(ctx, principal, action, in)
 	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
+	}
+	rules, err := readTagRules(ctx, s.buckets, in.Bucket)
+	if err != nil {
+		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
+	}
+	if tags, err = s.keepObjectTags(ctx, rules, in.Key, tags); err != nil {
 		return object.Version{}, fmt.Errorf("object.SetTags: %w", err)
 	}
 	stored, err := s.index.SetTags(ctx, in.Bucket, in.Key, version.Ref(), tags)
@@ -1342,8 +1369,11 @@ func (s *ObjectService) Copy(ctx context.Context, principal iam.Principal, in Co
 		dest.ContentType, dest.ContentEncoding, dest.ContentDisposition = source.ContentType, source.ContentEncoding, source.ContentDisposition
 		dest.ContentLanguage, dest.CacheControl, dest.UserMetadata = source.ContentLanguage, source.CacheControl, source.UserMetadata
 	}
-	if !in.ReplaceTags {
-		dest.Tags = source.Tags
+	tags := source.Tags
+	if in.ReplaceTags {
+		if tags, err = object.TagMap(dest.Tags); err != nil {
+			return CopyOutput{}, fmt.Errorf("object.Copy: %w", err)
+		}
 	}
 	same := in.Source.Bucket == dest.Bucket && in.Source.Key == dest.Key && in.Source.Version == nil && in.Source.Range == nil
 	// Another mode of encryption is a change; so is a customer key, which
@@ -1355,7 +1385,9 @@ func (s *ObjectService) Copy(ctx context.Context, principal iam.Principal, in Co
 	}
 	body, verify := in.Digest(out.Body)
 	dest.Body, dest.Size, dest.Verify = body, out.Range.Length, verify
-	version, err := s.put(ctx, principal, dest)
+	// The copy's tags - the source's or those given - are judged by the
+	// destination's rules, as any other put's.
+	version, err := s.put(ctx, principal, dest, tags)
 	if err != nil {
 		return CopyOutput{}, fmt.Errorf("object.Copy: %w", err)
 	}

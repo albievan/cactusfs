@@ -61,7 +61,7 @@ type Buckets interface {
 	SetCORS(ctx context.Context, principal iam.Principal, name string, rules *bucket.CORS) error
 	CORSOf(ctx context.Context, name string) *bucket.CORS
 	Tags(ctx context.Context, principal iam.Principal, name string) (map[string]string, error)
-	SetTags(ctx context.Context, principal iam.Principal, name string, tags map[string]string) error
+	SetTags(ctx context.Context, principal iam.Principal, name string, tags []object.Tag) (map[string]string, error)
 	Lifecycle(ctx context.Context, principal iam.Principal, name string) (*bucket.Lifecycle, error)
 	SetLifecycle(ctx context.Context, principal iam.Principal, name string, rules *bucket.Lifecycle) error
 }
@@ -88,7 +88,7 @@ type Objects interface {
 	ListParts(ctx context.Context, principal iam.Principal, in app.ListPartsInput) (app.ListPartsOutput, error)
 	ListUploads(ctx context.Context, principal iam.Principal, in app.ListUploadsInput) (app.ListUploadsOutput, error)
 	Tags(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Version, error)
-	SetTags(ctx context.Context, principal iam.Principal, in app.LockInput, tags map[string]string) (object.Version, error)
+	SetTags(ctx context.Context, principal iam.Principal, in app.LockInput, tags []object.Tag) (object.Version, error)
 }
 
 // Identities resolves an access key to its secret and principal.
@@ -494,7 +494,8 @@ func allowHeaders(header http.Header) error {
 		case slices.Contains(copyHeaders(), lower):
 			// Read by the copy operations; refused elsewhere, in route.
 		case lower == headerTagging:
-			// Read by PutObject; refused elsewhere, in route.
+			// Read by PutObject, CopyObject and CreateMultipartUpload;
+			// refused elsewhere, in route.
 		case isSSEHeader(lower):
 			// Read, or refused, by the operation: see allowSSEHeaders.
 		case lower == "x-amz-storage-class" && len(values) == 1 && values[0] == storageClass:
@@ -546,12 +547,16 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 			return fmt.Errorf("%w: %s is not part of this operation", domain.ErrInvalidArgument, name)
 		}
 	}
-	// Tags come with the request that creates an object, and no other.
+	// Tags come with the request that creates an object, and no other: a
+	// PUT of an object (a copy included), or the POST that begins a
+	// multipart upload, whose tags the completed object is given.
 	selects := len(query)
 	if query.Has(queryClientInfo) {
 		selects--
 	}
-	if len(req.Header.Values(headerTagging)) > 0 && (req.Method != http.MethodPut || req.key == "" || selects > 0) {
+	creates := req.key != "" && ((req.Method == http.MethodPut && selects == 0) ||
+		(req.Method == http.MethodPost && selects == 1 && query.Has("uploads")))
+	if len(req.Header.Values(headerTagging)) > 0 && !creates {
 		return errNotImplemented()
 	}
 

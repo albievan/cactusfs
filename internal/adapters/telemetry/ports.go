@@ -9,6 +9,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/domain/tagging"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -684,4 +685,52 @@ func (s *targetStore) ListTargets(ctx context.Context) ([]delivery.Target, error
 	targets, err := s.next.ListTargets(ctx)
 	done(err)
 	return targets, err
+}
+
+// InstrumentTagDefinitions returns next wrapped so that every call is traced
+// and counted. A key of the catalogue is neither a label nor an attribute:
+// it is chosen by somebody (ADR-0018).
+func (t *Telemetry) InstrumentTagDefinitions(next ports.TagDefinitionStore) ports.TagDefinitionStore {
+	return &tagDefinitionStore{t: t, next: next}
+}
+
+type tagDefinitionStore struct {
+	t    *Telemetry
+	next ports.TagDefinitionStore
+}
+
+const portTagDefinitions = "tag_definitions"
+
+func (*tagDefinitionStore) instrumented() {}
+
+// PutTagDefinition implements ports.TagDefinitionStore.
+func (s *tagDefinitionStore) PutTagDefinition(ctx context.Context, d tagging.Definition, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portTagDefinitions, "PutTagDefinition")
+	err := s.next.PutTagDefinition(ctx, d, record)
+	done(err)
+	return err
+}
+
+// DeleteTagDefinition implements ports.TagDefinitionStore.
+func (s *tagDefinitionStore) DeleteTagDefinition(ctx context.Context, key string, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portTagDefinitions, "DeleteTagDefinition")
+	err := s.next.DeleteTagDefinition(ctx, key, record)
+	done(err)
+	return err
+}
+
+// GetTagDefinition implements ports.TagDefinitionStore.
+func (s *tagDefinitionStore) GetTagDefinition(ctx context.Context, key string) (tagging.Definition, error) {
+	ctx, done := s.t.call(ctx, portTagDefinitions, "GetTagDefinition")
+	d, err := s.next.GetTagDefinition(ctx, key)
+	done(err)
+	return d, err
+}
+
+// ListTagDefinitions implements ports.TagDefinitionStore.
+func (s *tagDefinitionStore) ListTagDefinitions(ctx context.Context) ([]tagging.Definition, error) {
+	ctx, done := s.t.call(ctx, portTagDefinitions, "ListTagDefinitions")
+	definitions, err := s.next.ListTagDefinitions(ctx)
+	done(err)
+	return definitions, err
 }

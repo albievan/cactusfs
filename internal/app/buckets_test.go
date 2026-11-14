@@ -342,19 +342,19 @@ func TestAuthorizerAndBucketPolicies(t *testing.T) {
 	if got, err := buckets.CORS(ctx, porttest.Root(), "site"); err != nil || got != nil {
 		t.Errorf("CORS after removal = %+v, %v", got, err)
 	}
-	if err := buckets.SetTags(ctx, porttest.Root(), "site", map[string]string{"team": "web"}); err != nil {
+	if _, err := buckets.SetTags(ctx, porttest.Root(), "site", []object.Tag{{Key: "team", Value: "web"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := buckets.Tags(ctx, porttest.Root(), "site"); err != nil || got["team"] != "web" {
 		t.Errorf("Tags = %v, %v", got, err)
 	}
-	if err := buckets.SetTags(ctx, porttest.Root(), "site", map[string]string{"": "x"}); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := buckets.SetTags(ctx, porttest.Root(), "site", []object.Tag{{Value: "x"}}); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("SetTags with an empty key = %v", err)
 	}
-	if err := buckets.SetTags(ctx, anonymous(), "site", nil); !errors.Is(err, domain.ErrAccessDenied) {
+	if _, err := buckets.SetTags(ctx, anonymous(), "site", nil); !errors.Is(err, domain.ErrAccessDenied) {
 		t.Errorf("SetTags by nobody = %v", err)
 	}
-	if err := buckets.SetTags(ctx, porttest.Root(), "site", nil); err != nil {
+	if _, err := buckets.SetTags(ctx, porttest.Root(), "site", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := buckets.Tags(ctx, porttest.Root(), "site"); err != nil || got != nil {

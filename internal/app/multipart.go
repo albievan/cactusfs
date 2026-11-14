@@ -79,6 +79,12 @@ type CreateUploadInput struct {
 	// SSE says whose key it takes to read the object. With SSE-C every
 	// part must come with the same key.
 	SSE object.SSE
+	// Tags are the tags the completed version is to have, as they were
+	// given: a key given twice is refused. As for a put, setting them is
+	// a permission of its own, and the bucket's tag rules (ADR-0018)
+	// decide how they are kept; they are checked against the rules now
+	// and again when the upload is completed.
+	Tags []object.Tag
 }
 
 // CreateUpload begins a multipart upload.
@@ -98,11 +104,19 @@ func (s *ObjectService) createUpload(ctx context.Context, principal iam.Principa
 	if err := s.admit(ctx, principal, resource, in.UserMetadata, in.Lock); err != nil {
 		return object.Upload{}, err
 	}
+	tags, err := object.TagMap(in.Tags)
+	if err != nil {
+		return object.Upload{}, err
+	}
+	if tags, err = s.admitTags(ctx, principal, resource, tags); err != nil {
+		return object.Upload{}, err
+	}
 	random, err := s.random(object.IDSize)
 	if err != nil {
 		return object.Upload{}, err
 	}
 	upload := object.Upload{
+		Tags:   tags,
 		Bucket: in.Bucket, Key: in.Key, ID: object.ID(random), InitiatedAt: s.clock.Now().UTC(), Initiator: principal.Name(),
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata, Lock: in.Lock,
@@ -327,6 +341,17 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 		return object.Version{}, err
 	}
 	if err := s.checkUploadKey(ctx, upload, in.CustomerKey); err != nil {
+		return object.Version{}, err
+	}
+	// The rules may have changed since the upload began: the version is
+	// judged by those of now, with the tags it will have - those of the
+	// upload, which are not changed now. An upload whose tags the rules no
+	// longer allow, in lower case or otherwise, is begun again.
+	rules, err := readTagRules(ctx, s.buckets, in.Bucket)
+	if err != nil {
+		return object.Version{}, err
+	}
+	if err := s.checkObjectTags(ctx, rules, in.Key, upload.Tags); err != nil {
 		return object.Version{}, err
 	}
 	if upload.Encryption.Mode == object.SSEC {

@@ -666,27 +666,102 @@ func (s *BucketService) Tags(ctx context.Context, principal iam.Principal, name 
 	return tags, nil
 }
 
-// SetTags replaces the tags of a bucket; none removes them.
-func (s *BucketService) SetTags(ctx context.Context, principal iam.Principal, name string, tags map[string]string) error {
+// SetTags replaces the tags of a bucket; none removes them. A key given
+// twice is refused. Where the bucket's tag rules say so (ADR-0018) the tags
+// are kept in lower case, and two keys that become one are refused, not
+// merged. It returns the tags as they are kept.
+func (s *BucketService) SetTags(ctx context.Context, principal iam.Principal, name string, list []object.Tag) (map[string]string, error) {
 	if err := s.authorize(ctx, principal, iam.ActionPutBucketTagging, name); err != nil {
-		return fmt.Errorf("bucket.SetTags: %w", err)
+		return nil, fmt.Errorf("bucket.SetTags: %w", err)
+	}
+	tags, err := object.TagMap(list)
+	if err != nil {
+		return nil, fmt.Errorf("bucket.SetTags: %w", err)
 	}
 	if err := object.ValidateTags(tags, object.MaxBucketTags); err != nil {
-		return fmt.Errorf("bucket.SetTags: %w", err)
+		return nil, fmt.Errorf("bucket.SetTags: %w", err)
 	}
 	var document []byte
 	if len(tags) > 0 {
-		var err error
+		// Removing the tags needs no rules; keeping them does.
+		rules, err := readTagRules(ctx, s.buckets, name)
+		if err != nil {
+			return nil, fmt.Errorf("bucket.SetTags: %w", err)
+		}
+		if tags, err = rules.Keep(tags, object.MaxBucketTags); err != nil {
+			return nil, fmt.Errorf("bucket.SetTags: %w", err)
+		}
 		if document, err = json.Marshal(tags); err != nil {
-			return fmt.Errorf("bucket.SetTags: %w", err)
+			return nil, fmt.Errorf("bucket.SetTags: %w", err)
 		}
 	}
 	if err := s.buckets.SetBucketConfig(ctx, name, bucket.ConfigTagging, document); err != nil {
-		return fmt.Errorf("bucket.SetTags: %w", err)
+		return nil, fmt.Errorf("bucket.SetTags: %w", err)
 	}
 	if s.auditor != nil {
 		details := map[string]string{"tags": strconv.Itoa(len(tags))}
 		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutBucketTagging, iam.Resource{Bucket: name}, audit.Succeeded, details))
+	}
+	return tags, nil
+}
+
+// TagRules returns the rules for the tags of a bucket's objects (ADR-0018).
+// A bucket without rules has rules that ask for nothing: all off. Rules
+// this release cannot read are domain.ErrUnavailable when they are of a
+// later release, domain.ErrIntegrity otherwise.
+func (s *BucketService) TagRules(ctx context.Context, principal iam.Principal, name string) (bucket.TagRules, error) {
+	if err := s.authorize(ctx, principal, iam.ActionGetBucketTagRules, name); err != nil {
+		return bucket.TagRules{}, fmt.Errorf("bucket.TagRules: %w", err)
+	}
+	rules, err := readTagRules(ctx, s.buckets, name)
+	if err != nil {
+		return bucket.TagRules{}, fmt.Errorf("bucket.TagRules: %w", err)
+	}
+	return rules, nil
+}
+
+// SetTagRules replaces the tag rules of a bucket. From then on every way an
+// object comes to have tags keeps them (ObjectService); objects that exist
+// are left as they are. Rules bucket.TagRules.Validate refuses wrap
+// domain.ErrInvalidArgument, and the rules the bucket had are kept. Until
+// every member of the metadata group knows tag rules the store refuses them
+// with domain.ErrUnavailable. The change is audited, with what the rules
+// ask but not the keys or values they name.
+func (s *BucketService) SetTagRules(ctx context.Context, principal iam.Principal, name string, rules bucket.TagRules) error {
+	if err := s.authorize(ctx, principal, iam.ActionPutBucketTagRules, name); err != nil {
+		return fmt.Errorf("bucket.SetTagRules: %w", err)
+	}
+	document, err := rules.Document()
+	if err != nil {
+		return fmt.Errorf("bucket.SetTagRules: %w", err)
+	}
+	if err := s.buckets.SetBucketConfig(ctx, name, bucket.ConfigTagRules, document); err != nil {
+		return fmt.Errorf("bucket.SetTagRules: %w", err)
+	}
+	if s.auditor != nil {
+		details := map[string]string{
+			"lowercase": strconv.FormatBool(rules.Lowercase), "catalogue_only": strconv.FormatBool(rules.CatalogueOnly),
+			"required": strconv.Itoa(len(rules.Required)),
+		}
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutBucketTagRules, iam.Resource{Bucket: name}, audit.Succeeded, details))
+	}
+	return nil
+}
+
+// DeleteTagRules removes the tag rules of a bucket: from then on its tags
+// are kept in the case they are sent in, any tag may be given and none is
+// required. It is asked as setting them is (s3:PutBucketTagRules), and
+// audited.
+func (s *BucketService) DeleteTagRules(ctx context.Context, principal iam.Principal, name string) error {
+	if err := s.authorize(ctx, principal, iam.ActionPutBucketTagRules, name); err != nil {
+		return fmt.Errorf("bucket.DeleteTagRules: %w", err)
+	}
+	if err := s.buckets.SetBucketConfig(ctx, name, bucket.ConfigTagRules, nil); err != nil {
+		return fmt.Errorf("bucket.DeleteTagRules: %w", err)
+	}
+	if s.auditor != nil {
+		details := map[string]string{"tag_rules": "removed"}
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionPutBucketTagRules, iam.Resource{Bucket: name}, audit.Succeeded, details))
 	}
 	return nil
 }

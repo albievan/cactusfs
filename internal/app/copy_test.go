@@ -40,7 +40,7 @@ func TestCopy(t *testing.T) {
 	data := randomBytes(t, 300_000)
 	source, err := f.objects.Put(ctx, porttest.Root(), app.PutInput{
 		Bucket: "b", Key: "src", Body: bytes.NewReader(data), Size: int64(len(data)), ContentType: "image/png",
-		UserMetadata: map[string]string{"owner": "albie"}, Tags: map[string]string{"project": "apollo"},
+		UserMetadata: map[string]string{"owner": "albie"}, Tags: []object.Tag{{Key: "project", Value: "apollo"}},
 		Verify: func() (string, error) { return partTag(data), nil },
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func TestCopy(t *testing.T) {
 	// With the metadata and the tags of the request.
 	in.Source = app.GetInput{Bucket: "dst", Key: "copy"}
 	in.Destination.Key, in.ReplaceMetadata, in.ReplaceTags = "replaced", true, true
-	in.Destination.Tags = map[string]string{"stage": "final"}
+	in.Destination.Tags = []object.Tag{{Key: "stage", Value: "final"}}
 	out, err = f.objects.Copy(ctx, porttest.Root(), in)
 	if v := out.Version; err != nil || v.ContentType != "text/plain" || v.UserMetadata["owner"] != "other" || len(v.Tags) != 1 || v.Tags["stage"] != "final" {
 		t.Errorf("a copy with replaced metadata = %+v, %v", out.Version, err)
@@ -139,7 +139,7 @@ func TestCopyPermissions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := erasureFixture(t)
-	if _, err := f.objects.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "tagged", Body: bytes.NewReader([]byte("x")), Size: 1, Tags: map[string]string{"a": "b"}}); err != nil {
+	if _, err := f.objects.Put(ctx, porttest.Root(), app.PutInput{Bucket: "b", Key: "tagged", Body: bytes.NewReader([]byte("x")), Size: 1, Tags: []object.Tag{{Key: "a", Value: "b"}}}); err != nil {
 		t.Fatal(err)
 	}
 	f.put(t, "b", "plain", []byte("y"))

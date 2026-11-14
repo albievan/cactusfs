@@ -19,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -1357,9 +1358,9 @@ func TestKnowingAKeyIsNotUsingIt(t *testing.T) {
 	f.identities.Authenticated(iam.Principal{User: "alice"})
 }
 
-// TestBucketConfigurationChangesAreAudited: a policy, cross-origin rules and
-// tags set on a bucket or taken off it are in the trail, and a policy with
-// whether it opens anything to everyone.
+// TestBucketConfigurationChangesAreAudited: a policy, cross-origin rules,
+// tags and tag rules set on a bucket or taken off it are in the trail, and a
+// policy with whether it opens anything to everyone.
 func TestBucketConfigurationChangesAreAudited(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1383,12 +1384,22 @@ func TestBucketConfigurationChangesAreAudited(t *testing.T) {
 		{func() error { return buckets.SetPolicy(ctx, alice, "site", nil) }, "s3:DeleteBucketPolicy", [2]string{"policy", "removed"}},
 		{func() error { return buckets.SetCORS(ctx, alice, "site", rules) }, "s3:PutBucketCORS", [2]string{"rules", "1"}},
 		{func() error { return buckets.SetCORS(ctx, alice, "site", nil) }, "s3:PutBucketCORS", [2]string{"cors", "removed"}},
-		{func() error { return buckets.SetTags(ctx, alice, "site", map[string]string{"team": "web"}) }, "s3:PutBucketTagging", [2]string{"tags", "1"}},
-		{func() error { return buckets.SetTags(ctx, alice, "site", nil) }, "s3:PutBucketTagging", [2]string{"tags", "0"}},
+		{func() error {
+			_, err := buckets.SetTags(ctx, alice, "site", []object.Tag{{Key: "team", Value: "web"}})
+			return err
+		}, "s3:PutBucketTagging", [2]string{"tags", "1"}},
+		{func() error { _, err := buckets.SetTags(ctx, alice, "site", nil); return err }, "s3:PutBucketTagging", [2]string{"tags", "0"}},
 		{func() error {
 			return buckets.SetLifecycle(ctx, alice, "site", &bucket.Lifecycle{Rules: []bucket.LifecycleRule{{Enabled: true, ExpirationDays: 1}}})
 		}, "s3:PutLifecycleConfiguration", [2]string{"rules", "1"}},
 		{func() error { return buckets.SetLifecycle(ctx, alice, "site", nil) }, "s3:PutLifecycleConfiguration", [2]string{"lifecycle", "removed"}},
+		{func() error {
+			return buckets.SetTagRules(ctx, alice, "site", bucket.TagRules{Lowercase: true, Required: []bucket.RequiredTag{{Key: "stage"}}})
+		}, "s3:PutBucketTagRules", [2]string{"required", "1"}},
+		{func() error {
+			return buckets.SetTagRules(ctx, alice, "site", bucket.TagRules{CatalogueOnly: true})
+		}, "s3:PutBucketTagRules", [2]string{"catalogue_only", "true"}},
+		{func() error { return buckets.DeleteTagRules(ctx, alice, "site") }, "s3:PutBucketTagRules", [2]string{"tag_rules", "removed"}},
 	}
 	for i, step := range steps {
 		if err := step.do(); err != nil {
@@ -1397,6 +1408,9 @@ func TestBucketConfigurationChangesAreAudited(t *testing.T) {
 	}
 	// What changed nothing is not recorded as a change.
 	if err := buckets.SetPolicy(ctx, alice, "site", []byte("not a policy")); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatal(err)
+	}
+	if err := buckets.SetTagRules(ctx, alice, "site", bucket.TagRules{Lowercase: true, Required: []bucket.RequiredTag{{Key: "Stage"}}}); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatal(err)
 	}
 	records := f.trail(t)[base:]
