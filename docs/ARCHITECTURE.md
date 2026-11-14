@@ -732,8 +732,16 @@ four at a time.
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
   `SubBucketNotEmpty`) are served (PLAN C.6): the use cases authorize and audit, the
   handlers translate. A node without the use case of sub-buckets answers their paths
-  `501`. There is no path for tags. CORS, tags and lifecycle rules are set through the
-  S3 API.
+  `501`. The paths of tags (ADR-0018, PLAN D.0) are in the contract and answer 501
+  `NotImplemented` until PLAN D.4: a bucket's tags (`/buckets/{bucket}/tags`), an
+  object's (`/buckets/{bucket}/object/tags`, `key` and `version_id` in the query), a
+  bucket's tag rules (`/buckets/{bucket}/tag-rules`; `s3:GetBucketTagRules`,
+  `s3:PutBucketTagRules`) and the catalogue (`/tag-definitions` and
+  `/tag-definitions/{key}`; `admin:ListTagDefinitions`,
+  `admin:{Get,Put,Delete}TagDefinition`), and an upload with tags (`X-CactusFS-Tagging`, which is
+  part of the upload's idempotency fingerprint). A tag a bucket's rules refuse is 400
+  `TagRuleViolated` (`domain.ErrTagRule`, mapped already); a definition a rule names is
+  409 `EntityInUse`. Until then CORS, tags and lifecycle rules are set through the S3 API.
   The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.

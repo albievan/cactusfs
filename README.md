@@ -828,6 +828,7 @@ What the API has, under `/api/v1` (the contract is
 | `/buckets/{bucket}/object/preview` | an object's bytes for the console to show it (ADR-0028): PNG, JPEG, GIF, WebP, PDF, DOCX, XLSX, text, CSV and JSON, decided by the stored type and the bytes together; for whoever may read the object and either uploaded the version shown or is allowed `admin:PreviewObject`; always an attachment, never served inline; up to `--preview-max-size`, text to its first MiB; counted as a download |
 | `/buckets/{bucket}/policy` | a bucket's policy: the document S3's `GetBucketPolicy` and `PutBucketPolicy` read and write; one that cannot be kept answers `400 InvalidPolicy` |
 | `/buckets/{bucket}/subbuckets`, `/buckets/{bucket}/subbuckets/{name}` | sub-buckets (ADR-0017): list (names and ages, never a policy), read with the policy, create or set the policy, delete an empty one; at most 10 a bucket. In the console: a bucket's details |
+| `/buckets/{bucket}/tags`, `/buckets/{bucket}/object/tags`, `/buckets/{bucket}/tag-rules`, `/tag-definitions`, `/tag-definitions/{key}`; `X-CactusFS-Tagging` on an upload | tags of buckets and objects, a bucket's tag rules and the catalogue of tags (ADR-0018): in the contract, and every one answers `501` until PLAN D.4 - set tags through the S3 API until then |
 | `/search` | buckets by name and objects by key |
 | `/users`, `/users/{name}`, `/users/{name}/keys`, `/keys/{access_key_id}` | users and their API keys |
 | `/groups`, `/roles`, `/policies` (and `/{name}` of each) | groups, roles, policies |
