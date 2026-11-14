@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
@@ -347,7 +348,9 @@ func within[T any](t *testing.T, what string, call func() (T, error)) (T, error)
 	case <-time.After(time.Minute):
 		// Far beyond the deadlines of stallingService, and far beyond
 		// how slow the race detector and a loaded machine make a call:
-		// what does not return by then waits for the drive.
+		// what does not return by then waits for the drive. In a synctest
+		// bubble the minute passes on the bubble's clock, once nothing
+		// but the wait for the drive is left.
 		t.Fatalf("%s is held up by a drive that hangs", what)
 		var zero T
 		return zero, nil
@@ -446,34 +449,50 @@ func TestAHangingDriveDoesNotHoldUpWrites(t *testing.T) {
 
 // TestAHangingDriveDoesNotHoldUpHealing: a heal rebuilds what it can and
 // gives up on a shard whose drive hangs, rather than wait for it forever.
+//
+// A heal gives up on every shard that has not answered by the deadline, a
+// drive that answers slowly included. Each case runs in a synctest bubble,
+// whose clock moves only when every goroutine of the heal is blocked: the
+// drive that answers has answered by the time the deadline passes, however
+// slow the machine, so the deadline gives up on the hanging drive and on
+// nothing else. On the real clock a loaded CI runner held up the goroutine of
+// the drive that answers past the deadline, and its shard was given up on too
+// (PLAN decision of 2026-11-14).
 func TestAHangingDriveDoesNotHoldUpHealing(t *testing.T) {
 	t.Parallel()
 	for _, step := range []string{"create", "write", "commit"} {
 		t.Run(step, func(t *testing.T) {
 			t.Parallel()
-			f := erasureFixture(t)
-			data := randomBytes(t, multiStripe)
-			version := f.put(t, "b", "k", data)
-			drives := f.shardsOf(t, version)
-			_ = drives[1].Delete(t.Context(), shardID(version, 1))
-			_ = drives[4].Delete(t.Context(), shardID(version, 4))
-			hanging := slices.Index(f.drives, drives[4])
-
-			objects := f.stallingService(t, step, hanging)
-			result, err := within(t, "HealObject", func() (app.HealResult, error) {
-				return objects.Healer().HealObject(t.Context(), "b", "k")
-			})
-			if result.Damaged != 2 || result.Rebuilt != 1 || !errors.Is(err, domain.ErrUnavailable) {
-				t.Errorf("HealObject = %+v, %v; want two damaged shards, the one on the drive that answers rebuilt, and %v",
-					result, err, domain.ErrUnavailable)
-			}
-			if _, ok := drives[1].Bytes(shardID(version, 1)); !ok {
-				t.Error("the shard on the drive that answers was not rebuilt")
-			}
-			if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
-				t.Fatalf("Get: %v", err)
-			}
+			synctest.Test(t, func(t *testing.T) { healPastAHangingDrive(t, step) })
 		})
+	}
+}
+
+// healPastAHangingDrive heals an object two of whose shards are missing, one
+// of them on a drive that hangs at step.
+func healPastAHangingDrive(t *testing.T, step string) {
+	t.Helper()
+	f := erasureFixture(t)
+	data := randomBytes(t, multiStripe)
+	version := f.put(t, "b", "k", data)
+	drives := f.shardsOf(t, version)
+	_ = drives[1].Delete(t.Context(), shardID(version, 1))
+	_ = drives[4].Delete(t.Context(), shardID(version, 4))
+	hanging := slices.Index(f.drives, drives[4])
+
+	objects := f.stallingService(t, step, hanging)
+	result, err := within(t, "HealObject", func() (app.HealResult, error) {
+		return objects.Healer().HealObject(t.Context(), "b", "k")
+	})
+	if result.Damaged != 2 || result.Rebuilt != 1 || !errors.Is(err, domain.ErrUnavailable) {
+		t.Errorf("HealObject = %+v, %v; want two damaged shards, the one on the drive that answers rebuilt, and %v",
+			result, err, domain.ErrUnavailable)
+	}
+	if _, ok := drives[1].Bytes(shardID(version, 1)); !ok {
+		t.Error("the shard on the drive that answers was not rebuilt")
+	}
+	if got, _, err := f.get("b", "k", nil); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("Get: %v", err)
 	}
 }
 
