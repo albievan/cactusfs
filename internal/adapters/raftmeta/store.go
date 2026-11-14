@@ -82,6 +82,23 @@ type Config struct {
 	// Clock gives the time the leader stamps entries with; nil is the
 	// system clock.
 	Clock ports.Clock
+
+	// seam lets the package's own tests reach into how Raft's stores are
+	// guarded. It is unexported, so no caller outside the package can set
+	// it, and its zero value is the product's behaviour.
+	seam storeSeam
+}
+
+// storeSeam holds the hooks the package's tests put around the gate of
+// Raft's log and stable store (see gatedStore). Nothing outside a test sets
+// them.
+type storeSeam struct {
+	// wrap, when not nil, wraps what Raft is given in place of the gate,
+	// so that a test can hold a call before it enters the gate.
+	wrap func(gate raftStore) raftStore
+	// park, when not nil, replaces how the gate parks a call that came
+	// after Close; it must never return.
+	park func()
 }
 
 // wallClock is the system clock.
@@ -269,7 +286,12 @@ func (s *Store) start(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("open raft log: %w", err)
 	}
-	s.logs = newGatedStore(logs)
+	s.logs = newGatedStore(logs, cfg.seam.park)
+	// stores is what Raft is given: the gate, or a test's wrapper of it.
+	var stores raftStore = s.logs
+	if cfg.seam.wrap != nil {
+		stores = cfg.seam.wrap(s.logs)
+	}
 	logger := newHCLogger(cfg.Logger.With(slog.String("component", "raft")))
 	snapshots, err := raft.NewFileSnapshotStoreWithLogger(dir, retainedSnapshots, logger)
 	if err != nil {
@@ -322,20 +344,20 @@ func (s *Store) start(ctx context.Context, cfg Config) error {
 		_, transport = raft.NewInmemTransport(address)
 	}
 
-	existing, err := raft.HasExistingState(s.logs, s.logs, snapshots)
+	existing, err := raft.HasExistingState(stores, stores, snapshots)
 	if err != nil {
 		return fmt.Errorf("inspect raft state: %w", err)
 	}
 	if !existing && cfg.Cluster == nil {
 		servers := raft.Configuration{Servers: []raft.Server{{Suffrage: raft.Voter, ID: conf.LocalID, Address: address}}}
-		if err := raft.BootstrapCluster(conf, s.logs, s.logs, snapshots, transport, servers); err != nil {
+		if err := raft.BootstrapCluster(conf, stores, stores, snapshots, transport, servers); err != nil {
 			return fmt.Errorf("bootstrap raft: %w", err)
 		}
 	}
 	if err := s.catchUpToSnapshot(snapshots); err != nil {
 		return err
 	}
-	if s.raft, err = raft.NewRaft(conf, s.fsm, s.logs, s.logs, snapshots, transport); err != nil {
+	if s.raft, err = raft.NewRaft(conf, s.fsm, stores, stores, snapshots, transport); err != nil {
 		return fmt.Errorf("start raft: %w", err)
 	}
 	return nil

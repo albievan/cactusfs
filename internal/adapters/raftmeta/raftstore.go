@@ -3,7 +3,6 @@ package raftmeta
 import (
 	"io"
 	"sync"
-	"sync/atomic"
 
 	"github.com/hashicorp/raft"
 )
@@ -32,20 +31,21 @@ type raftStore interface {
 // operations are refused once it is closed - so nothing waits for a parked
 // call, and there is at most one for each connection open when the node
 // stopped, as the transport's connections are closed with it.
+//
+// A parked call is a goroutine that never ends, and what it refers to is
+// never freed: the stopped node's *raft.Raft, its state machine, the closed
+// BoltStore and the buffers of the connection it came on stay in memory
+// until the process ends. That is bounded by one call for each connection
+// that had a heartbeat in flight when the node stopped, and a node is stopped
+// once in a process's life outside tests.
 type gatedStore struct {
 	inner raftStore
 
 	// mu is held for reading by every call and for writing by Close.
 	mu     sync.RWMutex
 	closed bool
-	// parked is never closed: a call after Close waits on it for good.
-	parked chan struct{}
-	// late counts the calls that came after Close.
-	late atomic.Int64
-	// pause, when set, is called at the start of every call, before the
-	// call enters the gate. Tests use it to hold a caller where a stray
-	// heartbeat may be when the store closes.
-	pause atomic.Pointer[func(op string, key []byte)]
+	// park holds a call that came after Close; it never returns.
+	park func()
 }
 
 var (
@@ -53,22 +53,28 @@ var (
 	_ raft.StableStore = (*gatedStore)(nil)
 )
 
-// newGatedStore guards inner.
-func newGatedStore(inner raftStore) *gatedStore {
-	return &gatedStore{inner: inner, parked: make(chan struct{})}
+// newGatedStore guards inner. park, when not nil, replaces parkForGood: the
+// package's tests pass one that notes the call before it parks it, and it
+// must never return either.
+func newGatedStore(inner raftStore, park func()) *gatedStore {
+	if park == nil {
+		park = parkForGood
+	}
+	return &gatedStore{inner: inner, park: park}
+}
+
+// parkForGood blocks the calling goroutine for the rest of the process.
+func parkForGood() {
+	select {}
 }
 
 // enter lets a call in, or parks it for good when the store is closed. The
 // call must run the function it returns when it is done.
-func (g *gatedStore) enter(op string, key []byte) (leave func()) {
-	if pause := g.pause.Load(); pause != nil {
-		(*pause)(op, key)
-	}
+func (g *gatedStore) enter() (leave func()) {
 	g.mu.RLock()
 	if g.closed {
 		g.mu.RUnlock()
-		g.late.Add(1)
-		<-g.parked
+		g.park()
 	}
 	return g.mu.RUnlock
 }
@@ -87,60 +93,60 @@ func (g *gatedStore) Close() error {
 
 // FirstIndex implements raft.LogStore.
 func (g *gatedStore) FirstIndex() (uint64, error) {
-	defer g.enter("FirstIndex", nil)()
+	defer g.enter()()
 	return g.inner.FirstIndex()
 }
 
 // LastIndex implements raft.LogStore.
 func (g *gatedStore) LastIndex() (uint64, error) {
-	defer g.enter("LastIndex", nil)()
+	defer g.enter()()
 	return g.inner.LastIndex()
 }
 
 // GetLog implements raft.LogStore.
 func (g *gatedStore) GetLog(index uint64, log *raft.Log) error {
-	defer g.enter("GetLog", nil)()
+	defer g.enter()()
 	return g.inner.GetLog(index, log)
 }
 
 // StoreLog implements raft.LogStore.
 func (g *gatedStore) StoreLog(log *raft.Log) error {
-	defer g.enter("StoreLog", nil)()
+	defer g.enter()()
 	return g.inner.StoreLog(log)
 }
 
 // StoreLogs implements raft.LogStore.
 func (g *gatedStore) StoreLogs(logs []*raft.Log) error {
-	defer g.enter("StoreLogs", nil)()
+	defer g.enter()()
 	return g.inner.StoreLogs(logs)
 }
 
 // DeleteRange implements raft.LogStore.
 func (g *gatedStore) DeleteRange(lo, hi uint64) error {
-	defer g.enter("DeleteRange", nil)()
+	defer g.enter()()
 	return g.inner.DeleteRange(lo, hi)
 }
 
 // Set implements raft.StableStore.
 func (g *gatedStore) Set(key, val []byte) error {
-	defer g.enter("Set", key)()
+	defer g.enter()()
 	return g.inner.Set(key, val)
 }
 
 // Get implements raft.StableStore.
 func (g *gatedStore) Get(key []byte) ([]byte, error) {
-	defer g.enter("Get", key)()
+	defer g.enter()()
 	return g.inner.Get(key)
 }
 
 // SetUint64 implements raft.StableStore.
 func (g *gatedStore) SetUint64(key []byte, val uint64) error {
-	defer g.enter("SetUint64", key)()
+	defer g.enter()()
 	return g.inner.SetUint64(key, val)
 }
 
 // GetUint64 implements raft.StableStore.
 func (g *gatedStore) GetUint64(key []byte) (uint64, error) {
-	defer g.enter("GetUint64", key)()
+	defer g.enter()()
 	return g.inner.GetUint64(key)
 }

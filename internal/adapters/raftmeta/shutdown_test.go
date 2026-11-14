@@ -38,6 +38,13 @@ func TestAHeartbeatThatOutlivesRaftCannotReachTheClosedLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Once the store is open, the first write of the term is the
+	// heartbeat's: a node that is in no group yet starts no election (Raft
+	// writes the term once while it starts). It is held where the heartbeat
+	// is past Raft's check for shutdown and has not yet entered the gate.
+	reached, release := make(chan struct{}), make(chan struct{})
+	var armed, held atomic.Bool
+	var late atomic.Int64
 	store, err := Open(t.Context(), Config{
 		Dir: dir, Logger: slog.New(slog.DiscardHandler), Entropy: rand.Reader, Timing: clusterTiming(), NodeID: "m1",
 		Cluster: &Cluster{
@@ -46,24 +53,28 @@ func TestAHeartbeatThatOutlivesRaftCannotReachTheClosedLog(t *testing.T) {
 				return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 			},
 		},
+		seam: storeSeam{
+			wrap: func(gate raftStore) raftStore {
+				return &pausingStore{raftStore: gate, pause: func(op string, key []byte) {
+					if armed.Load() && op == "SetUint64" && string(key) == "CurrentTerm" && held.CompareAndSwap(false, true) {
+						close(reached)
+						<-release
+					}
+				}}
+			},
+			park: countAndPark(&late),
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-
-	// The first write of the term is the heartbeat's: a node that is in no
-	// group yet starts no election. It is held where the heartbeat is past
-	// Raft's check for shutdown and has not yet written.
-	reached, release := make(chan struct{}), make(chan struct{})
-	var held atomic.Bool
-	pause := func(op string, key []byte) {
-		if op == "SetUint64" && string(key) == "CurrentTerm" && held.CompareAndSwap(false, true) {
-			close(reached)
-			<-release
-		}
-	}
-	store.logs.pause.Store(&pause)
+	// A test that fails while the heartbeat is held lets it go before the
+	// store is closed (cleanups run last first), or it would wait for ever.
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	armed.Store(true)
 
 	const term = 5
 	leader, err := raft.NewTCPTransportWithLogger("127.0.0.1:0", nil, 1, time.Hour, hclog.NewNullLogger())
@@ -108,9 +119,9 @@ func TestAHeartbeatThatOutlivesRaftCannotReachTheClosedLog(t *testing.T) {
 	}
 
 	// Without the gate the write meets the closed database and Raft panics.
-	close(release)
+	letGo()
 	deadline := time.Now().Add(shutdownWait)
-	for store.logs.late.Load() == 0 {
+	for late.Load() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the late write of the term was not parked")
 		}
@@ -163,6 +174,73 @@ func (f *fakeRaftStore) SetUint64([]byte, uint64) error   { f.call(); return nil
 func (f *fakeRaftStore) GetUint64([]byte) (uint64, error) { f.call(); return 0, nil }
 func (f *fakeRaftStore) Close() error                     { f.closed.Store(true); return nil }
 
+// countAndPark parks a late call for good, as the gate does, once it has
+// counted it in late.
+func countAndPark(late *atomic.Int64) func() {
+	return func() {
+		late.Add(1)
+		parkForGood()
+	}
+}
+
+// pausingStore is what Raft is given in place of the gate in a test: it
+// calls pause at the start of every call, before the call enters the gate,
+// to hold a caller where a stray heartbeat may be when the store closes.
+type pausingStore struct {
+	raftStore
+	pause func(op string, key []byte)
+}
+
+func (p *pausingStore) FirstIndex() (uint64, error) {
+	p.pause("FirstIndex", nil)
+	return p.raftStore.FirstIndex()
+}
+
+func (p *pausingStore) LastIndex() (uint64, error) {
+	p.pause("LastIndex", nil)
+	return p.raftStore.LastIndex()
+}
+
+func (p *pausingStore) GetLog(index uint64, log *raft.Log) error {
+	p.pause("GetLog", nil)
+	return p.raftStore.GetLog(index, log)
+}
+
+func (p *pausingStore) StoreLog(log *raft.Log) error {
+	p.pause("StoreLog", nil)
+	return p.raftStore.StoreLog(log)
+}
+
+func (p *pausingStore) StoreLogs(logs []*raft.Log) error {
+	p.pause("StoreLogs", nil)
+	return p.raftStore.StoreLogs(logs)
+}
+
+func (p *pausingStore) DeleteRange(lo, hi uint64) error {
+	p.pause("DeleteRange", nil)
+	return p.raftStore.DeleteRange(lo, hi)
+}
+
+func (p *pausingStore) Set(key, val []byte) error {
+	p.pause("Set", key)
+	return p.raftStore.Set(key, val)
+}
+
+func (p *pausingStore) Get(key []byte) ([]byte, error) {
+	p.pause("Get", key)
+	return p.raftStore.Get(key)
+}
+
+func (p *pausingStore) SetUint64(key []byte, val uint64) error {
+	p.pause("SetUint64", key)
+	return p.raftStore.SetUint64(key, val)
+}
+
+func (p *pausingStore) GetUint64(key []byte) (uint64, error) {
+	p.pause("GetUint64", key)
+	return p.raftStore.GetUint64(key)
+}
+
 // gatedCalls is one call of each method of the gated store.
 func gatedCalls() []struct {
 	name string
@@ -194,7 +272,8 @@ func TestTheGateParksCallsAfterClose(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inner := &fakeRaftStore{}
-			gate := newGatedStore(inner)
+			var late atomic.Int64
+			gate := newGatedStore(inner, countAndPark(&late))
 			if err := tc.call(gate); err != nil || inner.calls.Load() != 1 {
 				t.Fatalf("open: err %v, %d calls; want the call made", err, inner.calls.Load())
 			}
@@ -204,7 +283,7 @@ func TestTheGateParksCallsAfterClose(t *testing.T) {
 			returned := make(chan error, 1)
 			go func() { returned <- tc.call(gate) }()
 			deadline := time.Now().Add(shutdownWait)
-			for gate.late.Load() == 0 {
+			for late.Load() == 0 {
 				if time.Now().After(deadline) {
 					t.Fatal("the call after Close was not parked")
 				}
@@ -234,7 +313,7 @@ func TestTheGateClosesAfterTheCallsUnderWay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inner := &fakeRaftStore{hold: make(chan struct{}), entered: make(chan struct{})}
-			gate := newGatedStore(inner)
+			gate := newGatedStore(inner, nil)
 			returned := make(chan error, 1)
 			go func() { returned <- tc.call(gate) }()
 			<-inner.entered
