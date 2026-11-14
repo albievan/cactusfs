@@ -56,7 +56,7 @@ func (s *Store) Observe() (Observation, bool) {
 	}
 	o := Observation{
 		Leader: s.raft.State() == raft.Leader, Term: s.raft.CurrentTerm(),
-		AppliedIndex: s.raft.AppliedIndex(), CommitIndex: s.raft.CommitIndex(),
+		CommitIndex:  s.raft.CommitIndex(),
 		Supported:    int(s.supported),
 		UsageClamped: s.fsm.usageClamped.Load(), UsageDrift: s.fsm.usageDrift.Load(),
 	}
@@ -70,8 +70,12 @@ func (s *Store) Observe() (Observation, bool) {
 	if level, err := s.entryVersion(); err == nil {
 		o.Level = int(level)
 	}
+	// The applied index is the state's own, read with its schema: Raft's
+	// counter of what it handed the state machine moves a moment after the
+	// state does, and an observation must not be behind what a read sees.
 	_ = s.fsm.view(func(tx *bbolt.Tx) error {
 		o.StateSchema = readStateSchema(tx)
+		o.AppliedIndex = readApplied(tx)
 		return nil
 	})
 	return o, true
