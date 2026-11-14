@@ -11,8 +11,8 @@ said where it belongs, with the milestone or goal of `PLAN.md` that holds it: de
 events to NATS and webhooks, replication between sites and quotas (milestone 8, of
 which entry schema 5, the domain, the ports, the replicated store and the contracts
 exist, and no use case, worker or adapter); sub-buckets (ADR-0017), of which the domain
-rules, the store, the contract, the authorizer's side, the use cases and the
-management API's handlers exist and the console does not; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
+rules, the store, the contract, the authorizer's side, the use cases, the
+management API's handlers and the console's sections exist; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
 the ports and the replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
 and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
 
@@ -915,7 +915,8 @@ four at a time.
   generated from the contract. Uploads belong to the console, not to a screen: they go
   on while any screen is shown, and a bar at the top of every screen shows them and the
   notices of what the console did (kept for the visit, not stored). An object's details
-  open in its own row of the object browser.
+  open in its own row of the object browser. A bucket's details hold its policy and its
+  sub-buckets, each folded and asked for only once opened.
 - **Console sessions (implemented, ADR-0006, 0007, 0027).** A session is a record in
   the replicated `sessions` store under the SHA-256 of its token, with its user, the
   hash of its CSRF token, `created_at` and `expires_at`; the cookie is
@@ -974,7 +975,7 @@ four at a time.
   that leaves (`Leave`) is revoked through Raft (entry schema 6, ADR-0030): no member
   serves it, lets it join again or keeps its Raft connections afterwards. Only the node
   itself can ask to leave; an operator's command to remove another node is not built.
-- **Sub-buckets (partly implemented) and tag rules (not implemented).** ADR-0017 and
+- **Sub-buckets (implemented) and tag rules (not implemented).** ADR-0017 and
   ADR-0018 are accepted, and entry schema 3 carries their commands: the domain rules
   (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,
   `TagDefinitionStore`) and the metadata store's side of them exist and are tested.
@@ -988,8 +989,20 @@ four at a time.
   any allows, within an API key's bound. One that does not parse refuses requests in
   that sub-bucket (`ErrIntegrity`, its text never logged). `app.SubBucketService` lists
   (names and ages, never a policy; filtered to what the caller may list), gets, puts and
-  deletes them, audited; the management API serves it (PLAN C.6), no screen of the
-  console calls it yet, and tag rules are used by nothing
+  deletes them, audited; the management API serves it (PLAN C.6), and the console
+  shows a bucket's policy and its sub-buckets in the bucket's details, folded until
+  opened (`web/src/screens/SubBuckets.tsx`, PLAN C.8, C.8b): a policy is edited as
+  JSON text and sent as typed (as on the Policies screen and in the API-key form), a
+  stored one shown compact when indented it would pass the 20 KiB the API measures as
+  sent, the server's problem shown next to the editor, a 403 on the list said as "you
+  may not see", and a 404 `NotFound` worded as a node of an older release. A Save or a
+  Remove in an open sub-bucket re-creates one deleted meanwhile (a PUT creates what is
+  missing; the contract has no precondition yet): the console sees a time of creation
+  in the answer other than the one it showed and says that the sub-bucket was created
+  again since - as seen, not as caused by the change, since another admin or a failed
+  read-back gives the same sign - but cannot prevent it. A caller refused the read (403)
+  is shown no time, so a re-creation is not reported to them.
+  Tag rules are used by nothing
   (`PLAN.md`, Goals C and D).
 
 ## 7. Security **(see the threat model for what is implemented)**

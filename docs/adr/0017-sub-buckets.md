@@ -1,12 +1,14 @@
 # ADR-0017: Sub-buckets
 
-- **Status:** accepted; partly implemented. The domain rules, the confined policy and
+- **Status:** accepted; implemented. The domain rules, the confined policy and
   the decision from three sources (PLAN C.1, C.1b), the port and the replicated store
   (C.2, S.3), the contract (C.0) and the authorizer, which reads a sub-bucket's policy
   with the bucket's in one consistent read, and search narrowed to sub-buckets (C.3,
   C.3b) exist. The use cases exist and are wired (C.4), and the management API serves
-  them (C.6); four nodes are tested, across a change of leader (C.7); the console is
-  to come (C.8)
+  them (C.6); four nodes are tested, across a change of leader (C.7); the console
+  shows, creates, edits and deletes them, and edits a bucket's policy, in the bucket's
+  details (C.8, C.8b). Open for Albie: a precondition on `putSubBucket` (`If-None-Match`,
+  `If-Match`), so that a change cannot re-create a sub-bucket deleted meanwhile
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)

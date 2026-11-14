@@ -76,6 +76,11 @@ control and a hash-chained audit trail.
 - **Identities.** Users, groups, roles and IAM-style policies; API keys that expire, can
   be narrowed and are revoked at once; five built-in roles; a single authorizer with
   default deny; a hash-chained audit trail.
+- **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)): up to 10 named first-level
+  prefixes of a bucket, each with a policy of its own that the single authorizer weighs
+  with the bucket's and the caller's; S3 clients address their objects as keys of the
+  bucket. Listed, created, given a policy and deleted (when empty) through the management
+  API (`/api/v1/buckets/{bucket}/subbuckets`) and in the console, in a bucket's details.
 - **Management API** (REST/JSON, designed first in OpenAPI) with Swagger UI, and a **web
   console** embedded in the binary: buckets as a grid with their creator, policy and
   latest use; an object browser with upload, download, an object's details opened in
@@ -83,7 +88,11 @@ control and a hash-chained audit trail.
   on while you use other screens, with a bar at the top of every screen that shows them
   and what the console did; search; users, groups, roles, policies and API keys; the
   cluster; the settings of every node; the audit log. A bucket's page shows its details
-  and can delete every object, after asking for your password. An object you may read and either uploaded
+  and can delete every object, after asking for your password. Its details hold, folded
+  until you open them, the bucket's policy - shown as JSON, edited, saved and removed - and
+  its sub-buckets: listed, created with or without a policy, each one's policy edited or
+  removed, and an empty one deleted (ADR-0017). A policy is sent as you typed it, and a
+  refused one shows the server's reason next to the editor. An object you may read and either uploaded
   or may preview opens in a preview - images, text, CSV, JSON, PDF, DOCX and XLSX - drawn
   by the console itself, never served inline (ADR-0028). A session that times out
   while it uploads is locked, not ended, until your password unlocks it.
@@ -119,15 +128,9 @@ Said plainly, so that nobody finds out by trying:
   `501 Not Implemented`. Events are published inside the process only;
   there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
   stores.
-- **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON; a
-  bucket's policy is set through the S3 API or the management API
-  (`/api/v1/buckets/{bucket}/policy`), not yet in the console.
-- **Sub-buckets** ([ADR-0017](docs/adr/0017-sub-buckets.md)). The rules of the domain,
-  the replicated store, the authorizer's reading of a sub-bucket's policy and search
-  narrowed to sub-buckets exist, and sub-buckets are listed, read, created (with their
-  policy) and deleted through the management API (`/api/v1/buckets/{bucket}/subbuckets`).
-  The console has no screen for them yet (PLAN C.8), and the four-node test is to come
-  (PLAN C.7).
+- **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON
+  text - an identity policy under Policies, a bucket's and a sub-bucket's in the bucket's
+  details - and the server alone judges it.
 - **Tag rules, lower-cased tags and a catalogue of tags**
   ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The same: domain and store
   only. Tags of buckets and objects as S3 has them do work; tags given with a multipart
@@ -824,7 +827,7 @@ What the API has, under `/api/v1` (the contract is
 | `/buckets/{bucket}/objects`, `/buckets/{bucket}/object`, `/object/metadata`, `/object/access` | list objects; upload, download and delete one; its metadata; who uploaded it and how often it was downloaded |
 | `/buckets/{bucket}/object/preview` | an object's bytes for the console to show it (ADR-0028): PNG, JPEG, GIF, WebP, PDF, DOCX, XLSX, text, CSV and JSON, decided by the stored type and the bytes together; for whoever may read the object and either uploaded the version shown or is allowed `admin:PreviewObject`; always an attachment, never served inline; up to `--preview-max-size`, text to its first MiB; counted as a download |
 | `/buckets/{bucket}/policy` | a bucket's policy: the document S3's `GetBucketPolicy` and `PutBucketPolicy` read and write; one that cannot be kept answers `400 InvalidPolicy` |
-| `/buckets/{bucket}/subbuckets`, `/buckets/{bucket}/subbuckets/{name}` | sub-buckets (ADR-0017): list (names and ages, never a policy), read with the policy, create or set the policy, delete an empty one; at most 10 a bucket. No console screen yet |
+| `/buckets/{bucket}/subbuckets`, `/buckets/{bucket}/subbuckets/{name}` | sub-buckets (ADR-0017): list (names and ages, never a policy), read with the policy, create or set the policy, delete an empty one; at most 10 a bucket. In the console: a bucket's details |
 | `/search` | buckets by name and objects by key |
 | `/users`, `/users/{name}`, `/users/{name}/keys`, `/keys/{access_key_id}` | users and their API keys |
 | `/groups`, `/roles`, `/policies` (and `/{name}` of each) | groups, roles, policies |
