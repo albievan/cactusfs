@@ -152,12 +152,44 @@ func ParseTagRules(document []byte) (TagRules, error) {
 // values it allows; no values means any value.
 type Defined func(key string) (values []string, ok bool)
 
-// Check reports whether an object with this key may carry these tags. The
-// tags are as they will be stored: already in lower case where the rules
-// say so. defined is asked only when the rules hold tags to the catalogue,
-// and may be nil otherwise. The error wraps domain.ErrTagRule and names the
-// rule that was broken, never a tag's value.
+// Keep returns tags as they are kept under these rules: in lower case where
+// the rules say so (object.NormalizeTags, which refuses two keys that become
+// one), and then held to what tags may be, at most limit of them
+// (object.ValidateTags) - lower-casing can lengthen a string. The error
+// wraps domain.ErrInvalidTag. It does not check what the rules ask of an
+// object's tags (Check): a bucket's own tags are kept by it too.
+func (r TagRules) Keep(tags map[string]string, limit int) (map[string]string, error) {
+	if r.Lowercase {
+		var err error
+		if tags, err = object.NormalizeTags(tags); err != nil {
+			return nil, err
+		}
+	}
+	if err := object.ValidateTags(tags, limit); err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 {
+		return nil, nil
+	}
+	return tags, nil
+}
+
+// Check reports whether an object with this key may carry these tags, as
+// they will be stored: where the rules lower-case tags, tags that are not
+// in lower case break them (Keep makes them so; tags kept before the rules
+// were set are not). defined is asked only when the rules hold tags to the
+// catalogue and there is a tag to look up, and may be nil otherwise; a nil
+// one when it would be asked refuses the tags, so a caller that cannot read
+// the catalogue must say so itself rather than pass nil. The error wraps
+// domain.ErrTagRule and names the rule that was broken, never a tag's value.
 func (r TagRules) Check(key string, tags map[string]string, defined Defined) error {
+	if r.Lowercase {
+		for tagKey, value := range tags {
+			if tagKey != strings.ToLower(tagKey) || value != strings.ToLower(value) {
+				return fmt.Errorf("%w: the bucket keeps its tags in lower case", domain.ErrTagRule)
+			}
+		}
+	}
 	for _, rule := range r.Required {
 		if rule.SubBucket != "" && !strings.HasPrefix(key, rule.SubBucket+"/") {
 			continue
@@ -170,7 +202,7 @@ func (r TagRules) Check(key string, tags map[string]string, defined Defined) err
 			return fmt.Errorf("%w: the tag %q has a value that is not one of those allowed", domain.ErrTagRule, rule.Key)
 		}
 	}
-	if r.CatalogueOnly {
+	if r.CatalogueOnly && len(tags) > 0 {
 		if defined == nil {
 			return fmt.Errorf("%w: the bucket takes only tags of the catalogue, which could not be read", domain.ErrTagRule)
 		}

@@ -70,3 +70,30 @@ func TestNormalizeTags(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestTagMap: a list is a map but for a key given twice, which is refused
+// and named; TagList is the way back, in key order.
+func TestTagMap(t *testing.T) {
+	t.Parallel()
+	got, err := object.TagMap([]object.Tag{{Key: "stage", Value: "draft"}, {Key: "Stage", Value: "Draft"}, {Key: "empty"}})
+	if want := map[string]string{"stage": "draft", "Stage": "Draft", "empty": ""}; err != nil || !maps.Equal(got, want) {
+		t.Errorf("TagMap = %v, %v; want %v", got, err, want)
+	}
+	if got, err := object.TagMap(nil); err != nil || got != nil {
+		t.Errorf("TagMap(nil) = %v, %v", got, err)
+	}
+	_, err = object.TagMap([]object.Tag{{Key: "a", Value: "secret"}, {Key: "a", Value: "secret"}})
+	if !errors.Is(err, domain.ErrInvalidTag) || strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), `"a"`) {
+		t.Errorf("a key given twice, even with one value: %v", err)
+	}
+	if got := object.TagList(map[string]string{"b": "2", "a": "1"}); len(got) != 2 || got[0] != (object.Tag{Key: "a", Value: "1"}) || got[1].Key != "b" {
+		t.Errorf("TagList = %v", got)
+	}
+	roundTrip := func(tags map[string]string) bool {
+		back, err := object.TagMap(object.TagList(tags))
+		return err == nil && maps.Equal(back, tags) && (len(tags) > 0 || back == nil)
+	}
+	if err := quick.Check(roundTrip, nil); err != nil {
+		t.Error(err)
+	}
+}

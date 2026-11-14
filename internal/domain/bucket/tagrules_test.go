@@ -2,12 +2,14 @@ package bucket_test
 
 import (
 	"errors"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 func TestTagRulesDocument(t *testing.T) {
@@ -139,6 +141,10 @@ func TestTagRulesCheck(t *testing.T) {
 		"catalogue only, no catalogue to ask":      {bucket.TagRules{CatalogueOnly: true}, "a", map[string]string{"project": "x"}, nil, true},
 		"catalogue only, no tags":                  {bucket.TagRules{CatalogueOnly: true}, "a", nil, catalogue, false},
 		"no rules":                                 {bucket.TagRules{}, "a", map[string]string{"Any": "Thing"}, nil, false},
+		"catalogue only, no tags, no catalogue":    {bucket.TagRules{CatalogueOnly: true}, "a", nil, nil, false},
+		"lower case, as kept":                      {bucket.TagRules{Lowercase: true}, "a", map[string]string{"stage": "draft"}, nil, false},
+		"lower case, a key that is not":            {bucket.TagRules{Lowercase: true}, "a", map[string]string{"Stage": "draft"}, nil, true},
+		"lower case, a value that is not":          {bucket.TagRules{Lowercase: true}, "a", map[string]string{"stage": "Secret"}, nil, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -152,6 +158,42 @@ func TestTagRulesCheck(t *testing.T) {
 				t.Errorf("the refusal: %v", err)
 			}
 		})
+	}
+}
+
+// TestTagRulesKeep: tags are kept in lower case where the rules say so, two
+// keys that become one are refused, and what is kept can be a tag at all.
+func TestTagRulesKeep(t *testing.T) {
+	t.Parallel()
+	lower := bucket.TagRules{Lowercase: true}
+	eleven := map[string]string{}
+	for _, k := range strings.Split("a b c d e f g h i j k", " ") {
+		eleven[k] = "v"
+	}
+	for name, tt := range map[string]struct {
+		rules bucket.TagRules
+		tags  map[string]string
+		want  map[string]string
+		err   error
+	}{
+		"as sent, without the rule":     {bucket.TagRules{}, map[string]string{"Stage": "Draft"}, map[string]string{"Stage": "Draft"}, nil},
+		"in lower case, with it":        {lower, map[string]string{"Stage": "Draft"}, map[string]string{"stage": "draft"}, nil},
+		"none is nil":                   {lower, map[string]string{}, nil, nil},
+		"two keys that become one":      {lower, map[string]string{"Stage": "a", "stage": "b"}, nil, domain.ErrInvalidTag},
+		"more than the limit":           {bucket.TagRules{}, eleven, nil, domain.ErrInvalidTag},
+		"a key no tag can have":         {bucket.TagRules{}, map[string]string{"a&b": "v"}, nil, domain.ErrInvalidTag},
+		"longer in bytes in lower case": {lower, map[string]string{"k": strings.Repeat("\u023a", 256)}, map[string]string{"k": strings.Repeat("\u2c65", 256)}, nil},
+	} {
+		got, err := tt.rules.Keep(tt.tags, object.MaxObjectTags)
+		if !errors.Is(err, tt.err) || (tt.err == nil && err != nil) || !maps.Equal(got, tt.want) || (tt.want == nil && got != nil) {
+			t.Errorf("%s: Keep = %v, %v; want %v, %v", name, got, err, tt.want, tt.err)
+		}
+		if err == nil {
+			// What is kept keeps the rule of the case.
+			if err := tt.rules.Check("k", got, nil); err != nil {
+				t.Errorf("%s: what Keep kept breaks the rules: %v", name, err)
+			}
+		}
 	}
 }
 

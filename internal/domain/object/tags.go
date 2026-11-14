@@ -2,6 +2,7 @@ package object
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -95,4 +96,45 @@ func NormalizeTags(tags map[string]string) (map[string]string, error) {
 		out[lower] = strings.ToLower(value)
 	}
 	return out, nil
+}
+
+// Tag is one tag as a caller gives it: a key and its value. The use cases
+// take tags as a list of them, never as a map, so that a key given twice
+// reaches the domain and is refused here (TagMap) rather than one of its
+// values chosen on the way in.
+type Tag struct {
+	Key   string
+	Value string
+}
+
+// TagMap returns a list of tags as a map from key to value; an empty list is
+// nil. A key given twice is refused, whatever its values: which one it has
+// must not be ours to choose. The error wraps domain.ErrInvalidTag and names
+// the key, never a value. Whether the tags can be kept is for ValidateTags.
+func TagMap(list []Tag) (map[string]string, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(list))
+	for _, tag := range list {
+		if _, twice := out[tag.Key]; twice {
+			return nil, fmt.Errorf("%w: the tag %q is given twice", domain.ErrInvalidTag, tag.Key)
+		}
+		out[tag.Key] = tag.Value
+	}
+	return out, nil
+}
+
+// TagList returns tags as a list in the order of their keys: what TagMap
+// takes back to the same map.
+func TagList(tags map[string]string) []Tag {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]Tag, 0, len(tags))
+	for key, value := range tags {
+		out = append(out, Tag{Key: key, Value: value})
+	}
+	slices.SortFunc(out, func(a, b Tag) int { return strings.Compare(a.Key, b.Key) })
+	return out
 }
