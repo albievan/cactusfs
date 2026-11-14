@@ -2,6 +2,7 @@ package object
 
 import (
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"unicode"
@@ -137,4 +138,39 @@ func TagList(tags map[string]string) []Tag {
 	}
 	slices.SortFunc(out, func(a, b Tag) int { return strings.Compare(a.Key, b.Key) })
 	return out
+}
+
+// ParseTagging reads the tags of an object version given as a URL query
+// string - "stage=draft&team=finance", each key and value URL-encoded - as
+// S3's x-amz-tagging and the admin API's X-CactusFS-Tagging give them. It
+// returns every pair in the order given, a key given twice included: that
+// one is TagMap's to refuse, as for tags given any other way; and how many
+// there may be is ValidateTags', after the caller is authorized. An empty
+// string is no tags (an empty list, not nil). It reads exactly what
+// url.ParseQuery reads, and refuses what it refuses - a semicolon, an
+// escape that is none, more pairs than it takes - with an error that wraps
+// domain.ErrInvalidArgument and holds nothing of the string.
+func ParseTagging(query string) ([]Tag, error) {
+	if _, err := url.ParseQuery(query); err != nil {
+		return nil, fmt.Errorf("%w: tags are not a query string", domain.ErrInvalidArgument)
+	}
+	// What url.ParseQuery takes, in the order given: each part between
+	// ampersands that is not empty, split at its first equals sign.
+	tags := []Tag{}
+	for pair := range strings.SplitSeq(query, "&") {
+		if pair == "" {
+			continue
+		}
+		rawKey, rawValue, _ := strings.Cut(pair, "=")
+		key, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: tags are not a query string", domain.ErrInvalidArgument)
+		}
+		value, err := url.QueryUnescape(rawValue)
+		if err != nil {
+			return nil, fmt.Errorf("%w: tags are not a query string", domain.ErrInvalidArgument)
+		}
+		tags = append(tags, Tag{Key: key, Value: value})
+	}
+	return tags, nil
 }

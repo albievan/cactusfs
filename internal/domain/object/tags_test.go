@@ -3,6 +3,8 @@ package object_test
 import (
 	"errors"
 	"maps"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,4 +98,93 @@ func TestTagMap(t *testing.T) {
 	if err := quick.Check(roundTrip, nil); err != nil {
 		t.Error(err)
 	}
+}
+
+func TestParseTagging(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		query string
+		want  []object.Tag
+		err   error
+	}{
+		{name: "pairs in the order given", query: "team=finance&stage=draft", want: []object.Tag{{Key: "team", Value: "finance"}, {Key: "stage", Value: "draft"}}},
+		{name: "escaped", query: "a%20b=c+d&%40x=%2F", want: []object.Tag{{Key: "a b", Value: "c d"}, {Key: "@x", Value: "/"}}},
+		{name: "a key given twice is kept twice", query: "a=1&a=2", want: []object.Tag{{Key: "a", Value: "1"}, {Key: "a", Value: "2"}}},
+		{name: "no value", query: "a&b=", want: []object.Tag{{Key: "a"}, {Key: "b"}}},
+		{name: "empty", query: "", want: []object.Tag{}},
+		{name: "empty parts", query: "&a=1&&", want: []object.Tag{{Key: "a", Value: "1"}}},
+		{name: "a semicolon", query: "a=1;b=2", err: domain.ErrInvalidArgument},
+		{name: "an escape that is none", query: "a=%zz", err: domain.ErrInvalidArgument},
+		{name: "a key that is no escape", query: "%=1", err: domain.ErrInvalidArgument},
+		// How many a version may have is ValidateTags', after the caller
+		// is authorized: all are read.
+		{name: "more pairs than a version can have", query: strings.Repeat("k=v&", object.MaxObjectTags) + "k=v", want: slices.Repeat([]object.Tag{{Key: "k", Value: "v"}}, object.MaxObjectTags+1)},
+		{name: "more pairs than a query string takes", query: strings.Repeat("k=v&", 10000) + "k=v", err: domain.ErrInvalidArgument},
+		{name: "more pairs, and a bad escape", query: strings.Repeat("k=v&", object.MaxObjectTags) + "k=%zz", err: domain.ErrInvalidArgument},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := object.ParseTagging(tt.query)
+			if !errors.Is(err, tt.err) || (tt.err == nil && err != nil) {
+				t.Fatalf("ParseTagging(%q) = %v, want %v", tt.query, err, tt.err)
+			}
+			if err != nil && len(tt.query) > 0 && strings.Contains(err.Error(), tt.query) {
+				t.Errorf("the error holds what was given: %v", err)
+			}
+			if tt.err == nil && (got == nil || !slices.Equal(got, tt.want)) {
+				t.Errorf("ParseTagging(%q) = %#v, want %#v", tt.query, got, tt.want)
+			}
+		})
+	}
+	// Tags written as a query string are read back as they were, in order.
+	roundTrip := func(keys, values []string) bool {
+		var parts []string
+		var want []object.Tag
+		for i, key := range keys[:min(len(keys), object.MaxObjectTags)] {
+			value := ""
+			if i < len(values) {
+				value = values[i]
+			}
+			parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+			want = append(want, object.Tag{Key: key, Value: value})
+		}
+		got, err := object.ParseTagging(strings.Join(parts, "&"))
+		if err != nil {
+			return false
+		}
+		return slices.Equal(got, want)
+	}
+	if err := quick.Check(roundTrip, nil); err != nil {
+		t.Error(err)
+	}
+}
+
+// FuzzParseTagging: ParseTagging reads what url.ParseQuery reads, as the
+// same pairs, and refuses what it refuses - as an argument error.
+func FuzzParseTagging(f *testing.F) {
+	for _, seed := range []string{"a=1&b=2", "a=1&a=2", "", "&&", "a;b", "%zz=1", "k=v&k=v&k=v&k=v&k=v&k=v&k=v&k=v&k=v&k=v&k=v", "=&=x&y"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, query string) {
+		tags, err := object.ParseTagging(query)
+		parsed, parseErr := url.ParseQuery(query)
+		if (err == nil) != (parseErr == nil) {
+			t.Fatalf("ParseTagging(%q) = %v, url.ParseQuery = %v", query, err, parseErr)
+		}
+		if err != nil {
+			if !errors.Is(err, domain.ErrInvalidArgument) {
+				t.Fatalf("ParseTagging(%q): %v is no argument error", query, err)
+			}
+			return
+		}
+		got := map[string][]string{}
+		for _, tag := range tags {
+			got[tag.Key] = append(got[tag.Key], tag.Value)
+		}
+		if !maps.EqualFunc(got, map[string][]string(parsed), slices.Equal) {
+			t.Fatalf("ParseTagging(%q) = %v, url.ParseQuery = %v", query, got, parsed)
+		}
+	})
 }
