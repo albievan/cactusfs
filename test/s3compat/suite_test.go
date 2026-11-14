@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -1493,6 +1494,37 @@ func TestTagging(t *testing.T) {
 	}
 	if got, _ := get(t, name, "report"); string(got) != "q3" {
 		t.Errorf("the object after its tags were deleted: %q", got)
+	}
+}
+
+// TestMultipartUploadWithTags: tags given when a multipart upload is created
+// are the tags of the object it completes, as they were sent - a bucket made
+// with CreateBucket keeps the case of its tags (ADR-0018).
+func TestMultipartUploadWithTags(t *testing.T) {
+	name := newBucket(t)
+	c := client()
+	first, second := randomBytes(t, minPart), randomBytes(t, 1000)
+	id, parts := sendParts(t, name, "tagged", &s3.CreateMultipartUploadInput{Tagging: aws.String("Project=Apollo&stage=draft+one")}, first, second)
+	if _, err := c.CompleteMultipartUpload(t.Context(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(name), Key: aws.String("tagged"), UploadId: aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	}); err != nil {
+		t.Fatalf("CompleteMultipartUpload: %v", err)
+	}
+	tags, err := c.GetObjectTagging(t.Context(), &s3.GetObjectTaggingInput{Bucket: aws.String(name), Key: aws.String("tagged")})
+	if err != nil {
+		t.Fatalf("GetObjectTagging: %v", err)
+	}
+	got := map[string]string{}
+	for _, tag := range tags.TagSet {
+		got[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	if want := map[string]string{"Project": "Apollo", "stage": "draft one"}; len(tags.TagSet) != len(want) || !maps.Equal(got, want) {
+		t.Errorf("GetObjectTagging = %v, want %v", got, want)
+	}
+	data, out := get(t, name, "tagged")
+	if !bytes.Equal(data, slices.Concat(first, second)) || aws.ToInt32(out.TagCount) != 2 {
+		t.Errorf("GetObject: %d bytes, TagCount %d", len(data), aws.ToInt32(out.TagCount))
 	}
 }
 
