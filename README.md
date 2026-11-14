@@ -81,6 +81,18 @@ control and a hash-chained audit trail.
   with the bucket's and the caller's; S3 clients address their objects as keys of the
   bucket. Listed, created, given a policy and deleted (when empty) through the management
   API (`/api/v1/buckets/{bucket}/subbuckets`) and in the console, in a bucket's details.
+- **Tag rules and a catalogue of tags** ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)):
+  a bucket's rules keep its tags in lower case, take only tags of the deployment's
+  catalogue, or require up to 10 tags (with the values allowed, for the whole bucket or
+  one sub-bucket). They hold on every way an object comes to have tags - S3's
+  `PutObject`, `CopyObject`, `PutObjectTagging`, `DeleteObjectTagging`, multipart uploads
+  (tags on `CreateMultipartUpload`, checked again at completion) and the management API's
+  upload - and a broken rule is refused (S3 `400 InvalidTag`, the management API
+  `TagRuleViolated`), naming the rule, never a value. A bucket made through the
+  management API or the console lower-cases its tags from the start; one made with S3's
+  `CreateBucket` has no rules. Set through the management API and in the console;
+  administrators keep the catalogue on the **Tags** screen. See
+  [Tags and their rules](#tags-and-their-rules) for what a rule asks of uploaders.
 - **Management API** (REST/JSON, designed first in OpenAPI) with Swagger UI, and a **web
   console** embedded in the binary: buckets as a grid with their creator, policy and
   latest use; an object browser with upload, download, an object's details opened in
@@ -108,7 +120,7 @@ control and a hash-chained audit trail.
   dashboards in [`deploy/observability`](deploy/observability/README.md).
 - **Supply chain.** Base images pinned by digest, a licence allow-list, SPDX SBOMs, and
   images signed by digest - proved offline in the gate; a release workflow that signs
-  keyless, written and not yet run.
+  keyless, which signed the image and chart of `v0.7.0`.
 - **Updates from the console, off by default.** Told where releases are, a node checks
   for newer ones and the console shows them; told it may, it installs one - only a
   release the project's release workflow signed for that version, verified offline
@@ -120,10 +132,14 @@ control and a hash-chained audit trail.
 
 Said plainly, so that nobody finds out by trying:
 
-- **No release has been published.** There is no image at `ghcr.io/albievan/cactusfs`
-  and no chart at `oci://ghcr.io/albievan/charts` yet; the commands that name them apply
-  from the first release. Until then, build the image yourself - and a check for
-  releases finds none.
+- **The first release is incomplete.** `v0.7.0` (2026-11-13) published and signed its
+  image, `ghcr.io/albievan/cactusfs:0.7.0`, and its chart,
+  `oci://ghcr.io/albievan/charts/cactusfs` version `0.7.0`; the workflow then failed to
+  create the GitHub Release (a permission error on the Sigstore bundle, fixed in the
+  scripts since). So there is no GitHub Release: no published binaries, `SHA256SUMS` or
+  `digests.txt`, and a node's check for releases, which reads GitHub's releases, finds
+  none. The binaries ship with the next release. `v0.7.0` predates tag rules and their
+  catalogue: no published release enforces them yet.
 - **Milestone 8: replication between sites, bucket notifications, quotas.** None of the
   three works. Notification targets can be defined, read, listed and deleted
   (`/targets`, with their secrets sealed and never shown) - nothing sends to them yet,
@@ -135,14 +151,6 @@ Said plainly, so that nobody finds out by trying:
 - **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON
   text - an identity policy under Policies, a bucket's and a sub-bucket's in the bucket's
   details - and the server alone judges it.
-- **Tag rules, lower-cased tags and a catalogue of tags**
-  ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The use cases exist and a
-  bucket's rules are enforced on every way S3 gives an object tags - `PutObject`,
-  `CopyObject`, `PutObjectTagging`, `DeleteObjectTagging` and multipart uploads, whose
-  tags (`x-amz-tagging` on `CreateMultipartUpload`) are now taken - and the rules and
-  the catalogue are set through the management API (a bucket made there lower-cases its
-  tags from the start) and in the console (PLAN D.6, built; it counts once the gate on
-  the test host has passed its tests).
 - **Growing a cluster.** The voters and the storage of a cluster are fixed when it
   forms: storage nodes and drives cannot be added afterwards, and a node cannot be given
   a vote later. Gateways can join.
@@ -152,7 +160,8 @@ Said plainly, so that nobody finds out by trying:
   notifications, inventory, analytics, website hosting, storage classes with a parity of
   their own. What is not implemented answers `501 NotImplemented`.
 - **Metadata is not encrypted at rest.** Object data is; bucket names, object keys,
-  sizes and user metadata are in the metadata store in the clear
+  sizes, user metadata, the tags of buckets and objects, tag rules, the catalogue's
+  descriptions and sub-buckets' policies are in the metadata store in the clear
   ([threat model](docs/threat-model.md)).
 - **No rotation of the local KMS key**, and no revocation list for node certificates.
 - **A rolling upgrade is tested with the binaries themselves for two steps only**: from
@@ -686,8 +695,8 @@ The chart makes no Secret and renders nothing until you name the ones it needs:
 | `kms.vault.tokenSecret` | the Vault token, key `token`; with it `kms.vault.addr`, `kms.vault.key` and a `networkPolicy.egressTo` that says where Vault is. `kms.vault.caSecret` (key `ca.crt`) when Vault's CA is not a public one |
 | `kms.local.keyFileSecret`, `kms.local.passphraseSecret` | instead of Vault, for one node or for development: keys `kms.json` and `passphrase`; on more than one node only with `dev.localKMS=true` |
 
-**With an image you built.** No release is published yet, so this is the way that works
-today. Build the image (`make image`, or `docker build`), push it to a registry your
+**With an image you built.** This works for any build, and is the way to run anything
+newer than the last release. Build the image (`make image`, or `docker build`), push it to a registry your
 cluster can pull from - or load it into the cluster - and name it:
 
 ```sh
@@ -702,7 +711,7 @@ architecture, or as a manifest of both). Pods carry the tag in the label
 `app.kubernetes.io/version`. Nothing is pulled from `ghcr.io` when you name an image of
 your own.
 
-**With a published release** - from the first release on, see [Releases](#releases):
+**With a published release** - `0.7.0` is the only one (see [Releases](#releases)):
 without `image.repository` and `image.tag` the chart runs `ghcr.io/albievan/cactusfs` at
 the chart's `appVersion`, and the chart itself is at `oci://ghcr.io/albievan/charts/cactusfs`.
 
@@ -980,6 +989,44 @@ further with each request. Past about 10 000 buckets with policies of 16 KiB eac
 identity, who is bound by no bucket policy, then works only within a bucket you name
 (`bucket=`).
 
+### Tags and their rules
+
+A bucket's tag rules ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)) are set with
+`s3:PutBucketTagRules` - held by `cluster-admin` and `bucket-admin` (through `s3:*`), or
+granted by a policy - and every change of them is in the audit trail. What to know
+before you set them:
+
+- **A required tag shuts out whoever may store but not tag.** Tagging is a permission of
+  its own, as in S3: an upload that carries tags needs `s3:PutObjectTagging` as well as
+  `s3:PutObject`, and one that carries none breaks a rule that requires a tag. So once a
+  bucket requires any tag, the built-in role `read-write` - which may store objects and
+  not tag them - cannot upload to it at all, nor can anybody whose policies grant
+  `s3:PutObject` alone; copies and multipart uploads alike. Grant such users
+  `s3:PutObjectTagging` on the bucket (an identity policy, the bucket's policy or a
+  sub-bucket's) if they are to upload there. Whether `read-write` should hold it, or
+  required tags pass under `s3:PutObject` alone, is open (threat model, section 5).
+- **A rule can be set that nothing can satisfy.** Rules are not checked against the
+  catalogue: with "catalogue only", a required tag the catalogue does not define, or a
+  value it does not list, refuses every upload the rule covers; so does a required key
+  in capitals where the bucket does not lower-case (the catalogue is lower case), and a
+  definition changed afterwards to no longer list a value a rule requires. A definition
+  that a rule requires with exactly its key cannot be deleted (409 `EntityInUse`); no
+  other use of the catalogue is guarded.
+- **A rule for a sub-bucket is a rule for a prefix.** It applies to keys under
+  `<name>/` whether or not the sub-bucket exists; deleting the sub-bucket leaves the
+  rule, which applies again to one created later with that name.
+- **Tags travel in a header on an upload** (`X-CactusFS-Tagging` here, `x-amz-tagging`
+  in S3), and every listener holds a request's headers, all together, to 16 KiB - a
+  request over that is answered `431` in plain text. Tags may hold any letter of any
+  script; a non-ASCII letter is two to four bytes, and each byte three characters once
+  URL-encoded, so ten long tags in another script can pass the limit (ten of the longest
+  key and value in a three-byte script come to about 35 KB). Tags a rule
+  does not require can be set after the upload (`PUT .../object/tags`, or S3's
+  `PutObjectTagging`), which take them in the body.
+- Changes to an object's tags are not in the audit trail (changes to a bucket's tags,
+  its rules and the catalogue are). Tags, rules and the catalogue are stored unencrypted
+  in the metadata, like keys and user metadata, and are never logged.
+
 ## Users, keys and the audit trail
 
 Access is decided by IAM-style policies (Effect, Action, Resource, Condition; `s3:*` and
@@ -1080,7 +1127,7 @@ cactusfs 0.7.0 local build (commit 330028134523-dirty, go1.27.2 darwin/arm64)
 | the management API | `server {version, build, commit}` in the answers of `POST /session`, `GET /session` and `GET /cluster` - to a caller who has been authenticated, and to nobody else: no sign-in page, probe, refusal or response header names it. `GET /settings` names the build of every node |
 | the console | `v0.7.0 · build 412` under the logo of the navigation, the commit in its hint (`local build` for build `0`); beside the logo on a phone; not shown while the navigation is folded to icons |
 | an image of `make image` | tag `cactusfs:<version>-<build>-<arch>`; labels `org.opencontainers.image.version=<version>-<build>` and `org.opencontainers.image.revision=<commit>` |
-| a deployment with the chart | `image.tag=<version>-<build>` names the build to run, of `image.repository` (by default `ghcr.io/albievan/cactusfs`, where releases will be published); pods and the chart's other objects are labelled `app.kubernetes.io/version` with it. Without a tag the chart runs `appVersion`, the release |
+| a deployment with the chart | `image.tag=<version>-<build>` names the build to run, of `image.repository` (by default `ghcr.io/albievan/cactusfs`, where releases are published); pods and the chart's other objects are labelled `app.kubernetes.io/version` with it. Without a tag the chart runs `appVersion`, the release |
 
 `GET /cluster` says the build of the node that answered. During a rolling upgrade, ask
 each node, read the Settings screen, or read the label:
@@ -1261,9 +1308,10 @@ Notes:
 
 ## Verifying an image
 
-**No release has been published yet.** Everything below applies from the first one;
-until then the names and commands are what the release workflow will produce, and
-nothing is there to verify ([ADR-0021](docs/adr/0021-sbom-and-signatures.md)).
+**`v0.7.0` is the one release so far, and only its image and chart were published**
+([ADR-0021](docs/adr/0021-sbom-and-signatures.md)): they verify as below. Its GitHub
+Release was not created, so it has no binaries, `SHA256SUMS` or `digests.txt` to verify
+- read the digest from the registry, and trust cosign's verdict on it.
 
 A release is published to `ghcr.io/albievan/cactusfs` and signed **keyless** with
 [cosign](https://github.com/sigstore/cosign) (Sigstore): there is no release key to
@@ -1322,12 +1370,16 @@ change, without the network: against a throw-away registry and with a key made f
 run, including that an unsigned image, a moved tag, another key and a signature or SBOM
 copied from another image are refused. `scripts/release.sh --dry-run`, which that gate
 runs, rehearses a release with the same code that publishes one. The keyless path
-itself - the workflow's identity, the public log - has not run: it cannot before the
-first release.
+itself - the workflow's identity, the public log - runs only in a real release: it
+signed the image and chart of `v0.7.0`, and failed after that on a permission of the
+Sigstore bundle of `SHA256SUMS`, which the dry run could not catch (fixed since).
 
 ## Releases
 
-**No release has been made yet.** This is how one is made.
+`v0.7.0` (2026-11-13) is the one release so far; its image and chart are published, and
+its GitHub Release is not (see [What is not there yet](#what-is-not-there-yet)). A
+published tag is never moved: the binaries ship with the next release. This is how one
+is made.
 
 A release is made by the workflow [`release.yml`](.github/workflows/release.yml), by a
 pushed tag, and by nothing else: `scripts/release.sh --publish` refuses outside that

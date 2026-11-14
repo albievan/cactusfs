@@ -4073,6 +4073,15 @@ export interface operations {
                 /**
                  * @description The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value
                  *     URL-encoded. Given at most once.
+                 *
+                 *     The `maxLength` of this header is not what limits it: every listener holds the headers of a request,
+                 *     all of them together, to 16 KiB of bytes (with the small allowance of Go's HTTP server), and a
+                 *     request over that is answered `431 Request Header Fields Too Large` in plain text, not as a
+                 *     problem. A tag may hold any Unicode letter, and each byte of a non-ASCII letter is three
+                 *     characters once URL-encoded, so ten long tags in another script may not fit - ten tags of the
+                 *     longest key and value in a three-byte script come to about 35 KB. Tags the bucket's rules do not
+                 *     require can be set afterwards with `PUT /buckets/{bucket}/object/tags`, which takes them in the
+                 *     body; required tags must fit in this header.
                  */
                 "X-CactusFS-Tagging"?: string;
                 /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */

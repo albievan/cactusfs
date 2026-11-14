@@ -62,8 +62,11 @@ type subBucketRefCmd struct {
 // audited returns what turns the outcome of a change into the outcome of
 // the entry: when the change took effect and came with an audit record, the
 // record is appended in the same transaction, as applyIAM does it. A change
-// that was refused is not audited here: the refusal is the proposer's to
-// record.
+// the state machine refused is not audited, here or by the proposers that
+// use this today: SubBucketService and TagDefinitionService answer such a
+// refusal (a full or non-empty sub-bucket, a definition a rule needs, a
+// full catalogue) to their caller and record nothing. Only a refusal by the
+// authorizer, before anything is proposed, is in the audit trail.
 func audited(tx *bbolt.Tx, record *auditRecord) func(applyResult, error) (applyResult, error) {
 	return func(result applyResult, err error) (applyResult, error) {
 		if err != nil || result.err != nil || record == nil {

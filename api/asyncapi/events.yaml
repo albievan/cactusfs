@@ -366,7 +366,13 @@ components:
                 $ref: '#/components/schemas/Bucket'
     BucketConfigurationChanged:
       name: cactusfs.bucket.configuration-changed.v1
-      title: The policy, the CORS rules or the tags of a bucket were set, changed or removed
+      title: A configuration document of a bucket was set, changed or removed
+      description: >-
+        Emitted when any configuration document of a bucket is set, changed or removed - its policy, CORS
+        rules, tags, lifecycle rules, tag rules (ADR-0018), notification rules or replication configuration.
+        The payload names the bucket, not which document changed. Sub-buckets (ADR-0017) and the catalogue
+        of tags (ADR-0018) have no event of their own; their changes are recorded only in the audit trail
+        (`cactusfs.audit.recorded.v1`).
       payload:
         allOf:
           - $ref: '#/components/schemas/Envelope'

@@ -1605,7 +1605,7 @@
           {
             "name": "X-CactusFS-Tagging",
             "in": "header",
-            "description": "The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value\nURL-encoded. Given at most once.\n",
+            "description": "The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value\nURL-encoded. Given at most once.\n\nThe `maxLength` of this header is not what limits it: every listener holds the headers of a request,\nall of them together, to 16 KiB of bytes (with the small allowance of Go's HTTP server), and a\nrequest over that is answered `431 Request Header Fields Too Large` in plain text, not as a\nproblem. A tag may hold any Unicode letter, and each byte of a non-ASCII letter is three\ncharacters once URL-encoded, so ten long tags in another script may not fit - ten tags of the\nlongest key and value in a three-byte script come to about 35 KB. Tags the bucket's rules do not\nrequire can be set afterwards with `PUT /buckets/{bucket}/object/tags`, which takes them in the\nbody; required tags must fit in this header.\n",
             "schema": {
               "type": "string",
               "maxLength": 16384

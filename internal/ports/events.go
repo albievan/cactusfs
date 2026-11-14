@@ -37,8 +37,13 @@ const (
 // set, changed or removed. The payload is a BucketEvent.
 const EventBucketLockChanged = "cactusfs.bucket.object-lock-changed.v1"
 
-// EventBucketConfigChanged tells that the policy, the CORS rules or the tags
-// of a bucket were set, changed or removed.
+// EventBucketConfigChanged tells that a configuration document of a bucket
+// was set, changed or removed: any kind the metadata store keeps - the
+// policy, the CORS rules, the tags, the lifecycle rules, the tag rules
+// (ADR-0018), the notification rules or the replication configuration. The
+// payload is a BucketEvent; it does not say which kind changed. Sub-buckets
+// and the catalogue of tags have no event of their own: their changes are
+// seen only as the audit records they carry.
 const EventBucketConfigChanged = "cactusfs.bucket.configuration-changed.v1"
 
 // EventObjectTagsChanged tells that the tags of an object version changed.

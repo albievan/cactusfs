@@ -63,7 +63,12 @@ policies." S3 has no such thing; a bucket has keys, and a key may contain slashe
 
 - `s3:PutSubBucket` is worth what `s3:PutBucketPolicy` is, for its prefix.
 - A listing of the bucket shows the keys inside sub-buckets to whoever may list the
-  bucket.
+  bucket, and so does search (which shows what a listing would): a sub-bucket cannot
+  hide its keys' names from them, only refuse access to the objects.
+- Deleting a sub-bucket does not touch the tag rules of its bucket (ADR-0018): a rule
+  confined to it (`sub_bucket`) is a test of the key's prefix, so it keeps applying to
+  keys under `<name>/` and to a sub-bucket created later under the same name. Accepted
+  (PLAN X.1, 2026-11-14); whoever deletes one changes the rules separately.
 - A third source of permissions is a third place to look when asking why something was
   allowed; the decision's log names the source.
 

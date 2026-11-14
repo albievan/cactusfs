@@ -10,13 +10,15 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
 events to NATS and webhooks, replication between sites and quotas (milestone 8, of
 which entry schema 5, the domain, the ports, the replicated store and the contracts
-exist, and no use case, worker or adapter); sub-buckets (ADR-0017), of which the domain
-rules, the store, the contract, the authorizer's side, the use cases, the
-management API's handlers and the console's sections exist; and tag rules with a catalogue of tags (ADR-0018), of which the domain rules,
-the ports, the replicated store and the use cases exist - the rules enforced on every
-way an object comes to have tags - and the management API's handlers and the console do
-not. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
-and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
+exist, and no use case, worker or adapter). Sub-buckets (ADR-0017) and tag rules with a
+catalogue of tags (ADR-0018) are implemented end to end - domain, store, use cases,
+management API and console. The release is 0.7.0 (`internal/buildinfo/VERSION`, tagged
+`v0.7.0` on 2026-11-13): its image (`ghcr.io/albievan/cactusfs:0.7.0`) and Helm chart
+(`ghcr.io/albievan/charts/cactusfs:0.7.0`) were published and signed keyless by the
+release workflow, which then failed to create the GitHub Release (cosign's bundle was not
+readable to the runner's user; the scripts are fixed), so it has no GitHub Release, no
+published binaries and no `SHA256SUMS`. That release predates the enforcement of tag
+rules (PLAN D.2b): no published release enforces them yet.
 
 ## 1. Shape of the system
 
@@ -575,7 +577,7 @@ sharded Raft groups later; that move needs an ADR. On-disk formats and Raft entr
 carry a version; no node writes an entry format newer than the oldest member of the
 cluster understands, so version N runs alongside N+1 during a rolling upgrade.
 
-The entry schema is at 5:
+The entry schema is at 6 (`MetadataVersion`, `internal/adapters/raftmeta/entry.go`):
 
 | Schema | Adds | ADR |
 |---|---|---|
@@ -584,13 +586,18 @@ The entry schema is at 5:
 | 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules, tags of an upload and tag definitions | 0016 (with 0017, 0018) |
 | 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
 | 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets and the record of a resync - which the state machine applies and the store proposes, and no use case sends yet | 0023 (with 0024, 0025, 0026) |
+| 6 | the revocation of a node that leaves (`node.revoke`, the bucket `revokednodes`); nothing old changes | 0030 |
 
 Upgrades from schema 2, 3 and 4 are tested against fixtures written by the binaries of
 those schemas (`test/integration/testdata`), and rolling upgrades from 3 to 4 and from
 4 to 5 with the binaries themselves (`make test-rolling`, which takes the release to
 start from and the test of that upgrade: `ROLLING_FROM_COMMIT`, `ROLLING_TEST`). After
 the last member is upgraded, the first entry of the new schema ends the way back to the
-release before (ADR-0016, ADR-0019, ADR-0023).
+release before (ADR-0016, ADR-0019, ADR-0023). The rise from 5 to 6 is tested in
+process (`TestRollingUpgradeToSchema6`, `TestRevokingANode`,
+`TestAStateOfSchema6IsOpenedOnlyByABinaryOfSchema6` of `internal/adapters/raftmeta`):
+only a node that leaves writes schema 6, so an upgraded cluster where nobody leaves stays
+one the release of schema 5 opens (ADR-0030).
 
 Schema 5 (ADR-0023) adds seven commands - `bucket.quota.put`, `bucket.usage.walk`,
 `target.put`, `target.delete`, `outbox.ack`, `bucket.replica.put`,
@@ -639,7 +646,9 @@ release again - and ends the way back for the cluster (ADR-0023, "Rollback";
 that had not yet seen level 5 is written below schema 5 and has no usage record until
 the counter of PLAN 8.3.1 walks it. The bytes of schema 5 are frozen: the golden files
 `schema5-entries.golden.txt` and `schema5-records.golden.txt`
-(`internal/adapters/raftmeta/testdata`) may not change without a schema 6.
+(`internal/adapters/raftmeta/testdata`) may not change - schema 6 left them as they
+were - and neither may `schema6.golden.txt`, which pins `node.revoke` and its record
+(`TestTheGoldenFileOfSchema6IsFrozen`): a change of any of them needs a schema 7.
 
 Schema 4 adds who created a
 bucket (`created_by` on `bucket.create`) and no command. It is also the schema a put, a
@@ -1013,7 +1022,8 @@ four at a time.
   that leaves (`Leave`) is revoked through Raft (entry schema 6, ADR-0030): no member
   serves it, lets it join again or keeps its Raft connections afterwards. Only the node
   itself can ask to leave; an operator's command to remove another node is not built.
-- **Sub-buckets (implemented) and tag rules (use cases implemented).** ADR-0017 and
+- **Sub-buckets and tag rules (implemented end to end: domain, store, use cases,
+  management API, console).** ADR-0017 and
   ADR-0018 are accepted, and entry schema 3 carries their commands: the domain rules
   (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,
   `TagDefinitionStore`) and the metadata store's side of them exist and are tested.

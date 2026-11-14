@@ -119,6 +119,37 @@ of that baseline.
   through the management API is made and then deleted again, answered 503, for as long
   as the rolling upgrade lasts. Every release since S.3 knows it, so this holds only for
   an upgrade from an older one. S3's `CreateBucket` is not affected.
+- **A required tag shuts out whoever may store and not tag** (X.1 review, 2026-11-14;
+  a decision for Albie). Tagging is a permission of its own: an upload that carries
+  tags needs `s3:PutObjectTagging` as well as `s3:PutObject` (`admitTags`,
+  `internal/app/tagrules.go`), as in S3, and one that carries none breaks a rule that
+  requires a tag (`bucket.TagRules.Check`). So once a bucket requires any tag, a caller
+  who holds `s3:PutObject` and not `s3:PutObjectTagging` cannot store an object there
+  at all, with tags or without - the built-in `read-write` role among them
+  (`internal/domain/iam/builtin.go`), and a user whose sub-bucket or bucket policy grants
+  `s3:PutObject` alone. The same holds for a copy and a multipart upload. Kept, as the
+  stricter reading, and documented; an administrator who wants such users to upload
+  grants them `s3:PutObjectTagging` on the bucket (an identity policy, the bucket's or a
+  sub-bucket's policy). Open for Albie: (a) give `read-write` `s3:PutObjectTagging`;
+  (b) let the tags a rule requires pass under `s3:PutObject` alone; (c) keep it.
+- **Rules no object can satisfy are accepted.** `SetTagRules` judges the rules by
+  themselves and never reads the catalogue: under `catalogue_only` a required key the
+  catalogue does not define, a required value it does not list, or a key in mixed case
+  where the bucket does not lower-case (the catalogue is lower case) is accepted, and
+  the bucket then refuses every upload the rule covers. A definition can also be changed
+  later (`TagDefinitionService.Put`) so that it no longer lists the values a rule
+  requires. The guard on deleting a definition (`EntityInUse`) is narrow: it looks only
+  for a required tag with exactly that key, so it does not protect a definition that a
+  `catalogue_only` bucket relies on for tags it does not require, nor match a required
+  key in another case. Accepted, deferred: rules are set by administrators and audited,
+  and the refusals name the rule. Cross-checking rules and catalogue in both directions
+  is open for Albie.
+- **A rule confined to a sub-bucket is a test of the key's prefix** (`sub_bucket`), not a
+  link to the registered sub-bucket. It may name a sub-bucket that does not exist, and
+  deleting a sub-bucket (`SubBucketService.Delete`) neither consults nor changes the
+  rules that name it: such a rule keeps applying to keys under `<name>/` with no
+  sub-bucket there, and to a sub-bucket created later under that name. Accepted,
+  deferred (ADR-0017, "Consequences").
 
 ## Alternatives
 
