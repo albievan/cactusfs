@@ -5,7 +5,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -285,9 +284,10 @@ func (h *Handler) deleteObjectTagging(ctx context.Context, req *request) error {
 }
 
 // tagsOf reads the x-amz-tagging header of a request that creates an
-// object: tags as a URL query string, passed on as a list in the order of
-// their keys. A key given twice is passed on twice, for the use case to
-// refuse; whether the tags can be kept is the use case's to say too.
+// object: tags as a URL query string (object.ParseTagging), passed on as a
+// list in the order given. A key given twice is passed on twice, for the
+// use case to refuse; whether the tags can be kept is the use case's to say
+// too. A header given, if empty, is an empty list and not nil.
 func tagsOf(header http.Header) ([]object.Tag, error) {
 	values := header.Values(headerTagging)
 	if len(values) == 0 {
@@ -296,17 +296,9 @@ func tagsOf(header http.Header) ([]object.Tag, error) {
 	if len(values) != 1 {
 		return nil, fmt.Errorf("%w: %s is given more than once", domain.ErrInvalidArgument, headerTagging)
 	}
-	parsed, err := url.ParseQuery(values[0])
+	tags, err := object.ParseTagging(values[0])
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s is not a query string", domain.ErrInvalidArgument, headerTagging)
-	}
-	keys := slices.Sorted(maps.Keys(parsed))
-	// Not nil: the header was given, if empty.
-	tags := make([]object.Tag, 0, len(keys))
-	for _, key := range keys {
-		for _, value := range parsed[key] {
-			tags = append(tags, object.Tag{Key: key, Value: value})
-		}
+		return nil, fmt.Errorf("%s: %w", headerTagging, err)
 	}
 	return tags, nil
 }

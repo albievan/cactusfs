@@ -183,7 +183,7 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	objects, err := app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: f.clock, Entropy: rand.Reader, Logger: logger,
-		Access: f.access, AccessStore: meta,
+		Access: f.access, AccessStore: meta, TagDefinitions: meta,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +229,10 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 		Updates:    f.updates,
 		Targets:    targets,
 		SubBuckets: app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
-		Buckets:    app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta), Objects: objects, Search: search, IAM: f.iam,
+		// The catalogue of tags carries its audit record to the trail, as
+		// targets do.
+		TagDefinitions: app.NewTagDefinitionService(app.TagDefinitionServiceConfig{Store: meta, Authz: authz, Auditor: f.auditor, Clock: f.clock}),
+		Buckets:        app.NewBucketService(meta, authz, f.clock).WithAuditor(f.auditor).WithDetails(meta, meta).WithUndo(meta, meta, logger), Objects: objects, Search: search, IAM: f.iam,
 		Sessions: sessions, Cluster: clusterService, Settings: settings, Idempotency: app.NewIdempotencyService(f.watched, kms, f.clock, rand.Reader).WithAuthorizer(authz).WithHasher(f.concealer),
 		Identities: f.identities, Clock: f.clock, Logger: logger,
 		SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Build: testBuild,
@@ -3108,8 +3111,9 @@ func (h *busyHasher) Conceal(ctx context.Context, value, salt []byte) ([]byte, e
 }
 
 // TestARefusedCallerReservesNothing: a caller who may not carry out an
-// operation on a user, group, role, policy or target, or have the node check
-// for releases now, and sends it with an
+// operation on a user, group, role, policy, target or definition of the
+// catalogue of tags, or have the node check for releases now, and sends it
+// with an
 // idempotency key, is refused before the key is reserved or the body
 // concealed - no replicated write, no Argon2id - and is refused as the
 // operation itself refuses: the denial in the trail names the action and
@@ -3141,6 +3145,11 @@ func TestARefusedCallerReservesNothing(t *testing.T) {
 		{"PUT", "/targets/hook", map[string]any{"kind": "webhook", "endpoint": "https://hooks.example.test/in", "buckets": []string{}}},
 		{"DELETE", "/targets/hook", nil},
 		{"POST", "/updates/check", map[string]any{}},
+		// The catalogue of tags names a definition by its key, in the
+		// path and in the body.
+		{"POST", "/tag-definitions", map[string]any{"key": "stage"}},
+		{"PUT", "/tag-definitions/stage", map[string]any{"description": "", "values": []string{}}},
+		{"DELETE", "/tag-definitions/stage", nil},
 	}
 	if len(tests) != len(adminapi.AskedFirst()) {
 		t.Fatalf("%d operations are tested, %d are asked first", len(tests), len(adminapi.AskedFirst()))

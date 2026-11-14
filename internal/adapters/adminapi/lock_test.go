@@ -461,9 +461,6 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucketNotifications", "putBucketNotifications", "deleteBucketNotifications",
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",
-		"getBucketTags", "putBucketTags", "deleteBucketTags", "getBucketTagRules", "putBucketTagRules", "deleteBucketTagRules",
-		"getObjectTags", "putObjectTags", "deleteObjectTags",
-		"listTagDefinitions", "createTagDefinition", "getTagDefinition", "putTagDefinition", "deleteTagDefinition",
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
 	// unlocking does: with a key they are asked as without one.
@@ -651,6 +648,14 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	for _, key := range []string{"second", "slow"} {
 		f.must(http.StatusOK, call{method: "GET", path: "/buckets/some-bucket/object/metadata?key=" + key})
 	}
+	// An upload with tags asks s3:PutObjectTagging too, which a locked
+	// session may not (putObject): refused 423, and nothing is stored.
+	tagged := admin.changing("")
+	tagged["X-CactusFS-Tagging"] = "stage=draft"
+	if r := f.do(call{method: "PUT", path: "/buckets/some-bucket/object?key=tagged", client: admin.client, raw: []byte("while locked"), headers: tagged}); r.status != http.StatusLocked || r.problem(t)["code"] != "SessionLocked" {
+		t.Errorf("an upload with tags by a locked session = %d %s, want 423 SessionLocked", r.status, r.body)
+	}
+	f.must(http.StatusNotFound, call{method: "GET", path: "/buckets/some-bucket/object/metadata?key=tagged"})
 	// Not without the CSRF token, locked or not: refused as a CSRF token
 	// that is not the session's, and not as a session that ended.
 	if r := f.do(call{method: "PUT", path: "/buckets/some-bucket/object?key=third", client: admin.client, raw: []byte("x")}); r.status != http.StatusForbidden || r.problem(t)["code"] != "CSRFTokenInvalid" {

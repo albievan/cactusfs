@@ -92,6 +92,8 @@ type node struct {
 	idempotency *app.IdempotencyService
 	// targets defines the places outside the deployment that it sends to.
 	targets *app.TargetService
+	// tagDefinitions holds the deployment's catalogue of tags (ADR-0018).
+	tagDefinitions *app.TagDefinitionService
 	// updates checks for releases and installs one (ADR-0029).
 	updates *app.UpdateService
 	// readiness is what /readyz answers by; the server gives it once the
@@ -228,11 +230,15 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// of the policies in this node's state, as a search does, and reads the
 	// latest use of the buckets in one call (ADR-0019).
 	bucketPolicies := n.telemetry.InstrumentBucketPolicies(n.meta.LocalConfig())
-	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.telemetry.InstrumentLocalConfig(n.meta.LocalConfig())).
-		WithDetails(bucketPolicies, n.telemetry.InstrumentBucketActivity(n.meta))
 	// The sub-buckets of buckets and their policies (ADR-0017), changed
 	// through Raft with the audit record in the same entry.
-	n.subBuckets = app.NewSubBucketService(n.telemetry.InstrumentSubBucketStore(n.meta), n.authorizer, n.auditor, n.clock, logger)
+	subBucketStore := n.telemetry.InstrumentSubBucketStore(n.meta)
+	// A bucket made through the management API whose tag rules could not
+	// be made is taken back only when nothing else is in it yet: its
+	// uploads and sub-buckets are read first (ADR-0018).
+	n.buckets = app.NewBucketService(meta, n.authorizer, n.clock).WithAuditor(n.auditor).WithLocalConfig(n.telemetry.InstrumentLocalConfig(n.meta.LocalConfig())).
+		WithDetails(bucketPolicies, n.telemetry.InstrumentBucketActivity(n.meta)).WithUndo(meta, subBucketStore, logger)
+	n.subBuckets = app.NewSubBucketService(subBucketStore, n.authorizer, n.auditor, n.clock, logger)
 	// Who read what: counted in memory and handed to the metadata store in
 	// the background, by this node under its own name (ADR-0016).
 	accessStore := n.telemetry.InstrumentObjectAccess(n.meta)
@@ -245,9 +251,13 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	if err != nil {
 		return err
 	}
-	// The catalogue of tags, read where a bucket's tag rules take only its
-	// tags (ADR-0018).
+	// The catalogue of tags (ADR-0018): read where a bucket's tag rules
+	// take only its tags, and changed through the management API with the
+	// audit record in the entry that makes the change.
 	tagDefinitions := n.telemetry.InstrumentTagDefinitions(n.meta)
+	n.tagDefinitions = app.NewTagDefinitionService(app.TagDefinitionServiceConfig{
+		Store: tagDefinitions, Authz: n.authorizer, Auditor: n.auditor, Clock: n.clock,
+	})
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
 		TagDefinitions: tagDefinitions,

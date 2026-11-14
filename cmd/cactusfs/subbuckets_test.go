@@ -74,26 +74,25 @@ func TestTheNodeAuthorizerReadsSubBucketPolicies(t *testing.T) {
 	}
 }
 
-// TestTheServedAdminAPICreatesSubBuckets holds server.go to the wiring of
-// PLAN C.6: the management API of a node started as the binary starts it is
-// given the use case of sub-buckets, so a PUT of one answers 200 and the
-// list names it - not the 501 of a node without the use case.
-func TestTheServedAdminAPICreatesSubBuckets(t *testing.T) {
-	t.Parallel()
+// servedAdmin starts a node as the binary starts it, with the management
+// API on a plaintext loopback listener, and waits until it is ready. It
+// returns a caller of that API, the bearer credential of root, and a stop
+// that ends the node and fails the test if it did not end well.
+func servedAdmin(t *testing.T) (call func(method, path, bearer, body string) (int, string), root string, stop func()) {
+	t.Helper()
 	cfg := nodeConfig(t.TempDir())
 	cfg.AdminAddr, cfg.S3Addr = freeAddr(t), freeAddr(t)
 	cfg.DevPlaintext = true
 	cfg.DrainDelay, cfg.ShutdownTimeout = 0, 5*time.Second
 
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 	logs := &lockedBuffer{buf: &bytes.Buffer{}}
 	notice := &lockedBuffer{buf: &bytes.Buffer{}}
 	done := make(chan error, 1)
 	go func() { done <- runServer(ctx, cfg, logs, notice) }()
 
 	admin := "http://" + cfg.AdminAddr
-	call := func(method, path, bearer, body string) (int, string) {
+	call = func(method, path, bearer, body string) (int, string) {
 		t.Helper()
 		var reader io.Reader
 		if body != "" {
@@ -117,12 +116,25 @@ func TestTheServedAdminAPICreatesSubBuckets(t *testing.T) {
 		answer, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(answer)
 	}
+	stop = func() {
+		t.Helper()
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("runServer: %v", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("the node did not stop within 20 s")
+		}
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if status, _ := call(http.MethodGet, "/readyz", "", ""); status == http.StatusOK {
 			break
 		}
 		if time.Now().After(deadline) {
+			stop()
 			logs.mu.Lock()
 			t.Fatalf("the node did not become ready; log:\n%s", logs.buf.String())
 		}
@@ -131,7 +143,17 @@ func TestTheServedAdminAPICreatesSubBuckets(t *testing.T) {
 	notice.mu.Lock()
 	creds := shownCredentials(t, notice.buf.String())
 	notice.mu.Unlock()
-	root := creds.AccessKeyID + ":" + creds.SecretKey
+	return call, creds.AccessKeyID + ":" + creds.SecretKey, stop
+}
+
+// TestTheServedAdminAPICreatesSubBuckets holds server.go to the wiring of
+// PLAN C.6: the management API of a node started as the binary starts it is
+// given the use case of sub-buckets, so a PUT of one answers 200 and the
+// list names it - not the 501 of a node without the use case.
+func TestTheServedAdminAPICreatesSubBuckets(t *testing.T) {
+	t.Parallel()
+	call, root, stop := servedAdmin(t)
+	defer stop()
 
 	if status, body := call(http.MethodPost, "/api/v1/buckets", root, `{"name":"parent"}`); status != http.StatusCreated {
 		t.Fatalf("POST /buckets = %d %s", status, body)
@@ -142,14 +164,45 @@ func TestTheServedAdminAPICreatesSubBuckets(t *testing.T) {
 	if status, body := call(http.MethodGet, "/api/v1/buckets/parent/subbuckets", root, ""); status != http.StatusOK || !strings.Contains(body, `"name":"reports"`) {
 		t.Errorf("the list of sub-buckets = %d %s", status, body)
 	}
+}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("runServer: %v", err)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("the node did not stop within 20 s")
+// TestTheServedAdminAPIKeepsTheCatalogue holds server.go and node.go to the
+// wiring of PLAN D.4: the management API of a node started as the binary
+// starts it is given the use case of the catalogue of tags - a definition
+// is made and listed, not answered 501 - and the object service the same
+// catalogue, so a bucket that takes only its tags takes a tag it defines. A
+// bucket made through the API lower-cases its tags.
+func TestTheServedAdminAPIKeepsTheCatalogue(t *testing.T) {
+	t.Parallel()
+	call, root, stop := servedAdmin(t)
+	defer stop()
+
+	if status, body := call(http.MethodPost, "/api/v1/tag-definitions", root, `{"key":"stage","values":["draft","final"]}`); status != http.StatusCreated {
+		t.Fatalf("POST /tag-definitions on the served node = %d %s, want 201", status, body)
+	}
+	if status, body := call(http.MethodGet, "/api/v1/tag-definitions", root, ""); status != http.StatusOK || !strings.Contains(body, `"key":"stage"`) {
+		t.Errorf("the catalogue = %d %s", status, body)
+	}
+	if status, body := call(http.MethodPost, "/api/v1/buckets", root, `{"name":"documents"}`); status != http.StatusCreated {
+		t.Fatalf("POST /buckets = %d %s", status, body)
+	}
+	if status, body := call(http.MethodGet, "/api/v1/buckets/documents/tag-rules", root, ""); status != http.StatusOK || !strings.Contains(body, `"lowercase":true`) {
+		t.Errorf("the rules of a bucket made through the API = %d %s", status, body)
+	}
+	rules := `{"lowercase":true,"catalogue_only":true,"required":[]}`
+	if status, body := call(http.MethodPut, "/api/v1/buckets/documents/tag-rules", root, rules); status != http.StatusOK {
+		t.Fatalf("PUT the rules = %d %s", status, body)
+	}
+	if status, body := call(http.MethodPut, "/api/v1/buckets/documents/object?key=report", root, "content"); status != http.StatusOK {
+		t.Fatalf("an upload = %d %s", status, body)
+	}
+	tags := func(pairs string) string { return `{"tags":[` + pairs + `]}` }
+	if status, body := call(http.MethodPut, "/api/v1/buckets/documents/object/tags?key=report", root, tags(`{"key":"Stage","value":"Draft"}`)); status != http.StatusOK ||
+		!strings.Contains(body, `{"key":"stage","value":"draft"}`) {
+		t.Errorf("a tag of the catalogue = %d %s", status, body)
+	}
+	if status, body := call(http.MethodPut, "/api/v1/buckets/documents/object/tags?key=report", root, tags(`{"key":"colour","value":"red"}`)); status != http.StatusBadRequest ||
+		!strings.Contains(body, `"TagRuleViolated"`) {
+		t.Errorf("a tag outside the catalogue = %d %s", status, body)
 	}
 }

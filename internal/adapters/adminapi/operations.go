@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/adminapi/api"
@@ -25,6 +26,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/domain/release"
+	"github.com/albievan/cactusfs/internal/domain/tagging"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -231,10 +233,12 @@ func (o *operations) CreateBucket(ctx context.Context, request api.CreateBucketR
 	if request.Body == nil {
 		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
 	}
-	if err := o.h.cfg.Buckets.Create(ctx, who(ctx), request.Body.Name); err != nil {
-		return nil, err
-	}
-	b, err := o.h.cfg.Buckets.Get(ctx, who(ctx), request.Body.Name)
+	// A bucket made here keeps its tags in lower case from the start
+	// (ADR-0018): the use case makes it so, and takes the bucket back when
+	// it cannot.
+	// The answer is the bucket as it was written: whoever may make a
+	// bucket need not be allowed to list it, and nothing is read again.
+	b, err := o.h.cfg.Buckets.CreateLowercasing(ctx, who(ctx), request.Body.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -462,11 +466,15 @@ func (o *operations) PutObject(ctx context.Context, request api.PutObjectRequest
 	if size < 0 {
 		return nil, fmt.Errorf("%w: Content-Length is required", domain.ErrInvalidArgument)
 	}
-	if request.Params.XCactusFSTagging != nil {
-		// Tags on an upload are in the contract ahead of their use case
-		// (PLAN D.0): stored without them, the version would not be what
-		// was asked for, so the upload is not made at all.
-		return nil, notYet("tags on an upload")
+	// The tags are passed on as they were given, a key given twice
+	// included: whether they may be given and kept is the use case's.
+	var tags []object.Tag
+	if tagging := request.Params.XCactusFSTagging; tagging != nil {
+		parsed, err := object.ParseTagging(*tagging)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", headerTagging, err)
+		}
+		tags = parsed
 	}
 	contentType := "application/octet-stream"
 	if t := request.Params.ContentType; t != nil && *t != "" {
@@ -475,8 +483,8 @@ func (o *operations) PutObject(ctx context.Context, request api.PutObjectRequest
 	sum := sha256.New()
 	v, err := o.h.cfg.Objects.Put(ctx, who(ctx), app.PutInput{
 		Bucket: request.Bucket, Key: request.Params.Key, Body: io.TeeReader(request.Body, sum), Size: size,
-		ContentType: contentType,
-		Verify:      func() (string, error) { return contentTag(sum), nil },
+		ContentType: contentType, Tags: tags,
+		Verify: func() (string, error) { return contentTag(sum), nil },
 	})
 	if err != nil {
 		return nil, err
@@ -1356,80 +1364,272 @@ func (o *operations) DeleteSubBucket(ctx context.Context, request api.DeleteSubB
 	return api.DeleteSubBucket204Response{}, nil
 }
 
-// --- tags, tag rules and the catalogue of tags (PLAN D.0, ADR-0018) ---
+// --- tags, tag rules and the catalogue of tags (ADR-0018) ---
 //
-// In the contract ahead of their use cases; each answers notYet until PLAN
-// D.4 writes it and puts the use case - which authorizes and audits - in
-// front of it. So does an upload with tags (tagsNotYet).
+// What may be tagged by whom, how the bucket's rules keep tags and which
+// definitions a rule holds on to are the use cases' to decide
+// (BucketService, ObjectService, TagDefinitionService): each asks the
+// single authorizer and records what it changes. These carry tags between
+// the lists of the contract and the use cases. A list is passed on as it
+// was given, a key given twice included, for the domain to refuse
+// (object.TagMap); tags are answered in key order (object.TagList).
 
-// GetBucketTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) GetBucketTags(context.Context, api.GetBucketTagsRequestObject) (api.GetBucketTagsResponseObject, error) {
-	return nil, notYet("bucket tags")
+// tagsIn are the tags of a request, in the order given.
+func tagsIn(list []api.Tag) []object.Tag {
+	out := make([]object.Tag, len(list))
+	for i, tag := range list {
+		out[i] = object.Tag{Key: tag.Key, Value: tag.Value}
+	}
+	return out
 }
 
-// PutBucketTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) PutBucketTags(context.Context, api.PutBucketTagsRequestObject) (api.PutBucketTagsResponseObject, error) {
-	return nil, notYet("bucket tags")
+// tagsOut are tags as the contract answers them: in key order, and an
+// empty list - never null - for none.
+func tagsOut(tags map[string]string) []api.Tag {
+	list := object.TagList(tags)
+	out := make([]api.Tag, len(list))
+	for i, tag := range list {
+		out[i] = api.Tag{Key: tag.Key, Value: tag.Value}
+	}
+	return out
 }
 
-// DeleteBucketTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) DeleteBucketTags(context.Context, api.DeleteBucketTagsRequestObject) (api.DeleteBucketTagsResponseObject, error) {
-	return nil, notYet("bucket tags")
+// GetBucketTags implements api.StrictServerInterface.
+func (o *operations) GetBucketTags(ctx context.Context, request api.GetBucketTagsRequestObject) (api.GetBucketTagsResponseObject, error) {
+	tags, err := o.h.cfg.Buckets.Tags(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketTags200JSONResponse{Tags: tagsOut(tags)}, nil
 }
 
-// GetObjectTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) GetObjectTags(context.Context, api.GetObjectTagsRequestObject) (api.GetObjectTagsResponseObject, error) {
-	return nil, notYet("object tags")
+// PutBucketTags implements api.StrictServerInterface. It answers the tags as
+// the use case kept them: in lower case where the bucket's rules say so.
+func (o *operations) PutBucketTags(ctx context.Context, request api.PutBucketTagsRequestObject) (api.PutBucketTagsResponseObject, error) {
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	kept, err := o.h.cfg.Buckets.SetTags(ctx, who(ctx), request.Bucket, tagsIn(request.Body.Tags))
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketTags200JSONResponse{Tags: tagsOut(kept)}, nil
 }
 
-// PutObjectTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) PutObjectTags(context.Context, api.PutObjectTagsRequestObject) (api.PutObjectTagsResponseObject, error) {
-	return nil, notYet("object tags")
+// DeleteBucketTags implements api.StrictServerInterface: setting no tags, as
+// S3's DeleteBucketTagging is.
+func (o *operations) DeleteBucketTags(ctx context.Context, request api.DeleteBucketTagsRequestObject) (api.DeleteBucketTagsResponseObject, error) {
+	if _, err := o.h.cfg.Buckets.SetTags(ctx, who(ctx), request.Bucket, nil); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketTags204Response{}, nil
 }
 
-// DeleteObjectTags implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) DeleteObjectTags(context.Context, api.DeleteObjectTagsRequestObject) (api.DeleteObjectTagsResponseObject, error) {
-	return nil, notYet("object tags")
+// taggedVersion is the version a request about the tags of an object names:
+// nil, the current version, without version_id.
+func taggedVersion(id *api.TaggedVersion) (*object.VersionRef, error) {
+	if id == nil {
+		return nil, nil
+	}
+	ref, err := object.ParseVersionRef(*id)
+	if err != nil {
+		return nil, err
+	}
+	return &ref, nil
 }
 
-// GetBucketTagRules implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) GetBucketTagRules(context.Context, api.GetBucketTagRulesRequestObject) (api.GetBucketTagRulesResponseObject, error) {
-	return nil, notYet("tag rules")
+// objectTagsOf is the answer of an operation on the tags of a version.
+func objectTagsOf(v object.Version) api.ObjectTags {
+	return api.ObjectTags{Tags: tagsOut(v.Tags), VersionId: v.Ref().String()}
 }
 
-// PutBucketTagRules implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) PutBucketTagRules(context.Context, api.PutBucketTagRulesRequestObject) (api.PutBucketTagRulesResponseObject, error) {
-	return nil, notYet("tag rules")
+// GetObjectTags implements api.StrictServerInterface.
+func (o *operations) GetObjectTags(ctx context.Context, request api.GetObjectTagsRequestObject) (api.GetObjectTagsResponseObject, error) {
+	version, err := taggedVersion(request.Params.VersionId)
+	if err != nil {
+		return nil, err
+	}
+	v, err := o.h.cfg.Objects.Tags(ctx, who(ctx), app.LockInput{Bucket: request.Bucket, Key: request.Params.Key, Version: version})
+	if err != nil {
+		return nil, err
+	}
+	return api.GetObjectTags200JSONResponse(objectTagsOf(v)), nil
 }
 
-// DeleteBucketTagRules implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) DeleteBucketTagRules(context.Context, api.DeleteBucketTagRulesRequestObject) (api.DeleteBucketTagRulesResponseObject, error) {
-	return nil, notYet("tag rules")
+// PutObjectTags implements api.StrictServerInterface. An empty list is
+// asked as deleteObjectTags is; that is the use case's to say.
+func (o *operations) PutObjectTags(ctx context.Context, request api.PutObjectTagsRequestObject) (api.PutObjectTagsResponseObject, error) {
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	version, err := taggedVersion(request.Params.VersionId)
+	if err != nil {
+		return nil, err
+	}
+	v, err := o.h.cfg.Objects.SetTags(ctx, who(ctx), app.LockInput{Bucket: request.Bucket, Key: request.Params.Key, Version: version},
+		tagsIn(request.Body.Tags))
+	if err != nil {
+		return nil, err
+	}
+	return api.PutObjectTags200JSONResponse(objectTagsOf(v)), nil
 }
 
-// ListTagDefinitions implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) ListTagDefinitions(context.Context, api.ListTagDefinitionsRequestObject) (api.ListTagDefinitionsResponseObject, error) {
-	return nil, notYet("tag catalogue")
+// DeleteObjectTags implements api.StrictServerInterface.
+func (o *operations) DeleteObjectTags(ctx context.Context, request api.DeleteObjectTagsRequestObject) (api.DeleteObjectTagsResponseObject, error) {
+	version, err := taggedVersion(request.Params.VersionId)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := o.h.cfg.Objects.SetTags(ctx, who(ctx), app.LockInput{Bucket: request.Bucket, Key: request.Params.Key, Version: version}, nil); err != nil {
+		return nil, err
+	}
+	return api.DeleteObjectTags204Response{}, nil
 }
 
-// CreateTagDefinition implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) CreateTagDefinition(context.Context, api.CreateTagDefinitionRequestObject) (api.CreateTagDefinitionResponseObject, error) {
-	return nil, notYet("tag catalogue")
+// tagRulesIn are the rules of a request, the required tags in the order
+// given.
+func tagRulesIn(body api.TagRulesPut) bucket.TagRules {
+	rules := bucket.TagRules{Lowercase: body.Lowercase, CatalogueOnly: body.CatalogueOnly, Required: make([]bucket.RequiredTag, len(body.Required))}
+	for i, required := range body.Required {
+		rules.Required[i] = bucket.RequiredTag{Key: required.Key, SubBucket: optional(required.SubBucket), Values: optional(required.Values)}
+	}
+	return rules
 }
 
-// GetTagDefinition implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) GetTagDefinition(context.Context, api.GetTagDefinitionRequestObject) (api.GetTagDefinitionResponseObject, error) {
-	return nil, notYet("tag catalogue")
+// tagRulesOut are rules as the contract answers them: every field, and
+// required an empty list - never null - when there are none.
+func tagRulesOut(rules bucket.TagRules) api.TagRules {
+	out := api.TagRules{Lowercase: rules.Lowercase, CatalogueOnly: rules.CatalogueOnly, Required: make([]api.RequiredTag, len(rules.Required))}
+	for i, required := range rules.Required {
+		out.Required[i] = api.RequiredTag{Key: required.Key, SubBucket: stringOrNil(required.SubBucket)}
+		if len(required.Values) > 0 {
+			values := slices.Clone(required.Values)
+			out.Required[i].Values = &values
+		}
+	}
+	return out
 }
 
-// PutTagDefinition implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) PutTagDefinition(context.Context, api.PutTagDefinitionRequestObject) (api.PutTagDefinitionResponseObject, error) {
-	return nil, notYet("tag catalogue")
+// GetBucketTagRules implements api.StrictServerInterface.
+func (o *operations) GetBucketTagRules(ctx context.Context, request api.GetBucketTagRulesRequestObject) (api.GetBucketTagRulesResponseObject, error) {
+	rules, err := o.h.cfg.Buckets.TagRules(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketTagRules200JSONResponse(tagRulesOut(rules)), nil
 }
 
-// DeleteTagDefinition implements api.StrictServerInterface (PLAN D.4).
-func (o *operations) DeleteTagDefinition(context.Context, api.DeleteTagDefinitionRequestObject) (api.DeleteTagDefinitionResponseObject, error) {
-	return nil, notYet("tag catalogue")
+// PutBucketTagRules implements api.StrictServerInterface. It answers the
+// rules that were set, without asking to read them, as PutBucketPolicy
+// answers its document.
+func (o *operations) PutBucketTagRules(ctx context.Context, request api.PutBucketTagRulesRequestObject) (api.PutBucketTagRulesResponseObject, error) {
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	rules := tagRulesIn(*request.Body)
+	if err := o.h.cfg.Buckets.SetTagRules(ctx, who(ctx), request.Bucket, rules); err != nil {
+		return nil, err
+	}
+	return api.PutBucketTagRules200JSONResponse(tagRulesOut(rules)), nil
+}
+
+// DeleteBucketTagRules implements api.StrictServerInterface.
+func (o *operations) DeleteBucketTagRules(ctx context.Context, request api.DeleteBucketTagRulesRequestObject) (api.DeleteBucketTagRulesResponseObject, error) {
+	if err := o.h.cfg.Buckets.DeleteTagRules(ctx, who(ctx), request.Bucket); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketTagRules204Response{}, nil
+}
+
+// tagDefinitions is the use case of the catalogue of tags, or the answer of
+// a node that was not given it.
+func (o *operations) tagDefinitions() (*app.TagDefinitionService, error) {
+	if o.h.cfg.TagDefinitions == nil {
+		return nil, notYet("tag catalogue")
+	}
+	return o.h.cfg.TagDefinitions, nil
+}
+
+// tagDefinitionOf maps a definition to the contract: values an empty list,
+// never null, when the tag may have any.
+func tagDefinitionOf(d tagging.Definition) api.TagDefinition {
+	return api.TagDefinition{Key: d.Key, Description: d.Description, Values: stringsOf(d.Values), CreatedAt: d.CreatedAt}
+}
+
+// ListTagDefinitions implements api.StrictServerInterface.
+func (o *operations) ListTagDefinitions(ctx context.Context, _ api.ListTagDefinitionsRequestObject) (api.ListTagDefinitionsResponseObject, error) {
+	definitions, err := o.tagDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	list, err := definitions.List(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	out := make(api.ListTagDefinitions200JSONResponse, len(list))
+	for i, d := range list {
+		out[i] = tagDefinitionOf(d)
+	}
+	return out, nil
+}
+
+// CreateTagDefinition implements api.StrictServerInterface.
+func (o *operations) CreateTagDefinition(ctx context.Context, request api.CreateTagDefinitionRequestObject) (api.CreateTagDefinitionResponseObject, error) {
+	definitions, err := o.tagDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	b := request.Body
+	if b == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	d, err := definitions.Create(ctx, who(ctx), app.TagDefinitionInput{Key: b.Key, Description: optional(b.Description), Values: optional(b.Values)})
+	if err != nil {
+		return nil, err
+	}
+	return api.CreateTagDefinition201JSONResponse(tagDefinitionOf(d)), nil
+}
+
+// GetTagDefinition implements api.StrictServerInterface.
+func (o *operations) GetTagDefinition(ctx context.Context, request api.GetTagDefinitionRequestObject) (api.GetTagDefinitionResponseObject, error) {
+	definitions, err := o.tagDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	d, err := definitions.Get(ctx, who(ctx), request.Key)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetTagDefinition200JSONResponse(tagDefinitionOf(d)), nil
+}
+
+// PutTagDefinition implements api.StrictServerInterface.
+func (o *operations) PutTagDefinition(ctx context.Context, request api.PutTagDefinitionRequestObject) (api.PutTagDefinitionResponseObject, error) {
+	definitions, err := o.tagDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	b := request.Body
+	if b == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	d, err := definitions.Put(ctx, who(ctx), app.TagDefinitionInput{Key: request.Key, Description: b.Description, Values: b.Values})
+	if err != nil {
+		return nil, err
+	}
+	return api.PutTagDefinition200JSONResponse(tagDefinitionOf(d)), nil
+}
+
+// DeleteTagDefinition implements api.StrictServerInterface.
+func (o *operations) DeleteTagDefinition(ctx context.Context, request api.DeleteTagDefinitionRequestObject) (api.DeleteTagDefinitionResponseObject, error) {
+	definitions, err := o.tagDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	if err := definitions.Delete(ctx, who(ctx), request.Key); err != nil {
+		return nil, err
+	}
+	return api.DeleteTagDefinition204Response{}, nil
 }
 
 // --- targets ---

@@ -43,7 +43,7 @@ const (
 	headerRequestID   = "X-Request-Id"
 	headerIdempotency = "Idempotency-Key"
 	headerReplayed    = "Idempotent-Replayed"
-	// headerTagging carries the tags of an upload (PLAN D.0).
+	// headerTagging carries the tags of an upload (ADR-0018).
 	headerTagging = "X-CactusFS-Tagging"
 	// maxJSONBody bounds every request body but an upload.
 	maxJSONBody = 1 << 20
@@ -154,6 +154,11 @@ type Config struct {
 	// to. It may be nil on a node that was not given the use case: its
 	// operations then answer 501.
 	Targets *app.TargetService
+	// TagDefinitions holds the deployment's catalogue of tags (ADR-0018).
+	// It may be nil on a node that was not given the use case: its
+	// operations then answer 501. Tags and tag rules are Buckets' and
+	// Objects'.
+	TagDefinitions *app.TagDefinitionService
 	// Updates checks for releases and installs one (ADR-0029). It may be
 	// nil on a node that was not given the use case: its operations then
 	// answer 501.
