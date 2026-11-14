@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -91,7 +92,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrInvalidRange:         {400, "InvalidArgument"},
 		domain.ErrKeyUnavailable:       {503, "ServiceUnavailable"},
 		domain.ErrInvalidTag:           {400, "InvalidArgument"},
-		domain.ErrTagRule:              {400, "InvalidArgument"},
+		domain.ErrTagRule:              {400, "TagRuleViolated"},
 		domain.ErrObjectKeyTooLong:     {400, "InvalidObjectKey"},
 		domain.ErrInvalidPolicy:        {400, "InvalidPolicy"},
 		domain.ErrIdempotencyKeyReused: {422, "IdempotencyKeyReused"},
@@ -147,5 +148,19 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 	}
 	if both := problemOf(fmt.Errorf("%w: %w", domain.ErrAccessDenied, domain.ErrSessionLocked)); both.code != "SessionLocked" {
 		t.Errorf("a locked session that is also denied is told as %s", both.code)
+	}
+
+	// A refusal by a bucket's tag rules (ADR-0018): told apart from tags
+	// that cannot be kept at all - both are argument errors - by its code,
+	// and its detail is what the domain says: the rule, never a value.
+	rule := fmt.Errorf("object.SetTags: %w: the tag %q is required", domain.ErrTagRule, "stage")
+	if p := problemOf(rule); p.status != 400 || p.code != "TagRuleViolated" || p.title == "" {
+		t.Errorf("a refusal by the tag rules = %+v", p)
+	}
+	if detail := publicDetail(rule); !strings.Contains(detail, `the tag "stage" is required`) || strings.Contains(detail, "object.SetTags") {
+		t.Errorf("the detail of a refusal by the tag rules = %q", detail)
+	}
+	if p := problemOf(fmt.Errorf("object.SetTags: %w: more than 10 tags", domain.ErrInvalidTag)); p.code != "InvalidArgument" {
+		t.Errorf("tags that cannot be kept are told as %s", p.code)
 	}
 }

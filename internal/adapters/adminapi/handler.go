@@ -43,6 +43,8 @@ const (
 	headerRequestID   = "X-Request-Id"
 	headerIdempotency = "Idempotency-Key"
 	headerReplayed    = "Idempotent-Replayed"
+	// headerTagging carries the tags of an upload (PLAN D.0).
+	headerTagging = "X-CactusFS-Tagging"
 	// maxJSONBody bounds every request body but an upload.
 	maxJSONBody = 1 << 20
 	// maxIdempotencyKey is the longest idempotency key accepted.
@@ -529,7 +531,10 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 		return
 	}
 	// What makes two requests the same request. An upload is not read
-	// twice to find out: its length and type stand for its content.
+	// twice to find out: its length and type stand for its content, and
+	// the tags it gives (PLAN D.0) are part of what it asks for. Each of
+	// those headers is given at most once; the generated decoder refuses
+	// a second.
 	var (
 		content   string
 		concealed []string
@@ -538,6 +543,9 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 	)
 	if upload {
 		content = "length:" + strconv.FormatInt(r.ContentLength, 10) + ";type:" + r.Header.Get("Content-Type")
+		if tagging := r.Header.Values(headerTagging); len(tagging) > 0 {
+			content += ";tagging:" + strings.Join(tagging, "\n")
+		}
 	} else {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -738,6 +746,11 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusBadRequest, code: "InvalidBucketName", title: "Invalid bucket name"}
 	case is(domain.ErrInvalidObjectKey):
 		return problem{status: http.StatusBadRequest, code: "InvalidObjectKey", title: "Invalid object key"}
+	case is(domain.ErrTagRule):
+		// Before the argument error it is one of: the contract tells a
+		// bucket's tag rules refusing apart from tags that cannot be kept
+		// at all (ADR-0018). Its detail names the rule, never a value.
+		return problem{status: http.StatusBadRequest, code: "TagRuleViolated", title: "Against the bucket's tag rules"}
 	case is(domain.ErrInvalidPolicy):
 		// Before the argument error it is one of: the contract names the
 		// policies a bucket and a sub-bucket cannot keep apart.

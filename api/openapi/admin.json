@@ -3,7 +3,7 @@
   "info": {
     "title": "CactusFS management API",
     "version": "1.0.0",
-    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`. One that does not is answered 403 with the\nproblem code `CSRFTokenInvalid` - not 401: the session is there, and\n`getSession` returns its CSRF token (`csrf_token`). The cookie belongs to\nthe browser and the token to one tab of it: a tab whose token is not that\nof the session the cookie stands for now - another tab signed in, say -\nasks `getSession` again.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A path this document does not name.** A request whose path begins with\n`/api/v1/` and that is none of the operations of this document - a path\nit does not name, or a method that a path it names does not have - is\nanswered 404 `application/problem+json` with the problem code `NotFound`,\nwhatever its method, and whether or not it carries a credential: it is\nanswered before anybody is asked who sent it, and says nothing that this\ndocument does not. (`HEAD` of a path that has a `GET` is that `GET`\nwithout its body, as HTTP has it; the object and its preview answer it\n405 `MethodNotAllowed`.) `NotFound` is answered for nothing else: a\nbucket, object, version, user or other entity that is not there has a\ncode of its own (`NoSuchBucket`, `NoSuchObject`, `NoSuchVersion`,\n`NoSuchEntity`, `NoSuchSubBucket`), so a client answered `NotFound` for an\noperation of this document is talking to a node of a release that does\nnot have that operation yet.\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever. A request whose body may hold a secret\n(`createUser`, `updateUser`, `putTarget`) is recognised again by a slow\nhash of the body, never by the body or a plain hash of it; when that hash\ncannot be made at once the request is answered 429 with `Retry-After`,\nand nothing is reserved.\n"
+    "description": "The management API of CactusFS: buckets and objects, users, groups, roles,\npolicies and API keys, the state of the cluster, and the audit trail; the\nquota of a bucket, the targets the deployment sends to, and the\nnotifications and the replication of a bucket; the tags of buckets and\nobjects, the tag rules of a bucket, and the deployment's catalogue of tags.\n\n**Authentication.** Every request is authenticated, except signing in and\nfetching this document. Send an API key as a bearer credential,\n`Authorization: Bearer <access key ID>:<secret key>`, or - from the\nconsole - the session cookie that signing in sets. A request made with a\nsession that changes something must also carry the CSRF token of that\nsession in `X-CSRF-Token`. One that does not is answered 403 with the\nproblem code `CSRFTokenInvalid` - not 401: the session is there, and\n`getSession` returns its CSRF token (`csrf_token`). The cookie belongs to\nthe browser and the token to one tab of it: a tab whose token is not that\nof the session the cookie stands for now - another tab signed in, say -\nasks `getSession` again.\n\n**Authorization.** Every request is decided by the same authorizer as the\nS3 API, from the policies of the user. What a request needs is named in\neach operation as `x-cactusfs-action`.\n\n**Errors** are `application/problem+json` (RFC 9457).\n\n**A path this document does not name.** A request whose path begins with\n`/api/v1/` and that is none of the operations of this document - a path\nit does not name, or a method that a path it names does not have - is\nanswered 404 `application/problem+json` with the problem code `NotFound`,\nwhatever its method, and whether or not it carries a credential: it is\nanswered before anybody is asked who sent it, and says nothing that this\ndocument does not. (`HEAD` of a path that has a `GET` is that `GET`\nwithout its body, as HTTP has it; the object and its preview answer it\n405 `MethodNotAllowed`.) `NotFound` is answered for nothing else: a\nbucket, object, version, user or other entity that is not there has a\ncode of its own (`NoSuchBucket`, `NoSuchObject`, `NoSuchVersion`,\n`NoSuchEntity`, `NoSuchSubBucket`), so a client answered `NotFound` for an\noperation of this document is talking to a node of a release that does\nnot have that operation yet.\n\n**A locked session.** A console session that reaches its timeout while its\nuser is uploading objects is not ended: it is locked. A locked session may\nstore objects (`putObject`), read its own state (`getSession`), unlock\n(`unlockSession`) and sign out (`signOut`). Every other operation answers\n423 with the problem code `SessionLocked` - not 401, which says that the\nsession is gone. The password of the session's user unlocks it. A session\nis locked no longer than the uploads last and a moment more, and no longer\nthan the deployment allows; then it has ended, and the answer is 401. An\nAPI key is never locked. What is wrong with a request whoever sent it is\nstill said first: 400, 404, 415 and 501 are answered to a locked session\nas to any other.\n\n**A changed password** ends every console session of the user, at once,\nthat of the user who changed it included: the next request answers 401.\n\n**Idempotency.** Every request that changes something accepts\n`Idempotency-Key`. A request repeated with the same key and the same\ncontent gets the answer the first one got, and changes nothing again; with\nthe same key and other content it is refused with 422; while the first is\nstill being carried out it is refused with 409. Keys are kept for 24 hours.\nA locked session is given no answer that was kept, and none of its\nanswers is: with a key or without, it is answered 423 - but for an upload,\nwhose repeat is answered as ever. A request whose body may hold a secret\n(`createUser`, `updateUser`, `putTarget`) is recognised again by a slow\nhash of the body, never by the body or a plain hash of it; when that hash\ncannot be made at once the request is answered 429 with `Retry-After`,\nand nothing is reserved.\n"
   },
   "servers": [
     {
@@ -32,6 +32,10 @@
     {
       "name": "search",
       "description": "Finding buckets and objects by name."
+    },
+    {
+      "name": "catalogue",
+      "description": "The deployment's catalogue of tags, for users to pick from when tagging (ADR-0018)."
     },
     {
       "name": "users"
@@ -273,6 +277,7 @@
           "buckets"
         ],
         "summary": "Create a bucket",
+        "description": "Makes the bucket. A bucket made through this API or the console by a release that implements tag rules\n(ADR-0018) is given the tag rule `lowercase` from the start: its tags are kept in lower case until its\nrules say otherwise (`/buckets/{bucket}/tag-rules`). One made by an earlier release, or with S3's\n`CreateBucket`, has no tag rules.\n",
         "x-cactusfs-action": "s3:CreateBucket",
         "parameters": [
           {
@@ -861,6 +866,234 @@
         }
       }
     },
+    "/buckets/{bucket}/tags": {
+      "get": {
+        "operationId": "getBucketTags",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the tags of a bucket",
+        "description": "The bucket's tags (ADR-0011), in key order - the same tags S3's `GetBucketTagging` gives. A bucket\nwithout tags is answered too, with none.\n",
+        "x-cactusfs-action": "s3:GetBucketTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tags, or that there are none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketTags"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketTags",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the tags of a bucket",
+        "description": "Replaces the bucket's tags with those in the body: the tags S3's `GetBucketTagging` gives from then on.\nA bucket has at most 50 tags; a key is 1 to 128 characters and a value at most 256, of letters, digits,\nspaces and `+ - = . _ : / @`, and a key is given once. An empty list removes every tag.\n\nWhere the bucket's tag rules say `lowercase` (ADR-0018), keys and values are kept in lower case\nwhatever case they are sent in, and the answer shows them so; two keys that are one key in lower case\nare refused, not merged. Tags that do not keep to these rules are refused with 400 and the problem\ncode `InvalidArgument`, and the tags the bucket had are kept.\n",
+        "x-cactusfs-action": "s3:PutBucketTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketTagsPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set. The tags as they are kept.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketTags"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The tags cannot be kept (`code` is `InvalidArgument`); `detail` says why.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketTags",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the tags of a bucket",
+        "description": "Removes every tag of the bucket. As in S3, it is asked as setting them is.\n",
+        "x-cactusfs-action": "s3:PutBucketTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there were none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/tag-rules": {
+      "get": {
+        "operationId": "getBucketTagRules",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Get the tag rules of a bucket",
+        "description": "The rules for the tags of the bucket's objects (ADR-0018): whether tags are kept in lower case, whether\nan object may carry only tags of the deployment's catalogue (`/tag-definitions`), and which tags every\nobject must carry. A bucket without rules is answered too: `lowercase` and `catalogue_only` are then\nfalse and `required` is empty. A bucket made through this API or the console by a release that\nimplements tag rules lower-cases its tags from the start (see `createBucket`); one made with S3's\n`CreateBucket`, or by an earlier release, does not until its rules say so.\n",
+        "x-cactusfs-action": "s3:GetBucketTagRules",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rules, or that there are none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagRules"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putBucketTagRules",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Set the tag rules of a bucket",
+        "description": "Replaces the bucket's tag rules (ADR-0018). From then on every node of a release that enforces them\nkeeps them by every way an object comes to have tags (but see **Rolling upgrades** below) - this API's upload and `putObjectTags`, and S3's `PutObject`, `CopyObject`, multipart\nuploads and `PutObjectTagging` alike - and `deleteObjectTags` (S3's `DeleteObjectTagging`) is refused\nwhere a tag is required. An object that breaks a rule is refused: here with 400 and the problem code\n`TagRuleViolated`, in S3 with `400 InvalidTag`. Objects that exist are left as they are, and tags\nstored before `lowercase` was set are lower-cased when they are next written.\n\n- `lowercase`: keys and values are kept in lower case whatever case they are sent in; two keys that\n  are one key in lower case are refused, not merged. The keys and values of `required` must then be\n  written in lower case.\n- `catalogue_only`: an object may carry only tags the catalogue defines, each with a value the\n  definition allows.\n- `required`: at most 10 tags every object must carry - or, with `sub_bucket`, every object of that\n  sub-bucket - each with one of `values` when they are given. A key is required once for the bucket\n  and once for each sub-bucket.\n\nRules that do not keep to these bounds are refused with 400 and the problem code `InvalidArgument`,\nand the rules the bucket had are kept. A rule is read once a request: an upload that races a change\nof the rules may be judged by the rules before. A definition of the catalogue whose key a rule\nrequires cannot be deleted.\n\n**Rolling upgrades.** Rules are kept by the nodes of a release that enforces them. While a cluster is\nbeing upgraded to such a release, a node of an older release stores what it is sent without\nchecking it against the rules - through S3 or through this API - and an older node's upload ignores\n`X-CactusFS-Tagging` and stores the object without tags. Objects stored so are left as they are, as\nthose stored before the rules were set.\n\nAnswers 503 until every member of the metadata group is of a release that knows tag rules.\n",
+        "x-cactusfs-action": "s3:PutBucketTagRules",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagRulesPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagRules"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The rules cannot be kept (`code` is `InvalidArgument`); `detail` says why.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteBucketTagRules",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Remove the tag rules of a bucket",
+        "description": "Removes the bucket's tag rules: from then on its tags are kept in the case they are sent in, any tag\nmay be given, and none is required. Tags already kept are not changed. As for CORS and lifecycle\nrules, it is asked as setting them is.\n",
+        "x-cactusfs-action": "s3:PutBucketTagRules",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there were none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
     "/buckets/{bucket}/notifications": {
       "get": {
         "operationId": "getBucketNotifications",
@@ -1351,7 +1584,7 @@
           "objects"
         ],
         "summary": "Upload an object",
-        "description": "Stores the body as the object. `Content-Length` is required. With `Idempotency-Key`, a repeated request\nis recognised by its bucket, key and length, not by its content.\n",
+        "description": "Stores the body as the object. `Content-Length` is required. With `Idempotency-Key`, a repeated request\nis recognised by its bucket, key, length and tags, not by its content.\n\n**Tags.** `X-CactusFS-Tagging` gives the version its tags, as S3's `x-amz-tagging` does: at most 10, a\nkey of 1 to 128 characters and a value of at most 256, of letters, digits, spaces and\n`+ - = . _ : / @`, each key once. Tagging needs `s3:PutObjectTagging` on the object as well, as in S3;\na locked session, which may do nothing but store objects, is refused an upload with tags (423,\n`SessionLocked`). The bucket's tag rules (ADR-0018, `/buckets/{bucket}/tag-rules`) hold for every\nupload that a node of a release that enforces them answers, with tags or without: where they say `lowercase` the tags are kept in lower case, and an\nupload whose tags they do not allow - a required tag missing or with a value it may not have, a tag\noutside the catalogue where only the catalogue's are taken - is refused with 400 and the problem code\n`TagRuleViolated`, whose `detail` names the rule, never a value. Nothing is stored then.\n\nA node of a release older than tags on this upload ignores `X-CactusFS-Tagging` and stores the object\nwithout tags, and checks no tag rule; while a cluster is being upgraded, an upload answered by such a\nnode is stored so (see `putBucketTagRules`).\n",
         "x-cactusfs-action": "s3:PutObject",
         "parameters": [
           {
@@ -1367,6 +1600,15 @@
             "schema": {
               "type": "string",
               "maxLength": 255
+            }
+          },
+          {
+            "name": "X-CactusFS-Tagging",
+            "in": "header",
+            "description": "The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value\nURL-encoded. Given at most once.\n",
+            "schema": {
+              "type": "string",
+              "maxLength": 16384
             }
           },
           {
@@ -1394,6 +1636,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ObjectMetadata"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The bucket's tag rules do not allow the upload's tags, or their absence (`code` is\n`TagRuleViolated`), or the tags cannot be kept at all (`code` is `InvalidArgument`); `detail` says\nwhy. Nothing was stored.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -1510,6 +1762,208 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ObjectAccess"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/object/tags": {
+      "get": {
+        "operationId": "getObjectTags",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Get the tags of an object",
+        "description": "The tags of a version of the object, in key order - the same tags S3's `GetObjectTagging` gives.\n",
+        "x-cactusfs-action": "s3:GetObjectTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "$ref": "#/components/parameters/TaggedVersion"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tags of the version, or that it has none.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectTags"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putObjectTags",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Set the tags of an object",
+        "description": "Replaces the tags of a version of the object with those in the body - S3's `PutObjectTagging`. A\nversion has at most 10 tags; a key is 1 to 128 characters and a value at most 256, of letters, digits,\nspaces and `+ - = . _ : / @`, and a key is given once. An empty list removes every tag, and is asked\nas `deleteObjectTags` is (`s3:DeleteObjectTagging`).\n\nThe bucket's tag rules (ADR-0018, `/buckets/{bucket}/tag-rules`) hold: where they say `lowercase`\nthe tags are kept in lower case and the answer shows them so, and tags they do not allow - a required\ntag missing or with a value it may not have, a tag outside the catalogue where only the catalogue's\nare taken - are refused with 400 and the problem code `TagRuleViolated`, whose `detail` names the\nrule, never a value. The tags the version had are then kept.\n",
+        "x-cactusfs-action": "s3:PutObjectTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "$ref": "#/components/parameters/TaggedVersion"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObjectTagsPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Set. The tags as they are kept.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectTags"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The bucket's tag rules do not allow the tags (`code` is `TagRuleViolated`), or they cannot be kept\nat all (`code` is `InvalidArgument`); `detail` says why.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteObjectTags",
+        "tags": [
+          "objects"
+        ],
+        "summary": "Remove the tags of an object",
+        "description": "Removes every tag of a version of the object - S3's `DeleteObjectTagging`. Where the bucket's tag rules\nrequire a tag of the object it is refused with 400 and the problem code `TagRuleViolated`, and the tags\nare kept.\n",
+        "x-cactusfs-action": "s3:DeleteObjectTagging",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectKey"
+          },
+          {
+            "$ref": "#/components/parameters/TaggedVersion"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or there were none."
+          },
+          "400": {
+            "description": "The bucket's tag rules require a tag of the object (`code` is `TagRuleViolated`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -1768,6 +2222,241 @@
                 }
               }
             },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/tag-definitions": {
+      "get": {
+        "operationId": "listTagDefinitions",
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "List the catalogue of tags",
+        "description": "Every tag the deployment defines for its users to pick (ADR-0018), in key order, at most 200. Every\nbuilt-in role may list them. A deployment whose metadata group is not yet all of a release that knows\nthe catalogue has none.\n",
+        "x-cactusfs-action": "admin:ListTagDefinitions",
+        "responses": {
+          "200": {
+            "description": "The definitions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "$ref": "#/components/schemas/TagDefinition"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createTagDefinition",
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "Define a tag",
+        "description": "Adds a definition to the catalogue: a key, what the tag is for, and optionally the only values it may\nhave. The catalogue is always in lower case: a key or a value that is not is refused, and so is one no\ntag can have (see `TagDefinitionKey`). A key that is defined already is refused with 409 and the\nproblem code `EntityAlreadyExists`; `putTagDefinition` changes it. That is decided before the\ndefinition is stored, not with it: two requests that define the same new key at the same moment may\nboth be answered 201, and the definition is then that of the one stored last. The catalogue holds at most 200 definitions, each with at most 50 values: beyond is\nrefused with 400 and the problem code `InvalidArgument`. Tags outside the catalogue stay allowed,\nbut by a bucket whose tag rules say `catalogue_only`.\n\nAnswers 503 until every member of the metadata group is of a release that knows the catalogue.\n",
+        "x-cactusfs-action": "admin:PutTagDefinition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagDefinitionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Defined.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagDefinition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The definition cannot be kept (`code` is `InvalidArgument`); `detail` says why.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key is defined already (`code` is `EntityAlreadyExists`) - as far as could be seen before the\ndefinition was stored; see above.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/tag-definitions/{key}": {
+      "get": {
+        "operationId": "getTagDefinition",
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "Get a definition of the catalogue",
+        "x-cactusfs-action": "admin:GetTagDefinition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TagDefinitionKeyParam"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The definition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagDefinition"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The catalogue does not define the key (`code` is `NoSuchEntity`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "put": {
+        "operationId": "putTagDefinition",
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "Define a tag, or change its definition",
+        "description": "Defines the key with what the body says, in place of the definition it had: it keeps the time it was\nfirst defined. `values` empty lets the tag have any value. The bounds are those of\n`createTagDefinition`. Changing a definition changes no tag already kept, and no tag rule.\n\nAnswers 503 until every member of the metadata group is of a release that knows the catalogue.\n",
+        "x-cactusfs-action": "admin:PutTagDefinition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TagDefinitionKeyParam"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagDefinitionPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Defined.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagDefinition"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The definition cannot be kept (`code` is `InvalidArgument`); `detail` says why.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteTagDefinition",
+        "tags": [
+          "catalogue"
+        ],
+        "summary": "Remove a definition from the catalogue",
+        "description": "Removes the definition. Tags already kept are not changed. While the tag rules of any bucket require a\ntag with this key it cannot be removed: 409 with the problem code `EntityInUse`, which does not say\nwhich bucket - the caller may not be allowed to know of it.\n",
+        "x-cactusfs-action": "admin:DeleteTagDefinition",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TagDefinitionKeyParam"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed."
+          },
+          "404": {
+            "description": "The catalogue does not define the key (`code` is `NoSuchEntity`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The tag rules of a bucket require a tag with this key (`code` is `EntityInUse`).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3324,6 +4013,24 @@
           "$ref": "#/components/schemas/Name"
         }
       },
+      "TaggedVersion": {
+        "name": "version_id",
+        "in": "query",
+        "description": "The version whose tags are meant - `null`, or the ID of a version. Without it, the current version.",
+        "schema": {
+          "type": "string",
+          "pattern": "^(null|[0-9a-f]{32})$"
+        }
+      },
+      "TagDefinitionKeyParam": {
+        "name": "key",
+        "in": "path",
+        "required": true,
+        "description": "The key the definition is of, in lower case.",
+        "schema": {
+          "$ref": "#/components/schemas/TagDefinitionKey"
+        }
+      },
       "TargetName": {
         "name": "name",
         "in": "path",
@@ -3725,6 +4432,264 @@
         "properties": {
           "policy": {
             "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "TagKey": {
+        "type": "string",
+        "description": "The key of a tag: 1 to 128 characters - letters, digits, spaces and `+ - = . _ : / @`.\n",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "TagValue": {
+        "type": "string",
+        "description": "The value of a tag - at most 256 characters, of those a key may have.",
+        "maxLength": 256
+      },
+      "Tag": {
+        "type": "object",
+        "description": "A tag, as S3 has them on buckets and on versions of objects.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/TagKey"
+          },
+          "value": {
+            "$ref": "#/components/schemas/TagValue"
+          }
+        }
+      },
+      "BucketTags": {
+        "type": "object",
+        "description": "The tags of a bucket, in key order.",
+        "required": [
+          "tags"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          }
+        }
+      },
+      "BucketTagsPut": {
+        "type": "object",
+        "description": "What the tags of a bucket are to be. A list, not a map, so that a key given twice is seen and refused.\n",
+        "required": [
+          "tags"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          }
+        }
+      },
+      "ObjectTags": {
+        "type": "object",
+        "description": "The tags of a version of an object, in key order.",
+        "required": [
+          "version_id",
+          "tags"
+        ],
+        "properties": {
+          "version_id": {
+            "type": "string",
+            "description": "The version whose tags these are - `null`, or the ID of a version."
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          }
+        }
+      },
+      "ObjectTagsPut": {
+        "type": "object",
+        "description": "What the tags of a version are to be. A list, not a map, so that a key given twice is seen and refused.\n",
+        "required": [
+          "tags"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            }
+          }
+        }
+      },
+      "RequiredTag": {
+        "type": "object",
+        "description": "A tag every object of the bucket - or of one of its sub-buckets - must carry.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/TagKey"
+          },
+          "values": {
+            "type": "array",
+            "description": "The only values the tag may have, each given once and each a value a tag can have. Absent or empty,\nany value. The key and the values are compared as they are written - in lower case when the rules\nlower-case tags, and then they must be written so.\n",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/TagValue"
+            }
+          },
+          "sub_bucket": {
+            "$ref": "#/components/schemas/SubBucketNameValue"
+          }
+        }
+      },
+      "TagRules": {
+        "type": "object",
+        "description": "The rules for the tags of a bucket's objects (ADR-0018).",
+        "required": [
+          "lowercase",
+          "catalogue_only",
+          "required"
+        ],
+        "properties": {
+          "lowercase": {
+            "type": "boolean",
+            "description": "Whether keys and values are kept in lower case, whatever case they are sent in."
+          },
+          "catalogue_only": {
+            "type": "boolean",
+            "description": "Whether an object may carry only tags the catalogue defines, with values it allows."
+          },
+          "required": {
+            "type": "array",
+            "description": "The tags every object must carry, in the order they were given.",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/RequiredTag"
+            }
+          }
+        }
+      },
+      "TagRulesPut": {
+        "type": "object",
+        "description": "What the tag rules of a bucket are to be. Every field is given: a PUT replaces the rules whole, and a\nfield left out would otherwise switch a rule off.\n",
+        "required": [
+          "lowercase",
+          "catalogue_only",
+          "required"
+        ],
+        "properties": {
+          "lowercase": {
+            "type": "boolean"
+          },
+          "catalogue_only": {
+            "type": "boolean"
+          },
+          "required": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "$ref": "#/components/schemas/RequiredTag"
+            }
+          }
+        }
+      },
+      "TagDefinitionKey": {
+        "type": "string",
+        "description": "The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces\nand `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.\n",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "TagDefinitionValue": {
+        "type": "string",
+        "description": "A value a definition allows: a value a tag can have (`TagValue`: letters, digits, spaces and\n`+ - = . _ : / @`), in lower case, of at most 256 bytes in UTF-8.\n",
+        "maxLength": 256
+      },
+      "TagDefinition": {
+        "type": "object",
+        "description": "A tag the deployment defines for its users to pick (ADR-0018). Always in lower case.",
+        "required": [
+          "key",
+          "description",
+          "values",
+          "created_at"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/TagDefinitionKey"
+          },
+          "description": {
+            "type": "string",
+            "description": "What the tag is for.",
+            "maxLength": 256
+          },
+          "values": {
+            "type": "array",
+            "description": "The only values the tag may have, in the order they were given. Empty, any value.",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/TagDefinitionValue"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the tag was first defined; changing the definition does not change it."
+          }
+        }
+      },
+      "TagDefinitionCreate": {
+        "type": "object",
+        "description": "A new definition. Without `values` the tag may have any value.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/TagDefinitionKey"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "values": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/TagDefinitionValue"
+            }
+          }
+        }
+      },
+      "TagDefinitionPut": {
+        "type": "object",
+        "description": "What a definition is to be. Both fields are given: a PUT replaces the definition whole, and `values`\nleft out would otherwise let the tag have any value.\n",
+        "required": [
+          "description",
+          "values"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "values": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/TagDefinitionValue"
+            }
           }
         }
       },

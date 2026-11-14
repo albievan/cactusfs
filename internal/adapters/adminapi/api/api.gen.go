@@ -833,6 +833,16 @@ type BucketReplicationStatus struct {
 	TargetState string `json:"target_state"`
 }
 
+// BucketTags The tags of a bucket, in key order.
+type BucketTags struct {
+	Tags []Tag `json:"tags"`
+}
+
+// BucketTagsPut What the tags of a bucket are to be. A list, not a map, so that a key given twice is seen and refused.
+type BucketTagsPut struct {
+	Tags []Tag `json:"tags"`
+}
+
 // BucketUsage defines model for BucketUsage.
 type BucketUsage struct {
 	// Complete False when the bucket has more objects than are counted in one request. Never false when `exact` is true.
@@ -1223,6 +1233,19 @@ type ObjectSummary struct {
 	Size         int64                `json:"size"`
 }
 
+// ObjectTags The tags of a version of an object, in key order.
+type ObjectTags struct {
+	Tags []Tag `json:"tags"`
+
+	// VersionId The version whose tags these are - `null`, or the ID of a version.
+	VersionId string `json:"version_id"`
+}
+
+// ObjectTagsPut What the tags of a version are to be. A list, not a map, so that a key given twice is seen and refused.
+type ObjectTagsPut struct {
+	Tags []Tag `json:"tags"`
+}
+
 // Policy defines model for Policy.
 type Policy struct {
 	BuiltIn   bool      `json:"built_in"`
@@ -1309,6 +1332,21 @@ type ReplicationRule struct {
 
 	// Priority Of the rules that match a key, the one with the greatest priority decides.
 	Priority int `json:"priority"`
+}
+
+// RequiredTag A tag every object of the bucket - or of one of its sub-buckets - must carry.
+type RequiredTag struct {
+	// Key The key of a tag: 1 to 128 characters - letters, digits, spaces and `+ - = . _ : / @`.
+	Key TagKey `json:"key"`
+
+	// SubBucket The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
+	// letter or digit. The first segment of the keys that belong to it.
+	SubBucket *SubBucketNameValue `json:"sub_bucket,omitempty"`
+
+	// Values The only values the tag may have, each given once and each a value a tag can have. Absent or empty,
+	// any value. The key and the values are compared as they are written - in lower case when the rules
+	// lower-case tags, and then they must be written so.
+	Values *[]TagValue `json:"values,omitempty"`
 }
 
 // Role defines model for Role.
@@ -1606,6 +1644,82 @@ type SubBucketSummary struct {
 	// letter or digit. The first segment of the keys that belong to it.
 	Name SubBucketNameValue `json:"name"`
 }
+
+// Tag A tag, as S3 has them on buckets and on versions of objects.
+type Tag struct {
+	// Key The key of a tag: 1 to 128 characters - letters, digits, spaces and `+ - = . _ : / @`.
+	Key TagKey `json:"key"`
+
+	// Value The value of a tag - at most 256 characters, of those a key may have.
+	Value TagValue `json:"value"`
+}
+
+// TagDefinition A tag the deployment defines for its users to pick (ADR-0018). Always in lower case.
+type TagDefinition struct {
+	// CreatedAt When the tag was first defined; changing the definition does not change it.
+	CreatedAt time.Time `json:"created_at"`
+
+	// Description What the tag is for.
+	Description string `json:"description"`
+
+	// Key The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces
+	// and `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.
+	Key TagDefinitionKey `json:"key"`
+
+	// Values The only values the tag may have, in the order they were given. Empty, any value.
+	Values []TagDefinitionValue `json:"values"`
+}
+
+// TagDefinitionCreate A new definition. Without `values` the tag may have any value.
+type TagDefinitionCreate struct {
+	Description *string `json:"description,omitempty"`
+
+	// Key The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces
+	// and `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.
+	Key    TagDefinitionKey      `json:"key"`
+	Values *[]TagDefinitionValue `json:"values,omitempty"`
+}
+
+// TagDefinitionKey The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces
+// and `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.
+type TagDefinitionKey = string
+
+// TagDefinitionPut What a definition is to be. Both fields are given: a PUT replaces the definition whole, and `values`
+// left out would otherwise let the tag have any value.
+type TagDefinitionPut struct {
+	Description string               `json:"description"`
+	Values      []TagDefinitionValue `json:"values"`
+}
+
+// TagDefinitionValue A value a definition allows: a value a tag can have (`TagValue`: letters, digits, spaces and
+// `+ - = . _ : / @`), in lower case, of at most 256 bytes in UTF-8.
+type TagDefinitionValue = string
+
+// TagKey The key of a tag: 1 to 128 characters - letters, digits, spaces and `+ - = . _ : / @`.
+type TagKey = string
+
+// TagRules The rules for the tags of a bucket's objects (ADR-0018).
+type TagRules struct {
+	// CatalogueOnly Whether an object may carry only tags the catalogue defines, with values it allows.
+	CatalogueOnly bool `json:"catalogue_only"`
+
+	// Lowercase Whether keys and values are kept in lower case, whatever case they are sent in.
+	Lowercase bool `json:"lowercase"`
+
+	// Required The tags every object must carry, in the order they were given.
+	Required []RequiredTag `json:"required"`
+}
+
+// TagRulesPut What the tag rules of a bucket are to be. Every field is given: a PUT replaces the rules whole, and a
+// field left out would otherwise switch a rule off.
+type TagRulesPut struct {
+	CatalogueOnly bool          `json:"catalogue_only"`
+	Lowercase     bool          `json:"lowercase"`
+	Required      []RequiredTag `json:"required"`
+}
+
+// TagValue The value of a tag - at most 256 characters, of those a key may have.
+type TagValue = string
 
 // Target A place outside the deployment that it sends to, as it may be shown - with no credential, and
 // without the path of its endpoint, which may be one.
@@ -1963,6 +2077,13 @@ type ObjectKey = string
 // letter or digit. The first segment of the keys that belong to it.
 type SubBucketName = SubBucketNameValue
 
+// TagDefinitionKeyParam The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces
+// and `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.
+type TagDefinitionKeyParam = TagDefinitionKey
+
+// TaggedVersion defines model for TaggedVersion.
+type TaggedVersion = string
+
 // TargetName The name of a target. Lower-case letters, digits and hyphens; it is part of the ARNs the S3 API uses.
 type TargetName = TargetNameValue
 
@@ -2048,6 +2169,10 @@ type PutObjectParams struct {
 	// ContentType The media type to store with the object.
 	ContentType *string `json:"Content-Type,omitempty"`
 
+	// XCactusFSTagging The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value
+	// URL-encoded. Given at most once.
+	XCactusFSTagging *string `json:"X-CactusFS-Tagging,omitempty"`
+
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -2077,6 +2202,45 @@ type PreviewObjectParams struct {
 
 	// VersionId The version to show - `null`, or the ID of a version. Without it, the current version.
 	VersionId *string `form:"version_id,omitempty" json:"version_id,omitempty"`
+}
+
+// DeleteObjectTagsParams defines parameters for DeleteObjectTags.
+type DeleteObjectTagsParams struct {
+	// Key The key of the object.
+	Key ObjectKey `form:"key" json:"key"`
+
+	// VersionId The version whose tags are meant - `null`, or the ID of a version. Without it, the current version.
+	VersionId *TaggedVersion `form:"version_id,omitempty" json:"version_id,omitempty"`
+
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// GetObjectTagsParams defines parameters for GetObjectTags.
+type GetObjectTagsParams struct {
+	// Key The key of the object.
+	Key ObjectKey `form:"key" json:"key"`
+
+	// VersionId The version whose tags are meant - `null`, or the ID of a version. Without it, the current version.
+	VersionId *TaggedVersion `form:"version_id,omitempty" json:"version_id,omitempty"`
+}
+
+// PutObjectTagsParams defines parameters for PutObjectTags.
+type PutObjectTagsParams struct {
+	// Key The key of the object.
+	Key ObjectKey `form:"key" json:"key"`
+
+	// VersionId The version whose tags are meant - `null`, or the ID of a version. Without it, the current version.
+	VersionId *TaggedVersion `form:"version_id,omitempty" json:"version_id,omitempty"`
+
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
 // ListObjectsParams defines parameters for ListObjects.
@@ -2180,6 +2344,42 @@ type DeleteSubBucketParams struct {
 
 // PutSubBucketParams defines parameters for PutSubBucket.
 type PutSubBucketParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteBucketTagRulesParams defines parameters for DeleteBucketTagRules.
+type DeleteBucketTagRulesParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketTagRulesParams defines parameters for PutBucketTagRules.
+type PutBucketTagRulesParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteBucketTagsParams defines parameters for DeleteBucketTags.
+type DeleteBucketTagsParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutBucketTagsParams defines parameters for PutBucketTags.
+type PutBucketTagsParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -2325,6 +2525,33 @@ type UnlockSessionParams struct {
 	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
+// CreateTagDefinitionParams defines parameters for CreateTagDefinition.
+type CreateTagDefinitionParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// DeleteTagDefinitionParams defines parameters for DeleteTagDefinition.
+type DeleteTagDefinitionParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// PutTagDefinitionParams defines parameters for PutTagDefinition.
+type PutTagDefinitionParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // DeleteTargetParams defines parameters for DeleteTarget.
 type DeleteTargetParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -2403,6 +2630,9 @@ type CreateBucketJSONRequestBody = BucketCreate
 // PutBucketNotificationsJSONRequestBody defines body for PutBucketNotifications for application/json ContentType.
 type PutBucketNotificationsJSONRequestBody = BucketNotificationsPut
 
+// PutObjectTagsJSONRequestBody defines body for PutObjectTags for application/json ContentType.
+type PutObjectTagsJSONRequestBody = ObjectTagsPut
+
 // PutBucketPolicyJSONRequestBody defines body for PutBucketPolicy for application/json ContentType.
 type PutBucketPolicyJSONRequestBody = BucketPolicyPut
 
@@ -2417,6 +2647,12 @@ type PutBucketReplicationJSONRequestBody = BucketReplicationPut
 
 // PutSubBucketJSONRequestBody defines body for PutSubBucket for application/json ContentType.
 type PutSubBucketJSONRequestBody = SubBucketPut
+
+// PutBucketTagRulesJSONRequestBody defines body for PutBucketTagRules for application/json ContentType.
+type PutBucketTagRulesJSONRequestBody = TagRulesPut
+
+// PutBucketTagsJSONRequestBody defines body for PutBucketTags for application/json ContentType.
+type PutBucketTagsJSONRequestBody = BucketTagsPut
 
 // CreateGroupJSONRequestBody defines body for CreateGroup for application/json ContentType.
 type CreateGroupJSONRequestBody = GroupCreate
@@ -2441,6 +2677,12 @@ type SignInJSONRequestBody = SignInRequest
 
 // UnlockSessionJSONRequestBody defines body for UnlockSession for application/json ContentType.
 type UnlockSessionJSONRequestBody = UnlockRequest
+
+// CreateTagDefinitionJSONRequestBody defines body for CreateTagDefinition for application/json ContentType.
+type CreateTagDefinitionJSONRequestBody = TagDefinitionCreate
+
+// PutTagDefinitionJSONRequestBody defines body for PutTagDefinition for application/json ContentType.
+type PutTagDefinitionJSONRequestBody = TagDefinitionPut
 
 // PutTargetJSONRequestBody defines body for PutTarget for application/json ContentType.
 type PutTargetJSONRequestBody = TargetPut
@@ -2501,6 +2743,15 @@ type ServerInterface interface {
 	// PreviewObject Get an object's bytes for the console to show
 	// (GET /buckets/{bucket}/object/preview)
 	PreviewObject(w http.ResponseWriter, r *http.Request, bucket BucketName, params PreviewObjectParams)
+	// DeleteObjectTags Remove the tags of an object
+	// (DELETE /buckets/{bucket}/object/tags)
+	DeleteObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteObjectTagsParams)
+	// GetObjectTags Get the tags of an object
+	// (GET /buckets/{bucket}/object/tags)
+	GetObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectTagsParams)
+	// PutObjectTags Set the tags of an object
+	// (PUT /buckets/{bucket}/object/tags)
+	PutObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutObjectTagsParams)
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(w http.ResponseWriter, r *http.Request, bucket BucketName, params ListObjectsParams)
@@ -2555,6 +2806,24 @@ type ServerInterface interface {
 	// PutSubBucket Create a sub-bucket, or set its policy
 	// (PUT /buckets/{bucket}/subbuckets/{name})
 	PutSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params PutSubBucketParams)
+	// DeleteBucketTagRules Remove the tag rules of a bucket
+	// (DELETE /buckets/{bucket}/tag-rules)
+	DeleteBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketTagRulesParams)
+	// GetBucketTagRules Get the tag rules of a bucket
+	// (GET /buckets/{bucket}/tag-rules)
+	GetBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketTagRules Set the tag rules of a bucket
+	// (PUT /buckets/{bucket}/tag-rules)
+	PutBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketTagRulesParams)
+	// DeleteBucketTags Remove the tags of a bucket
+	// (DELETE /buckets/{bucket}/tags)
+	DeleteBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketTagsParams)
+	// GetBucketTags Get the tags of a bucket
+	// (GET /buckets/{bucket}/tags)
+	GetBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName)
+	// PutBucketTags Set the tags of a bucket
+	// (PUT /buckets/{bucket}/tags)
+	PutBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketTagsParams)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(w http.ResponseWriter, r *http.Request, bucket BucketName)
@@ -2633,6 +2902,21 @@ type ServerInterface interface {
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(w http.ResponseWriter, r *http.Request)
+	// ListTagDefinitions List the catalogue of tags
+	// (GET /tag-definitions)
+	ListTagDefinitions(w http.ResponseWriter, r *http.Request)
+	// CreateTagDefinition Define a tag
+	// (POST /tag-definitions)
+	CreateTagDefinition(w http.ResponseWriter, r *http.Request, params CreateTagDefinitionParams)
+	// DeleteTagDefinition Remove a definition from the catalogue
+	// (DELETE /tag-definitions/{key})
+	DeleteTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam, params DeleteTagDefinitionParams)
+	// GetTagDefinition Get a definition of the catalogue
+	// (GET /tag-definitions/{key})
+	GetTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam)
+	// PutTagDefinition Define a tag, or change its definition
+	// (PUT /tag-definitions/{key})
+	PutTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam, params PutTagDefinitionParams)
 	// ListTargets List the targets
 	// (GET /targets)
 	ListTargets(w http.ResponseWriter, r *http.Request)
@@ -3343,6 +3627,25 @@ func (siw *ServerInterfaceWrapper) PutObject(w http.ResponseWriter, r *http.Requ
 
 	}
 
+	// ------------- Optional header parameter "X-CactusFS-Tagging" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CactusFS-Tagging")]; found {
+		var XCactusFSTagging string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CactusFS-Tagging", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CactusFS-Tagging", valueList[0], &XCactusFSTagging, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CactusFS-Tagging", Err: err})
+			return
+		}
+
+		params.XCactusFSTagging = &XCactusFSTagging
+
+	}
+
 	// ------------- Optional header parameter "Idempotency-Key" -------------
 	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
 		var IdempotencyKey IdempotencyKey
@@ -3556,6 +3859,272 @@ func (siw *ServerInterfaceWrapper) PreviewObject(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PreviewObject(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteObjectTags operation middleware
+func (siw *ServerInterfaceWrapper) DeleteObjectTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteObjectTagsParams
+
+	// ------------- Required query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "version_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "version_id", r.URL.Query(), &params.VersionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		}
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteObjectTags(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetObjectTags operation middleware
+func (siw *ServerInterfaceWrapper) GetObjectTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetObjectTagsParams
+
+	// ------------- Required query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "version_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "version_id", r.URL.Query(), &params.VersionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetObjectTags(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutObjectTags operation middleware
+func (siw *ServerInterfaceWrapper) PutObjectTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutObjectTagsParams
+
+	// ------------- Required query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "version_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "version_id", r.URL.Query(), &params.VersionId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version_id", Err: err})
+		}
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutObjectTags(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -4675,6 +5244,376 @@ func (siw *ServerInterfaceWrapper) PutSubBucket(w http.ResponseWriter, r *http.R
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutSubBucket(w, r, bucket, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBucketTagRules operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketTagRules(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketTagRulesParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketTagRules(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketTagRules operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketTagRules(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketTagRules(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketTagRules operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketTagRules(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketTagRulesParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketTagRules(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBucketTags operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBucketTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteBucketTagsParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBucketTags(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBucketTags operation middleware
+func (siw *ServerInterfaceWrapper) GetBucketTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBucketTags(w, r, bucket)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutBucketTags operation middleware
+func (siw *ServerInterfaceWrapper) PutBucketTags(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutBucketTagsParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutBucketTags(w, r, bucket, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6023,6 +6962,279 @@ func (siw *ServerInterfaceWrapper) GetSettings(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// ListTagDefinitions operation middleware
+func (siw *ServerInterfaceWrapper) ListTagDefinitions(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTagDefinitions(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateTagDefinition operation middleware
+func (siw *ServerInterfaceWrapper) CreateTagDefinition(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CreateTagDefinitionParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateTagDefinition(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteTagDefinition operation middleware
+func (siw *ServerInterfaceWrapper) DeleteTagDefinition(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key TagDefinitionKeyParam
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", r.PathValue("key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteTagDefinitionParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteTagDefinition(w, r, key, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTagDefinition operation middleware
+func (siw *ServerInterfaceWrapper) GetTagDefinition(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key TagDefinitionKeyParam
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", r.PathValue("key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTagDefinition(w, r, key)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutTagDefinition operation middleware
+func (siw *ServerInterfaceWrapper) PutTagDefinition(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "key" -------------
+	var key TagDefinitionKeyParam
+
+	err = runtime.BindStyledParameterWithOptions("simple", "key", r.PathValue("key"), &key, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutTagDefinitionParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutTagDefinition(w, r, key, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListTargets operation middleware
 func (siw *ServerInterfaceWrapper) ListTargets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -6960,6 +8172,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.DeleteSubBucket)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.GetSubBucket)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.PutSubBucket)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.DeleteBucketTags)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.GetBucketTags)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.PutBucketTags)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/tag-rules", wrapper.DeleteBucketTagRules)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/tag-rules", wrapper.GetBucketTagRules)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/tag-rules", wrapper.PutBucketTagRules)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.DeleteBucketNotifications)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.GetBucketNotifications)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/notifications", wrapper.PutBucketNotifications)
@@ -6976,8 +8194,16 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/object", wrapper.PutObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/metadata", wrapper.GetObjectMetadata)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/access", wrapper.GetObjectAccess)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/object/tags", wrapper.DeleteObjectTags)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/tags", wrapper.GetObjectTags)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/object/tags", wrapper.PutObjectTags)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/object/preview", wrapper.PreviewObject)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/search", wrapper.Search)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/tag-definitions", wrapper.ListTagDefinitions)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/tag-definitions", wrapper.CreateTagDefinition)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/tag-definitions/{key}", wrapper.DeleteTagDefinition)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/tag-definitions/{key}", wrapper.GetTagDefinition)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/tag-definitions/{key}", wrapper.PutTagDefinition)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/users", wrapper.ListUsers)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/users", wrapper.CreateUser)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/users/{name}", wrapper.DeleteUser)
@@ -7428,6 +8654,19 @@ func (response PutObject200JSONResponse) VisitPutObjectResponse(w http.ResponseW
 	return err
 }
 
+type PutObject400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutObject400ApplicationProblemPlusJSONResponse) VisitPutObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type PutObject403ApplicationProblemPlusJSONResponse Problem
 
 func (response PutObject403ApplicationProblemPlusJSONResponse) VisitPutObjectResponse(w http.ResponseWriter) error {
@@ -7686,6 +8925,219 @@ type PreviewObjectdefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response PreviewObjectdefaultApplicationProblemPlusJSONResponse) VisitPreviewObjectResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteObjectTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteObjectTagsParams
+}
+
+type DeleteObjectTagsResponseObject interface {
+	VisitDeleteObjectTagsResponse(w http.ResponseWriter) error
+}
+
+type DeleteObjectTags204Response struct{}
+
+func (response DeleteObjectTags204Response) VisitDeleteObjectTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteObjectTags400ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteObjectTags400ApplicationProblemPlusJSONResponse) VisitDeleteObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteObjectTags404ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteObjectTags404ApplicationProblemPlusJSONResponse) VisitDeleteObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteObjectTags405ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteObjectTags405ApplicationProblemPlusJSONResponse) VisitDeleteObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(405)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteObjectTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteObjectTagsdefaultApplicationProblemPlusJSONResponse) VisitDeleteObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params GetObjectTagsParams
+}
+
+type GetObjectTagsResponseObject interface {
+	VisitGetObjectTagsResponse(w http.ResponseWriter) error
+}
+
+type GetObjectTags200JSONResponse ObjectTags
+
+func (response GetObjectTags200JSONResponse) VisitGetObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectTags404ApplicationProblemPlusJSONResponse Problem
+
+func (response GetObjectTags404ApplicationProblemPlusJSONResponse) VisitGetObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectTags405ApplicationProblemPlusJSONResponse Problem
+
+func (response GetObjectTags405ApplicationProblemPlusJSONResponse) VisitGetObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(405)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetObjectTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetObjectTagsdefaultApplicationProblemPlusJSONResponse) VisitGetObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObjectTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutObjectTagsParams
+	Body   *PutObjectTagsJSONRequestBody
+}
+
+type PutObjectTagsResponseObject interface {
+	VisitPutObjectTagsResponse(w http.ResponseWriter) error
+}
+
+type PutObjectTags200JSONResponse ObjectTags
+
+func (response PutObjectTags200JSONResponse) VisitPutObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObjectTags400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutObjectTags400ApplicationProblemPlusJSONResponse) VisitPutObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObjectTags404ApplicationProblemPlusJSONResponse Problem
+
+func (response PutObjectTags404ApplicationProblemPlusJSONResponse) VisitPutObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObjectTags405ApplicationProblemPlusJSONResponse Problem
+
+func (response PutObjectTags405ApplicationProblemPlusJSONResponse) VisitPutObjectTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(405)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutObjectTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutObjectTagsdefaultApplicationProblemPlusJSONResponse) VisitPutObjectTagsResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -8451,6 +9903,248 @@ type PutSubBucketdefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response PutSubBucketdefaultApplicationProblemPlusJSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBucketTagRulesRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketTagRulesParams
+}
+
+type DeleteBucketTagRulesResponseObject interface {
+	VisitDeleteBucketTagRulesResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketTagRules204Response struct{}
+
+func (response DeleteBucketTagRules204Response) VisitDeleteBucketTagRulesResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketTagRulesdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketTagRulesdefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketTagRulesRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketTagRulesResponseObject interface {
+	VisitGetBucketTagRulesResponse(w http.ResponseWriter) error
+}
+
+type GetBucketTagRules200JSONResponse TagRules
+
+func (response GetBucketTagRules200JSONResponse) VisitGetBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketTagRulesdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketTagRulesdefaultApplicationProblemPlusJSONResponse) VisitGetBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTagRulesRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketTagRulesParams
+	Body   *PutBucketTagRulesJSONRequestBody
+}
+
+type PutBucketTagRulesResponseObject interface {
+	VisitPutBucketTagRulesResponse(w http.ResponseWriter) error
+}
+
+type PutBucketTagRules200JSONResponse TagRules
+
+func (response PutBucketTagRules200JSONResponse) VisitPutBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTagRules400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutBucketTagRules400ApplicationProblemPlusJSONResponse) VisitPutBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTagRulesdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketTagRulesdefaultApplicationProblemPlusJSONResponse) VisitPutBucketTagRulesResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBucketTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params DeleteBucketTagsParams
+}
+
+type DeleteBucketTagsResponseObject interface {
+	VisitDeleteBucketTagsResponse(w http.ResponseWriter) error
+}
+
+type DeleteBucketTags204Response struct{}
+
+func (response DeleteBucketTags204Response) VisitDeleteBucketTagsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBucketTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteBucketTagsdefaultApplicationProblemPlusJSONResponse) VisitDeleteBucketTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+}
+
+type GetBucketTagsResponseObject interface {
+	VisitGetBucketTagsResponse(w http.ResponseWriter) error
+}
+
+type GetBucketTags200JSONResponse BucketTags
+
+func (response GetBucketTags200JSONResponse) VisitGetBucketTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBucketTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetBucketTagsdefaultApplicationProblemPlusJSONResponse) VisitGetBucketTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTagsRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params PutBucketTagsParams
+	Body   *PutBucketTagsJSONRequestBody
+}
+
+type PutBucketTagsResponseObject interface {
+	VisitPutBucketTagsResponse(w http.ResponseWriter) error
+}
+
+type PutBucketTags200JSONResponse BucketTags
+
+func (response PutBucketTags200JSONResponse) VisitPutBucketTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTags400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutBucketTags400ApplicationProblemPlusJSONResponse) VisitPutBucketTagsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutBucketTagsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutBucketTagsdefaultApplicationProblemPlusJSONResponse) VisitPutBucketTagsResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -9454,6 +11148,265 @@ func (response GetSettingsdefaultApplicationProblemPlusJSONResponse) VisitGetSet
 	return err
 }
 
+type ListTagDefinitionsRequestObject struct{}
+
+type ListTagDefinitionsResponseObject interface {
+	VisitListTagDefinitionsResponse(w http.ResponseWriter) error
+}
+
+type ListTagDefinitions200JSONResponse []TagDefinition
+
+func (response ListTagDefinitions200JSONResponse) VisitListTagDefinitionsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListTagDefinitionsdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ListTagDefinitionsdefaultApplicationProblemPlusJSONResponse) VisitListTagDefinitionsResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTagDefinitionRequestObject struct {
+	Params CreateTagDefinitionParams
+	Body   *CreateTagDefinitionJSONRequestBody
+}
+
+type CreateTagDefinitionResponseObject interface {
+	VisitCreateTagDefinitionResponse(w http.ResponseWriter) error
+}
+
+type CreateTagDefinition201JSONResponse TagDefinition
+
+func (response CreateTagDefinition201JSONResponse) VisitCreateTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTagDefinition400ApplicationProblemPlusJSONResponse Problem
+
+func (response CreateTagDefinition400ApplicationProblemPlusJSONResponse) VisitCreateTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTagDefinition409ApplicationProblemPlusJSONResponse Problem
+
+func (response CreateTagDefinition409ApplicationProblemPlusJSONResponse) VisitCreateTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateTagDefinitiondefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response CreateTagDefinitiondefaultApplicationProblemPlusJSONResponse) VisitCreateTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteTagDefinitionRequestObject struct {
+	Key    TagDefinitionKeyParam `json:"key"`
+	Params DeleteTagDefinitionParams
+}
+
+type DeleteTagDefinitionResponseObject interface {
+	VisitDeleteTagDefinitionResponse(w http.ResponseWriter) error
+}
+
+type DeleteTagDefinition204Response struct{}
+
+func (response DeleteTagDefinition204Response) VisitDeleteTagDefinitionResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteTagDefinition404ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteTagDefinition404ApplicationProblemPlusJSONResponse) VisitDeleteTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteTagDefinition409ApplicationProblemPlusJSONResponse Problem
+
+func (response DeleteTagDefinition409ApplicationProblemPlusJSONResponse) VisitDeleteTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteTagDefinitiondefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response DeleteTagDefinitiondefaultApplicationProblemPlusJSONResponse) VisitDeleteTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTagDefinitionRequestObject struct {
+	Key TagDefinitionKeyParam `json:"key"`
+}
+
+type GetTagDefinitionResponseObject interface {
+	VisitGetTagDefinitionResponse(w http.ResponseWriter) error
+}
+
+type GetTagDefinition200JSONResponse TagDefinition
+
+func (response GetTagDefinition200JSONResponse) VisitGetTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTagDefinition404ApplicationProblemPlusJSONResponse Problem
+
+func (response GetTagDefinition404ApplicationProblemPlusJSONResponse) VisitGetTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetTagDefinitiondefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetTagDefinitiondefaultApplicationProblemPlusJSONResponse) VisitGetTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutTagDefinitionRequestObject struct {
+	Key    TagDefinitionKeyParam `json:"key"`
+	Params PutTagDefinitionParams
+	Body   *PutTagDefinitionJSONRequestBody
+}
+
+type PutTagDefinitionResponseObject interface {
+	VisitPutTagDefinitionResponse(w http.ResponseWriter) error
+}
+
+type PutTagDefinition200JSONResponse TagDefinition
+
+func (response PutTagDefinition200JSONResponse) VisitPutTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutTagDefinition400ApplicationProblemPlusJSONResponse Problem
+
+func (response PutTagDefinition400ApplicationProblemPlusJSONResponse) VisitPutTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PutTagDefinitiondefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response PutTagDefinitiondefaultApplicationProblemPlusJSONResponse) VisitPutTagDefinitionResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListTargetsRequestObject struct{}
 
 type ListTargetsResponseObject interface {
@@ -10322,6 +12275,15 @@ type StrictServerInterface interface {
 	// PreviewObject Get an object's bytes for the console to show
 	// (GET /buckets/{bucket}/object/preview)
 	PreviewObject(ctx context.Context, request PreviewObjectRequestObject) (PreviewObjectResponseObject, error)
+	// DeleteObjectTags Remove the tags of an object
+	// (DELETE /buckets/{bucket}/object/tags)
+	DeleteObjectTags(ctx context.Context, request DeleteObjectTagsRequestObject) (DeleteObjectTagsResponseObject, error)
+	// GetObjectTags Get the tags of an object
+	// (GET /buckets/{bucket}/object/tags)
+	GetObjectTags(ctx context.Context, request GetObjectTagsRequestObject) (GetObjectTagsResponseObject, error)
+	// PutObjectTags Set the tags of an object
+	// (PUT /buckets/{bucket}/object/tags)
+	PutObjectTags(ctx context.Context, request PutObjectTagsRequestObject) (PutObjectTagsResponseObject, error)
 	// ListObjects List the objects of a bucket
 	// (GET /buckets/{bucket}/objects)
 	ListObjects(ctx context.Context, request ListObjectsRequestObject) (ListObjectsResponseObject, error)
@@ -10376,6 +12338,24 @@ type StrictServerInterface interface {
 	// PutSubBucket Create a sub-bucket, or set its policy
 	// (PUT /buckets/{bucket}/subbuckets/{name})
 	PutSubBucket(ctx context.Context, request PutSubBucketRequestObject) (PutSubBucketResponseObject, error)
+	// DeleteBucketTagRules Remove the tag rules of a bucket
+	// (DELETE /buckets/{bucket}/tag-rules)
+	DeleteBucketTagRules(ctx context.Context, request DeleteBucketTagRulesRequestObject) (DeleteBucketTagRulesResponseObject, error)
+	// GetBucketTagRules Get the tag rules of a bucket
+	// (GET /buckets/{bucket}/tag-rules)
+	GetBucketTagRules(ctx context.Context, request GetBucketTagRulesRequestObject) (GetBucketTagRulesResponseObject, error)
+	// PutBucketTagRules Set the tag rules of a bucket
+	// (PUT /buckets/{bucket}/tag-rules)
+	PutBucketTagRules(ctx context.Context, request PutBucketTagRulesRequestObject) (PutBucketTagRulesResponseObject, error)
+	// DeleteBucketTags Remove the tags of a bucket
+	// (DELETE /buckets/{bucket}/tags)
+	DeleteBucketTags(ctx context.Context, request DeleteBucketTagsRequestObject) (DeleteBucketTagsResponseObject, error)
+	// GetBucketTags Get the tags of a bucket
+	// (GET /buckets/{bucket}/tags)
+	GetBucketTags(ctx context.Context, request GetBucketTagsRequestObject) (GetBucketTagsResponseObject, error)
+	// PutBucketTags Set the tags of a bucket
+	// (PUT /buckets/{bucket}/tags)
+	PutBucketTags(ctx context.Context, request PutBucketTagsRequestObject) (PutBucketTagsResponseObject, error)
 	// GetBucketUsage How many objects a bucket holds, and their size together
 	// (GET /buckets/{bucket}/usage)
 	GetBucketUsage(ctx context.Context, request GetBucketUsageRequestObject) (GetBucketUsageResponseObject, error)
@@ -10454,6 +12434,21 @@ type StrictServerInterface interface {
 	// GetSettings How every node of the deployment is configured
 	// (GET /settings)
 	GetSettings(ctx context.Context, request GetSettingsRequestObject) (GetSettingsResponseObject, error)
+	// ListTagDefinitions List the catalogue of tags
+	// (GET /tag-definitions)
+	ListTagDefinitions(ctx context.Context, request ListTagDefinitionsRequestObject) (ListTagDefinitionsResponseObject, error)
+	// CreateTagDefinition Define a tag
+	// (POST /tag-definitions)
+	CreateTagDefinition(ctx context.Context, request CreateTagDefinitionRequestObject) (CreateTagDefinitionResponseObject, error)
+	// DeleteTagDefinition Remove a definition from the catalogue
+	// (DELETE /tag-definitions/{key})
+	DeleteTagDefinition(ctx context.Context, request DeleteTagDefinitionRequestObject) (DeleteTagDefinitionResponseObject, error)
+	// GetTagDefinition Get a definition of the catalogue
+	// (GET /tag-definitions/{key})
+	GetTagDefinition(ctx context.Context, request GetTagDefinitionRequestObject) (GetTagDefinitionResponseObject, error)
+	// PutTagDefinition Define a tag, or change its definition
+	// (PUT /tag-definitions/{key})
+	PutTagDefinition(ctx context.Context, request PutTagDefinitionRequestObject) (PutTagDefinitionResponseObject, error)
 	// ListTargets List the targets
 	// (GET /targets)
 	ListTargets(ctx context.Context, request ListTargetsRequestObject) (ListTargetsResponseObject, error)
@@ -10927,6 +12922,94 @@ func (sh *strictHandler) PreviewObject(w http.ResponseWriter, r *http.Request, b
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PreviewObjectResponseObject); ok {
 		if err := validResponse.VisitPreviewObjectResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteObjectTags operation middleware
+func (sh *strictHandler) DeleteObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteObjectTagsParams) {
+	var request DeleteObjectTagsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteObjectTags(ctx, request.(DeleteObjectTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteObjectTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteObjectTagsResponseObject); ok {
+		if err := validResponse.VisitDeleteObjectTagsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetObjectTags operation middleware
+func (sh *strictHandler) GetObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params GetObjectTagsParams) {
+	var request GetObjectTagsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetObjectTags(ctx, request.(GetObjectTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetObjectTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetObjectTagsResponseObject); ok {
+		if err := validResponse.VisitGetObjectTagsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutObjectTags operation middleware
+func (sh *strictHandler) PutObjectTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutObjectTagsParams) {
+	var request PutObjectTagsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutObjectTagsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutObjectTags(ctx, request.(PutObjectTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutObjectTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutObjectTagsResponseObject); ok {
+		if err := validResponse.VisitPutObjectTagsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -11444,6 +13527,180 @@ func (sh *strictHandler) PutSubBucket(w http.ResponseWriter, r *http.Request, bu
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PutSubBucketResponseObject); ok {
 		if err := validResponse.VisitPutSubBucketResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteBucketTagRules operation middleware
+func (sh *strictHandler) DeleteBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketTagRulesParams) {
+	var request DeleteBucketTagRulesRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketTagRules(ctx, request.(DeleteBucketTagRulesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketTagRules")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketTagRulesResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketTagRulesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketTagRules operation middleware
+func (sh *strictHandler) GetBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketTagRulesRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketTagRules(ctx, request.(GetBucketTagRulesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketTagRules")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketTagRulesResponseObject); ok {
+		if err := validResponse.VisitGetBucketTagRulesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketTagRules operation middleware
+func (sh *strictHandler) PutBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketTagRulesParams) {
+	var request PutBucketTagRulesRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketTagRulesJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketTagRules(ctx, request.(PutBucketTagRulesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketTagRules")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketTagRulesResponseObject); ok {
+		if err := validResponse.VisitPutBucketTagRulesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteBucketTags operation middleware
+func (sh *strictHandler) DeleteBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketTagsParams) {
+	var request DeleteBucketTagsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBucketTags(ctx, request.(DeleteBucketTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBucketTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBucketTagsResponseObject); ok {
+		if err := validResponse.VisitDeleteBucketTagsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBucketTags operation middleware
+func (sh *strictHandler) GetBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName) {
+	var request GetBucketTagsRequestObject
+
+	request.Bucket = bucket
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBucketTags(ctx, request.(GetBucketTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBucketTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBucketTagsResponseObject); ok {
+		if err := validResponse.VisitGetBucketTagsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutBucketTags operation middleware
+func (sh *strictHandler) PutBucketTags(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketTagsParams) {
+	var request PutBucketTagsRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body PutBucketTagsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutBucketTags(ctx, request.(PutBucketTagsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutBucketTags")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutBucketTagsResponseObject); ok {
+		if err := validResponse.VisitPutBucketTagsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -12170,6 +14427,150 @@ func (sh *strictHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetSettingsResponseObject); ok {
 		if err := validResponse.VisitGetSettingsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListTagDefinitions operation middleware
+func (sh *strictHandler) ListTagDefinitions(w http.ResponseWriter, r *http.Request) {
+	var request ListTagDefinitionsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListTagDefinitions(ctx, request.(ListTagDefinitionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListTagDefinitions")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListTagDefinitionsResponseObject); ok {
+		if err := validResponse.VisitListTagDefinitionsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateTagDefinition operation middleware
+func (sh *strictHandler) CreateTagDefinition(w http.ResponseWriter, r *http.Request, params CreateTagDefinitionParams) {
+	var request CreateTagDefinitionRequestObject
+
+	request.Params = params
+
+	var body CreateTagDefinitionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateTagDefinition(ctx, request.(CreateTagDefinitionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateTagDefinition")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateTagDefinitionResponseObject); ok {
+		if err := validResponse.VisitCreateTagDefinitionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteTagDefinition operation middleware
+func (sh *strictHandler) DeleteTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam, params DeleteTagDefinitionParams) {
+	var request DeleteTagDefinitionRequestObject
+
+	request.Key = key
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteTagDefinition(ctx, request.(DeleteTagDefinitionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteTagDefinition")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteTagDefinitionResponseObject); ok {
+		if err := validResponse.VisitDeleteTagDefinitionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetTagDefinition operation middleware
+func (sh *strictHandler) GetTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam) {
+	var request GetTagDefinitionRequestObject
+
+	request.Key = key
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetTagDefinition(ctx, request.(GetTagDefinitionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetTagDefinition")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetTagDefinitionResponseObject); ok {
+		if err := validResponse.VisitGetTagDefinitionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PutTagDefinition operation middleware
+func (sh *strictHandler) PutTagDefinition(w http.ResponseWriter, r *http.Request, key TagDefinitionKeyParam, params PutTagDefinitionParams) {
+	var request PutTagDefinitionRequestObject
+
+	request.Key = key
+	request.Params = params
+
+	var body PutTagDefinitionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutTagDefinition(ctx, request.(PutTagDefinitionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutTagDefinition")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutTagDefinitionResponseObject); ok {
+		if err := validResponse.VisitPutTagDefinitionResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

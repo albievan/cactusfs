@@ -95,7 +95,13 @@ export interface paths {
          */
         get: operations["listBuckets"];
         put?: never;
-        /** Create a bucket */
+        /**
+         * Create a bucket
+         * @description Makes the bucket. A bucket made through this API or the console by a release that implements tag rules
+         *     (ADR-0018) is given the tag rule `lowercase` from the start: its tags are kept in lower case until its
+         *     rules say otherwise (`/buckets/{bucket}/tag-rules`). One made by an earlier release, or with S3's
+         *     `CreateBucket`, has no tag rules.
+         */
         post: operations["createBucket"];
         delete?: never;
         options?: never;
@@ -324,6 +330,104 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/buckets/{bucket}/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the tags of a bucket
+         * @description The bucket's tags (ADR-0011), in key order - the same tags S3's `GetBucketTagging` gives. A bucket
+         *     without tags is answered too, with none.
+         */
+        get: operations["getBucketTags"];
+        /**
+         * Set the tags of a bucket
+         * @description Replaces the bucket's tags with those in the body: the tags S3's `GetBucketTagging` gives from then on.
+         *     A bucket has at most 50 tags; a key is 1 to 128 characters and a value at most 256, of letters, digits,
+         *     spaces and `+ - = . _ : / @`, and a key is given once. An empty list removes every tag.
+         *
+         *     Where the bucket's tag rules say `lowercase` (ADR-0018), keys and values are kept in lower case
+         *     whatever case they are sent in, and the answer shows them so; two keys that are one key in lower case
+         *     are refused, not merged. Tags that do not keep to these rules are refused with 400 and the problem
+         *     code `InvalidArgument`, and the tags the bucket had are kept.
+         */
+        put: operations["putBucketTags"];
+        post?: never;
+        /**
+         * Remove the tags of a bucket
+         * @description Removes every tag of the bucket. As in S3, it is asked as setting them is.
+         */
+        delete: operations["deleteBucketTags"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/tag-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the tag rules of a bucket
+         * @description The rules for the tags of the bucket's objects (ADR-0018): whether tags are kept in lower case, whether
+         *     an object may carry only tags of the deployment's catalogue (`/tag-definitions`), and which tags every
+         *     object must carry. A bucket without rules is answered too: `lowercase` and `catalogue_only` are then
+         *     false and `required` is empty. A bucket made through this API or the console by a release that
+         *     implements tag rules lower-cases its tags from the start (see `createBucket`); one made with S3's
+         *     `CreateBucket`, or by an earlier release, does not until its rules say so.
+         */
+        get: operations["getBucketTagRules"];
+        /**
+         * Set the tag rules of a bucket
+         * @description Replaces the bucket's tag rules (ADR-0018). From then on every node of a release that enforces them
+         *     keeps them by every way an object comes to have tags (but see **Rolling upgrades** below) - this API's upload and `putObjectTags`, and S3's `PutObject`, `CopyObject`, multipart
+         *     uploads and `PutObjectTagging` alike - and `deleteObjectTags` (S3's `DeleteObjectTagging`) is refused
+         *     where a tag is required. An object that breaks a rule is refused: here with 400 and the problem code
+         *     `TagRuleViolated`, in S3 with `400 InvalidTag`. Objects that exist are left as they are, and tags
+         *     stored before `lowercase` was set are lower-cased when they are next written.
+         *
+         *     - `lowercase`: keys and values are kept in lower case whatever case they are sent in; two keys that
+         *       are one key in lower case are refused, not merged. The keys and values of `required` must then be
+         *       written in lower case.
+         *     - `catalogue_only`: an object may carry only tags the catalogue defines, each with a value the
+         *       definition allows.
+         *     - `required`: at most 10 tags every object must carry - or, with `sub_bucket`, every object of that
+         *       sub-bucket - each with one of `values` when they are given. A key is required once for the bucket
+         *       and once for each sub-bucket.
+         *
+         *     Rules that do not keep to these bounds are refused with 400 and the problem code `InvalidArgument`,
+         *     and the rules the bucket had are kept. A rule is read once a request: an upload that races a change
+         *     of the rules may be judged by the rules before. A definition of the catalogue whose key a rule
+         *     requires cannot be deleted.
+         *
+         *     **Rolling upgrades.** Rules are kept by the nodes of a release that enforces them. While a cluster is
+         *     being upgraded to such a release, a node of an older release stores what it is sent without
+         *     checking it against the rules - through S3 or through this API - and an older node's upload ignores
+         *     `X-CactusFS-Tagging` and stores the object without tags. Objects stored so are left as they are, as
+         *     those stored before the rules were set.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows tag rules.
+         */
+        put: operations["putBucketTagRules"];
+        post?: never;
+        /**
+         * Remove the tag rules of a bucket
+         * @description Removes the bucket's tag rules: from then on its tags are kept in the case they are sent in, any tag
+         *     may be given, and none is required. Tags already kept are not changed. As for CORS and lifecycle
+         *     rules, it is asked as setting them is.
+         */
+        delete: operations["deleteBucketTagRules"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/buckets/{bucket}/notifications": {
         parameters: {
             query?: never;
@@ -521,7 +625,21 @@ export interface paths {
         /**
          * Upload an object
          * @description Stores the body as the object. `Content-Length` is required. With `Idempotency-Key`, a repeated request
-         *     is recognised by its bucket, key and length, not by its content.
+         *     is recognised by its bucket, key, length and tags, not by its content.
+         *
+         *     **Tags.** `X-CactusFS-Tagging` gives the version its tags, as S3's `x-amz-tagging` does: at most 10, a
+         *     key of 1 to 128 characters and a value of at most 256, of letters, digits, spaces and
+         *     `+ - = . _ : / @`, each key once. Tagging needs `s3:PutObjectTagging` on the object as well, as in S3;
+         *     a locked session, which may do nothing but store objects, is refused an upload with tags (423,
+         *     `SessionLocked`). The bucket's tag rules (ADR-0018, `/buckets/{bucket}/tag-rules`) hold for every
+         *     upload that a node of a release that enforces them answers, with tags or without: where they say `lowercase` the tags are kept in lower case, and an
+         *     upload whose tags they do not allow - a required tag missing or with a value it may not have, a tag
+         *     outside the catalogue where only the catalogue's are taken - is refused with 400 and the problem code
+         *     `TagRuleViolated`, whose `detail` names the rule, never a value. Nothing is stored then.
+         *
+         *     A node of a release older than tags on this upload ignores `X-CactusFS-Tagging` and stores the object
+         *     without tags, and checks no tag rule; while a cluster is being upgraded, an upload answered by such a
+         *     node is stored so (see `putBucketTagRules`).
          */
         put: operations["putObject"];
         post?: never;
@@ -569,6 +687,45 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/buckets/{bucket}/object/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the tags of an object
+         * @description The tags of a version of the object, in key order - the same tags S3's `GetObjectTagging` gives.
+         */
+        get: operations["getObjectTags"];
+        /**
+         * Set the tags of an object
+         * @description Replaces the tags of a version of the object with those in the body - S3's `PutObjectTagging`. A
+         *     version has at most 10 tags; a key is 1 to 128 characters and a value at most 256, of letters, digits,
+         *     spaces and `+ - = . _ : / @`, and a key is given once. An empty list removes every tag, and is asked
+         *     as `deleteObjectTags` is (`s3:DeleteObjectTagging`).
+         *
+         *     The bucket's tag rules (ADR-0018, `/buckets/{bucket}/tag-rules`) hold: where they say `lowercase`
+         *     the tags are kept in lower case and the answer shows them so, and tags they do not allow - a required
+         *     tag missing or with a value it may not have, a tag outside the catalogue where only the catalogue's
+         *     are taken - are refused with 400 and the problem code `TagRuleViolated`, whose `detail` names the
+         *     rule, never a value. The tags the version had are then kept.
+         */
+        put: operations["putObjectTags"];
+        post?: never;
+        /**
+         * Remove the tags of an object
+         * @description Removes every tag of a version of the object - S3's `DeleteObjectTagging`. Where the bucket's tag rules
+         *     require a tag of the object it is refused with 400 and the problem code `TagRuleViolated`, and the tags
+         *     are kept.
+         */
+        delete: operations["deleteObjectTags"];
         options?: never;
         head?: never;
         patch?: never;
@@ -687,6 +844,72 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tag-definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the catalogue of tags
+         * @description Every tag the deployment defines for its users to pick (ADR-0018), in key order, at most 200. Every
+         *     built-in role may list them. A deployment whose metadata group is not yet all of a release that knows
+         *     the catalogue has none.
+         */
+        get: operations["listTagDefinitions"];
+        put?: never;
+        /**
+         * Define a tag
+         * @description Adds a definition to the catalogue: a key, what the tag is for, and optionally the only values it may
+         *     have. The catalogue is always in lower case: a key or a value that is not is refused, and so is one no
+         *     tag can have (see `TagDefinitionKey`). A key that is defined already is refused with 409 and the
+         *     problem code `EntityAlreadyExists`; `putTagDefinition` changes it. That is decided before the
+         *     definition is stored, not with it: two requests that define the same new key at the same moment may
+         *     both be answered 201, and the definition is then that of the one stored last. The catalogue holds at most 200 definitions, each with at most 50 values: beyond is
+         *     refused with 400 and the problem code `InvalidArgument`. Tags outside the catalogue stay allowed,
+         *     but by a bucket whose tag rules say `catalogue_only`.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows the catalogue.
+         */
+        post: operations["createTagDefinition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tag-definitions/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a definition of the catalogue */
+        get: operations["getTagDefinition"];
+        /**
+         * Define a tag, or change its definition
+         * @description Defines the key with what the body says, in place of the definition it had: it keeps the time it was
+         *     first defined. `values` empty lets the tag have any value. The bounds are those of
+         *     `createTagDefinition`. Changing a definition changes no tag already kept, and no tag rule.
+         *
+         *     Answers 503 until every member of the metadata group is of a release that knows the catalogue.
+         */
+        put: operations["putTagDefinition"];
+        post?: never;
+        /**
+         * Remove a definition from the catalogue
+         * @description Removes the definition. Tags already kept are not changed. While the tag rules of any bucket require a
+         *     tag with this key it cannot be removed: 409 with the problem code `EntityInUse`, which does not say
+         *     which bucket - the caller may not be allowed to know of it.
+         */
+        delete: operations["deleteTagDefinition"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1466,6 +1689,99 @@ export interface components {
         /** @description What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own. */
         SubBucketPut: {
             policy?: components["schemas"]["PolicyDocument"];
+        };
+        /** @description The key of a tag: 1 to 128 characters - letters, digits, spaces and `+ - = . _ : / @`. */
+        TagKey: string;
+        /** @description The value of a tag - at most 256 characters, of those a key may have. */
+        TagValue: string;
+        /** @description A tag, as S3 has them on buckets and on versions of objects. */
+        Tag: {
+            key: components["schemas"]["TagKey"];
+            value: components["schemas"]["TagValue"];
+        };
+        /** @description The tags of a bucket, in key order. */
+        BucketTags: {
+            tags: components["schemas"]["Tag"][];
+        };
+        /** @description What the tags of a bucket are to be. A list, not a map, so that a key given twice is seen and refused. */
+        BucketTagsPut: {
+            tags: components["schemas"]["Tag"][];
+        };
+        /** @description The tags of a version of an object, in key order. */
+        ObjectTags: {
+            /** @description The version whose tags these are - `null`, or the ID of a version. */
+            version_id: string;
+            tags: components["schemas"]["Tag"][];
+        };
+        /** @description What the tags of a version are to be. A list, not a map, so that a key given twice is seen and refused. */
+        ObjectTagsPut: {
+            tags: components["schemas"]["Tag"][];
+        };
+        /** @description A tag every object of the bucket - or of one of its sub-buckets - must carry. */
+        RequiredTag: {
+            key: components["schemas"]["TagKey"];
+            /**
+             * @description The only values the tag may have, each given once and each a value a tag can have. Absent or empty,
+             *     any value. The key and the values are compared as they are written - in lower case when the rules
+             *     lower-case tags, and then they must be written so.
+             */
+            values?: components["schemas"]["TagValue"][];
+            sub_bucket?: components["schemas"]["SubBucketNameValue"];
+        };
+        /** @description The rules for the tags of a bucket's objects (ADR-0018). */
+        TagRules: {
+            /** @description Whether keys and values are kept in lower case, whatever case they are sent in. */
+            lowercase: boolean;
+            /** @description Whether an object may carry only tags the catalogue defines, with values it allows. */
+            catalogue_only: boolean;
+            /** @description The tags every object must carry, in the order they were given. */
+            required: components["schemas"]["RequiredTag"][];
+        };
+        /**
+         * @description What the tag rules of a bucket are to be. Every field is given: a PUT replaces the rules whole, and a
+         *     field left out would otherwise switch a rule off.
+         */
+        TagRulesPut: {
+            lowercase: boolean;
+            catalogue_only: boolean;
+            required: components["schemas"]["RequiredTag"][];
+        };
+        /**
+         * @description The key a definition of the catalogue is of: a key a tag can have (`TagKey`: letters, digits, spaces
+         *     and `+ - = . _ : / @`), in lower case, of 1 to 128 characters and at most 128 bytes in UTF-8.
+         */
+        TagDefinitionKey: string;
+        /**
+         * @description A value a definition allows: a value a tag can have (`TagValue`: letters, digits, spaces and
+         *     `+ - = . _ : / @`), in lower case, of at most 256 bytes in UTF-8.
+         */
+        TagDefinitionValue: string;
+        /** @description A tag the deployment defines for its users to pick (ADR-0018). Always in lower case. */
+        TagDefinition: {
+            key: components["schemas"]["TagDefinitionKey"];
+            /** @description What the tag is for. */
+            description: string;
+            /** @description The only values the tag may have, in the order they were given. Empty, any value. */
+            values: components["schemas"]["TagDefinitionValue"][];
+            /**
+             * Format: date-time
+             * @description When the tag was first defined; changing the definition does not change it.
+             */
+            created_at: string;
+        };
+        /** @description A new definition. Without `values` the tag may have any value. */
+        TagDefinitionCreate: {
+            key: components["schemas"]["TagDefinitionKey"];
+            description?: string;
+            values?: components["schemas"]["TagDefinitionValue"][];
+        };
+        /**
+         * @description What a definition is to be. Both fields are given: a PUT replaces the definition whole, and `values`
+         *     left out would otherwise let the tag have any value.
+         */
+        TagDefinitionPut: {
+            description: string;
+            values: components["schemas"]["TagDefinitionValue"][];
         };
         BucketCreate: {
             name: string;
@@ -2594,6 +2910,10 @@ export interface components {
         /** @description The name of the sub-bucket. */
         SubBucketName: components["schemas"]["SubBucketNameValue"];
         EntityName: components["schemas"]["Name"];
+        /** @description The version whose tags are meant - `null`, or the ID of a version. Without it, the current version. */
+        TaggedVersion: string;
+        /** @description The key the definition is of, in lower case. */
+        TagDefinitionKeyParam: components["schemas"]["TagDefinitionKey"];
         TargetName: components["schemas"]["TargetNameValue"];
     };
     requestBodies: never;
@@ -3226,6 +3546,186 @@ export interface operations {
             default: components["responses"]["Problem"];
         };
     };
+    getBucketTags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tags, or that there are none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTags"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketTags: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BucketTagsPut"];
+            };
+        };
+        responses: {
+            /** @description Set. The tags as they are kept. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTags"];
+                };
+            };
+            /** @description The tags cannot be kept (`code` is `InvalidArgument`); `detail` says why. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketTags: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there were none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getBucketTagRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rules, or that there are none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagRules"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putBucketTagRules: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagRulesPut"];
+            };
+        };
+        responses: {
+            /** @description Set. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagRules"];
+                };
+            };
+            /** @description The rules cannot be kept (`code` is `InvalidArgument`); `detail` says why. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteBucketTagRules: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there were none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
     getBucketNotifications: {
         parameters: {
             query?: never;
@@ -3570,6 +4070,11 @@ export interface operations {
             header?: {
                 /** @description The media type to store with the object. */
                 "Content-Type"?: string;
+                /**
+                 * @description The tags of the version, as a URL query string - `stage=draft&team=finance` - each key and value
+                 *     URL-encoded. Given at most once.
+                 */
+                "X-CactusFS-Tagging"?: string;
                 /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
                 "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
                 /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
@@ -3593,6 +4098,19 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ObjectMetadata"];
+                };
+            };
+            /**
+             * @description The bucket's tag rules do not allow the upload's tags, or their absence (`code` is
+             *     `TagRuleViolated`), or the tags cannot be kept at all (`code` is `InvalidArgument`); `detail` says
+             *     why. Nothing was stored.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /**
@@ -3690,6 +4208,177 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ObjectAccess"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getObjectTags: {
+        parameters: {
+            query: {
+                /** @description The key of the object. */
+                key: components["parameters"]["ObjectKey"];
+                /** @description The version whose tags are meant - `null`, or the ID of a version. Without it, the current version. */
+                version_id?: components["parameters"]["TaggedVersion"];
+            };
+            header?: never;
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tags of the version, or that it has none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObjectTags"];
+                };
+            };
+            /** @description There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`). */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putObjectTags: {
+        parameters: {
+            query: {
+                /** @description The key of the object. */
+                key: components["parameters"]["ObjectKey"];
+                /** @description The version whose tags are meant - `null`, or the ID of a version. Without it, the current version. */
+                version_id?: components["parameters"]["TaggedVersion"];
+            };
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObjectTagsPut"];
+            };
+        };
+        responses: {
+            /** @description Set. The tags as they are kept. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ObjectTags"];
+                };
+            };
+            /**
+             * @description The bucket's tag rules do not allow the tags (`code` is `TagRuleViolated`), or they cannot be kept
+             *     at all (`code` is `InvalidArgument`); `detail` says why.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`). */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteObjectTags: {
+        parameters: {
+            query: {
+                /** @description The key of the object. */
+                key: components["parameters"]["ObjectKey"];
+                /** @description The version whose tags are meant - `null`, or the ID of a version. Without it, the current version. */
+                version_id?: components["parameters"]["TaggedVersion"];
+            };
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                bucket: components["parameters"]["BucketName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or there were none. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The bucket's tag rules require a tag of the object (`code` is `TagRuleViolated`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description There is no such bucket, object or version (`code` is `NoSuchBucket`, `NoSuchObject` or `NoSuchVersion`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is a delete marker, which has no tags (`code` is `MethodNotAllowed`). */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             default: components["responses"]["Problem"];
@@ -3851,6 +4540,198 @@ export interface operations {
                 headers: {
                     /** @description After how many seconds to send the request again. */
                     "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    listTagDefinitions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The definitions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagDefinition"][];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    createTagDefinition: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagDefinitionCreate"];
+            };
+        };
+        responses: {
+            /** @description Defined. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagDefinition"];
+                };
+            };
+            /** @description The definition cannot be kept (`code` is `InvalidArgument`); `detail` says why. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description The key is defined already (`code` is `EntityAlreadyExists`) - as far as could be seen before the
+             *     definition was stored; see above.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    getTagDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The key the definition is of, in lower case. */
+                key: components["parameters"]["TagDefinitionKeyParam"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The definition. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagDefinition"];
+                };
+            };
+            /** @description The catalogue does not define the key (`code` is `NoSuchEntity`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    putTagDefinition: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                /** @description The key the definition is of, in lower case. */
+                key: components["parameters"]["TagDefinitionKeyParam"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TagDefinitionPut"];
+            };
+        };
+        responses: {
+            /** @description Defined. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagDefinition"];
+                };
+            };
+            /** @description The definition cannot be kept (`code` is `InvalidArgument`); `detail` says why. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteTagDefinition: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+                /** @description The CSRF token of the session. Required when the request is made with a session; ignored with an API key. */
+                "X-CSRF-Token"?: components["parameters"]["CSRFToken"];
+            };
+            path: {
+                /** @description The key the definition is of, in lower case. */
+                key: components["parameters"]["TagDefinitionKeyParam"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The catalogue does not define the key (`code` is `NoSuchEntity`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The tag rules of a bucket require a tag with this key (`code` is `EntityInUse`). */
+            409: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

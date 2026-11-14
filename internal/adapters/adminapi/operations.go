@@ -462,6 +462,12 @@ func (o *operations) PutObject(ctx context.Context, request api.PutObjectRequest
 	if size < 0 {
 		return nil, fmt.Errorf("%w: Content-Length is required", domain.ErrInvalidArgument)
 	}
+	if request.Params.XCactusFSTagging != nil {
+		// Tags on an upload are in the contract ahead of their use case
+		// (PLAN D.0): stored without them, the version would not be what
+		// was asked for, so the upload is not made at all.
+		return nil, notYet("tags on an upload")
+	}
 	contentType := "application/octet-stream"
 	if t := request.Params.ContentType; t != nil && *t != "" {
 		contentType = *t
@@ -1348,6 +1354,82 @@ func (o *operations) DeleteSubBucket(ctx context.Context, request api.DeleteSubB
 		return nil, err
 	}
 	return api.DeleteSubBucket204Response{}, nil
+}
+
+// --- tags, tag rules and the catalogue of tags (PLAN D.0, ADR-0018) ---
+//
+// In the contract ahead of their use cases; each answers notYet until PLAN
+// D.4 writes it and puts the use case - which authorizes and audits - in
+// front of it. So does an upload with tags (tagsNotYet).
+
+// GetBucketTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) GetBucketTags(context.Context, api.GetBucketTagsRequestObject) (api.GetBucketTagsResponseObject, error) {
+	return nil, notYet("bucket tags")
+}
+
+// PutBucketTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) PutBucketTags(context.Context, api.PutBucketTagsRequestObject) (api.PutBucketTagsResponseObject, error) {
+	return nil, notYet("bucket tags")
+}
+
+// DeleteBucketTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) DeleteBucketTags(context.Context, api.DeleteBucketTagsRequestObject) (api.DeleteBucketTagsResponseObject, error) {
+	return nil, notYet("bucket tags")
+}
+
+// GetObjectTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) GetObjectTags(context.Context, api.GetObjectTagsRequestObject) (api.GetObjectTagsResponseObject, error) {
+	return nil, notYet("object tags")
+}
+
+// PutObjectTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) PutObjectTags(context.Context, api.PutObjectTagsRequestObject) (api.PutObjectTagsResponseObject, error) {
+	return nil, notYet("object tags")
+}
+
+// DeleteObjectTags implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) DeleteObjectTags(context.Context, api.DeleteObjectTagsRequestObject) (api.DeleteObjectTagsResponseObject, error) {
+	return nil, notYet("object tags")
+}
+
+// GetBucketTagRules implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) GetBucketTagRules(context.Context, api.GetBucketTagRulesRequestObject) (api.GetBucketTagRulesResponseObject, error) {
+	return nil, notYet("tag rules")
+}
+
+// PutBucketTagRules implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) PutBucketTagRules(context.Context, api.PutBucketTagRulesRequestObject) (api.PutBucketTagRulesResponseObject, error) {
+	return nil, notYet("tag rules")
+}
+
+// DeleteBucketTagRules implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) DeleteBucketTagRules(context.Context, api.DeleteBucketTagRulesRequestObject) (api.DeleteBucketTagRulesResponseObject, error) {
+	return nil, notYet("tag rules")
+}
+
+// ListTagDefinitions implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) ListTagDefinitions(context.Context, api.ListTagDefinitionsRequestObject) (api.ListTagDefinitionsResponseObject, error) {
+	return nil, notYet("tag catalogue")
+}
+
+// CreateTagDefinition implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) CreateTagDefinition(context.Context, api.CreateTagDefinitionRequestObject) (api.CreateTagDefinitionResponseObject, error) {
+	return nil, notYet("tag catalogue")
+}
+
+// GetTagDefinition implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) GetTagDefinition(context.Context, api.GetTagDefinitionRequestObject) (api.GetTagDefinitionResponseObject, error) {
+	return nil, notYet("tag catalogue")
+}
+
+// PutTagDefinition implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) PutTagDefinition(context.Context, api.PutTagDefinitionRequestObject) (api.PutTagDefinitionResponseObject, error) {
+	return nil, notYet("tag catalogue")
+}
+
+// DeleteTagDefinition implements api.StrictServerInterface (PLAN D.4).
+func (o *operations) DeleteTagDefinition(context.Context, api.DeleteTagDefinitionRequestObject) (api.DeleteTagDefinitionResponseObject, error) {
+	return nil, notYet("tag catalogue")
 }
 
 // --- targets ---

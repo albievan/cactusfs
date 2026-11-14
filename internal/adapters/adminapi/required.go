@@ -24,6 +24,9 @@ func requiredFields() map[string][]string {
 		"POST " + BasePath + "/buckets":                       {"name"},
 		"PUT " + BasePath + "/buckets/{bucket}/quota":         {"quota_bytes"},
 		"PUT " + BasePath + "/buckets/{bucket}/policy":        {"document"},
+		"PUT " + BasePath + "/buckets/{bucket}/tags":          {"tags"},
+		"PUT " + BasePath + "/buckets/{bucket}/tag-rules":     {"lowercase", "catalogue_only", "required"},
+		"PUT " + BasePath + "/buckets/{bucket}/object/tags":   {"tags"},
 		"PUT " + BasePath + "/buckets/{bucket}/notifications": {"rules"},
 		"PUT " + BasePath + "/buckets/{bucket}/replication":   {"target", "destination_bucket", "rules"},
 		"PUT " + BasePath + "/buckets/{bucket}/replica":       {"source"},
@@ -37,6 +40,8 @@ func requiredFields() map[string][]string {
 		"PUT " + BasePath + "/policies/{name}":                {"document"},
 		"POST " + BasePath + "/upgrade":                       {"version", "password"},
 		"PUT " + BasePath + "/targets/{name}":                 {"kind", "buckets"},
+		"POST " + BasePath + "/tag-definitions":               {"key"},
+		"PUT " + BasePath + "/tag-definitions/{key}":          {"description", "values"},
 	}
 }
 
