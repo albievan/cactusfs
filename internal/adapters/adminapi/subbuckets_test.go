@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -605,8 +606,9 @@ func TestPolicyFieldsAreTheContracts(t *testing.T) {
 // then Allow, a condition key twice - is refused on every route that takes a
 // policy, as S3's PutBucketPolicy refuses it, and not judged by the last
 // value; so is a body that gives the policy field itself twice, in two
-// cases; the 20 KiB limit is that of the bytes sent; and a bucket's policy
-// is answered with its keys in the order they were set.
+// cases or with a letter escaped, and a policy that is not a JSON object;
+// the 20 KiB limit is that of the bytes sent, on every route; and a
+// bucket's policy is answered with its keys in the order they were set.
 func TestPolicyDocumentsAreReadAsSent(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -656,10 +658,25 @@ func TestPolicyDocumentsAreReadAsSent(t *testing.T) {
 		if !route.identity {
 			document = string(mustJSON(t, aDocument))
 		}
-		body := `{` + extra + `"` + route.field + `":{"Version":"2012-10-17","Statement":[]},"` + strings.ToUpper(route.field) + `":` + document + `}`
-		r := f.must(http.StatusBadRequest, call{method: route.method, path: route.path, raw: []byte(body), headers: media})
-		if p := r.problem(t); p["code"] != "InvalidArgument" {
-			t.Errorf("%s %s with the field twice: problem = %s", route.method, route.path, r.body)
+		// The field twice: in two cases, and once with a letter escaped
+		// (the decoder reads "\u0064ocument" as "document").
+		escaped := `\u00` + strconv.FormatInt(int64(route.field[0]), 16) + route.field[1:]
+		for name, second := range map[string]string{"in two cases": strings.ToUpper(route.field), "escaped": escaped} {
+			body := `{` + extra + `"` + route.field + `":{"Version":"2012-10-17","Statement":[]},"` + second + `":` + document + `}`
+			r := f.must(http.StatusBadRequest, call{method: route.method, path: route.path, raw: []byte(body), headers: media})
+			if p := r.problem(t); p["code"] != "InvalidArgument" {
+				t.Errorf("%s %s with the field twice, %s: problem = %s", route.method, route.path, name, r.body)
+			}
+		}
+		// A policy that is not a JSON object, refused by the policy's
+		// parser (its detail begins "policy:"), not by the decoder of the
+		// body: identity routes answer InvalidArgument to either.
+		for _, document := range []string{`"x"`, `[]`, `5`} {
+			body := `{` + extra + `"` + route.field + `":` + document + `}`
+			r := f.must(http.StatusBadRequest, call{method: route.method, path: route.path, raw: []byte(body), headers: media})
+			if p := r.problem(t); p["code"] != route.code || !strings.Contains(fmt.Sprint(p["detail"]), "policy: ") {
+				t.Errorf("%s %s with the policy %s: problem = %s", route.method, route.path, document, r.body)
+			}
 		}
 	}
 	// Nothing of it was kept.
@@ -670,20 +687,35 @@ func TestPolicyDocumentsAreReadAsSent(t *testing.T) {
 	f.must(http.StatusNotFound, call{method: "GET", path: "/policies/twice"})
 
 	// More than 20 KiB as sent, if not once the spaces are taken out: the
-	// size is the client's.
-	spaced, err := json.MarshalIndent(aDocument, "", strings.Repeat(" ", 2000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compact := mustJSON(t, aDocument); len(spaced) <= iam.MaxPolicyBytes || len(compact) > iam.MaxPolicyBytes {
-		t.Fatalf("the document is %d bytes as sent and %d without spaces", len(spaced), len(compact))
-	}
-	for _, route := range routes[:2] {
-		body := `{"` + route.field + `":` + string(spaced) + `}`
+	// size is the client's. Without the spaces each document is one its
+	// route takes.
+	identityDocument := map[string]any{"Version": "2012-10-17", "Statement": []any{map[string]any{
+		"Effect": "Allow", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::some-bucket/reports/*",
+	}}}
+	for _, route := range routes {
+		extra, document := "", aDocument
+		if route.path == "/policies" {
+			extra = `"name":"spaced",`
+		}
+		if route.identity {
+			document = identityDocument
+		}
+		spaced, err := json.MarshalIndent(document, "", strings.Repeat(" ", 2000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compact := mustJSON(t, document); len(spaced) <= iam.MaxPolicyBytes || len(compact) > iam.MaxPolicyBytes {
+			t.Fatalf("the document is %d bytes as sent and %d without spaces", len(spaced), len(compact))
+		}
+		body := `{` + extra + `"` + route.field + `":` + string(spaced) + `}`
 		r := f.must(http.StatusBadRequest, call{method: route.method, path: route.path, raw: []byte(body), headers: media})
-		if p := r.problem(t); p["code"] != "InvalidPolicy" {
+		if p := r.problem(t); p["code"] != route.code || !strings.Contains(fmt.Sprint(p["detail"]), fmt.Sprintf("larger than %d bytes", iam.MaxPolicyBytes)) {
 			t.Errorf("%s %s with %d bytes: problem = %s", route.method, route.path, len(spaced), r.body)
 		}
+	}
+	f.must(http.StatusNotFound, call{method: "GET", path: "/policies/spaced"})
+	if r := f.must(http.StatusOK, call{method: "GET", path: "/users/dora/keys"}); strings.Contains(string(r.body), "access_key_id") {
+		t.Errorf("a key was made with a refused policy: %s", r.body)
 	}
 
 	// As it was set: the keys in the order the client gave them.
