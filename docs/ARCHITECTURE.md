@@ -734,16 +734,27 @@ four at a time.
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
   `SubBucketNotEmpty`) are served (PLAN C.6): the use cases authorize and audit, the
   handlers translate. A node without the use case of sub-buckets answers their paths
-  `501`. The paths of tags (ADR-0018, PLAN D.0) are in the contract and answer 501
-  `NotImplemented` until PLAN D.4: a bucket's tags (`/buckets/{bucket}/tags`), an
-  object's (`/buckets/{bucket}/object/tags`, `key` and `version_id` in the query), a
-  bucket's tag rules (`/buckets/{bucket}/tag-rules`; `s3:GetBucketTagRules`,
-  `s3:PutBucketTagRules`) and the catalogue (`/tag-definitions` and
-  `/tag-definitions/{key}`; `admin:ListTagDefinitions`,
-  `admin:{Get,Put,Delete}TagDefinition`), and an upload with tags (`X-CactusFS-Tagging`, which is
-  part of the upload's idempotency fingerprint). A tag a bucket's rules refuse is 400
-  `TagRuleViolated` (`domain.ErrTagRule`, mapped already); a definition a rule names is
-  409 `EntityInUse`. Until then CORS, tags and lifecycle rules are set through the S3 API.
+  `501`. The paths of tags (ADR-0018) are served (PLAN D.4): a bucket's tags
+  (`/buckets/{bucket}/tags`), an object's (`/buckets/{bucket}/object/tags`, `key` and
+  `version_id` in the query), a bucket's tag rules (`/buckets/{bucket}/tag-rules`;
+  `s3:GetBucketTagRules`, `s3:PutBucketTagRules`) and the catalogue (`/tag-definitions`
+  and `/tag-definitions/{key}`; `admin:ListTagDefinitions`,
+  `admin:{Get,Put,Delete}TagDefinition`, `app.TagDefinitionService`, 501 on a node not
+  given it), and an upload with tags (`X-CactusFS-Tagging`, read by
+  `object.ParseTagging` as S3's `x-amz-tagging` is, and part of the upload's
+  idempotency fingerprint). Tags cross as lists in the order given, a key given twice
+  refused by the domain (400 `InvalidArgument`), and are answered in key order. A tag a
+  bucket's rules refuse is 400 `TagRuleViolated`; a definition a rule names is 409
+  `EntityInUse`, one defined already 409 `EntityAlreadyExists`, one not defined 404
+  `NoSuchEntity`. A bucket made through the API (`BucketService.CreateLowercasing`) is
+  given the tag rule `lowercase`: two entries. When the second fails the bucket is
+  deleted again if it is still only what was made (its record, no configuration, no
+  sub-bucket, no upload: read through `WithUndo`), and the error is answered; when it
+  cannot be, it is left without the rule, answered 201, audited `tag_rules=not_set` and
+  logged at ERROR; one deleted by another request in the gap is 409 `Conflict`
+  (ADR-0018). The 201 is the bucket as written, with no second read or authorization. The catalogue's create, put and delete are asked of the authorizer before an
+  Idempotency-Key is reserved (`askedFirstOf`, by the path value or body field `key`).
+  CORS and lifecycle rules are still set through the S3 API.
   The contract is served at `/api/v1/openapi.json` and
   `.yaml`, and Swagger UI at `/docs` from embedded assets under a Content-Security-Policy
   that allows nothing from another host.
@@ -1027,8 +1038,8 @@ four at a time.
   read, rules of a later release, and a node not given the catalogue refuse a write as
   `domain.ErrUnavailable` (503), never as a broken rule. Tags reach the use cases as
   lists (`object.Tag`), and a key given twice is refused in the domain
-  (`object.TagMap`). Nothing sets rules or the catalogue but these use cases, whose
-  handlers are PLAN D.4.
+  (`object.TagMap`). Nothing sets rules or the catalogue but these use cases, served by the
+  management API (PLAN D.4).
 
 ## 7. Security **(see the threat model for what is implemented)**
 

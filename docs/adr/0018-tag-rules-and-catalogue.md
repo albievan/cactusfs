@@ -1,10 +1,11 @@
 # ADR-0018: Tag rules, lower-case tags, and a catalogue of tags
 
 - **Status:** accepted; the domain rules and actions, the port, the replicated store
-  (PLAN D.1, S.3), the management API's contract, whose operations answer 501 (PLAN
-  D.0), and the use cases, which enforce the rules on S3's every way an object comes to
-  have tags (PLAN D.2-D.3), are implemented. The handlers and the console are to come
-  (PLAN D.4-D.6)
+  (PLAN D.1, S.3), the management API's contract (PLAN D.0), the use cases, which
+  enforce the rules on S3's every way an object comes to have tags (PLAN D.2-D.3), and
+  the management API's handlers - tags, tag rules, the catalogue, an upload's tags,
+  and a bucket made through the API lower-casing its tags (PLAN D.4) - are implemented.
+  The four-node tests and the console are to come (PLAN D.5-D.6)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0011 (tags of buckets and objects), ADR-0016 (entry schema 3),
   ADR-0017 (sub-buckets)
@@ -88,6 +89,33 @@ of that baseline.
   otherwise a rule could refuse every object, and a definition could never be picked.
   This is checked by the proposer's domain types; the state machine keeps checking bytes
   only, so the entry schema does not change.
+- **A bucket made through the management API is two entries** - the bucket, then its
+  rule `lowercase` (one entry would be a new entry schema). When the second fails the
+  bucket is deleted again, if it is still only what was made (no configuration,
+  sub-bucket or upload in progress; its record as written), and the caller is told the
+  error; the attempt is audited as failed (`tag_rules=failed`, `undone=true`). When it
+  cannot be deleted again - something else is in it by now, the store cannot say, or the
+  deletion fails - the bucket is there without the rule: the caller is answered 201, so
+  that a repeat with the same Idempotency-Key agrees, the creation is audited as
+  succeeded with `tag_rules=not_set`, and the log says so at ERROR. Buckets made through
+  the API therefore lower-case their tags except after that failure, which the trail and
+  the log name; their rules can be set then. Rules found written after all (an outcome
+  that was not known) make the creation a success. A bucket another request deleted
+  before its rules were made is not taken back by anybody: the creation is answered 409
+  `Conflict`, kept for its Idempotency-Key so that a repeat does not make again what
+  another caller deleted, and audited as failed (`undone=false`,
+  `removed_by_other=true`). A deletion whose outcome is not known is decided by reading
+  the bucket again. The answer of a creation is the bucket as written - nothing is read
+  or authorized again - so a caller who may create buckets and not list them is answered
+  201. Left for later, as each needs a conditional deletion or one entry (an ADR and an
+  entry schema): a write between the look and the deletion is not seen (and a bucket
+  made again by someone in that moment would be deleted), and a creation whose outcome
+  is not known but was committed leaves a bucket that no record names (as `Create` has
+  always done).
+- While a member of the metadata group does not know entry schema 3, every bucket made
+  through the management API is made and then deleted again, answered 503, for as long
+  as the rolling upgrade lasts. Every release since S.3 knows it, so this holds only for
+  an upgrade from an older one. S3's `CreateBucket` is not affected.
 
 ## Alternatives
 
