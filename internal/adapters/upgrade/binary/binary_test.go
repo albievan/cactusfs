@@ -551,6 +551,12 @@ func TestTheBinaryIsReplaced(t *testing.T) {
 			if len(last.Nodes) != 1 || last.Nodes[0].ID != "node-1" || last.Nodes[0].State != node {
 				t.Errorf("the node = %+v", last.Nodes)
 			}
+			// Done is said before the restart is asked for (the process that
+			// answers next runs the new binary), so the restart may follow
+			// the last report by a moment.
+			for deadline := time.Now().Add(10 * time.Second); f.restarts.count() < restarts && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
 			if f.restarts.count() != restarts {
 				t.Errorf("restarted %d times, want %d", f.restarts.count(), restarts)
 			}
