@@ -19,15 +19,19 @@ func statement(actions, resources []string) Document {
 // BuiltInPolicies returns the built-in policies by name.
 func BuiltInPolicies() map[string]Document {
 	everything := []string{"*"}
+	// Every built-in role may read the catalogue of tags (ADR-0018); only
+	// the cluster-admin, by "admin:*", changes it.
+	readCatalogue := []string{string(ActionListTagDefinitions), string(ActionGetTagDefinition)}
 	return map[string]Document{
 		// Everything a user can be allowed: all of S3 and all of
 		// administration. (Node RPC is not something a policy can grant.)
 		RoleClusterAdmin: statement([]string{"s3:*", "admin:*"}, everything),
-		// All of S3 on every bucket, and of administration only the
-		// preview of objects it may read anyway (ADR-0028).
-		RoleBucketAdmin: statement([]string{"s3:*", string(ActionPreviewObject)}, everything),
+		// All of S3 on every bucket - the tag rules of a bucket included
+		// (ADR-0018) - and of administration only the preview of objects
+		// it may read anyway (ADR-0028) and reading the catalogue of tags.
+		RoleBucketAdmin: statement(append([]string{"s3:*", string(ActionPreviewObject)}, readCatalogue...), everything),
 		// Read and write objects; buckets can be listed, not made or removed.
-		RoleReadWrite: statement([]string{
+		RoleReadWrite: statement(append([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation",
 			"s3:GetObject", "s3:PutObject", "s3:DeleteObject",
 			// Versions can be read. Removing one for good is not part of
@@ -40,16 +44,17 @@ func BuiltInPolicies() map[string]Document {
 			"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
 			// What it may download, it may see in the console.
 			string(ActionPreviewObject),
-		}, everything),
-		RoleReadOnly: statement([]string{
+		}, readCatalogue...), everything),
+		RoleReadOnly: statement(append([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetObject",
 			"s3:GetObjectVersion", "s3:ListBucketVersions", "s3:GetBucketVersioning",
 			string(ActionPreviewObject),
-		}, everything),
+		}, readCatalogue...), everything),
 		// Look at how the deployment is run, change nothing, read no object
 		// - and preview none: admin:PreviewObject begins with neither Get
 		// nor List. Of releases (ADR-0029) it reads what the node knows,
-		// admin:GetUpdates, and neither asks the source nor upgrades.
+		// admin:GetUpdates, and neither asks the source nor upgrades. The
+		// catalogue of tags it reads by the same two wildcards.
 		RoleAuditor: statement([]string{"admin:Get*", "admin:List*"}, everything),
 	}
 }

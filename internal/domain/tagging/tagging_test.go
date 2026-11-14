@@ -48,6 +48,15 @@ func TestDefinitionValidate(t *testing.T) {
 		"a value given twice":       {tagging.Definition{Key: "k", Values: []string{"draft", "final", "draft"}}, false},
 		"the empty value twice":     {tagging.Definition{Key: "k", Values: []string{"", ""}}, false},
 		"a key of 128 runes, wider": {tagging.Definition{Key: strings.Repeat("ö", tagging.MaxKeyBytes)}, false},
+		// A key or a value no tag can have could never be picked.
+		"a key with a comma":           {tagging.Definition{Key: "a,b"}, false},
+		"a key with a slash and space": {tagging.Definition{Key: "cost centre/q4"}, true},
+		"a key with a quote":           {tagging.Definition{Key: `say"`}, false},
+		"a key with a newline":         {tagging.Definition{Key: "a\nb"}, false},
+		"a key with an ampersand":      {tagging.Definition{Key: "a&b"}, false},
+		"a value with a semicolon":     {tagging.Definition{Key: "k", Values: []string{"a;b"}}, false},
+		"a value with a tab":           {tagging.Definition{Key: "k", Values: []string{"a\tb"}}, false},
+		"a value of 256 wider runes":   {tagging.Definition{Key: "k", Values: []string{strings.Repeat("ü", 128)}}, true},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

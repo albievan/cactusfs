@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 // Bounds of the catalogue. They are part of the replicated format: the state
@@ -50,14 +51,19 @@ func invalid(format string, args ...any) error {
 
 // Validate reports whether the definition can be kept: a key of 1 to 128
 // bytes in lower case, a description of at most 256 bytes, and at most 50
-// values, each of at most 256 bytes, in lower case and given once. The error
-// wraps domain.ErrInvalidArgument.
+// values, each of at most 256 bytes, in lower case and given once - and the
+// key and every value one a tag can have (object.ValidateTagKey,
+// object.ValidateTagValue). The error wraps domain.ErrInvalidArgument.
 func (d Definition) Validate() error {
 	switch {
 	case d.Key == "" || len(d.Key) > MaxKeyBytes:
 		return invalid("the key has 1 to %d bytes", MaxKeyBytes)
 	case !utf8.ValidString(d.Key) || d.Key != strings.ToLower(d.Key):
 		return invalid("the key %q is written in lower case", d.Key)
+	case object.ValidateTagKey(d.Key) != nil:
+		// A definition is offered as a tag to pick: a key no tag can have
+		// could never be picked.
+		return invalid("the key is one no tag can have: 1 to 128 characters, each a letter, a digit, a space or one of + - = . _ : / @")
 	case len(d.Description) > MaxDescriptionBytes || !utf8.ValidString(d.Description):
 		return invalid("the description has at most %d bytes", MaxDescriptionBytes)
 	case len(d.Values) > MaxValues:
@@ -69,6 +75,8 @@ func (d Definition) Validate() error {
 			return invalid("a value is longer than %d bytes", MaxValueBytes)
 		case !utf8.ValidString(value) || value != strings.ToLower(value):
 			return invalid("the value %q is written in lower case", value)
+		case object.ValidateTagValue(value) != nil:
+			return invalid("a value is one no tag can have: each character a letter, a digit, a space or one of + - = . _ : / @")
 		case slices.Contains(d.Values[:i], value):
 			return invalid("the value %q is given twice", value)
 		}

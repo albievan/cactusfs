@@ -66,6 +66,19 @@ const (
 	ActionDeleteSubBucket Action = "s3:DeleteSubBucket"
 	// ActionGetSubBucketPolicy allows reading a sub-bucket and its policy.
 	ActionGetSubBucketPolicy Action = "s3:GetSubBucketPolicy"
+	// Tag rules of a bucket (ADR-0018): whether its tags are kept in lower
+	// case, whether its objects may carry only tags of the catalogue, and
+	// which tags they must carry. They are S3 actions, granted as the
+	// bucket's other configurations are: whoever holds "s3:*" on the bucket
+	// - the built-in bucket-admin - holds them, and a bucket policy may
+	// grant them to a user, never to a caller who has not authenticated.
+	//
+	// ActionGetBucketTagRules allows reading the tag rules of a bucket.
+	ActionGetBucketTagRules Action = "s3:GetBucketTagRules"
+	// ActionPutBucketTagRules allows setting and removing the tag rules of
+	// a bucket: as for CORS and lifecycle rules, removing has no action of
+	// its own.
+	ActionPutBucketTagRules Action = "s3:PutBucketTagRules"
 	// Lifecycle rules.
 	ActionGetLifecycle Action = "s3:GetLifecycleConfiguration"
 	ActionPutLifecycle Action = "s3:PutLifecycleConfiguration"
@@ -208,6 +221,27 @@ const (
 	// ActionPutBucketReplicaMode allows making a bucket a replica and
 	// promoting it.
 	ActionPutBucketReplicaMode Action = "admin:PutBucketReplicaMode"
+)
+
+// The admin actions of the deployment's catalogue of tags (ADR-0018), asked
+// on the resource "tag-definitions" (arn:cactusfs:admin:::tag-definitions)
+// for the list and "tag-definition/<key>" for one definition. They are admin
+// actions, so that "s3:*" - and a bucket policy - gives none of them: the
+// catalogue is the deployment's, not a bucket's. Every built-in role may
+// read it, to offer its tags when tagging; only the cluster-admin changes
+// it.
+const (
+	// ActionListTagDefinitions allows listing the catalogue.
+	ActionListTagDefinitions Action = "admin:ListTagDefinitions"
+	// ActionGetTagDefinition allows reading one definition of the
+	// catalogue.
+	ActionGetTagDefinition Action = "admin:GetTagDefinition"
+	// ActionPutTagDefinition allows adding a definition to the catalogue
+	// and changing one.
+	ActionPutTagDefinition Action = "admin:PutTagDefinition"
+	// ActionDeleteTagDefinition allows removing a definition that no tag
+	// rule names.
+	ActionDeleteTagDefinition Action = "admin:DeleteTagDefinition"
 )
 
 // ActionPreviewObject allows having an object shown in the console: its

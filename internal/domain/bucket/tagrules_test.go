@@ -44,9 +44,17 @@ func TestTagRulesRefused(t *testing.T) {
 		values[i] = strings.Repeat("v", i+1)
 	}
 	for name, rules := range map[string]bucket.TagRules{
-		"too many required tags":            {Required: many},
-		"a required tag without a key":      {Required: []bucket.RequiredTag{{Key: ""}}},
-		"a key that is too long":            {Required: []bucket.RequiredTag{{Key: strings.Repeat("k", 257)}}},
+		"too many required tags":       {Required: many},
+		"a required tag without a key": {Required: []bucket.RequiredTag{{Key: ""}}},
+		"a key that is too long":       {Required: []bucket.RequiredTag{{Key: strings.Repeat("k", 257)}}},
+		// A key or a value no tag can have would refuse every object.
+		"a key of 129 characters":           {Required: []bucket.RequiredTag{{Key: strings.Repeat("k", 129)}}},
+		"a key with a comma":                {Required: []bucket.RequiredTag{{Key: "a,b"}}},
+		"a key with an ampersand":           {Required: []bucket.RequiredTag{{Key: "a&b"}}},
+		"a key that is not text":            {Required: []bucket.RequiredTag{{Key: "k\xff"}}},
+		"a value of 257 characters":         {Required: []bucket.RequiredTag{{Key: "a", Values: []string{strings.Repeat("ü", 257)}}}},
+		"a value with a semicolon":          {Required: []bucket.RequiredTag{{Key: "a", Values: []string{"x;y"}}}},
+		"a value with a newline":            {Required: []bucket.RequiredTag{{Key: "a", Values: []string{"x\ny"}}}},
 		"the same tag twice":                {Required: []bucket.RequiredTag{{Key: "a"}, {Key: "a"}}},
 		"too many values":                   {Required: []bucket.RequiredTag{{Key: "a", Values: values}}},
 		"a value twice":                     {Required: []bucket.RequiredTag{{Key: "a", Values: []string{"x", "x"}}}},
@@ -64,6 +72,15 @@ func TestTagRulesRefused(t *testing.T) {
 				t.Errorf("Document = %v, want %v", err, domain.ErrInvalidArgument)
 			}
 		})
+	}
+	// Every key and value a tag can have may be required: the longest, of
+	// every kind of character, and the empty value.
+	widest := bucket.TagRules{Required: []bucket.RequiredTag{
+		{Key: strings.Repeat("ö", 128), Values: []string{strings.Repeat("ü", 256), ""}},
+		{Key: "cost centre:2026/q4+x=y.z_w@v-u", Values: []string{"a b+c-d=e.f_g:h/i@j"}},
+	}}
+	if err := widest.Validate(); err != nil {
+		t.Errorf("keys and values a tag can have: %v", err)
 	}
 	// The same tag may be required of two sub-buckets, or of one and of all.
 	fine := bucket.TagRules{Required: []bucket.RequiredTag{{Key: "a"}, {SubBucket: "x", Key: "a"}, {SubBucket: "y", Key: "a"}}}

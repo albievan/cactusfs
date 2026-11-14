@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 // ConfigTagRules is the kind of bucket configuration that holds the rules
@@ -21,7 +22,13 @@ const (
 	MaxRequiredTags = 10
 	// MaxAllowedValues is how many values a required tag can be held to.
 	MaxAllowedValues = 50
-	maxRuleText      = 256
+)
+
+// What a key and a value of a tag may be (object.ValidateTagKey,
+// object.ValidateTagValue), in the words of a refusal.
+const (
+	tagTextRule  = "1 to 128 characters, each a letter, a digit, a space or one of + - = . _ : / @"
+	tagValueRule = "at most 256 characters, each a letter, a digit, a space or one of + - = . _ : / @"
 )
 
 // tagRulesVersion is the version of the stored document.
@@ -67,8 +74,9 @@ func (r TagRules) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, tag := range r.Required {
-		if tag.Key == "" || len(tag.Key) > maxRuleText {
-			return invalidTagRules("a required tag has a key of 1 to %d bytes", maxRuleText)
+		// A key or a value no tag can have would refuse every object.
+		if object.ValidateTagKey(tag.Key) != nil {
+			return invalidTagRules("a required tag has a key no tag can have: %s", tagTextRule)
 		}
 		if r.Lowercase && tag.Key != strings.ToLower(tag.Key) {
 			return invalidTagRules("the bucket lower-cases its tags: write the key %q in lower case", tag.Key)
@@ -87,8 +95,8 @@ func (r TagRules) Validate() error {
 			return invalidTagRules("more than %d values for the tag %q", MaxAllowedValues, tag.Key)
 		}
 		for i, value := range tag.Values {
-			if len(value) > maxRuleText {
-				return invalidTagRules("a value of the tag %q is longer than %d bytes", tag.Key, maxRuleText)
+			if object.ValidateTagValue(value) != nil {
+				return invalidTagRules("a value of the tag %q is one no tag can have: %s", tag.Key, tagValueRule)
 			}
 			if r.Lowercase && value != strings.ToLower(value) {
 				return invalidTagRules("the bucket lower-cases its tags: write the value %q in lower case", value)
