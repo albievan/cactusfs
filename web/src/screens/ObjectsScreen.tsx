@@ -8,6 +8,7 @@ import {
   type ObjectAccessSummary,
   type ObjectList,
   type ObjectMetadata,
+  type RequiredTag,
 } from '../api/client';
 import { useDeleting, useDeletionList, useDeletions } from '../deletions/context';
 import { doneOf, outcomeOf, progressLineOf, totalOf } from '../deletions/state';
@@ -20,12 +21,15 @@ import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
 import { reasonOf } from '../ui/reason';
+import { taggingOf, tagsOf, withRequired, type TagRow } from '../ui/tags';
 import { useUploadList, useUploads } from '../uploads/context';
 import { UPLOADS_AT_ONCE } from '../uploads/engine';
 import { totalsOf } from '../uploads/state';
 import { UploadTile } from '../uploads/UploadTile';
 import { BucketDetails, useBucketFacts } from './BucketDetails';
 import { DeleteAll } from './DeleteAll';
+import { ObjectTags } from './ObjectTags';
+import { UploadTags } from './UploadTags';
 
 const DELIMITER = '/';
 
@@ -191,6 +195,20 @@ export function ObjectsScreen({ bucket, prefix, passwordSession = false }: Objec
   const submittedFiles = useRef<File[] | null>(null);
   const chosenFiles = useRef<File[]>(files);
   const [sending, setSending] = useState(false);
+  // The tags every file of the next upload is given, as typed. They stay when
+  // an upload is over: the next is likely to want the same.
+  const [tagRows, setTagRows] = useState<TagRow[]>([]);
+  // Whether files were ever chosen here: from then on the tags field reads
+  // the bucket's tag rules.
+  const [askRules, setAskRules] = useState(false);
+  // Puts the keys the bucket's rules require in the rows, once they are read:
+  // those required of the key typed - or of the prefix of several files - then.
+  const putRequired = useCallback(
+    (required: RequiredTag[]) => {
+      setTagRows((rows) => withRequired(rows, required, key));
+    },
+    [key],
+  );
   // The keys ticked for deletion, of this page.
   const [chosen, setChosen] = useState<string[]>([]);
 
@@ -298,9 +316,14 @@ export function ObjectsScreen({ bucket, prefix, passwordSession = false }: Objec
       return;
     }
     submittedFiles.current = files;
+    const tagging = taggingOf(tagsOf(tagRows));
     submitted.current = uploads.start(
       bucket,
-      files.map((file) => ({ file, key: several ? key + file.name : key })),
+      files.map((file) => ({
+        file,
+        key: several ? key + file.name : key,
+        tagging: tagging === '' ? undefined : tagging,
+      })),
     );
     setSending(true);
   };
@@ -410,6 +433,9 @@ export function ObjectsScreen({ bucket, prefix, passwordSession = false }: Objec
                 const chosen = Array.from(event.target.files ?? []);
                 chosenFiles.current = chosen;
                 setFiles(chosen);
+                if (chosen.length > 0) {
+                  setAskRules(true);
+                }
                 const [only] = chosen;
                 setKey(chosen.length === 1 && only !== undefined ? prefix + only.name : prefix);
               }}
@@ -432,6 +458,14 @@ export function ObjectsScreen({ bucket, prefix, passwordSession = false }: Objec
             <i className="bi bi-upload" aria-hidden="true" /> <span className="btn-text">Upload</span>
           </button>
         </form>
+        <UploadTags
+          bucket={bucket}
+          rows={tagRows}
+          onRows={setTagRows}
+          active={askRules}
+          onRequired={putRequired}
+          disabled={sending}
+        />
         {several ? (
           <p className="form-hint">
             {files.length} files chosen: each is stored under the prefix by its own name, {UPLOADS_AT_ONCE} at a time. A
@@ -951,8 +985,8 @@ interface ObjectDetailsProps {
 }
 
 /**
- * Everything that is known of one object: what it is, and who uploaded and
- * downloaded it. It is asked for when the details are first opened and when
+ * Everything that is known of one object: what it is, who uploaded and
+ * downloaded it, and its tags. It is asked for when the details are first opened and when
  * the listing says the object was replaced, and not otherwise. That it is on
  * its way, and that it could not be had, is said here, in the row: the
  * details of one object failing are no failure of the screen, nor of the
@@ -1030,6 +1064,10 @@ function ObjectDetails({ bucket, object, known, onKnown }: ObjectDetailsProps) {
         <div className="grid-detail-group">
           {/* Asked for again when the object was replaced: another upload has another uploader. */}
           <ObjectAccessFacts key={stamp} bucket={metadata.bucket} objectKey={metadata.key} />
+        </div>
+        <div className="grid-detail-group">
+          {/* And another version has tags of its own. */}
+          <ObjectTags key={stamp} bucket={metadata.bucket} objectKey={metadata.key} />
         </div>
       </>
     );

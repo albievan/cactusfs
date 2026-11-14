@@ -8,6 +8,7 @@ import { reasonOf } from '../ui/reason';
 import { useUploads } from '../uploads/context';
 import { ActivityLine, AtLeast, PolicySummary } from './BucketsScreen';
 import { BucketPolicySection, SubBucketsSection } from './SubBuckets';
+import { BucketTagsSection, TagRulesSection } from './TagSections';
 
 /** What the API tells of one bucket, as the details of its page show it. */
 export interface BucketFacts {
@@ -98,7 +99,8 @@ function refused(error: unknown): boolean {
  * uploads and downloads - as far as the API tells the caller, and in its
  * words. A figure the caller may not see is said to be so, one that is not
  * exact is said to be that: neither is ever shown as 0. Below them, folded
- * until asked for, the bucket's policy and its sub-buckets.
+ * until asked for, the bucket's policy, its sub-buckets, its tags and its
+ * tag rules.
  */
 export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: BucketFacts }) {
   const headingId = useId();
@@ -195,6 +197,8 @@ export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: 
         ) : null}
         <BucketPolicySection bucket={name} />
         <SubBucketsSection bucket={name} />
+        <BucketTagsSection bucket={name} />
+        <TagRulesSection bucket={name} />
       </div>
     </section>
   );

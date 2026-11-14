@@ -15,6 +15,7 @@ const SECTIONS = [
   { segment: 'groups', label: 'Groups', icon: 'bi-people' },
   { segment: 'roles', label: 'Roles', icon: 'bi-person-badge' },
   { segment: 'policies', label: 'Policies', icon: 'bi-shield-lock' },
+  { segment: 'tags', label: 'Tags', icon: 'bi-tags' },
   { segment: 'cluster', label: 'Cluster', icon: 'bi-hdd-network' },
   { segment: 'settings', label: 'Settings', icon: 'bi-gear' },
   { segment: 'updates', label: 'Updates', icon: 'bi-arrow-up-circle' },

@@ -29,6 +29,18 @@ export type BucketPolicy = Schemas['BucketPolicy'];
 export type SubBucketSummary = Schemas['SubBucketSummary'];
 /** A sub-bucket of a bucket and its policy; `policy` is absent when it has none of its own. */
 export type SubBucket = Schemas['SubBucket'];
+/** A tag of a bucket or of a version of an object: a key and a value. */
+export type Tag = Schemas['Tag'];
+/** The tags of a bucket, in key order. */
+export type BucketTags = Schemas['BucketTags'];
+/** The tags of a version of an object, in key order. */
+export type ObjectTags = Schemas['ObjectTags'];
+/** The rules for the tags of a bucket's objects (ADR-0018). */
+export type TagRules = Schemas['TagRules'];
+/** A tag every object of a bucket - or of one of its sub-buckets - must carry. */
+export type RequiredTag = Schemas['RequiredTag'];
+/** A tag the deployment defines for its users to pick (ADR-0018). */
+export type TagDefinition = Schemas['TagDefinition'];
 /** One page of an object listing. */
 export type ObjectList = Schemas['ObjectList'];
 /** What is known about one object. */
@@ -688,6 +700,10 @@ export type UploadProgress = (sent: number, total: number) => void;
  * way is judged once the unlock is over: one of these if the unlock gave
  * new tokens, the end of the session if it did not.
  *
+ * `tagging`, when it is given and not empty, is sent as `X-CactusFS-Tagging`:
+ * the tags of the version, as a URL query string. Whether they may be given,
+ * and whether they keep to the bucket's tag rules, is the API's to say.
+ *
  * An upload whose `signal` is aborted is given up: the request is aborted and
  * the promise rejects with an ApiError of status 0, "The upload was stopped".
  * Whoever aborted tells that from a failure by looking at the signal.
@@ -699,13 +715,14 @@ export function uploadObjectWithProgress(
   onProgress: UploadProgress,
   idempotencyKey: string = crypto.randomUUID(),
   signal?: AbortSignal,
+  tagging?: string,
 ): Promise<ObjectMetadata> {
   const path: keyof paths = '/buckets/{bucket}/object';
   const query = new URLSearchParams({ key });
   const url = `${API_BASE}${path.replace('{bucket}', encodeURIComponent(bucket))}?${query.toString()}`;
   // The request is made at once, as it always was - unless an unlock is on
   // its way: then once that is over, with the tokens it left.
-  const send = () => sendObject(url, file, onProgress, idempotencyKey, signal);
+  const send = () => sendObject(url, file, onProgress, idempotencyKey, signal, tagging);
   return unlocking === null ? send() : unlocking.then(send);
 }
 
@@ -716,6 +733,7 @@ function sendObject(
   onProgress: UploadProgress,
   idempotencyKey: string,
   signal: AbortSignal | undefined,
+  tagging: string | undefined,
 ): Promise<ObjectMetadata> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
@@ -739,6 +757,11 @@ function sendObject(
     // The same key for every attempt at the same upload: an attempt that
     // was stored, though its answer was lost, is then not stored twice.
     request.setRequestHeader('Idempotency-Key', idempotencyKey);
+    // The tags of the version, as the contract's `X-CactusFS-Tagging`: a URL
+    // query string (`taggingOf` in ui/tags.ts). None, no header.
+    if (tagging !== undefined && tagging !== '') {
+      request.setRequestHeader('X-CactusFS-Tagging', tagging);
+    }
     const token = readCsrfToken();
     if (token !== null) {
       request.setRequestHeader('X-CSRF-Token', token);

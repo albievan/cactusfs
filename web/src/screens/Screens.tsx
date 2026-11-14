@@ -9,6 +9,7 @@ import { RoleScreen } from './RoleScreen';
 import { RolesScreen } from './RolesScreen';
 import { SearchScreen } from './SearchScreen';
 import { SettingsScreen } from './SettingsScreen';
+import { TagsScreen } from './TagsScreen';
 import { UpdatesScreen } from './UpdatesScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
@@ -52,6 +53,8 @@ export function Screens({ passwordSession = false }: ScreensProps) {
       return item === undefined ? <RolesScreen /> : <RoleScreen key={item} name={item} />;
     case 'policies':
       return <PoliciesScreen />;
+    case 'tags':
+      return <TagsScreen />;
     case 'cluster':
       return <ClusterScreen />;
     case 'settings':

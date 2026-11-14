@@ -2,10 +2,8 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type R
 
 import {
   api,
-  ApiError,
   unwrap,
   type PolicyDocument,
-  type Problem,
   type SubBucket,
   type SubBucketSummary,
 } from '../api/client';
@@ -22,15 +20,7 @@ import {
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
-
-/**
- * The code of the problem the API answers a path it does not know with
- * (`internal/adapters/adminapi/handler.go`, "No such endpoint"). A bucket,
- * a sub-bucket or a policy that is not there has codes of its own
- * (`NoSuchBucket`, `NoSuchSubBucket`): only a node of a release before these
- * operations - met during a rolling upgrade - answers them `NotFound`.
- */
-const NO_SUCH_ENDPOINT = 'NotFound';
+import { firstOf, Fold, LoadFailure, olderNode, onCode, refused, type Explain } from '../ui/sections';
 
 /** The rule of a sub-bucket's name, as the contract has it (`SubBucketNameValue`). */
 export const SUB_BUCKET_NAME_RULE =
@@ -39,105 +29,8 @@ export const SUB_BUCKET_NAME_RULE =
 /** How many sub-buckets a bucket may have, as the contract says (ADR-0017). It is only said: the API counts. */
 const MOST_SUB_BUCKETS = 10;
 
-/** A problem the console says something more of, or undefined. */
-type Explain = (problem: Problem) => string | undefined;
-
-/** Whether the API refused to tell the caller this: 403. */
-function refused(error: unknown): boolean {
-  return error instanceof ApiError && error.problem.status === 403;
-}
-
-/** What is said of a 404 `NotFound`: the node that answered is of an older release. */
-function olderNode(what: string): Explain {
-  return (problem) =>
-    problem.status === 404 && problem.code === NO_SUCH_ENDPOINT
-      ? `${what} not available on the node that answered (an older release); try again.`
-      : undefined;
-}
-
-/** The first of the explanations that has something to say. */
-function firstOf(...explains: Explain[]): Explain {
-  return (problem) => {
-    for (const explain of explains) {
-      const words = explain(problem);
-      if (words !== undefined) {
-        return words;
-      }
-    }
-    return undefined;
-  };
-}
-
-/** What is said when the API answers a code, and the words. */
-function onCode(code: string, words: string): Explain {
-  return (problem) => (problem.code === code ? words : undefined);
-}
-
 const SUB_BUCKETS_ON_AN_OLDER_NODE = olderNode('Sub-buckets are');
 const POLICIES_ON_AN_OLDER_NODE = olderNode('Bucket policies are');
-
-interface FoldProps {
-  /** The heading, and the name of the region. */
-  title: string;
-  /** What is shown, for the hint of the button: "the policy of this bucket". */
-  what: string;
-  children: ReactNode;
-}
-
-/**
- * A part of a bucket's details that is folded until it is asked for. What it
- * holds is made - and so asks the API - only once it is unfolded, and is
- * kept, with what was typed into it, when it is folded again.
- */
-function Fold({ title, what, children }: FoldProps) {
-  const headingId = useId();
-  const bodyId = useId();
-  const [open, setOpen] = useState(false);
-  const [made, setMade] = useState(false);
-  return (
-    <section className="bucket-section" aria-labelledby={headingId}>
-      <h3 id={headingId} className="bucket-section-heading">
-        <button
-          type="button"
-          className="bucket-details-toggle"
-          aria-expanded={open}
-          aria-controls={bodyId}
-          title={open ? `Hide ${what}` : `Show ${what}`}
-          onClick={() => {
-            setOpen(!open);
-            setMade(true);
-          }}
-        >
-          <i className={`bi ${open ? 'bi-chevron-down' : 'bi-chevron-right'}`} aria-hidden="true" />
-          {title}
-        </button>
-      </h3>
-      <div id={bodyId} className="bucket-section-body" hidden={!open}>
-        {made ? children : null}
-      </div>
-    </section>
-  );
-}
-
-interface LoadFailureProps {
-  error: unknown;
-  explain: Explain;
-  onRetry: () => void;
-  /** What the button's hint says is asked for again. */
-  what: string;
-}
-
-/** Why something could not be read, in the API's words, and a way to ask again. */
-function LoadFailure({ error, explain, onRetry, what }: LoadFailureProps) {
-  return (
-    <div className="bucket-section-failure">
-      <ProblemNotice error={error} explain={explain} />
-      <button type="button" className="btn btn-outline-secondary btn-sm" onClick={onRetry} title={`Ask for ${what} again`}>
-        <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Try again</span>
-      </button>
-    </div>
-  );
-}
 
 interface PolicyTextProps {
   /** The label of the text: "Policy of bucket photos as JSON". */

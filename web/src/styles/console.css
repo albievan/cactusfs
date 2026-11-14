@@ -1652,6 +1652,75 @@ textarea[readonly] {
   font-size: 1rem;
 }
 
+/* Tags edited as rows of a key and a value - of a bucket, of an object, of
+   an upload - and the required tags of a bucket's rules, a row each. On a
+   phone a row is one column: the key above its value, the button under
+   them, every control one a finger can hit. */
+.tag-rows {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.tag-rows h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.tag-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.tag-row-required {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr) auto;
+}
+
+.tag-rows-empty,
+.tag-said {
+  margin: 0;
+  color: var(--muted);
+}
+
+.notice-region:not(:empty) > .tag-said {
+  margin-bottom: 0.5rem;
+}
+
+.upload-tags {
+  margin-top: 1rem;
+}
+
+.upload-tags-heading {
+  font-size: 1rem;
+}
+
+.upload-tag-rules-title {
+  margin: 0;
+}
+
+.upload-tag-rules-list {
+  margin: 0.25rem 0 0.5rem;
+  padding-left: 1.25rem;
+}
+
+@media (max-width: 575.98px) {
+  .tag-row,
+  .tag-row-required {
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tag-row-remove {
+    justify-self: start;
+  }
+
+  .tag-rule-check {
+    min-height: 44px;
+  }
+}
+
 /* "Delete all": the question, on a row of the toolbar of its own. */
 .delete-all {
   flex: 1 0 100%;

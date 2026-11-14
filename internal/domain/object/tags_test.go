@@ -110,6 +110,11 @@ func TestParseTagging(t *testing.T) {
 	}{
 		{name: "pairs in the order given", query: "team=finance&stage=draft", want: []object.Tag{{Key: "team", Value: "finance"}, {Key: "stage", Value: "draft"}}},
 		{name: "escaped", query: "a%20b=c+d&%40x=%2F", want: []object.Tag{{Key: "a b", Value: "c d"}, {Key: "@x", Value: "/"}}},
+		// The header the console sends (taggingOf in web/src/ui/tags.ts,
+		// encodeURIComponent: a space is %20, never +), byte for byte as its
+		// tests expect it.
+		{name: "as the console encodes it", query: "stage=draft&team=a%2Bb%3Dc%2Fd%20e&Owner=Ana%40x%3Ay", want: []object.Tag{{Key: "stage", Value: "draft"}, {Key: "team", Value: "a+b=c/d e"}, {Key: "Owner", Value: "Ana@x:y"}}},
+		{name: "a lone surrogate as the console sends it", query: "k=a%EF%BF%BDb", want: []object.Tag{{Key: "k", Value: "a\uFFFDb"}}},
 		{name: "a key given twice is kept twice", query: "a=1&a=2", want: []object.Tag{{Key: "a", Value: "1"}, {Key: "a", Value: "2"}}},
 		{name: "no value", query: "a&b=", want: []object.Tag{{Key: "a"}, {Key: "b"}}},
 		{name: "empty", query: "", want: []object.Tag{}},

@@ -144,6 +144,60 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('the tags of an upload', () => {
+  const TAGGING = 'stage=draft&team=a%2Bb%20c';
+  const tagsOf = (api: FakeApi) =>
+    api.callsTo('PUT', '/buckets/photos/object').map((call) => call.headers.get('X-CactusFS-Tagging'));
+
+  it('go with every attempt at a file, under the same Idempotency-Key, when a node says "not now"', async () => {
+    const api = fakeApi({ 'PUT /buckets/photos/object': inTurn(() => problem(503, 'No metadata leader'), stores) });
+    const { engine, notices } = uploadsOf();
+
+    engine.start('photos', [{ file: file('a.txt'), key: 'a.txt', tagging: TAGGING }]);
+    await paused();
+    await vi.advanceTimersByTimeAsync(UPLOAD_RETRY_MS);
+    await until(() => notices.length === 1, 'the notice of the batch');
+
+    expect(statesOf(engine)).toEqual(['stored']);
+    expect(api.xhrs).toHaveLength(2);
+    expect(tagsOf(api)).toEqual([TAGGING, TAGGING]);
+    const keys = keysOf(api);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+  });
+
+  it('go again with a file that was refused and is sent again, as a new upload under a new key', async () => {
+    let allowed = false;
+    const api = fakeApi({
+      'PUT /buckets/photos/object': (call) => (allowed ? stores(call) : problem(400, "Against the bucket's tag rules")),
+    });
+    const { engine, notices } = uploadsOf();
+
+    engine.start('photos', [{ file: file('a.txt'), key: 'a.txt', tagging: TAGGING }]);
+    await until(() => notices.length === 1, 'the notice of the refusal');
+    expect(statesOf(engine)).toEqual(['failed']);
+
+    allowed = true;
+    engine.retryFailed();
+    await until(() => notices.length === 2, 'the notice of the second attempt');
+
+    expect(statesOf(engine)).toEqual(['stored']);
+    expect(tagsOf(api)).toEqual([TAGGING, TAGGING]);
+    const keys = keysOf(api);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('are not sent when there are none', async () => {
+    const api = fakeApi({ 'PUT /buckets/photos/object': stores });
+    const { engine, notices } = uploadsOf();
+
+    engine.start('photos', [{ file: file('a.txt'), key: 'a.txt' }]);
+    await until(() => notices.length === 1, 'the notice of the batch');
+    expect(tagsOf(api)).toEqual([null]);
+  });
+});
+
 describe('the sending of uploads', () => {
   it('waits longer each time the API says it is still working, and no longer than the limit', () => {
     expect(busyWait(1)).toBe(UPLOAD_BUSY_MS);

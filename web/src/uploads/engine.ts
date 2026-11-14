@@ -1,4 +1,4 @@
-import { ApiError, uploadObjectWithProgress } from '../api/client';
+import { ApiError, SESSION_LOCKED, uploadObjectWithProgress } from '../api/client';
 import type { NoticeInput } from '../notices/state';
 import { routeHref } from '../router';
 import { limiter } from '../ui/limiter';
@@ -49,10 +49,24 @@ export const STILL_WORKING =
 /** How often, at most, the progress of the files is told to the screen. */
 export const PROGRESS_EVERY_MS = 100;
 
+/**
+ * Why a file with tags was not stored while the session was locked: a locked
+ * session may store objects, but not give them tags (the contract's 423
+ * `SessionLocked` on `putObject`). Sent again once the session is unlocked, it
+ * is a new upload, as every refusal is.
+ */
+export const LOCKED_WITH_TAGS =
+  'Not stored: the session was locked, and a locked session may not upload with tags. Unlock it, then retry the files that were not stored.';
+
 /** A file to upload, and the key to store it under. */
 export interface UploadItem {
   file: File;
   key: string;
+  /**
+   * The tags to give it, as a URL query string (`X-CactusFS-Tagging`);
+   * undefined or empty for none.
+   */
+  tagging?: string;
 }
 
 /** What is told to whoever listens to the uploads. */
@@ -108,6 +122,8 @@ interface Job {
   file: File;
   bucket: string;
   key: string;
+  /** The tags it is sent with, as `X-CactusFS-Tagging`; undefined for none. */
+  tagging: string | undefined;
   batch: string;
   /** The same for every attempt at the same upload; see send. */
   idempotencyKey: string;
@@ -149,6 +165,23 @@ function refusal(error: unknown): boolean {
  */
 function keptRefusal(error: unknown): boolean {
   return refusal(error) && error instanceof ApiError && error.replayed;
+}
+
+/**
+ * Why a file was not stored, in the words of the API - but for a file with
+ * tags that a locked session was refused: that is said as what it is.
+ */
+function reasonFor(error: unknown, job: Job): string {
+  if (
+    job.tagging !== undefined &&
+    job.tagging !== '' &&
+    error instanceof ApiError &&
+    error.problem.status === 423 &&
+    error.problem.code === SESSION_LOCKED
+  ) {
+    return LOCKED_WITH_TAGS;
+  }
+  return reasonOf(error);
 }
 
 // Waits, and no longer than until the signal is aborted.
@@ -304,6 +337,7 @@ export function createUploads(notify: (notice: NoticeInput) => void): UploadsEng
           },
           job.idempotencyKey,
           job.stop.signal,
+          job.tagging,
         );
       } catch (error) {
         if (job.stop.signal.aborted) {
@@ -346,7 +380,7 @@ export function createUploads(notify: (notice: NoticeInput) => void): UploadsEng
         apply(
           working
             ? { type: 'failed', id, reason: STILL_WORKING, undecided: true }
-            : { type: 'failed', id, reason: reasonOf(error) },
+            : { type: 'failed', id, reason: reasonFor(error, job) },
         );
         settle(job.batch);
         return;
@@ -373,12 +407,13 @@ export function createUploads(notify: (notice: NoticeInput) => void): UploadsEng
 
   const start = (bucket: string, items: UploadItem[]): string => {
     const batch = crypto.randomUUID();
-    const added = items.map(({ file, key }) => {
+    const added = items.map(({ file, key, tagging }) => {
       const id = crypto.randomUUID();
       const job: Job = {
         file,
         bucket,
         key,
+        tagging,
         batch,
         idempotencyKey: crypto.randomUUID(),
         refused: false,
