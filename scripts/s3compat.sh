@@ -16,6 +16,11 @@ if [ ! -f "$baseline" ]; then
 	exit 1
 fi
 
+# Since Go 1.24 test2json writes "OutputType" after "Output" on some lines
+# ("frame", "error", "error-continue"); it is dropped before a line's output
+# is taken, or the printed line would end in its JSON.
+strip_type='s/,"OutputType":"[a-z-]*"}$/}/'
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -41,7 +46,7 @@ if [ ! -s "$work/events.json" ]; then
 fi
 if grep -q '"Action":"build-fail"\|"FailedBuild":' "$work/events.json"; then
 	echo "s3-compat: FAIL - the suite does not build:" >&2
-	grep '"Action":"build-output"' "$work/events.json" | sed 's/.*"Output":"\(.*\)"}$/\1/' >&2 || true
+	grep '"Action":"build-output"' "$work/events.json" | sed -e "$strip_type" -e 's/.*"Output":"\(.*\)"}$/\1/' >&2 || true
 	exit 1
 fi
 
@@ -61,7 +66,7 @@ total=$((passed + failed))
 
 if [ "$suite_status" -ne 0 ] && [ "$total" -eq 0 ]; then
 	echo "s3-compat: FAIL - the suite did not run:" >&2
-	grep '"Action":"output"' "$work/events.json" | sed 's/.*"Output":"\(.*\)"}$/\1/' >&2 || cat "$work/events.json" >&2
+	grep '"Action":"output"' "$work/events.json" | sed -e "$strip_type" -e 's/.*"Output":"\(.*\)"}$/\1/' >&2 || cat "$work/events.json" >&2
 	exit 1
 fi
 
@@ -79,11 +84,11 @@ check)
 			echo "--- output of $pkg $test:" >&2
 			grep -F "\"Package\":\"$pkg\"" "$work/events.json" | grep '"Action":"output"' |
 				grep "\"Test\":\"${test}[\"/]" |
-				sed 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
+				sed -e "$strip_type" -e 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
 			echo "--- output of $pkg outside its tests:" >&2
 			grep -F "\"Package\":\"$pkg\"" "$work/events.json" | grep '"Action":"output"' |
 				grep -v '"Test":' |
-				sed 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
+				sed -e "$strip_type" -e 's/.*"Output":"\(.*\)"}$/\1/' | sed 's/\\n$//; s/\\t/	/g; s/\\"/"/g' | tail -n 60 >&2 || true
 		done <"$work/regressions.txt"
 		exit 1
 	fi
