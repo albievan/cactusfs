@@ -7,6 +7,7 @@ import { useLoad, type Loaded } from '../ui/hooks';
 import { reasonOf } from '../ui/reason';
 import { useUploads } from '../uploads/context';
 import { ActivityLine, AtLeast, PolicySummary } from './BucketsScreen';
+import { BucketPolicySection, SubBucketsSection } from './SubBuckets';
 
 /** What the API tells of one bucket, as the details of its page show it. */
 export interface BucketFacts {
@@ -96,9 +97,10 @@ function refused(error: unknown): boolean {
  * keeps besides, when it was made and by whom, its policy and its latest
  * uploads and downloads - as far as the API tells the caller, and in its
  * words. A figure the caller may not see is said to be so, one that is not
- * exact is said to be that: neither is ever shown as 0.
+ * exact is said to be that: neither is ever shown as 0. Below them, folded
+ * until asked for, the bucket's policy and its sub-buckets.
  */
-export function BucketDetails({ facts }: { facts: BucketFacts }) {
+export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: BucketFacts }) {
   const headingId = useId();
   const { usage, bucket } = facts;
   const found = bucket.data;
@@ -191,6 +193,8 @@ export function BucketDetails({ facts }: { facts: BucketFacts }) {
             {usage.data.complete ? '' : ', and the count stopped at its bound before it reached the end of the bucket'}.
           </p>
         ) : null}
+        <BucketPolicySection bucket={name} />
+        <SubBucketsSection bucket={name} />
       </div>
     </section>
   );

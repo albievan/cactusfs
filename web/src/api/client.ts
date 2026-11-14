@@ -23,6 +23,12 @@ export type BucketDetails = Schemas['BucketDetails'];
 export type BucketActivityEntry = Schemas['BucketActivityEntry'];
 /** How much a bucket holds. */
 export type BucketUsage = Schemas['BucketUsage'];
+/** The policy of a bucket; `document` is absent when it has none. */
+export type BucketPolicy = Schemas['BucketPolicy'];
+/** A sub-bucket of a bucket, as a list of them names it: without its policy. */
+export type SubBucketSummary = Schemas['SubBucketSummary'];
+/** A sub-bucket of a bucket and its policy; `policy` is absent when it has none of its own. */
+export type SubBucket = Schemas['SubBucket'];
 /** One page of an object listing. */
 export type ObjectList = Schemas['ObjectList'];
 /** What is known about one object. */

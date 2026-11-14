@@ -1622,6 +1622,36 @@ textarea[readonly] {
   color: var(--muted);
 }
 
+/* The policy and the sub-buckets of a bucket, under its facts: each folded
+   until asked for, a rule above it. Their forms are form grids and their
+   list a grid, which fold onto one column and into cards on a phone. */
+.bucket-section {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.bucket-section-heading {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.bucket-section-body {
+  margin-top: 0.75rem;
+}
+
+.bucket-section-failure {
+  margin-bottom: 0.75rem;
+}
+
+.bucket-subsection {
+  margin-top: 1rem;
+}
+
+.bucket-subsection h4 {
+  font-size: 1rem;
+}
+
 /* "Delete all": the question, on a row of the toolbar of its own. */
 .delete-all {
   flex: 1 0 100%;

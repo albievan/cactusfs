@@ -33,6 +33,14 @@ function body(call: { body: string } | undefined): unknown {
   return JSON.parse(call?.body ?? 'null');
 }
 
+/** A policy typed with a key given twice: JavaScript keeps the last value, the API refuses the document. */
+const TWICE = '{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Effect":"Allow","Action":"s3:*","Resource":"*"}]}';
+
+/** What the API answers a document that names a key twice. */
+function refusedTwice(): Response {
+  return problem(400, 'Invalid policy', 'statement 1: the field "Effect" is given twice');
+}
+
 describe('users', () => {
   it('lists the users and what the API says about them', async () => {
     fakeApi({ 'GET /users': () => json(200, [user(), user({ name: 'eve', disabled: true, has_password: false })]) });
@@ -242,6 +250,30 @@ describe('API keys', () => {
     expect(body(api.callsTo('POST', '/users/bob/keys')[0])).toEqual({});
   });
 
+  it('sends an inline policy as typed, so that a key typed twice is refused by the API', async () => {
+    const api = fakeApi({
+      'GET /users/bob/keys': () => json(200, []),
+      'POST /users/bob/keys': refusedTwice,
+    });
+    render(<ApiKeys user="bob" />);
+    await screen.findByText('This user has no API keys.');
+
+    typeInto('Description (optional)', 'backup job');
+    typeInto('Inline policy as JSON (optional; narrows what the key may do)', TWICE);
+    fireEvent.click(screen.getByRole('button', { name: 'Create API key' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('the field "Effect" is given twice');
+    const [post] = api.callsTo('POST', '/users/bob/keys');
+    expect(post?.body).toBe(`{"description":"backup job","inline_policy":${TWICE}}`);
+    expect(post?.headers.get('Content-Type')).toBe('application/json');
+    // What was typed is kept, to be put right.
+    expect(
+      (screen.getByLabelText('Inline policy as JSON (optional; narrows what the key may do)') as HTMLTextAreaElement)
+        .value,
+    ).toBe(TWICE);
+    expect(screen.getByText(/spaces and line breaks count towards the 20 KiB/)).toBeDefined();
+  });
+
   it('does not send an inline policy that is not JSON', async () => {
     const api = fakeApi({ 'GET /users/bob/keys': () => json(200, []) });
     render(<ApiKeys user="bob" />);
@@ -402,6 +434,65 @@ describe('policies', () => {
       expect(screen.getByRole('alert').textContent).toContain('Unknown field "Nonsense".');
     });
     expect(body(api.callsTo('POST', '/policies')[0])).toEqual({ name: 'p', document: { Nonsense: true } });
+  });
+
+  it('sends a new policy as typed, so that a key typed twice is refused by the API', async () => {
+    const api = fakeApi({
+      'GET /policies': () => json(200, []),
+      'POST /policies': refusedTwice,
+    });
+    render(<PoliciesScreen />);
+    await screen.findByText('There are no policies.');
+
+    typeInto('Policy name', 'twice');
+    typeInto('Policy document as JSON', TWICE);
+    fireEvent.click(screen.getByRole('button', { name: 'Create policy' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('the field "Effect" is given twice');
+    const [post] = api.callsTo('POST', '/policies');
+    expect(post?.body).toBe(`{"name":"twice","document":${TWICE}}`);
+    expect(post?.headers.get('Content-Type')).toBe('application/json');
+    expect((screen.getByLabelText('Policy document as JSON') as HTMLTextAreaElement).value).toBe(TWICE);
+  });
+
+  it('sends a changed policy as typed, so that a key typed twice is refused by the API', async () => {
+    const api = fakeApi({
+      'GET /policies': () => json(200, policies),
+      'PUT /policies/get-only': refusedTwice,
+    });
+    render(<PoliciesScreen />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy get-only' }));
+    typeInto('Policy document of get-only as JSON', TWICE);
+    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('the field "Effect" is given twice');
+    expect(api.callsTo('PUT', '/policies/get-only')[0]?.body).toBe(`{"document":${TWICE}}`);
+    expect((screen.getByLabelText('Policy document of get-only as JSON') as HTMLTextAreaElement).value).toBe(TWICE);
+  });
+
+  it('opens a policy compact when indented it would be larger than 20 KiB', async () => {
+    const large = {
+      Version: '2012-10-17',
+      Statement: Array.from({ length: 140 }, (_, i) => ({
+        Sid: `s${String(i)}`,
+        Effect: 'Allow',
+        Action: ['s3:GetObject', 's3:PutObject'],
+        Resource: `arn:aws:s3:::photos/reports/${String(i)}/*`,
+      })),
+    };
+    fakeApi({
+      'GET /policies': () => json(200, [{ name: 'large', document: large, built_in: false, created_at: CREATED }]),
+    });
+    render(<PoliciesScreen />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit policy large' }));
+
+    const editor = screen.getByLabelText('Policy document of large as JSON') as HTMLTextAreaElement;
+    expect(editor.value).toBe(JSON.stringify(large));
+    const hint = window.document.getElementById(editor.getAttribute('aria-describedby') ?? '');
+    expect(hint?.textContent).toContain('Shown without indentation: indented, it would be larger than 20 KiB.');
+    expect(hint?.textContent).toContain('spaces and line breaks count towards the 20 KiB');
   });
 
   it('shows a built-in policy read-only', async () => {

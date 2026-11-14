@@ -2,7 +2,15 @@ import { useState, type FormEvent } from 'react';
 
 import { api, unwrap, type Policy } from '../api/client';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { formatPolicyDocument, formatTime, parsePolicyDocument } from '../ui/format';
+import {
+  formatPolicyDocument,
+  formatTime,
+  POLICY_COMPACT_HINT,
+  POLICY_SIZE_HINT,
+  policyLayout,
+  typedPolicy,
+  type TypedPolicy,
+} from '../ui/format';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
@@ -13,7 +21,9 @@ function loadPolicies() {
 
 /**
  * The policies. A policy document is edited as JSON text; the console checks
- * that it is JSON and leaves the rest to the API. Built-in policies are only
+ * that it is JSON and leaves the rest to the API, to which it is sent as
+ * typed (`typedPolicy`): a key typed twice reaches the API, which refuses it,
+ * rather than JavaScript keeping its last value. Built-in policies are only
  * shown.
  */
 export function PoliciesScreen() {
@@ -25,15 +35,17 @@ export function PoliciesScreen() {
 
   const create = (event: FormEvent) => {
     event.preventDefault();
-    let parsed: Record<string, unknown>;
+    let typed: TypedPolicy;
     try {
-      parsed = parsePolicyDocument(document);
+      typed = typedPolicy('document', document, { name });
     } catch (error) {
       action.fail(error);
       return;
     }
     void action.run(async () => {
-      await unwrap(api.POST('/policies', { body: { name, document: parsed } }));
+      await unwrap(
+        api.POST('/policies', { body: { name, document: typed.document }, bodySerializer: () => typed.body }),
+      );
       setName('');
       setDocument('');
       policies.reload();
@@ -80,12 +92,16 @@ export function PoliciesScreen() {
               required
               rows={10}
               spellCheck={false}
+              aria-describedby="create-policy-size"
               value={document}
               onChange={(event) => {
                 setDocument(event.target.value);
               }}
             />
           </label>
+          <p id="create-policy-size" className="form-hint field-full">
+            {POLICY_SIZE_HINT}
+          </p>
           <div className="form-actions d-flex flex-wrap gap-2">
             <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this policy">
               <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create policy</span>
@@ -171,23 +187,33 @@ interface PolicyEditorProps {
   onClose?: () => void;
 }
 
-/** Shows a policy document and, unless the policy is built in, lets it be changed. */
+/**
+ * Shows a policy document and, unless the policy is built in, lets it be
+ * changed. The document is sent as typed; a stored one that indented would
+ * be larger than the API takes is shown compact.
+ */
 export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
   const heading = `edit-policy-${policy.name}`;
-  const [text, setText] = useState(formatPolicyDocument(policy.document));
+  const hint = `edit-policy-${policy.name}-size`;
+  const [layout] = useState(() => policyLayout(policy.document));
+  const [text, setText] = useState(layout.text);
 
   const save = (event: FormEvent) => {
     event.preventDefault();
-    let parsed: Record<string, unknown>;
+    let typed: TypedPolicy;
     try {
-      parsed = parsePolicyDocument(text);
+      typed = typedPolicy('document', text);
     } catch (error) {
       action.fail(error);
       return;
     }
     void action.run(async () => {
       await unwrap(
-        api.PUT('/policies/{name}', { params: { path: { name: policy.name } }, body: { document: parsed } }),
+        api.PUT('/policies/{name}', {
+          params: { path: { name: policy.name } },
+          body: { document: typed.document },
+          bodySerializer: () => typed.body,
+        }),
       );
       onSaved();
     });
@@ -209,12 +235,19 @@ export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorP
             rows={14}
             spellCheck={false}
             readOnly={policy.built_in}
+            aria-describedby={policy.built_in ? undefined : hint}
             value={text}
             onChange={(event) => {
               setText(event.target.value);
             }}
           />
         </label>
+        {policy.built_in ? null : (
+          <p id={hint} className="form-hint field-full">
+            {layout.compact ? `${POLICY_COMPACT_HINT} ` : ''}
+            {POLICY_SIZE_HINT}
+          </p>
+        )}
         <div className="form-actions d-flex flex-wrap gap-2">
           {policy.built_in ? null : (
             <button type="submit" className="btn btn-primary" disabled={action.busy} title="Save this policy document">

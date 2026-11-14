@@ -393,7 +393,7 @@ export function ObjectsScreen({ bucket, prefix, passwordSession = false }: Objec
       <h1>{bucket}</h1>
       <Breadcrumbs bucket={bucket} prefix={prefix} />
       <ProblemNotice error={action.error ?? listing.error} />
-      <BucketDetails facts={facts} />
+      <BucketDetails bucket={bucket} facts={facts} />
 
       <section className="card card-body panel" aria-labelledby="upload-object">
         <h2 id="upload-object">Upload an object</h2>

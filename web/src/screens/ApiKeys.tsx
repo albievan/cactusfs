@@ -2,7 +2,7 @@ import { useCallback, useState, type FormEvent } from 'react';
 
 import { api, unwrap, type APIKeyCreated } from '../api/client';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import { formatPolicyDocument, formatTime, parsePolicyDocument } from '../ui/format';
+import { formatPolicyDocument, formatTime, POLICY_SIZE_HINT, typedPolicy } from '../ui/format';
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
@@ -31,9 +31,25 @@ export function ApiKeys({ user }: ApiKeysProps) {
 
   const create = (event: FormEvent) => {
     event.preventDefault();
+    let body: { description?: string; expires_at?: string };
     let inlinePolicy: Record<string, unknown> | undefined;
+    // The body as sent: the inline policy in it as typed, so that a key typed
+    // twice reaches the API, which refuses it, rather than JavaScript keeping
+    // its last value.
+    let sent: string;
     try {
-      inlinePolicy = policy.trim() === '' ? undefined : parsePolicyDocument(policy);
+      body = {
+        description: description === '' ? undefined : description,
+        // The field holds local time; the API wants an instant.
+        expires_at: expires === '' ? undefined : new Date(expires).toISOString(),
+      };
+      if (policy.trim() === '') {
+        sent = JSON.stringify(body);
+      } else {
+        const typed = typedPolicy('inline_policy', policy, body);
+        inlinePolicy = typed.document;
+        sent = typed.body;
+      }
     } catch (error) {
       action.fail(error);
       return;
@@ -42,12 +58,8 @@ export function ApiKeys({ user }: ApiKeysProps) {
       const answer = await unwrap(
         api.POST('/users/{name}/keys', {
           params: { path: { name: user } },
-          body: {
-            description: description === '' ? undefined : description,
-            // The field holds local time; the API wants an instant.
-            expires_at: expires === '' ? undefined : new Date(expires).toISOString(),
-            inline_policy: inlinePolicy,
-          },
+          body: { ...body, inline_policy: inlinePolicy },
+          bodySerializer: () => sent,
         }),
       );
       setCreated(answer);
@@ -113,12 +125,16 @@ export function ApiKeys({ user }: ApiKeysProps) {
             name="policy"
             rows={6}
             spellCheck={false}
+            aria-describedby="api-key-policy-size"
             value={policy}
             onChange={(event) => {
               setPolicy(event.target.value);
             }}
           />
         </label>
+        <p id="api-key-policy-size" className="form-hint field-full">
+          {POLICY_SIZE_HINT}
+        </p>
         <div className="form-actions d-flex flex-wrap gap-2">
           <button
             type="submit"
