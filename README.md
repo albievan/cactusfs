@@ -132,9 +132,12 @@ Said plainly, so that nobody finds out by trying:
   text - an identity policy under Policies, a bucket's and a sub-bucket's in the bucket's
   details - and the server alone judges it.
 - **Tag rules, lower-cased tags and a catalogue of tags**
-  ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The same: domain and store
-  only. Tags of buckets and objects as S3 has them do work; tags given with a multipart
-  upload answer `501`.
+  ([ADR-0018](docs/adr/0018-tag-rules-and-catalogue.md)). The use cases exist and a
+  bucket's rules are enforced on every way S3 gives an object tags - `PutObject`,
+  `CopyObject`, `PutObjectTagging`, `DeleteObjectTagging` and multipart uploads, whose
+  tags (`x-amz-tagging` on `CreateMultipartUpload`) are now taken - but nothing sets
+  the rules or the catalogue yet: their management API answers `501` until PLAN D.4,
+  and the console's editors are PLAN D.6.
 - **Growing a cluster.** The voters and the storage of a cluster are fixed when it
   forms: storage nodes and drives cannot be added afterwards, and a node cannot be given
   a vote later. Gateways can join.

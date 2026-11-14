@@ -1,9 +1,10 @@
 # ADR-0018: Tag rules, lower-case tags, and a catalogue of tags
 
-- **Status:** accepted; not implemented beyond the domain rules and actions, the port,
-  the replicated store (PLAN D.1, S.3) and the management API's contract, whose
-  operations answer 501 (PLAN D.0). The use cases, the handlers and the console are to
-  come (PLAN D.2-D.6)
+- **Status:** accepted; the domain rules and actions, the port, the replicated store
+  (PLAN D.1, S.3), the management API's contract, whose operations answer 501 (PLAN
+  D.0), and the use cases, which enforce the rules on S3's every way an object comes to
+  have tags (PLAN D.2-D.3), are implemented. The handlers and the console are to come
+  (PLAN D.4-D.6)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0011 (tags of buckets and objects), ADR-0016 (entry schema 3),
   ADR-0017 (sub-buckets)
@@ -38,6 +39,11 @@ of that baseline.
   DeleteObjectTagging is refused where a tag is required. Tags on
   CreateMultipartUpload, 501 until now, are implemented: a bucket that requires tags
   would otherwise take no multipart upload. Objects that exist are left as they are.
+  An upload is judged again at completion, by the rules of then and with the tags it
+  was begun with: one begun before `lowercase` was set, or before a stricter rule, whose
+  tags those rules do not allow, is refused at completion and must be begun again -
+  the completion entry does not carry tags, so they cannot be lower-cased there
+  (that would be entry schema 7).
 - A violation is `domain.ErrTagRule`, an `ErrInvalidTag`: S3 answers 400 `InvalidTag`,
   the management API a problem with code `TagRuleViolated` (PascalCase, as every code
   of that API; PLAN D.0). The message names the

@@ -372,7 +372,8 @@ Questions, with the default that was accepted:
     and expires by lifecycle rule whatever no lock keeps. Stricter rules - the earliest
     clock of a majority for a removal that only time allows (ADR-0009); refusing to act
     when the clock is far ahead of the last entry's time (ADR-0013) - are not built.
-25. **Lower-casing of tags** (ADR-0018, not implemented beyond the store). The owner
+25. **Lower-casing of tags** (ADR-0018; enforced by the use cases where a bucket's
+    rules say so, PLAN D.2b; nothing sets the rules until PLAN D.4). The owner
     asked for all tags in lower case; S3 keeps their case and two entries of the
     compatibility baseline assert it. As designed it is a setting of each bucket's tag
     rules. Deployment-wide lower-casing costs those two entries: his to choose.

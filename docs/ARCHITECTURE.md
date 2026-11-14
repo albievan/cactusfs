@@ -12,8 +12,10 @@ events to NATS and webhooks, replication between sites and quotas (milestone 8, 
 which entry schema 5, the domain, the ports, the replicated store and the contracts
 exist, and no use case, worker or adapter); sub-buckets (ADR-0017), of which the domain
 rules, the store, the contract, the authorizer's side, the use cases, the
-management API's handlers and the console's sections exist; and tag rules with a catalogue of tags (ADR-0018), of which only the domain rules,
-the ports and the replicated store exist. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
+management API's handlers and the console's sections exist; and tag rules with a catalogue of tags (ADR-0018), of which the domain rules,
+the ports, the replicated store and the use cases exist - the rules enforced on every
+way an object comes to have tags - and the management API's handlers and the console do
+not. The release is 0.7.0 (`internal/buildinfo/VERSION`): its image
 and chart are published and signed on `ghcr.io`, and it has no GitHub Release.
 
 ## 1. Shape of the system
@@ -88,8 +90,8 @@ Conventions that follow from it:
 | `internal/domain/preview` | what kind of thing an object is shown as in a preview, from its stored type and the signature of its bytes; the size of an image from its header; the walk of a GIF's frames as its bytes stream (ADR-0028) |
 | `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
 | `internal/domain/release` | versions (semantic versioning 2.0), releases and their files, the channels, what may be installed (`Allowed`, `NextStep`), the signed lists `SHA256SUMS` and `digests.txt` read strictly, `Verified` - the one thing an upgrader takes - and the progress of an upgrade (ADR-0029) |
-| `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018: rules only, used by no use case yet) |
-| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore`, and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
+| `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018), kept by `app.TagDefinitionService` |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
 | `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
 | `internal/buildinfo` | the version, build and commit of the binary, and whether it was built as the image's (section 8) |
@@ -579,7 +581,7 @@ The entry schema is at 5:
 |---|---|---|
 | 1 | buckets, the object index, the root credential, nodes and topology, identities, sessions, the audit trail | 0003, 0005, 0006 |
 | 2 | the leader's time on every entry; object versions, delete markers, Object Lock, bucket configuration, multipart uploads | 0008 (with 0009, 0011, 0012) |
-| 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules and tag definitions, which the state machine applies and no use case sends yet | 0016 (with 0017, 0018) |
+| 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules, tags of an upload and tag definitions | 0016 (with 0017, 0018) |
 | 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
 | 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets and the record of a resync - which the state machine applies and the store proposes, and no use case sends yet | 0023 (with 0024, 0025, 0026) |
 
@@ -983,7 +985,7 @@ four at a time.
   that leaves (`Leave`) is revoked through Raft (entry schema 6, ADR-0030): no member
   serves it, lets it join again or keeps its Raft connections afterwards. Only the node
   itself can ask to leave; an operator's command to remove another node is not built.
-- **Sub-buckets (implemented) and tag rules (not implemented).** ADR-0017 and
+- **Sub-buckets (implemented) and tag rules (use cases implemented).** ADR-0017 and
   ADR-0018 are accepted, and entry schema 3 carries their commands: the domain rules
   (`internal/domain/bucket`, `internal/domain/tagging`), the ports (`SubBucketStore`,
   `TagDefinitionStore`) and the metadata store's side of them exist and are tested.
@@ -1010,8 +1012,23 @@ four at a time.
   again since - as seen, not as caused by the change, since another admin or a failed
   read-back gives the same sign - but cannot prevent it. A caller refused the read (403)
   is shown no time, so a re-creation is not reported to them.
-  Tag rules are used by nothing
-  (`PLAN.md`, Goals C and D).
+  Tag rules (PLAN D.2-D.3): `BucketService.{TagRules,SetTagRules,DeleteTagRules}`
+  (`s3:GetBucketTagRules`, `s3:PutBucketTagRules`, audited) and
+  `app.TagDefinitionService` (`admin:ListTagDefinitions` on `tag-definitions`,
+  `admin:{Get,Put,Delete}TagDefinition` on `tag-definition/<key>`; changes audited in
+  the entry that makes them; a create is a read then a put, so two creates of one key
+  through different gateways may both succeed; a definition a rule names is
+  `domain.ErrEntityInUse`). The rules of a bucket are read once a request, consistent,
+  and every way an object comes to have tags - a put, a copy (the source's tags or its
+  own), a change or removal of its tags, a multipart upload when it begins and again
+  when it completes - keeps its tags as they say (in lower case where they lower-case;
+  a bucket's own tags too) and refuses what they do not allow (`domain.ErrTagRule`,
+  naming the rule, never a value; S3's 400 `InvalidTag`). A catalogue that cannot be
+  read, rules of a later release, and a node not given the catalogue refuse a write as
+  `domain.ErrUnavailable` (503), never as a broken rule. Tags reach the use cases as
+  lists (`object.Tag`), and a key given twice is refused in the domain
+  (`object.TagMap`). Nothing sets rules or the catalogue but these use cases, whose
+  handlers are PLAN D.4.
 
 ## 7. Security **(see the threat model for what is implemented)**
 
