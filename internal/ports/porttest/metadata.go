@@ -89,6 +89,13 @@ type MemMetadata struct {
 	FailWrites error
 	// FailParts, when set, is returned by PutPart.
 	FailParts error
+	// FailDeleteBucket, when set, is returned by DeleteBucket, and
+	// FailGetBucket by GetBucket.
+	FailGetBucket    error
+	FailDeleteBucket error
+	// FailConfig, when it names a kind of bucket configuration, is
+	// returned by SetBucketConfig for a document of that kind and no other.
+	FailConfig map[string]error
 	// PolicyPage, when set, is how many buckets one page of BucketPolicies
 	// reads.
 	PolicyPage int
@@ -152,6 +159,9 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 	if m.FailWrites != nil {
 		return m.FailWrites
 	}
+	if m.FailDeleteBucket != nil {
+		return m.FailDeleteBucket
+	}
 	if _, ok := m.buckets[name]; !ok {
 		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
 	}
@@ -183,6 +193,9 @@ func (m *MemMetadata) DeleteBucket(_ context.Context, name string) error {
 func (m *MemMetadata) GetBucket(_ context.Context, name string) (bucket.Bucket, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.FailGetBucket != nil {
+		return bucket.Bucket{}, m.FailGetBucket
+	}
 	b, ok := m.buckets[name]
 	if !ok {
 		return bucket.Bucket{}, fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)
@@ -808,6 +821,9 @@ func (m *MemMetadata) SetBucketConfig(_ context.Context, name, kind string, docu
 	defer m.mu.Unlock()
 	if m.FailWrites != nil {
 		return m.FailWrites
+	}
+	if err := m.FailConfig[kind]; err != nil {
+		return err
 	}
 	delivered := kind == bucket.ConfigNotification || kind == bucket.ConfigReplication
 	b, ok := m.buckets[name]

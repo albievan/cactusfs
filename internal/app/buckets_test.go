@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
@@ -1106,5 +1108,397 @@ func TestSetPolicyRefusesAPolicyThatCannotBeKept(t *testing.T) {
 	elsewhere := bytes.ReplaceAll(kept, []byte(":::site/"), []byte(":::nowhere/"))
 	if err := buckets.SetPolicy(ctx, porttest.Root(), "nowhere", elsewhere); !errors.Is(err, domain.ErrBucketNotFound) || errors.Is(err, domain.ErrInvalidPolicy) {
 		t.Errorf("SetPolicy on a bucket that is not there = %v", err)
+	}
+}
+
+// rulesFailingStore is a bucket store whose writes of tag rules fail, and
+// that notes how buckets are deleted: what CreateLowercasing does when its
+// second entry is not made.
+type rulesFailingStore struct {
+	*porttest.MemMetadata
+	// failRules, when set, is returned by every write of tag rules; gap,
+	// when set, is called first - what others do between the two entries -
+	// and cancel, as if the caller had gone.
+	failRules error
+	gap       func(ctx context.Context, m *porttest.MemMetadata) error
+	cancel    func()
+	// committed makes the failing write of the rules write them first: an
+	// outcome that was not known.
+	committed bool
+	// failDelete, when set, is returned by DeleteBucket - after deleting,
+	// when deleteFirst is set.
+	failDelete  error
+	deleteFirst bool
+	// seen, when set, changes the record GetBucket reads; configs are
+	// documents GetBucketConfig reads in place of the store's - what
+	// others did in the gap that the store's own changes cannot show.
+	seen    func(b *bucket.Bucket)
+	configs map[string][]byte
+
+	mu        sync.Mutex
+	deletes   int
+	deleteCtx error
+}
+
+func (s *rulesFailingStore) SetBucketConfig(ctx context.Context, name, kind string, document []byte) error {
+	if kind == bucket.ConfigTagRules && s.failRules != nil {
+		if s.gap != nil {
+			if err := s.gap(ctx, s.MemMetadata); err != nil {
+				return err
+			}
+		}
+		if s.committed {
+			if err := s.MemMetadata.SetBucketConfig(ctx, name, kind, document); err != nil {
+				return err
+			}
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+		return s.failRules
+	}
+	return s.MemMetadata.SetBucketConfig(ctx, name, kind, document)
+}
+
+func (s *rulesFailingStore) GetBucket(ctx context.Context, name string) (bucket.Bucket, error) {
+	b, err := s.MemMetadata.GetBucket(ctx, name)
+	if err == nil && s.seen != nil {
+		s.seen(&b)
+	}
+	return b, err
+}
+
+func (s *rulesFailingStore) GetBucketConfig(ctx context.Context, name, kind string) ([]byte, error) {
+	if document, ok := s.configs[kind]; ok {
+		return document, nil
+	}
+	return s.MemMetadata.GetBucketConfig(ctx, name, kind)
+}
+
+func (s *rulesFailingStore) DeleteBucket(ctx context.Context, name string) error {
+	s.mu.Lock()
+	s.deletes++
+	s.deleteCtx = ctx.Err()
+	s.mu.Unlock()
+	if s.failDelete != nil {
+		if s.deleteFirst {
+			if err := s.MemMetadata.DeleteBucket(ctx, name); err != nil {
+				return err
+			}
+		}
+		return s.failDelete
+	}
+	return s.MemMetadata.DeleteBucket(ctx, name)
+}
+
+// lowercasingRow is a case of TestCreateLowercasing.
+type lowercasingRow struct {
+	name      string
+	principal iam.Principal
+	bucket    string
+	// noUndo builds the service without WithUndo.
+	noUndo  bool
+	setup   func(t *testing.T, s *rulesFailingStore, cancel func())
+	wantErr error
+	notErr  error
+	// exists is whether the bucket is there afterwards, and lowercase
+	// whether it has the rule; deletes is how often a deletion was tried.
+	exists, lowercase bool
+	deletes           int
+}
+
+// TestCreateLowercasing: a bucket made as the admin API makes one has the
+// tag rule lowercase from the start (ADR-0018). The bucket and its rules
+// are two entries. When the second is not made the bucket is taken back -
+// even when the caller has gone - and the caller is told why; unless it is
+// no longer only what was made, or cannot be taken back: then it is left,
+// and the creation is told as made.
+func TestCreateLowercasing(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("raft unavailable")
+	gone := fmt.Errorf("%w: the rules entry", domain.ErrOutcomeUnknown)
+	other := iam.Principal{AccessKeyID: "OTHER"}
+	uploadID, err := object.ParseID(strings.Repeat("0", 31) + "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// inTheGap is a row in which something is done to the bucket between
+	// the two entries, after which it is left as it is.
+	inTheGap := func(do func(ctx context.Context, m *porttest.MemMetadata) error) func(*testing.T, *rulesFailingStore, func()) {
+		return func(_ *testing.T, s *rulesFailingStore, _ func()) { s.failRules, s.gap = boom, do }
+	}
+	tests := []lowercasingRow{
+		{name: "made with the rule", principal: porttest.Root(), bucket: "photos", exists: true, lowercase: true},
+		{name: "refused", principal: anonymous(), bucket: "photos", wantErr: domain.ErrAccessDenied},
+		{name: "an invalid name", principal: porttest.Root(), bucket: "Not_Valid", wantErr: domain.ErrInvalidBucketName},
+		{
+			name: "a bucket that exists keeps its rules", principal: porttest.Root(), bucket: "photos",
+			setup: func(t *testing.T, s *rulesFailingStore, _ func()) {
+				t.Helper()
+				if err := s.CreateBucket(t.Context(), bucket.Bucket{Name: "photos", CreatedAt: testNow}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: domain.ErrBucketAlreadyExists, exists: true,
+		},
+		{
+			name: "the rules are not made: the bucket is taken back", principal: porttest.Root(), bucket: "photos",
+			setup:   func(_ *testing.T, s *rulesFailingStore, _ func()) { s.failRules = boom },
+			wantErr: boom, deletes: 1,
+		},
+		{
+			name: "the rules are not made and the caller has gone: still taken back", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, cancel func()) {
+				s.failRules, s.cancel = gone, cancel
+			},
+			wantErr: domain.ErrOutcomeUnknown, deletes: 1,
+		},
+		{
+			name: "somebody deleted it in the gap: nothing to take back", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				return m.DeleteBucket(ctx, "photos")
+			}),
+			wantErr: domain.ErrConflict, notErr: boom,
+		},
+		{
+			name: "the rules entry finds no bucket: nothing to take back", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules = fmt.Errorf("%w: photos", domain.ErrBucketNotFound)
+				s.gap = func(ctx context.Context, m *porttest.MemMetadata) error { return m.DeleteBucket(ctx, "photos") }
+			},
+			wantErr: domain.ErrConflict, notErr: domain.ErrBucketNotFound,
+		},
+		{
+			name: "the rules were made after all: made", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules, s.committed = gone, true
+			},
+			exists: true, lowercase: true,
+		},
+		{
+			name: "the deletion's outcome is not known, and it was deleted: taken back", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules, s.failDelete, s.deleteFirst = boom, gone, true
+			},
+			wantErr: boom, deletes: 1,
+		},
+		{
+			name: "the deletion's outcome is not known, and it was not deleted: left", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules, s.failDelete = boom, gone
+			},
+			exists: true, deletes: 1,
+		},
+		{
+			name: "the deletion fails: left, and told as made", principal: porttest.Root(), bucket: "photos",
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules, s.failDelete = boom, fmt.Errorf("%w: photos", domain.ErrUnavailable)
+			},
+			exists: true, deletes: 1,
+		},
+		{
+			name: "what is in it cannot be read: left", principal: porttest.Root(), bucket: "photos", noUndo: true,
+			setup:  func(_ *testing.T, s *rulesFailingStore, _ func()) { s.failRules = boom },
+			exists: true,
+		},
+		{
+			name: "a policy was set in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				return m.SetBucketConfig(ctx, "photos", bucket.ConfigCORS, []byte(`{"rules":[]}`))
+			}),
+			exists: true,
+		},
+		{
+			name: "a sub-bucket was made in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				return m.PutSubBucket(ctx, "photos", bucket.SubBucket{Name: "reports", CreatedAt: testNow}, audit.Record{
+					Time: testNow, Actor: "user/other", Action: string(iam.ActionPutSubBucket), Resource: "arn:aws:s3:::photos", Outcome: audit.Succeeded,
+				})
+			}),
+			exists: true,
+		},
+		{
+			name: "an upload began in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				return m.CreateUpload(ctx, object.Upload{Bucket: "photos", Key: "k", ID: uploadID, InitiatedAt: testNow, Encryption: object.Encryption{KeyMode: object.KeyModePartHKDF}})
+			}),
+			exists: true,
+		},
+		{
+			name: "versioning was turned on in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				return m.SetBucketVersioning(ctx, "photos", bucket.VersioningEnabled)
+			}),
+			exists: true,
+		},
+		{
+			name: "it was made again by somebody else in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				made, err := m.GetBucket(ctx, "photos")
+				if err != nil {
+					return err
+				}
+				if err := m.DeleteBucket(ctx, "photos"); err != nil {
+					return err
+				}
+				return m.CreateBucket(ctx, bucket.Bucket{Name: "photos", CreatedAt: made.CreatedAt, CreatedBy: "user/" + other.AccessKeyID})
+			}),
+			exists: true,
+		},
+		{
+			name: "it was made again at another time in the gap: left", principal: porttest.Root(), bucket: "photos",
+			setup: inTheGap(func(ctx context.Context, m *porttest.MemMetadata) error {
+				made, err := m.GetBucket(ctx, "photos")
+				if err != nil {
+					return err
+				}
+				if err := m.DeleteBucket(ctx, "photos"); err != nil {
+					return err
+				}
+				return m.CreateBucket(ctx, bucket.Bucket{Name: "photos", CreatedAt: testNow.Add(time.Second), CreatedBy: made.CreatedBy})
+			}),
+			exists: true,
+		},
+	}
+	// What the record of the bucket says that only other changes give it,
+	// and every kind of configuration document: each in the gap leaves it.
+	// (A bucket with Object Lock keeps versions, and only such a bucket has
+	// a default retention: the store cannot show either alone, so they are
+	// seen as a record that says so.)
+	for name, seen := range map[string]func(*bucket.Bucket){
+		"a quota":             func(b *bucket.Bucket) { b.QuotaBytes = 1 << 30 },
+		"a replica source":    func(b *bucket.Bucket) { b.ReplicaFrom = "site-a" },
+		"object lock":         func(b *bucket.Bucket) { b.ObjectLock = true },
+		"a default retention": func(b *bucket.Bucket) { b.DefaultRetention = &bucket.DefaultRetention{Days: 1} },
+	} {
+		tests = append(tests, lowercasingRow{
+			name: name + " was given in the gap: left", principal: porttest.Root(), bucket: "photos", exists: true,
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) { s.failRules, s.seen = boom, seen },
+		})
+	}
+	for _, kind := range []string{
+		bucket.ConfigPolicy, bucket.ConfigCORS, bucket.ConfigTagging, bucket.ConfigLifecycle,
+		bucket.ConfigNotification, bucket.ConfigReplication, bucket.ConfigTagRules,
+	} {
+		tests = append(tests, lowercasingRow{
+			name: "a document " + kind + " was set in the gap: left", principal: porttest.Root(), bucket: "photos", exists: true,
+			setup: func(_ *testing.T, s *rulesFailingStore, _ func()) {
+				s.failRules, s.configs = boom, map[string][]byte{kind: []byte(`{"set":"by another"}`)}
+			},
+		})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			store := &rulesFailingStore{MemMetadata: f.meta}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.setup != nil {
+				tt.setup(t, store, cancel)
+			}
+			buckets := app.NewBucketService(store, f.authz, f.clock)
+			if !tt.noUndo {
+				buckets = buckets.WithUndo(store, store, slog.New(slog.DiscardHandler))
+			}
+			made, err := buckets.CreateLowercasing(ctx, tt.principal, tt.bucket)
+			if !errors.Is(err, tt.wantErr) || (tt.wantErr == nil && err != nil) {
+				t.Fatalf("CreateLowercasing = %v, want %v", err, tt.wantErr)
+			}
+			// The bucket answered is the one written, or none.
+			if wantMade := (bucket.Bucket{Name: tt.bucket, CreatedAt: testNow, CreatedBy: "root"}); (err == nil) != (made == wantMade) {
+				t.Errorf("CreateLowercasing answered %+v (%v), want %+v when it is made", made, err, wantMade)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "bucket.CreateLowercasing: ") {
+				t.Errorf("error %q is not wrapped with the use case name", err)
+			}
+			if tt.notErr != nil && errors.Is(err, tt.notErr) {
+				t.Errorf("the error %v is told as %v", err, tt.notErr)
+			}
+			_, getErr := f.meta.GetBucket(t.Context(), tt.bucket)
+			if exists := getErr == nil; exists != tt.exists {
+				t.Errorf("the bucket is there: %v, want %v (%v)", exists, tt.exists, getErr)
+			}
+			if tt.exists {
+				rules, err := f.buckets.TagRules(t.Context(), porttest.Root(), tt.bucket)
+				if err != nil || rules.Lowercase != tt.lowercase || rules.CatalogueOnly || len(rules.Required) != 0 {
+					t.Errorf("the rules = %+v, %v; want lowercase %v and nothing else", rules, err, tt.lowercase)
+				}
+			}
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.deletes != tt.deletes || store.deleteCtx != nil {
+				t.Errorf("%d deletions were tried, with the context %v; want %d with a live one", store.deletes, store.deleteCtx, tt.deletes)
+			}
+		})
+	}
+}
+
+// TestCreateLowercasingIsAudited: what CreateLowercasing did is in the
+// trail, in one record of s3:CreateBucket - made with its rule; made, and
+// taken back (failed); or made without it, which the log says at ERROR as
+// well. It asks s3:CreateBucket alone.
+func TestCreateLowercasingIsAudited(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newIAMFixture(t)
+	store := &rulesFailingStore{MemMetadata: f.meta}
+	logs := &syncBuffer{}
+	buckets := app.NewBucketService(store, f.authz, f.clock).WithAuditor(f.auditor).
+		WithUndo(store, store, slog.New(slog.NewJSONHandler(logs, nil)))
+	// A policy that may make buckets and do nothing else.
+	maker := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:CreateBucket","Resource":"*"}]}`)
+	if err := f.iam.PutPolicy(ctx, f.root, "maker", maker, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.iam.PutRole(ctx, f.root, iam.Role{Name: "maker", Policies: []string{"maker"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	alice := f.as(t, f.user(t, "alice", "maker"))
+	base := len(f.trail(t))
+	if _, err := buckets.CreateLowercasing(ctx, alice, "site"); err != nil {
+		t.Fatal(err)
+	}
+	store.failRules = errors.New("raft unavailable")
+	if _, err := buckets.CreateLowercasing(ctx, alice, "undone"); err == nil {
+		t.Fatal("a bucket whose rules were not made, and that was taken back, was told as made")
+	}
+	if strings.Contains(logs.String(), `"level":"ERROR"`) {
+		t.Errorf("a bucket taken back is logged as an error: %s", logs.String())
+	}
+	store.gap = func(ctx context.Context, m *porttest.MemMetadata) error { return m.DeleteBucket(ctx, "vanished") }
+	if _, err := buckets.CreateLowercasing(ctx, alice, "vanished"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("a bucket deleted by another before its rules were made is told as %v", err)
+	}
+	store.gap = nil
+	store.failDelete = errors.New("lost quorum")
+	if _, err := buckets.CreateLowercasing(ctx, alice, "left"); err != nil {
+		t.Fatalf("a bucket that was left is told as %v", err)
+	}
+	want := map[string]struct {
+		outcome audit.Outcome
+		details map[string]string
+	}{
+		"arn:aws:s3:::site":     {audit.Succeeded, map[string]string{"tag_rules": "lowercase"}},
+		"arn:aws:s3:::undone":   {audit.Failed, map[string]string{"tag_rules": "failed", "undone": "true"}},
+		"arn:aws:s3:::left":     {audit.Succeeded, map[string]string{"tag_rules": "not_set"}},
+		"arn:aws:s3:::vanished": {audit.Failed, map[string]string{"tag_rules": "failed", "undone": "false", "removed_by_other": "true"}},
+	}
+	seen := 0
+	for _, r := range f.trail(t)[base:] {
+		if r.Action != string(iam.ActionCreateBucket) {
+			continue
+		}
+		seen++
+		w, ok := want[r.Resource]
+		if !ok || r.Actor != "user/alice" || r.Outcome != w.outcome || !maps.Equal(r.Details, w.details) {
+			t.Errorf("record %+v, want %+v", r, w)
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("%d records of creations, want %d", seen, len(want))
+	}
+	if log := logs.String(); !strings.Contains(log, `"level":"ERROR"`) || !strings.Contains(log, `"bucket":"left"`) || !strings.Contains(log, "lowercase") {
+		t.Errorf("the log of a bucket left without its rule: %s", log)
 	}
 }

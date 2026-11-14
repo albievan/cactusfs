@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
@@ -33,6 +35,22 @@ type BucketService struct {
 	// node's state, page by page, and the record of the latest use of each.
 	policies ports.BucketPolicies
 	activity ports.BucketActivityStore
+	// uploads and subBuckets, when both are set, are what CreateLowercasing
+	// reads before it takes back a bucket it made: without them it never
+	// does. logger says when a bucket is left without its rules.
+	uploads    ports.UploadStore
+	subBuckets ports.SubBucketLister
+	logger     *slog.Logger
+}
+
+// WithUndo gives CreateLowercasing what it reads before it takes back a
+// bucket whose tag rules could not be made - the uploads in progress and
+// the sub-buckets of the bucket - and where it says that a bucket was left
+// without them. Without it such a bucket is always left, and the creation
+// told as made. It is called once, when the node is assembled.
+func (s *BucketService) WithUndo(uploads ports.UploadStore, subBuckets ports.SubBucketLister, logger *slog.Logger) *BucketService {
+	s.uploads, s.subBuckets, s.logger = uploads, subBuckets, logger
+	return s
 }
 
 // WithDetails gives the service what ListDetailed reads beyond the list of
@@ -90,6 +108,157 @@ func (s *BucketService) Create(ctx context.Context, principal iam.Principal, nam
 		return fmt.Errorf("bucket.Create: %w", err)
 	}
 	s.audited(ctx, principal, iam.ActionCreateBucket, name)
+	return nil
+}
+
+// undoTimeout bounds what is done to take back a bucket that was made and
+// could not be given the rest of what it was made with.
+const undoTimeout = 30 * time.Second
+
+// CreateLowercasing creates a bucket, as the admin API and the console make
+// one (ADR-0018): with the tag rule lowercase from the start, so that its
+// tags are kept in lower case until its rules say otherwise. It is asked as
+// Create is (s3:CreateBucket) and nothing more: the rule is how such a
+// bucket is made, not a change its maker asks for, and whoever may make a
+// bucket may make it so. It returns the bucket as it was written, for the
+// caller to answer with: nothing more is read, and nothing more asked.
+//
+// It is two entries - the bucket, then its rules - since one entry that
+// made both would be a new entry schema. When the second fails:
+//
+//   - if the rules are there all the same (an outcome that was not known),
+//     the bucket was made as it should be, and is told as made;
+//   - if the bucket is not there any more (deleted by another request in
+//     the gap), nothing is taken back: the error wraps domain.ErrConflict,
+//     and the attempt is audited as failed with undone=false and
+//     removed_by_other=true;
+//   - otherwise the bucket is taken back if it is still only what this call
+//     made (undoCreation), the error of the second entry is returned, and
+//     the attempt is audited as failed with tag_rules=failed, undone=true;
+//   - when it cannot be taken back - something else is in it by now, the
+//     store cannot say, or the deletion fails - the bucket is there, and is
+//     told as made: audited as succeeded with tag_rules=not_set, and the
+//     log says at ERROR that the bucket was made without the rule.
+//
+// The caller's answer and a repeat of the request then agree with what
+// exists. The clean-up runs to its end even when the caller has gone.
+func (s *BucketService) CreateLowercasing(ctx context.Context, principal iam.Principal, name string) (bucket.Bucket, error) {
+	if err := s.authorize(ctx, principal, iam.ActionCreateBucket, name); err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: %w", err)
+	}
+	if err := bucket.ValidateName(name); err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: %w", err)
+	}
+	document, err := bucket.TagRules{Lowercase: true}.Document()
+	if err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: %w", err)
+	}
+	b := bucket.Bucket{Name: name, CreatedAt: s.clock.Now().UTC(), CreatedBy: actorOf(principal)}
+	if err := s.buckets.CreateBucket(ctx, b); err != nil {
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: %w", err)
+	}
+	rulesErr := s.buckets.SetBucketConfig(ctx, name, bucket.ConfigTagRules, document)
+	if rulesErr == nil {
+		s.auditCreation(ctx, principal, name, audit.Succeeded, map[string]string{"tag_rules": "lowercase"})
+		return b, nil
+	}
+	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), undoTimeout)
+	defer cancel()
+	stored, readErr := s.buckets.GetBucketConfig(undoCtx, name, bucket.ConfigTagRules)
+	if errors.Is(rulesErr, domain.ErrBucketNotFound) || errors.Is(readErr, domain.ErrBucketNotFound) {
+		// Another request deleted the bucket before its rules were made:
+		// there is nothing of this call's to take back, and no bucket.
+		s.auditCreation(undoCtx, principal, name, audit.Failed,
+			map[string]string{"tag_rules": "failed", "undone": "false", "removed_by_other": "true"})
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: %w: the bucket was deleted by another request before its tag rules were made",
+			domain.ErrConflict)
+	}
+	if readErr == nil && bytes.Equal(stored, document) {
+		// The rules entry was committed after all: what was asked for is
+		// there.
+		s.auditCreation(undoCtx, principal, name, audit.Succeeded, map[string]string{"tag_rules": "lowercase"})
+		return b, nil
+	}
+	undoErr := s.undoCreation(undoCtx, b)
+	// A bucket that is not there any more is as good as taken back.
+	if undoErr == nil || errors.Is(undoErr, domain.ErrBucketNotFound) {
+		s.auditCreation(undoCtx, principal, name, audit.Failed, map[string]string{"tag_rules": "failed", "undone": "true"})
+		return bucket.Bucket{}, fmt.Errorf("bucket.CreateLowercasing: the bucket was removed again: %w", rulesErr)
+	}
+	// The bucket is there: say so, to the caller, the trail and the log.
+	s.auditCreation(undoCtx, principal, name, audit.Succeeded, map[string]string{"tag_rules": "not_set"})
+	if s.logger != nil {
+		s.logger.ErrorContext(undoCtx, "a bucket was made without its tag rule lowercase; set its tag rules to have its tags lower-cased",
+			slog.String("bucket", name), slog.String("rules_error", rulesErr.Error()), slog.String("undo_error", undoErr.Error()))
+	}
+	return b, nil
+}
+
+// auditCreation records what CreateLowercasing did.
+func (s *BucketService) auditCreation(ctx context.Context, principal iam.Principal, name string, outcome audit.Outcome, details map[string]string) {
+	if s.auditor != nil {
+		// Succeeded enqueues the record as it is, with its outcome.
+		s.auditor.Succeeded(ctx, s.auditor.Record(principal, iam.ActionCreateBucket, iam.Resource{Bucket: name}, outcome, details))
+	}
+}
+
+// undoCreation deletes the bucket made as made, when it is still nothing
+// more: the record as it was written (its creator may have been left out
+// by a store whose members do not all know the field), no configuration of
+// any kind, no sub-bucket and no upload in progress - all of which a
+// deletion would silently drop, while it refuses only objects. An error
+// says why it was not deleted. What is written between this look and the
+// deletion is not seen: the store refuses the deletion for objects only.
+func (s *BucketService) undoCreation(ctx context.Context, made bucket.Bucket) error {
+	if s.uploads == nil || s.subBuckets == nil {
+		return errors.New("what refers to the bucket cannot be read here")
+	}
+	got, err := s.buckets.GetBucket(ctx, made.Name)
+	if err != nil {
+		return fmt.Errorf("reading the bucket: %w", err)
+	}
+	if !got.CreatedAt.Equal(made.CreatedAt) || (got.CreatedBy != made.CreatedBy && got.CreatedBy != "") ||
+		got.Versioning != "" || got.ObjectLock || got.DefaultRetention != nil || got.QuotaBytes != 0 || got.ReplicaFrom != "" {
+		return errors.New("the bucket is no longer the one made")
+	}
+	for _, kind := range []string{
+		bucket.ConfigPolicy, bucket.ConfigCORS, bucket.ConfigTagging, bucket.ConfigLifecycle,
+		bucket.ConfigNotification, bucket.ConfigReplication, bucket.ConfigTagRules,
+	} {
+		document, err := s.buckets.GetBucketConfig(ctx, made.Name, kind)
+		if err != nil {
+			return fmt.Errorf("reading its %s: %w", kind, err)
+		}
+		if len(document) > 0 {
+			return fmt.Errorf("the bucket has a %s by now", kind)
+		}
+	}
+	subs, err := s.subBuckets.ListSubBuckets(ctx, made.Name)
+	if err != nil {
+		return fmt.Errorf("reading its sub-buckets: %w", err)
+	}
+	if len(subs) > 0 {
+		return errors.New("the bucket has sub-buckets by now")
+	}
+	uploading := false
+	if err := s.uploads.ScanUploads(ctx, made.Name, ports.UploadCursor{}, func(object.Upload) ports.ScanControl {
+		uploading = true
+		return ports.ScanControl{Stop: true}
+	}); err != nil {
+		return fmt.Errorf("reading its uploads: %w", err)
+	}
+	if uploading {
+		return errors.New("an upload into the bucket has begun")
+	}
+	if err := s.buckets.DeleteBucket(ctx, made.Name); err != nil {
+		if errors.Is(err, domain.ErrOutcomeUnknown) {
+			// Whether it was deleted is read, not guessed.
+			if _, getErr := s.buckets.GetBucket(ctx, made.Name); errors.Is(getErr, domain.ErrBucketNotFound) {
+				return nil
+			}
+		}
+		return fmt.Errorf("deleting it: %w", err)
+	}
 	return nil
 }
 
