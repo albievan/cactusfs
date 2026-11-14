@@ -96,10 +96,27 @@ func (p *progressWriter) extend() {
 	_ = p.transfer.SetWriteDeadline(time.Now().Add(p.stall))
 }
 
-// Write implements http.ResponseWriter.
+// progressStep is the most a single write is given one stall for. A body
+// held in memory reaches Write whole (io.Copy prefers its WriteTo), and a
+// client taking it steadily but slower than its size a stall would be cut
+// off as if it had stopped.
+const progressStep = 64 << 10
+
+// Write implements http.ResponseWriter. It writes b a step at a time, each
+// step with a deadline of its own.
 func (p *progressWriter) Write(b []byte) (int, error) {
-	p.extend()
-	return p.ResponseWriter.Write(b)
+	written := 0
+	for len(b) > 0 {
+		step := b[:min(len(b), progressStep)]
+		p.extend()
+		n, err := p.ResponseWriter.Write(step)
+		written += n
+		if err != nil {
+			return written, err
+		}
+		b = b[n:]
+	}
+	return written, nil
 }
 
 // Unwrap lets http.ResponseController reach the connection.
