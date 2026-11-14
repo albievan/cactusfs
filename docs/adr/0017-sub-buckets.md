@@ -5,7 +5,8 @@
   (C.2, S.3), the contract (C.0) and the authorizer, which reads a sub-bucket's policy
   with the bucket's in one consistent read, and search narrowed to sub-buckets (C.3,
   C.3b) exist. The use cases exist and are wired (C.4), and the management API serves
-  them (C.6); the four-node test and the console are to come (C.7, C.8)
+  them (C.6); four nodes are tested, across a change of leader (C.7); the console is
+  to come (C.8)
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0006 (the single authorizer), ADR-0011 (bucket policies), ADR-0016
   (entry schema 3)
