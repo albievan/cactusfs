@@ -57,6 +57,10 @@ func TestConsoleFiles(t *testing.T) {
 		"assets/mark-abc.svg":                           {Data: []byte("<svg/>")},
 		"assets/icons-abc.woff2":                        {Data: []byte("wOF2")},
 		"assets/icons-abc.woff":                         {Data: []byte("wOFF")},
+		// The notices of the packages it is built with (PLAN X.5): content
+		// that would sniff as HTML where the host's table of types does not
+		// name .txt. contentTypeOf itself is tested in contenttype_test.go.
+		"notices.txt": {Data: []byte("<!doctype html><title>notices</title>")},
 	}
 	h := console.NewHandler(dist, true)
 
@@ -83,11 +87,19 @@ func TestConsoleFiles(t *testing.T) {
 		"/assets/mark-abc.svg":                           "image/svg+xml",
 		"/assets/icons-abc.woff2":                        "font/woff2",
 		"/assets/icons-abc.woff":                         "font/woff",
+		"/notices.txt":                                   "text/plain; charset=utf-8",
 	} {
 		rec := get(t, h, http.MethodGet, path)
 		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != want {
 			t.Errorf("GET %s = %d, Content-Type %q, want %q", path, rec.Code, rec.Header().Get("Content-Type"), want)
 		}
+	}
+	// The notices are at a stable path, looked at again every time: a new
+	// build may ship other packages under the same name.
+	if rec := get(t, h, http.MethodGet, "/notices.txt"); rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-cache" ||
+		rec.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Errorf("GET /notices.txt = %d, Cache-Control %q, Content-Type %q",
+			rec.Code, rec.Header().Get("Cache-Control"), rec.Header().Get("Content-Type"))
 	}
 	// A script that is not there is a plain 404, not JavaScript.
 	if rec := get(t, h, http.MethodGet, "/assets/missing.js"); rec.Code != http.StatusNotFound || strings.Contains(rec.Header().Get("Content-Type"), "javascript") {

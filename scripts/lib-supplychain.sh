@@ -68,6 +68,10 @@ SC_MODULE=github.com/albievan/cactusfs
 # SBOM without them did not read what it says it read.
 SC_GO_DEPENDENCY=github.com/hashicorp/raft
 SC_CONSOLE_PACKAGES="react bootstrap"
+# What the console's SBOM says of the notices (PLAN X.5). The SBOM lists the
+# whole lock file, development packages included; the notices file covers the
+# production packages the console ships.
+SC_CONSOLE_NOTICES="This document lists every package of web/pnpm-lock.yaml, development packages included. The notices of the production packages the console ships - name, version, licence, and the text of each licence and notice file, with those of the pdf.js decoders shipped beside the bundle - are generated when the console is built (web/notices.mjs) into web/dist/notices.txt; a cactusfs binary built with the console (-tags console), and so the image, embeds it and serves it at /notices.txt."
 SC_SBOM_DIR=dist/sbom
 SC_ARCHES="amd64 arm64"
 
@@ -278,6 +282,9 @@ sc_sbom_console() {
 	sc_syft "dir:$SC_WORK/console" cactusfs-console "$VERSION-$BUILD" "$sc_out" ||
 		sc_fail "syft did not write the SBOM of web/pnpm-lock.yaml"
 	rm -rf "$SC_WORK/console"
+	# Where the notices of the packages it lists go with them.
+	sc_helper sbom-comment "$sc_out" "$SC_CONSOLE_NOTICES" ||
+		sc_fail "the notices file is not named in $sc_out"
 	sc_sbom_check console
 }
 
@@ -663,6 +670,7 @@ sc_write_helper() {
 
     sbom-check <file> <spdx version> <least packages> <name>...
     sbom-license <file> <package> <licence id> <licence name> <text file> <url>
+    sbom-comment <file> <text>
     att-check <envelopes> <image digest> <predicate type> <package name>
     ping
     digest <repository> <reference>
@@ -901,6 +909,21 @@ def sbom_license(path, name, license_id, license_name, text_file, url):
     return f"{path}: {name} is declared {license_id} ({declared} package(s))"
 
 
+def sbom_comment(path, text):
+    """Adds a sentence to the comment of the document (SPDX 2.3: the document's "comment"), once."""
+    with open(path, encoding="utf-8") as file:
+        document = json.load(file)
+    if not text.strip():
+        raise Failure("no text to add to the comment of the document")
+    comment = document.get("comment") or ""
+    if text not in comment:
+        document["comment"] = f"{comment}\n{text}" if comment else text
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(document, file, indent=1, ensure_ascii=False)
+        file.write("\n")
+    return f"{path}: the comment of the document names what was asked"
+
+
 def att_check(path, digest, predicate_type, name):
     """Every envelope is a statement about the digest whose SBOM names the package."""
     checked = 0
@@ -932,6 +955,8 @@ def main(arguments):
         print(sbom_check(rest[0], rest[1], int(rest[2]), rest[3:]))
     elif command == "sbom-license":
         print(sbom_license(*rest))
+    elif command == "sbom-comment":
+        print(sbom_comment(*rest))
     elif command == "att-check":
         print(att_check(*rest))
     elif command == "ping":

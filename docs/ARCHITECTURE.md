@@ -936,8 +936,25 @@ four at a time.
   generated from the contract. Uploads belong to the console, not to a screen: they go
   on while any screen is shown, and a bar at the top of every screen shows them and the
   notices of what the console did (kept for the visit, not stored). An object's details
-  open in its own row of the object browser. A bucket's details hold its policy and its
-  sub-buckets, each folded and asked for only once opened.
+  open in its own row of the object browser. A bucket's details hold its policy, its
+  sub-buckets, its tags and its tag rules, each folded and asked for only once opened.
+  Tags (ADR-0018, PLAN D.6; `web/src/screens/{TagSections,ObjectTags,UploadTags,TagsScreen}.tsx`,
+  `web/src/ui/{tags.ts,TagRows.tsx}`) are edited as rows of a key and a value and sent
+  as the list typed, in its order - a key given twice and an empty key included, for
+  the API to refuse; what a save is answered with (key order, lower case where the
+  rules say so) is what is shown after it. An object's tags are those of its current
+  version, in its opened row. The upload form has a tags field sent as
+  `X-CactusFS-Tagging` (each key and value percent-encoded); once files are chosen it
+  reads the bucket's tag rules, says what they require and begins with the keys
+  required of the key typed - or says, where the rules cannot be read (403 or a
+  failure), that the server will tell; what the server refuses is said beside the
+  file, and a locked session's 423 is said as such and told to the lock. The
+  **Tags** screen is the catalogue: listed, defined, changed and removed after a
+  question; a caller the API does not show it (403) is told so in a line. A 403 on
+  reading a bucket's or an object's tags or a bucket's rules offers no editor (they
+  are replaced whole, and what cannot be seen is not replaced from here). The keys and
+  values of the catalogue and of the rules are offered while a tag is typed, never
+  required.
 - **Console sessions (implemented, ADR-0006, 0007, 0027).** A session is a record in
   the replicated `sessions` store under the SHA-256 of its token, with its user, the
   hash of its CSRF token, `created_at` and `expires_at`; the cookie is
@@ -1039,7 +1056,7 @@ four at a time.
   `domain.ErrUnavailable` (503), never as a broken rule. Tags reach the use cases as
   lists (`object.Tag`), and a key given twice is refused in the domain
   (`object.TagMap`). Nothing sets rules or the catalogue but these use cases, served by the
-  management API (PLAN D.4).
+  management API (PLAN D.4) and edited in the console (PLAN D.6).
 
 ## 7. Security **(see the threat model for what is implemented)**
 
@@ -1155,7 +1172,21 @@ run with a read-only root filesystem and all capabilities dropped.
 of each architecture, read from the Go module list embedded in the binary, and one for
 the console's packages, read from `web/pnpm-lock.yaml`. An image's SBOM declares the
 licence of CactusFS itself as `LicenseRef-CactusFS-Blessing`, with the text of
-`LICENSE.md` in the document: no identifier of the SPDX list is that text. `make sign-verify` starts a
+`LICENSE.md` in the document: no identifier of the SPDX list is that text. The console's
+document says, in its comment, where the notices of its packages are: `web/dist/notices.txt`
+(PLAN X.5), written by the console's build (`web/notices.mjs`, a plugin of
+`web/vite.config.ts`) from the installed production tree of `web/` - every package's name,
+version, licence and the text of its `LICENSE*`/`NOTICE*`/`COPYING*` files, sorted, no
+date, then pdf.js's `LICENSE_JBIG2`, `LICENSE_PDFJS_JBIG2`, `LICENSE_OPENJPEG` and
+`LICENSE_PDFJS_OPENJPEG` for the two decoders shipped beside the bundle. A licence off the
+list, a package without a licence or notice file, a decoder whose notices are not named, a
+module bundled - for the page or a worker - from a package that is not a production one, or
+Vite's module preload polyfill (turned off: `build.modulePreload.polyfill` false) fails the
+build (and removes `web/dist`). The file is embedded with the console and served
+at `/notices.txt` (`text/plain`, `no-cache`); `make licences` builds the console, fails if
+the file is not byte for byte what the build of the installed tree gives (it is generated
+deterministically, so this holds the build's plugin and the gate to one output), and runs a test of the
+binary's embedded copy (`web/embed_console_test.go`, `-tags console`). `make sign-verify` starts a
 throw-away registry, pushes both images, and with `cosign` and a key pair made for the
 run signs each **by digest**, attaches its SBOM as a signed attestation and verifies
 both - with the public key alone, no certificate authority, no transparency log, no

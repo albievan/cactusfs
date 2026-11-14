@@ -66,7 +66,7 @@ help:
 	@echo "  lint           golangci-lint              vet         go vet"
 	@echo "  test           unit tests, fast           cover       unit tests + coverage gate"
 	@echo "  test-int       integration tests          s3-compat   S3 compatibility vs baseline"
-	@echo "  vuln           govulncheck                licences    dependency licence allow-list"
+	@echo "  vuln           govulncheck                licences    dependency licence allow-list; console notices file"
 	@echo "  contracts      generated code + API contracts in sync"
 	@echo "  web-check      console lint, typecheck, test"
 	@echo "  build          cactusfs for this OS -> bin/"
@@ -329,7 +329,11 @@ vuln:
 contracts: web-install
 	@scripts/contracts.sh
 
-licences: web-install
+# After the console is built: its notices file (web/dist/notices.txt, PLAN
+# X.5) must be what notices.mjs gives for the installed tree - it is
+# generated deterministically, so this holds the build's plugin and the gate
+# to one output - and must be in what a binary built with the console embeds.
+licences: web-build
 	@scripts/licences.sh
 
 web-install:

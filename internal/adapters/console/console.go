@@ -38,6 +38,9 @@ func contentTypeOf(ext string) string {
 		return "font/woff2"
 	case ".woff":
 		return "font/woff"
+	case ".txt":
+		// The notices of the packages the console is built with (notices.txt).
+		return "text/plain; charset=utf-8"
 	default:
 		return ""
 	}

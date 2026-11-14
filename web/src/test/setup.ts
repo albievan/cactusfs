@@ -16,6 +16,8 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  // A file run in the node environment (notices.test.ts) has no window.
+  if (typeof window === 'undefined') return;
   window.sessionStorage.clear();
   window.localStorage.clear();
   window.location.hash = '';

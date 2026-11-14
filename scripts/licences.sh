@@ -2,7 +2,8 @@
 # Licence gate. Every dependency that ships in the binary - Go modules linked
 # into cmd/cactusfs on any of the six release platforms, and the console's
 # production packages - must carry a licence from the allow-list in CLAUDE.md
-# section 3. Run through `make licences`.
+# section 3, and the console's notices file must be current. Run through
+# `make licences`, which builds the console first.
 set -eu
 
 ALLOWED="MIT,BSD-2-Clause,BSD-3-Clause,ISC,Apache-2.0,MPL-2.0"
@@ -84,6 +85,17 @@ for platform in $PLATFORMS; do
 	}
 done
 
+# The console's packages, and its notices file (web/dist/notices.txt, PLAN
+# X.5): written by the build, it must be what notices.mjs gives for the
+# installed tree (generated deterministically; under make the build has just
+# run, so this holds the build's plugin and the gate to one output) - and it
+# must be in what a binary built with the console embeds.
 node scripts/web-licences.mjs "$ALLOWED"
+go test -count=1 -tags console ./web/ >"$work/log" 2>&1 || {
+	cat "$work/log" >&2
+	echo "licences: FAIL - web: the embedded console does not carry its notices" >&2
+	exit 1
+}
+echo "licences: web - the embedded console carries web/dist/notices.txt"
 
 echo "licences: PASS"

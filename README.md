@@ -91,7 +91,11 @@ control and a hash-chained audit trail.
   and can delete every object, after asking for your password. Its details hold, folded
   until you open them, the bucket's policy - shown as JSON, edited, saved and removed - and
   its sub-buckets: listed, created with or without a policy, each one's policy edited or
-  removed, and an empty one deleted (ADR-0017). A policy is sent as you typed it, and a
+  removed, and an empty one deleted (ADR-0017) - and its tags and tag rules: lower case,
+  the catalogue only, and the tags every object must carry (ADR-0018). An object's tags
+  are edited in its details, and the upload form takes tags, says which the bucket
+  requires and begins with them. The **Tags** screen keeps the catalogue of tags users
+  are offered. A policy is sent as you typed it, and a
   refused one shows the server's reason next to the editor. An object you may read and either uploaded
   or may preview opens in a preview - images, text, CSV, JSON, PDF, DOCX and XLSX - drawn
   by the console itself, never served inline (ADR-0028). A session that times out
@@ -137,7 +141,8 @@ Said plainly, so that nobody finds out by trying:
   `CopyObject`, `PutObjectTagging`, `DeleteObjectTagging` and multipart uploads, whose
   tags (`x-amz-tagging` on `CreateMultipartUpload`) are now taken - and the rules and
   the catalogue are set through the management API (a bucket made there lower-cases its
-  tags from the start); the console's editors are PLAN D.6.
+  tags from the start) and in the console (PLAN D.6, built; it counts once the gate on
+  the test host has passed its tests).
 - **Growing a cluster.** The voters and the storage of a cluster are fixed when it
   forms: storage nodes and drives cannot be added afterwards, and a node cannot be given
   a vote later. Gateways can join.
@@ -843,8 +848,8 @@ What the API has, under `/api/v1` (the contract is
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
-API keys), **Groups**, **Roles**, **Policies**, **Cluster**, **Settings** and **Audit
-log**. It talks only to the management API and decides nothing itself. The version and
+API keys), **Groups**, **Roles**, **Policies**, **Tags** (the catalogue of tags),
+**Cluster**, **Settings** and **Audit log**. It talks only to the management API and decides nothing itself. The version and
 build it runs are shown under the logo.
 
 - **Uploads go on across screens.** Files dropped on a bucket are sent while you use
@@ -855,7 +860,15 @@ build it runs are shown under the logo.
   while files are being sent asks first.
 - **An object's details in its row.** In the object browser a click on an object's
   name opens its details - key, size, ETag, last modified, content type, encryption,
-  and its uploads and downloads where you may see them - directly under its row.
+  its uploads and downloads where you may see them, and its tags, which can be edited
+  there - directly under its row.
+- **Tags.** A bucket's tags and tag rules are in its details, folded until opened; the
+  upload form gives the files it sends tags (`X-CactusFS-Tagging`), and once files are
+  chosen it says which tags the bucket's rules require - or that the server will tell,
+  where you may not read them - and begins with their keys. Tags are sent in the order
+  you typed them; the server lower-cases them where the rules say so, and its answer is
+  what is shown. A tag a rule refuses is shown with the server's reason (it names the
+  rule, never a value), beside the file for an upload.
 - **A session that locks while it uploads.** A console session lasts
   `--session-lifetime` (30 minutes) from sign-in, and nothing extends it. If it reaches
   that time while files are still being uploaded with it, it is **locked**, not ended:
@@ -1180,7 +1193,7 @@ The gates, in the order `make check` runs them:
 | `make s3-compat` | S3 compatibility against the recorded baseline: the AWS SDK for Go, the AWS CLI and the S3 tests of Ceph |
 | `make vuln` | `govulncheck` |
 | `make contracts` | generated code in sync with the contracts; no unflagged breaking change of the OpenAPI, AsyncAPI and protobuf contracts |
-| `make licences` | every dependency, of the binary and of the console, on the allow-list |
+| `make licences` | every dependency, of the binary and of the console, on the allow-list; the console's notices file what the build of the installed tree gives, and embedded |
 | `make web-check` | the console: lint, typecheck, tests |
 | `make build-all` | six OS/arch binaries in `dist/` |
 | `make image` | `cactusfs:<version>-<build>-amd64` and `-arm64`, each under 60 MB (see [Versions and builds](#versions-and-builds)) |
@@ -1407,4 +1420,11 @@ blessing in place of a legal notice: see [LICENSE.md](LICENSE.md), which is the 
 that counts and also says what the dedication does not cover and what a contributor
 agrees to. The Go modules and the console packages CactusFS is built with keep their
 own licences (MIT, BSD, ISC, Apache-2.0 or MPL-2.0); a binary or an image contains
-them, and their notices and conditions go with it.
+them, and their notices and conditions go with it. The console's are in one file, made
+when the console is built from the packages installed for it: every package's name,
+version and licence with the text of its licence and notice files, then those of the
+two pdf.js decoders shipped beside the bundle. A binary built with the console serves it
+at `/notices.txt` on the console's port (9001); the build fails if a package's licence is
+not on the list, a package has no licence or notice file, or the bundle holds code of a
+package that is not a production one; `make licences` fails if the file is not what the
+build of the installed tree gives (it is generated deterministically).
