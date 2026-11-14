@@ -6,8 +6,9 @@
   the management API's handlers - tags, tag rules, the catalogue, an upload's tags,
   and a bucket made through the API lower-casing its tags (PLAN D.4) - are implemented.
   The four-node test, `TestTagRulesAcrossTheCluster`, and an S3 compatibility test of
-  tags on a multipart upload are written (PLAN D.5); they count once the gate on the
-  test host has passed them. The console is to come (PLAN D.6)
+  tags on a multipart upload pass (PLAN D.5). The console's editors - a bucket's tags
+  and tag rules, an object's tags, the catalogue, and tags on the upload form - are
+  implemented (PLAN D.6). The ADR is implemented
 - **Date:** 2026-10-12
 - **Builds on:** ADR-0011 (tags of buckets and objects), ADR-0016 (entry schema 3),
   ADR-0017 (sub-buckets)
