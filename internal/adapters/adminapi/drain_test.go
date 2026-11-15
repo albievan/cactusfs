@@ -24,8 +24,13 @@ type rawUpload struct {
 	path    string
 	size    int
 	headers map[string]string
-	// expect sends "Expect: 100-continue" and no body.
+	// expect sends "Expect: 100-continue"; the body follows at once unless
+	// waits or withhold says otherwise.
 	expect bool
+	// waits reads "100 Continue" before the body is written.
+	waits bool
+	// withhold sends no body: the client waits to be told and never is.
+	withhold bool
 	// meanwhile reads the answer while the body is being written; else the
 	// whole body is written before the answer is read.
 	meanwhile bool
@@ -35,8 +40,10 @@ type rawUploadAnswer struct {
 	resp *http.Response
 	code string
 	sent error
-	conn net.Conn
-	r    *bufio.Reader
+	// continued says that "100 Continue" came before the answer.
+	continued bool
+	conn      net.Conn
+	r         *bufio.Reader
 }
 
 func (f *fixture) rawUpload(u rawUpload) rawUploadAnswer {
@@ -78,17 +85,37 @@ func (f *fixture) rawUpload(u rawUpload) rawUploadAnswer {
 	}
 	body := bytes.Repeat([]byte{'a'}, u.size)
 	a := rawUploadAnswer{conn: conn, r: bufio.NewReader(conn)}
+	if u.waits {
+		// Nothing is sent until the server says so.
+		resp, err := http.ReadResponse(a.r, nil)
+		if err != nil {
+			f.t.Fatalf("no answer to the head: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusContinue {
+			f.t.Fatalf("the head was answered %d, want 100 Continue", resp.StatusCode)
+		}
+		a.continued = true
+	}
 	switch {
-	case u.expect:
+	case u.withhold:
 	case u.meanwhile:
 		// What the write ends with is no matter: the server closes.
 		go func() { _, _ = conn.Write(body) }()
 	default:
 		_, a.sent = conn.Write(body)
 	}
-	resp, err := http.ReadResponse(a.r, nil)
-	if err != nil {
-		f.t.Fatalf("no answer (body sent: %v): %v", a.sent, err)
+	var resp *http.Response
+	for {
+		resp, err = http.ReadResponse(a.r, nil)
+		if err != nil {
+			f.t.Fatalf("no answer (body sent: %v): %v", a.sent, err)
+		}
+		if resp.StatusCode != http.StatusContinue {
+			break
+		}
+		_ = resp.Body.Close()
+		a.continued = true
 	}
 	a.resp = resp
 	data, err := io.ReadAll(resp.Body)
@@ -111,8 +138,10 @@ func (f *fixture) rawUpload(u rawUpload) rawUploadAnswer {
 // for a missing bucket, or answered again for its idempotency key - reaches
 // a client that writes its whole body before reading as the answer, not as a
 // reset connection, and the connection serves the next request. A body past
-// the bound is not read and the connection is closed; a client that asked
-// "100-continue" is answered without sending anything.
+// the bound is not read and the connection is closed. A client that asked
+// "100-continue" is told to send and is answered the same, whether it waited
+// or sent at once; one that asked for a body past the bound is answered
+// without being told to send, and the connection is closed.
 func TestAnEarlyRefusalOfAnUploadReachesItsClient(t *testing.T) {
 	t.Parallel()
 	const mib = 1 << 20
@@ -125,6 +154,8 @@ func TestAnEarlyRefusalOfAnUploadReachesItsClient(t *testing.T) {
 		status int
 		code   string
 		kept   bool
+		// continued is whether "100 Continue" came before the answer.
+		continued bool
 	}{
 		{name: "quota", upload: rawUpload{path: "/buckets/full/object?key=more", size: mib}, status: http.StatusForbidden, code: "QuotaExceeded", kept: true},
 		{name: "no such bucket", upload: rawUpload{path: "/buckets/nowhere/object?key=x", size: mib}, status: http.StatusNotFound, code: "NoSuchBucket", kept: true},
@@ -134,7 +165,15 @@ func TestAnEarlyRefusalOfAnUploadReachesItsClient(t *testing.T) {
 			status: http.StatusOK, kept: true,
 		},
 		{
-			name: "asks for 100-continue", upload: rawUpload{path: "/buckets/full/object?key=more", size: mib, expect: true},
+			name: "asks for 100-continue and waits", upload: rawUpload{path: "/buckets/full/object?key=more", size: 5 * mib, expect: true, waits: true},
+			status: http.StatusForbidden, code: "QuotaExceeded", kept: true, continued: true,
+		},
+		{
+			name: "asks for 100-continue and sends at once", upload: rawUpload{path: "/buckets/full/object?key=more", size: 5 * mib, expect: true},
+			status: http.StatusForbidden, code: "QuotaExceeded", kept: true, continued: true,
+		},
+		{
+			name: "asks for 100-continue past the bound", upload: rawUpload{path: "/buckets/full/object?key=more", size: httpdrain.DefaultBytes + mib, expect: true, withhold: true},
 			status: http.StatusForbidden, code: "QuotaExceeded",
 		},
 		{
@@ -168,6 +207,9 @@ func TestAnEarlyRefusalOfAnUploadReachesItsClient(t *testing.T) {
 			}
 			if took := time.Since(begun); took > 10*time.Second {
 				t.Errorf("answered after %v", took)
+			}
+			if a.continued != c.continued {
+				t.Errorf("100 Continue sent = %v, want %v", a.continued, c.continued)
 			}
 			if c.kept {
 				if a.sent != nil {

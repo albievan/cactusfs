@@ -32,9 +32,14 @@ type rawPut struct {
 	// keyID and key sign the request; the root's when empty.
 	keyID string
 	key   []byte
-	// expect sends "Expect: 100-continue" and no body: the client waits to
-	// be told.
+	// expect sends "Expect: 100-continue"; the body follows at once unless
+	// waits or withhold says otherwise.
 	expect bool
+	// waits reads "100 Continue" before the body is written, as a client
+	// does that asked for it and waits.
+	waits bool
+	// withhold sends no body: the client waits to be told and never is.
+	withhold bool
 	// meanwhile reads the answer while the body is being written, as a
 	// client must whose body is refused past the bound.
 	meanwhile bool
@@ -46,8 +51,10 @@ type rawAnswer struct {
 	code string
 	// sent is what writing the body ended with.
 	sent error
-	conn net.Conn
-	r    *bufio.Reader
+	// continued says that "100 Continue" came before the answer.
+	continued bool
+	conn      net.Conn
+	r         *bufio.Reader
 }
 
 func (s *testServer) rawPut(ctx context.Context, p rawPut) rawAnswer {
@@ -101,17 +108,37 @@ func (s *testServer) rawPut(ctx context.Context, p rawPut) rawAnswer {
 		s.t.Fatalf("writing the head: %v", err)
 	}
 	a := rawAnswer{conn: conn, r: bufio.NewReader(conn)}
+	if p.waits {
+		// Nothing is sent until the server says so.
+		resp, err := http.ReadResponse(a.r, nil)
+		if err != nil {
+			s.t.Fatalf("no answer to the head: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusContinue {
+			s.t.Fatalf("the head was answered %d, want 100 Continue", resp.StatusCode)
+		}
+		a.continued = true
+	}
 	switch {
-	case p.expect:
+	case p.withhold:
 	case p.meanwhile:
 		// What the write ends with is no matter: the server closes.
 		go func() { _, _ = conn.Write(body) }()
 	default:
 		_, a.sent = conn.Write(body)
 	}
-	resp, err := http.ReadResponse(a.r, nil)
-	if err != nil {
-		s.t.Fatalf("no answer (body sent: %v): %v", a.sent, err)
+	var resp *http.Response
+	for {
+		resp, err = http.ReadResponse(a.r, nil)
+		if err != nil {
+			s.t.Fatalf("no answer (body sent: %v): %v", a.sent, err)
+		}
+		if resp.StatusCode != http.StatusContinue {
+			break
+		}
+		_ = resp.Body.Close()
+		a.continued = true
 	}
 	a.resp = resp
 	data, err := io.ReadAll(resp.Body)
@@ -131,9 +158,11 @@ func (s *testServer) rawPut(ctx context.Context, p rawPut) rawAnswer {
 // body is read - by the quota, the authorizer, a missing bucket, a header -
 // is answered with its S3 error, not with a reset connection, when the
 // client writes its whole body before reading: the body is taken off the
-// wire first, and the connection serves the next request. A body past the
-// bound is not read and the connection is closed, and a client that asked
-// "100-continue" is answered without sending anything.
+// wire first, and the connection serves the next request. A client that
+// asked "100-continue" is told to send and is answered the same, whether it
+// waited or sent at once. A body past the bound is not read and the
+// connection is closed; a client that asked "100-continue" for one is
+// answered without being told to send.
 func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 	t.Parallel()
 	const mib = 1 << 20
@@ -148,6 +177,8 @@ func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 		// kept says the connection serves another request; else it is
 		// closed.
 		kept bool
+		// continued is whether "100 Continue" came before the answer.
+		continued bool
 	}{
 		{name: "quota", put: rawPut{path: "/full/one-more", size: mib}, status: http.StatusForbidden, code: "QuotaExceeded", kept: true},
 		{name: "quota over TLS", secure: true, put: rawPut{path: "/full/one-more", size: mib}, status: http.StatusForbidden, code: "QuotaExceeded", kept: true},
@@ -162,7 +193,21 @@ func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 			status: http.StatusBadRequest, code: "InvalidTag", kept: true,
 		},
 		{
-			name: "asks for 100-continue", put: rawPut{path: "/full/one-more", size: mib, expect: true},
+			// As aws-sdk-go-v2 does from 2 MiB.
+			name: "asks for 100-continue and waits", put: rawPut{path: "/full/one-more", size: 5 * mib, expect: true, waits: true},
+			status: http.StatusForbidden, code: "QuotaExceeded", kept: true, continued: true,
+		},
+		{
+			// As the SDK does once its second of waiting is out.
+			name: "asks for 100-continue and sends at once", put: rawPut{path: "/full/one-more", size: 5 * mib, expect: true},
+			status: http.StatusForbidden, code: "QuotaExceeded", kept: true, continued: true,
+		},
+		{
+			name: "asks for 100-continue over TLS and waits", secure: true, put: rawPut{path: "/full/one-more", size: 5 * mib, expect: true, waits: true},
+			status: http.StatusForbidden, code: "QuotaExceeded", kept: true, continued: true,
+		},
+		{
+			name: "asks for 100-continue past the bound", put: rawPut{path: "/full/one-more", size: httpdrain.DefaultBytes + mib, expect: true, withhold: true},
 			status: http.StatusForbidden, code: "QuotaExceeded",
 		},
 		{
@@ -198,6 +243,9 @@ func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 			if took := time.Since(begun); took > 10*time.Second {
 				t.Errorf("answered after %v", took)
 			}
+			if a.continued != c.continued {
+				t.Errorf("100 Continue sent = %v, want %v", a.continued, c.continued)
+			}
 			if c.kept {
 				if a.sent != nil {
 					t.Errorf("the body was not taken: %v", a.sent)
@@ -214,6 +262,11 @@ func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 					t.Fatalf("no answer to a second request on the connection: %v", err)
 				}
 				_ = next.Body.Close()
+				// The refused PUT was handled to its end before the
+				// second request was read.
+				if got := s.seen.lastOf("PutObject").BytesIn; c.put.expect && got != int64(c.put.size) {
+					t.Errorf("%d bytes of the body were read, want all %d", got, c.put.size)
+				}
 				return
 			}
 			if !a.resp.Close {
@@ -227,11 +280,23 @@ func TestAnEarlyRefusalReachesAClientStillSending(t *testing.T) {
 			case errors.As(err, &ne) && ne.Timeout():
 				t.Fatalf("the connection was left open: %v", err)
 			}
-			if c.put.expect {
+			if c.put.withhold {
 				if got := s.seen.last().BytesIn; got != 0 {
 					t.Errorf("%d bytes of the body were read; the client was never told to send it", got)
 				}
 			}
 		})
 	}
+}
+
+// lastOf is the last observation of the operation, or none.
+func (o *observations) lastOf(operation string) Observation {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for i := len(o.list) - 1; i >= 0; i-- {
+		if o.list[i].Operation == operation {
+			return o.list[i]
+		}
+	}
+	return Observation{}
 }

@@ -836,9 +836,11 @@ func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 		// A caller we know must be able to hear why it was refused. A
 		// client still sending its upload when the connection closes
 		// sees a reset and never the answer - an SDK sends a body under
-		// 2 MiB without waiting for "100-continue" - so what is left of
-		// the body is taken off the wire first, within bounds of bytes
-		// and time; past them the connection is closed as before.
+		// 2 MiB without asking "100-continue", and a larger one after a
+		// second of waiting for it - so what is left of the body is taken
+		// off the wire first ("100 Continue" is sent to a client that
+		// waits), within bounds of bytes and time; past them the
+		// connection is closed as before.
 		// Nothing is read for a caller who did not authenticate.
 		h.drain.Drain(req.w.ResponseWriter, req.Request, req.body.bytes)
 	}

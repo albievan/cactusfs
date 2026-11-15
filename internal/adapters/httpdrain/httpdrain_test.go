@@ -25,12 +25,17 @@ type exchange struct {
 	// sentFirst waits for the whole body to be written before the answer
 	// is read, as a client does that writes its request before it reads.
 	sentFirst bool
+	// waits reads "100 Continue" before the body is sent, as a client does
+	// that asked for it and waits.
+	waits bool
 }
 
 // outcome is what the client of an exchange saw.
 type outcome struct {
 	resp *http.Response
 	body []byte
+	// continued says that "100 Continue" came before the answer.
+	continued bool
 	// sendErr is what writing the body ended with, when it was waited for.
 	sendErr error
 	// conn is the connection, with r reading from it, for what comes next.
@@ -55,6 +60,18 @@ func run(t *testing.T, addr string, x exchange) *outcome {
 		t.Fatalf("writing the head: %v", err)
 	}
 	o := &outcome{conn: conn, r: bufio.NewReader(conn), sent: make(chan error, 1)}
+	if x.waits {
+		// Nothing is sent until the server says so.
+		resp, err := http.ReadResponse(o.r, nil)
+		if err != nil {
+			t.Fatalf("no answer to the head: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusContinue {
+			t.Fatalf("the head was answered %d, want 100 Continue", resp.StatusCode)
+		}
+		o.continued = true
+	}
 	if x.send == nil {
 		o.sent <- nil
 	} else {
@@ -67,7 +84,7 @@ func run(t *testing.T, addr string, x exchange) *outcome {
 		}
 		o.sent <- nil
 	}
-	resp, err := http.ReadResponse(o.r, nil)
+	resp, err := finalResponse(o.r, &o.continued)
 	if err != nil {
 		t.Fatalf("no answer: %v", err)
 	}
@@ -79,6 +96,22 @@ func run(t *testing.T, addr string, x exchange) *outcome {
 		t.Fatalf("reading the answer: %v", err)
 	}
 	return o
+}
+
+// finalResponse reads the answer to a request, past any "100 Continue",
+// which sets continued.
+func finalResponse(r *bufio.Reader, continued *bool) (*http.Response, error) {
+	for {
+		resp, err := http.ReadResponse(r, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusContinue {
+			return resp, nil
+		}
+		_ = resp.Body.Close()
+		*continued = true
+	}
 }
 
 // kept checks that the connection serves another request.
@@ -166,8 +199,10 @@ func trickle(w io.Writer) error {
 }
 
 // TestDrain: an answer written before the body is read reaches a client
-// still sending it, within the bounds; past them, or for a client that asked
-// to be told before sending, nothing more is read and the connection closes.
+// still sending it, within the bounds - a client that asked
+// "100-continue" is told to send, whether it waits or not; past them, or
+// for a client that asked and declared more than the bound, nothing more is
+// read and the connection closes.
 func TestDrain(t *testing.T) {
 	t.Parallel()
 	const mib = 1 << 20
@@ -178,6 +213,8 @@ func TestDrain(t *testing.T) {
 		// drained is what Drain reports; kept whether the connection
 		// serves another request (else it is closed).
 		drained, kept bool
+		// continued is whether "100 Continue" came before the answer.
+		continued bool
 		// within is how soon the answer comes, at the latest.
 		within time.Duration
 	}{
@@ -193,8 +230,31 @@ func TestDrain(t *testing.T) {
 			drained: true, kept: true, within: 10 * time.Second,
 		},
 		{
-			name: "asks for 100-continue", x: exchange{head: put(mib, "Expect: 100-continue")},
+			name: "asks for 100-continue and waits", x: exchange{head: put(mib, "Expect: 100-continue"), send: whole(mib), waits: true},
+			drained: true, kept: true, continued: true, within: 10 * time.Second,
+		},
+		{
+			name: "asks for 100-continue and sends at once", x: exchange{head: put(mib, "Expect: 100-continue"), send: whole(mib), sentFirst: true},
+			drained: true, kept: true, continued: true, within: 10 * time.Second,
+		},
+		{
+			name: "asks for 100-continue, chunked, and waits", x: exchange{head: put(-1, "Expect: 100-continue"), send: func(w io.Writer) error {
+				_, err := io.WriteString(w, "5\r\nhello\r\n0\r\n\r\n")
+				return err
+			}, waits: true},
+			drained: true, kept: true, continued: true, within: 10 * time.Second,
+		},
+		{
+			name: "asks for 100-continue and declares more than the bound", bounds: Bounds{Bytes: 64 << 10},
+			x:       exchange{head: put(mib, "Expect: 100-continue")},
 			drained: false, kept: false, within: 5 * time.Second,
+		},
+		{
+			// net/http sends no "100 Continue" over HTTP/1.0: a client
+			// that waits for it is not waited for.
+			name:    "asks for 100-continue over HTTP/1.0",
+			x:       exchange{head: "PUT /x HTTP/1.0\r\nHost: test\r\nContent-Length: 5\r\nExpect: 100-continue\r\n"},
+			drained: false, kept: false, within: 2 * time.Second,
 		},
 		{
 			name: "declares more than the bound", bounds: Bounds{Bytes: 64 << 10},
@@ -234,6 +294,9 @@ func TestDrain(t *testing.T) {
 			}
 			if got := <-drained; got != c.drained {
 				t.Errorf("Drain = %v, want %v", got, c.drained)
+			}
+			if o.continued != c.continued {
+				t.Errorf("100 Continue sent = %v, want %v", o.continued, c.continued)
 			}
 			if c.kept {
 				o.kept(t)

@@ -9,6 +9,14 @@
 // within a bound of bytes and of time, and otherwise closes the connection
 // as before: a refusal costs at most Bytes bytes and Time of a connection,
 // whatever the client does.
+//
+// A client that asks "Expect: 100-continue" is drained as well: it waits for
+// "100 Continue" only a while (aws-sdk-go-v2's transport a second, as RFC
+// 9110 allows) and then sends anyway, so an answer slower than that would
+// reach it as a reset. Reading its body makes net/http send "100 Continue"
+// first, so a client that waits is invited to send what fits the bounds -
+// the same bounds as any other - and hears the answer on a connection that
+// stays open.
 package httpdrain
 
 import (
@@ -22,9 +30,9 @@ import (
 const (
 	// DefaultBytes is the most of a body read before an early answer. It
 	// is four times the 2 MiB from which aws-sdk-go-v2 asks for
-	// "100-continue" (and so sends no body before it is told to), so that
-	// every body an SDK sends without asking fits, with room for the
-	// framing of aws-chunked content.
+	// "100-continue", so that every body an SDK sends without asking fits,
+	// with room for the framing of aws-chunked content. A body that asked
+	// and is declared longer is not invited to be sent.
 	DefaultBytes = 8 << 20
 	// DefaultTime is the longest a body is read before an early answer:
 	// 8 MiB at 13 Mbit/s, 2 MiB at 3.4 Mbit/s. A client that trickles is
@@ -61,15 +69,25 @@ func (b Bounds) time() time.Duration {
 // already, or 0 when it does not know. w must reach the server's own
 // ResponseWriter through Unwrap, which sets the read deadline.
 //
-// Nothing is read for a request that asked "Expect: 100-continue" - its
-// client sends the body only once told to, and net/http answers without
-// asking for it - nor over HTTP/2, which ends one stream and not the
-// connection. Where the rest of the body does not fit the bounds, or the
+// A request that asked "Expect: 100-continue" is read like any other, with
+// a known length or chunked: the first read makes net/http send "100
+// Continue" (Drain must run before the answer is written, which stops it),
+// so a client that waits sends its body and one that did not wait has it
+// read; either hears the answer on a connection that stays open. One whose
+// declared length is over the bound is not invited: nothing is read, and
+// net/http answers it without "100 Continue" and closes. Nothing is read
+// over HTTP/2, which ends one stream and not the connection, nor for an
+// HTTP/1.0 request asking "100-continue", to which net/http sends no "100
+// Continue". Where the rest of the body does not fit the bounds, or the
 // deadline cannot be set, nothing more is read and the answer carries
 // "Connection: close", as net/http would have done. It reports whether the
 // body was read to its end.
 func (b Bounds) Drain(w http.ResponseWriter, r *http.Request, consumed int64) bool {
-	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.ProtoMajor != 1 || expectsContinue(r) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 || r.ProtoMajor != 1 {
+		return false
+	}
+	if expectsContinue(r) && !r.ProtoAtLeast(1, 1) {
+		// A client that waits would be waited for until the deadline.
 		return false
 	}
 	limit := b.bytes()
