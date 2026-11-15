@@ -106,6 +106,11 @@ func errorMappings() []mapping {
 		{domain.ErrInvalidArgument, apiError{http.StatusBadRequest, "InvalidArgument", "Invalid argument."}},
 		{domain.ErrConflict, apiError{http.StatusConflict, "OperationAborted", "A conflicting operation is currently in progress against this resource. Please try again."}},
 
+		// A write whose outcome is not known may have been committed: it
+		// must not look safe to repeat, so it is an InternalError - also
+		// when the chain says, besides, that something was unavailable.
+		{domain.ErrOutcomeUnknown, errInternal()},
+
 		// Availability.
 		{domain.ErrInsufficientDrives, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},
 		{domain.ErrNotLeader, apiError{http.StatusServiceUnavailable, "ServiceUnavailable", "Service is unable to handle request."}},

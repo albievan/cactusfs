@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -443,6 +444,14 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 		return err
 	}
 	result := deleteResult{XMLNS: s3Namespace}
+	// The answer of the whole request is 200: the failures that are the
+	// node's would be in no log otherwise. They are counted, and logged
+	// once a request with the first cause - not once a key, of which a
+	// request names up to a thousand.
+	var (
+		faults     int
+		firstFault error
+	)
 	for _, target := range in.Objects {
 		entry := deletedEntry{Key: target.Key}
 		input := app.DeleteInput{Bucket: req.bucket, Key: target.Key, BypassGovernance: bypass && target.VersionID != nil}
@@ -465,6 +474,12 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 				return failure
 			}
 			api := toAPIError(failure)
+			if api.nodeFault() {
+				faults++
+				if firstFault == nil {
+					firstFault = failure
+				}
+			}
 			result.Errors = append(result.Errors, deleteError{Key: target.Key, VersionID: entry.VersionID, Code: api.code, Message: api.message})
 			continue
 		}
@@ -477,6 +492,11 @@ func (h *Handler) deleteObjects(ctx context.Context, req *request) error {
 		if !in.Quiet {
 			result.Deleted = append(result.Deleted, entry)
 		}
+	}
+	if faults > 0 {
+		h.cfg.Logger.ErrorContext(ctx, "s3 delete of objects failed",
+			slog.String("request_id", req.id), slog.String("operation", req.operation),
+			slog.Int("failed", faults), slog.Int("objects", len(in.Objects)), slog.Any("error", firstFault))
 	}
 	h.writeXML(ctx, req, http.StatusOK, result)
 	return nil

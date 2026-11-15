@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albievan/cactusfs/internal/adapters/httpdrain"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
@@ -134,6 +135,8 @@ type Config struct {
 // Handler serves the S3 API.
 type Handler struct {
 	cfg Config
+	// drain bounds what is read of a body before an error is answered.
+	drain httpdrain.Bounds
 }
 
 var _ http.Handler = (*Handler)(nil)
@@ -150,7 +153,9 @@ func NewHandler(cfg Config) *Handler {
 // request is the state of one request as it moves through the handler.
 type request struct {
 	*http.Request
-	w         *responseWriter
+	w *responseWriter
+	// body is the request body as the handler reads it, counted.
+	body      *countingBody
 	id        string
 	bucket    string
 	key       string
@@ -206,7 +211,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := h.cfg.Clock.Now()
 	body := &countingBody{ReadCloser: r.Body}
 	r.Body = body
-	req := &request{Request: r, w: &responseWriter{ResponseWriter: w}, id: newRequestID(), operation: "Unknown"}
+	req := &request{Request: r, w: &responseWriter{ResponseWriter: w}, body: body, id: newRequestID(), operation: "Unknown"}
 
 	header := w.Header()
 	header.Set("Server", serverName)
@@ -817,7 +822,7 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 // learn about are logged here and reported as InternalError.
 func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 	api := toAPIError(err)
-	if api.status >= http.StatusInternalServerError && api.status != http.StatusNotImplemented {
+	if api.nodeFault() {
 		h.cfg.Logger.ErrorContext(ctx, "s3 request failed",
 			slog.String("request_id", req.id), slog.String("operation", req.operation), slog.Any("error", err))
 	}
@@ -827,14 +832,15 @@ func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 		abortResponse(req)
 		return
 	}
-	if api.status >= http.StatusInternalServerError && !req.principal.Anonymous() {
-		// A caller we know is told that the store cannot serve it right
-		// now, and must be able to hear it. A client that is still
-		// sending its upload when the connection closes sees a reset and
-		// never the answer, so a body of modest size is taken off the
-		// wire first. Nothing is read for a caller who did not
-		// authenticate.
-		_, _ = io.CopyN(io.Discard, req.Body, maxDrainedBody)
+	if !req.principal.Anonymous() {
+		// A caller we know must be able to hear why it was refused. A
+		// client still sending its upload when the connection closes
+		// sees a reset and never the answer - an SDK sends a body under
+		// 2 MiB without waiting for "100-continue" - so what is left of
+		// the body is taken off the wire first, within bounds of bytes
+		// and time; past them the connection is closed as before.
+		// Nothing is read for a caller who did not authenticate.
+		h.drain.Drain(req.w.ResponseWriter, req.Request, req.body.bytes)
 	}
 	if req.Method == http.MethodHead {
 		req.w.WriteHeader(api.status)
@@ -845,9 +851,13 @@ func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 	})
 }
 
-// maxDrainedBody is how much of an unread request body is discarded before
-// an answer that says "try again".
-const maxDrainedBody = 1 << 20
+// nodeFault reports whether an answer is no fault of the client: a 5xx
+// other than NotImplemented, whose cause the client is not told and the log
+// is. A log line names the request and the operation - never an object key,
+// which is the client's data.
+func (e apiError) nodeFault() bool {
+	return e.status >= http.StatusInternalServerError && e.status != http.StatusNotImplemented
+}
 
 // abortResponse ends a response that has already started. With the write
 // deadline in the past nothing more can be sent, and net/http closes the

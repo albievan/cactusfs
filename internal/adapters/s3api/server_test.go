@@ -147,6 +147,12 @@ func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
 		Index: s.meta, Buckets: s.meta, Uploads: s.meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: clock, Entropy: rand.Reader, Logger: logger,
 		Access: s.access, AccessStore: s.meta,
+		// The pre-check of quotas, as a node has it: a write that does not
+		// fit is refused before its body is read.
+		Usage: s.meta, Quota: app.NewQuotaService(app.QuotaServiceConfig{
+			Buckets: s.meta, Usage: s.meta, Authz: authz, Auditor: s.auditor,
+			Level: func(context.Context) (int, error) { return s.meta.MetadataLevel() },
+		}),
 	})
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)

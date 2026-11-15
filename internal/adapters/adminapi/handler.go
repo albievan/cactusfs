@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/adminapi/api"
+	"github.com/albievan/cactusfs/internal/adapters/httpdrain"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/buildinfo"
@@ -211,6 +212,8 @@ type Config struct {
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+	// drain bounds what is read of a body before an early answer.
+	drain httpdrain.Bounds
 }
 
 // NewHandler returns the handler of everything under BasePath.
@@ -436,6 +439,19 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 	})
 }
 
+// drainUnread takes what is left of the body of an authenticated request off
+// the wire, within h.drain, before an answer that does not need it: an
+// upload refused before it is read - by its quota, its bucket, its tags or
+// the authorizer - would otherwise reach a client still sending it as a
+// reset connection, not as the problem. Nothing is read for a caller who did
+// not authenticate, nor once the response has begun.
+func (h *Handler) drainUnread(w http.ResponseWriter, r *http.Request, info *requestInfo) {
+	if info.started || info.principal.Anonymous() {
+		return
+	}
+	h.drain.Drain(w, r, 0)
+}
+
 var errUnauthenticated = errors.New("not authenticated")
 
 // errNotImplemented is the error of an operation of the contract that this
@@ -609,6 +625,9 @@ func (h *Handler) idempotent(w http.ResponseWriter, r *http.Request, info *reque
 		return
 	}
 	if answer != nil {
+		// A repeated upload is answered from what was kept, without
+		// its body.
+		h.drainUnread(w, r, info)
 		if answer.ContentType != "" {
 			w.Header().Set("Content-Type", answer.ContentType)
 		}
@@ -790,7 +809,14 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusBadRequest, code: "InvalidArgument", title: "Invalid request"}
 	case is(errNotImplemented):
 		return problem{status: http.StatusNotImplemented, code: "NotImplemented", title: "Not available on this node"}
-	case is(domain.ErrUnavailable), is(domain.ErrNotLeader), is(domain.ErrOutcomeUnknown), is(domain.ErrInsufficientDrives),
+	case is(domain.ErrOutcomeUnknown):
+		// A change whose outcome is not known may have been committed. A
+		// 503 with Retry-After would invite the caller to make it again -
+		// and a change may be sent without an Idempotency-Key. It is an
+		// internal error, also where the chain says, besides, that
+		// something was unavailable.
+		return problem{status: http.StatusInternalServerError, code: "InternalError", title: "Internal error"}
+	case is(domain.ErrUnavailable), is(domain.ErrNotLeader), is(domain.ErrInsufficientDrives),
 		is(domain.ErrKeyUnavailable), is(domain.ErrShuttingDown), is(domain.ErrDriveOffline), is(domain.ErrNoTopology),
 		is(context.DeadlineExceeded), is(context.Canceled):
 		return problem{status: http.StatusServiceUnavailable, code: "ServiceUnavailable", title: "Temporarily unavailable"}
@@ -933,6 +959,7 @@ func callSite(s string) bool {
 
 func (h *Handler) problem(w http.ResponseWriter, r *http.Request, p problem) {
 	info := infoOf(r.Context())
+	h.drainUnread(w, r, info)
 	body := api.Problem{Type: "about:blank", Title: p.title, Status: p.status, Code: p.code}
 	if p.detail != "" {
 		body.Detail = &p.detail

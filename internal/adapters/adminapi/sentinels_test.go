@@ -31,7 +31,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 	answers := map[error]answer{
 		domain.ErrShuttingDown:          {503, "ServiceUnavailable"},
 		domain.ErrNotLeader:             {503, "ServiceUnavailable"},
-		domain.ErrOutcomeUnknown:        {503, "ServiceUnavailable"},
+		domain.ErrOutcomeUnknown:        {500, "InternalError"},
 		domain.ErrNoTopology:            {503, "ServiceUnavailable"},
 		domain.ErrConflict:              {409, "Conflict"},
 		domain.ErrNotBootstrapped:       {500, "InternalError"},
