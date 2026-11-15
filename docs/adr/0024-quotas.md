@@ -1,7 +1,12 @@
 # ADR-0024: Quotas
 
-- **Status:** proposed (2026-10-12). It becomes accepted when the code of PLAN 8A has
-  landed and the gates have seen it (PLAN 8.3.6)
+- **Status:** accepted (2026-11-15, PLAN 8.3.6): implemented as written below, with
+  the code of PLAN 8.3.1 to 8.3.5 and the gates of each - the usage counted without
+  being asked and the recount (`app.UsageCounter`), the quota use case and the
+  pre-check (`app.QuotaService`), the management API, the metrics, the four-node,
+  S3-compatibility and chaos tests, the console, and the alerts of the observability
+  pack ("What is told"). The four points under "Open, for the owner" are not answered:
+  their defaults are what is built. It was proposed on 2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found", point 8) and to the domain and the two
@@ -63,9 +68,14 @@ was ever counted, which no change of a real bucket does - it is a fault of whoev
 the record, and a recount finds it as drift; and a count held at `MaxInt64` is over every
 quota there can be, since a quota is at most 2^62 - the bucket takes nothing that adds,
 and can still be emptied. A clamp begins a recount in the entry that clamped
-(`Usage.Add` says so and returns the record with a count begun; ADR-0023), is counted
-in `cactusfs_bucket_usage_clamped_total`, and the recount puts right what was clamped
-and reports it as drift. Until it ends the quota is judged by the clamped figure.
+(`Usage.Add` says so and returns the record with a count begun; ADR-0023), and the
+recount puts right what was clamped; a clamp that left a figure that was wrong is
+reported as drift - in `cactusfs_bucket_usage_drift_total` - by the node that ends the
+recount (not when that entry's outcome was unknown to it: the drift of that recount is
+then neither counted nor logged).
+Until it ends the quota is judged by the clamped figure. The clamp itself is counted by
+no metric (PLAN 8.3.6, ADR-0023 "Bucket usage": every member clamps as it applies, and a
+count of each member's would be the clamps times the members).
 
 | Entry | Adds | Frees | Can be refused |
 |---|---|---|---|
@@ -158,6 +168,18 @@ drive space, not quota.
   `cactusfs_buckets_quota{state="set|over_90|full"}`, `cactusfs_bucket_usage_counting`,
   `cactusfs_bucket_usage_drift_total`. Alerts `CactusFSBucketQuotaFull` and
   `CactusFSBucketUsageDrift`.
+- **As built (PLAN 8.3.3, 8.3.6).** The gauges are read by every node from its own copy
+  of the usage records, at most every 10 s, and so are the same on every node that is
+  current: the rules take them with `max` across the job. They are absent where a node
+  cannot say - below metadata level 5, and when it cannot read the buckets - and a
+  maximum over nothing is nothing, so `CactusFSBucketQuotaFull` (a bucket full for
+  15 minutes) is then silent. A third alert says so: `CactusFSBucketQuotasUnknown` fires
+  when no node has said for 30 minutes although the cluster is at level 5 and a node is
+  ready; the absence below level 5, without a leader and without any scrape is left to
+  the alerts that already speak of those. The drift counter is counted once, by the node
+  whose entry ended the recount, so `CactusFSBucketUsageDrift` fires by instance - the
+  node whose log names the bucket. Every rule has its `promtool` test in
+  `deploy/observability/rules/cactusfs.rules.test.yaml`.
 - **A refused write is counted in `cactusfs_quota_refusals_total` and is not an audit
   event.** The trail holds admin mutations, authentication failures and authorization
   denials; a quota refusal is none of the three - it is a limit and no denial - and a
@@ -188,7 +210,15 @@ quota on a bucket with a default retention has said how much may be retained.
 
 - The row of the threat model becomes implemented, with what it does not cover said:
   the capacity of the cluster as a whole (the sum of all quotas may exceed it), and the
-  bytes of parity.
+  bytes of parity. Done at PLAN 8.3.6, with rows for what a quota adds: a lever for
+  whoever may set it, advice that is stale, refusals that are counted and not audited,
+  and usage records in the clear in the metadata.
+- **A refusal must reach the client that is still sending.** A write refused before its
+  body is read - the pre-check above, as any early refusal - was answered by net/http
+  with the connection closed under a client still sending, which an SDK sees as a reset
+  and retries; the 403 was never read (found by the four-node test of PLAN 8.3.4). The
+  inbound adapters now read what is left of such a body, at most 8 MiB within 5 s, before
+  they answer (`internal/adapters/httpdrain`; the threat model's row of the drain).
 - A quota cannot be set on an old bucket until it has been counted: seconds for most
   buckets, minutes for one of hundreds of millions of versions.
 - An upload that is never completed counts until it is aborted. A lifecycle rule that
@@ -212,7 +242,8 @@ quota on a bucket with a default retention has said how much may be retained.
 
 ## Open, for the owner
 
-Defaults are applied until answered.
+Defaults are applied until answered. At acceptance (PLAN 8.3.6) none of the four has
+been answered, and each default is what is built; they stay open.
 
 1. **What does a quota count?** Default: every stored version and the parts of
    unfinished uploads, by the size of the object as it was sent; no quota by number of
@@ -223,7 +254,11 @@ Defaults are applied until answered.
    `type: about:blank` and a `code` in the spelling of the S3 codes (`AccessDenied`,
    `NoSuchBucket`); the contract and the code follow that. If a `type` URI of its own is
    wanted for this problem, it would be the first, and wants deciding for all of them.
+   Built: `code: QuotaExceeded` (PLAN 8.3.2, `TestQuotaExceededIsAProblem`); the row of
+   8.3.2 says so, pending this answer.
 4. **Should a refused write be audited?** Default, as ruled on 2026-10-12: no - it is
    counted in `cactusfs_quota_refusals_total` and is no audit event. The stricter
    reading would write a record for each, and a tenant at its limit could then fill
-   the trail.
+   the trail. Built: refusals by the pre-check and at commit alike are counted on the
+   node that refused them and audited by nobody (PLAN 8.3.2); the threat model keeps
+   it as an open question.

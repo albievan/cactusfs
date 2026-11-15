@@ -13,7 +13,8 @@ control and a hash-chained audit trail.
 > S3 depth listed below, and deployment hardening (the Helm chart, certificate rotation,
 > the observability pack, SBOMs, signatures and the release workflow). Milestone 8
 > (replication between sites, bucket notifications, quotas) is begun: its metadata
-> schema (entry schema 5) and its contracts exist, and none of its features does yet.
+> schema (entry schema 5) and its contracts exist, and of its features quotas on
+> buckets are built ([Quotas](#quotas); in no published release yet).
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -94,9 +95,9 @@ control and a hash-chained audit trail.
   administrators keep the catalogue on the **Tags** screen. See
   [Tags and their rules](#tags-and-their-rules) for what a rule asks of uploaders.
 - **Management API** (REST/JSON, designed first in OpenAPI) with Swagger UI, and a **web
-  console** embedded in the binary: buckets as a grid with their creator, policy and
-  latest use; an object browser with upload, download, an object's details opened in
-  its own row, and who uploaded and how often an object was downloaded; uploads that go
+  console** embedded in the binary: buckets as a grid with their creator, policy,
+  latest use and how full each is against its quota; an object browser with upload,
+  download, an object's details opened in its own row, and who uploaded and how often an object was downloaded; uploads that go
   on while you use other screens, with a bar at the top of every screen that shows them
   and what the console did; search; users, groups, roles, policies and API keys; the
   cluster; the settings of every node; the audit log. A bucket's page shows its details
@@ -140,14 +141,17 @@ Said plainly, so that nobody finds out by trying:
   `digests.txt`, and a node's check for releases, which reads GitHub's releases, finds
   none. The binaries ship with the next release. `v0.7.0` predates tag rules and their
   catalogue: no published release enforces them yet.
-- **Milestone 8: replication between sites, bucket notifications, quotas.** None of the
-  three works. Notification targets can be defined, read, listed and deleted
-  (`/targets`, with their secrets sealed and never shown) - nothing sends to them yet,
-  and their status answers `501`. A bucket's quota, notifications, replication and
-  replica mode are in the contract of the management API and answer
-  `501 Not Implemented`. Events are published inside the process only;
-  there is no NATS or webhook delivery. Nothing limits how much a bucket or a tenant
-  stores.
+- **Milestone 8: replication between sites, bucket notifications.** Neither works.
+  Notification targets can be defined, read, listed and deleted (`/targets`, with their
+  secrets sealed and never shown) - nothing sends to them yet, and their status answers
+  `501`. A bucket's notifications, replication and replica mode are in the contract of
+  the management API and answer `501 Not Implemented`. Events are published inside the
+  process only; there is no NATS or webhook delivery. (Quotas, the third part of
+  milestone 8, are built: [Quotas](#quotas).)
+- **Quotas are on buckets, in bytes, and nothing else.** There is no quota by user, by
+  tenant or by number of objects, no soft quota, and no limit on the number of buckets;
+  a bucket has no quota until one is set, and the quotas together may promise more than
+  the drives hold.
 - **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON
   text - an identity policy under Policies, a bucket's and a sub-bucket's in the bucket's
   details - and the server alone judges it.
@@ -161,20 +165,13 @@ Said plainly, so that nobody finds out by trying:
   their own. What is not implemented answers `501 NotImplemented`.
 - **Metadata is not encrypted at rest.** Object data is; bucket names, object keys,
   sizes, user metadata, the tags of buckets and objects, tag rules, the catalogue's
-  descriptions and sub-buckets' policies are in the metadata store in the clear
+  descriptions, sub-buckets' policies and what each bucket holds and its quota are in
+  the metadata store in the clear
   ([threat model](docs/threat-model.md)).
 - **No rotation of the local KMS key**, and no revocation list for node certificates.
 - **A rolling upgrade is tested with the binaries themselves for two steps only**: from
   entry schema 3 to 4 and from 4 to 5 (`make test-rolling`). Older states are tested by
   opening fixtures that the older binaries wrote.
-- **Entry schema 5 is in the metadata and nothing uses it yet.** A cluster of this
-  release counts what every new bucket holds, in its replicated state, and knows quotas,
-  targets, a delivery outbox and replica buckets there; only targets can be set through
-  the API yet, and a bucket that existed before the upgrade is not counted until a later
-  release counts it. Neither is a bucket created through a node that had not yet seen
-  that every node knows schema 5 - in the moment after the last node's upgrade, or
-  while a node is not registered: it is written as before, and has no usage record
-  until that later release counts it.
 
 ## Build from source
 
@@ -752,8 +749,8 @@ of the new schema has happened yet, the way back is still there - but only like 
 A rolling rollback is not safe. A node that is taken back keeps, in the cluster's
 records, the schema its newer release registered until it has started and registered
 again; until then the cluster goes on writing the new schema, and one such write in that
-time - with this release, one bucket created by anybody, through any node - is an entry
-the node taken back cannot apply. There is no switch that closes the cluster to such
+time - with this release, the leader counting a bucket, or one bucket created by
+anybody, through any node - is an entry the node taken back cannot apply. There is no switch that closes the cluster to such
 writes meanwhile, so nothing but stopping every node first keeps them out.
 
 If it happens all the same: the node that was taken back stops its metadata at that
@@ -771,10 +768,7 @@ Which write that is depends on the release you come from:
 | From a release of | The way back ends with |
 |---|---|
 | entry schema 3 | the first upload, the first flushed count of downloads or the first bucket created |
-| entry schema 4 (this release raises it to 5) | **the first bucket that is created** after the last node was upgraded - through S3 or the management API, on any node. Uploads, downloads, deletes and multipart uploads into the buckets you have do not end it. A node that runs alone has no other node to wait for: its first new bucket ends it |
-
-A later release of milestone 8 will count the buckets you already have by itself, within
-seconds of the last node's upgrade, and the way back from schema 5 will then end there.
+| entry schema 4 (this release raises it to 5) | **within seconds of the last node's upgrade**: the node that leads begins by itself to count what each bucket you already have holds ([Quotas](#quotas)), and that count is a write of schema 5 - as is the first bucket created, a quota set and a target defined. A deployment without a bucket keeps its way back until its first bucket. A node that runs alone has no other node to wait for: it writes schema 5 from its first start on this release, and its first count of a bucket ends the way back |
 
 Two things about the machine, which are not the chart's to do:
 
@@ -840,7 +834,8 @@ What the API has, under `/api/v1` (the contract is
 | Path | For |
 |---|---|
 | `/session`, `/session/unlock` | sign in, the session, sign out; unlock a locked session with the user's password |
-| `/buckets`, `/buckets/{bucket}`, `/buckets/{bucket}/usage` | list, create, read and delete buckets; how many objects a bucket holds and their size |
+| `/buckets`, `/buckets/{bucket}`, `/buckets/{bucket}/usage` | list, create, read and delete buckets; how many objects a bucket holds and their size - once its usage is counted (`exact`), also its versions, the bytes it stores and holds in uploads, and its quota |
+| `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount` | a bucket's quota: read, set and remove it ([Quotas](#quotas)); have its usage counted again (`202`) |
 | `/buckets/{bucket}/objects`, `/buckets/{bucket}/object`, `/object/metadata`, `/object/access` | list objects; upload, download and delete one; its metadata; who uploaded it and how often it was downloaded |
 | `/buckets/{bucket}/object/preview` | an object's bytes for the console to show it (ADR-0028): PNG, JPEG, GIF, WebP, PDF, DOCX, XLSX, text, CSV and JSON, decided by the stored type and the bytes together; for whoever may read the object and either uploaded the version shown or is allowed `admin:PreviewObject`; always an attachment, never served inline; up to `--preview-max-size`, text to its first MiB; counted as a download |
 | `/buckets/{bucket}/policy` | a bucket's policy: the document S3's `GetBucketPolicy` and `PutBucketPolicy` read and write; one that cannot be kept answers `400 InvalidPolicy` |
@@ -853,7 +848,7 @@ What the API has, under `/api/v1` (the contract is
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
 | `/targets` and `/targets/{name}` | milestone 8: define, read, list and delete a notification target; its secret and signing key sealed through the KMS, the key shown once; answers `503` until every member counts in schema 5 |
-| `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`, `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets/{name}/status` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
+| `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets/{name}/status` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
@@ -960,7 +955,10 @@ roles a `cluster-admin` is shown all of it, a `bucket-admin` the policy, `read-w
 and `read-only` the plain list; an `auditor` may not list the buckets. A part the
 caller may not see is left out (`access_included`, `policy_included`), bucket by
 bucket: the list is never refused for it. A bucket created before release 0.7 says
-nothing of its creator.
+nothing of its creator. The grid's "Quota" column comes from each bucket's usage: a bar
+of what counts against the quota, "not set", or "not counted yet"; the button "Quota" in
+a row opens the editor of the bucket's quota for whoever may read it
+([Quotas](#quotas)).
 
 ### Search
 
@@ -1026,6 +1024,67 @@ before you set them:
 - Changes to an object's tags are not in the audit trail (changes to a bucket's tags,
   its rules and the catalogue are). Tags, rules and the catalogue are stored unencrypted
   in the metadata, like keys and user metadata, and are never logged.
+
+### Quotas
+
+A bucket can be given a quota ([ADR-0024](docs/adr/0024-quotas.md)): a hard limit, in
+bytes, on what it stores.
+
+- **What counts.** Every version the bucket keeps, current or not, at the size it was
+  sent, and the parts of multipart uploads that are neither completed nor aborted - in
+  the bucket's usage, `stored_bytes + upload_bytes`. A delete marker counts nothing. Not
+  counted: the parity on the drives, the metadata, and shards waiting to be collected.
+- **Setting it.** `PUT /api/v1/buckets/{bucket}/quota` with `{"quota_bytes": <bytes>}`,
+  from 1 to 2^62; `GET` reads it with what counts against it; `DELETE` removes it. In
+  the console: "Quota" in the bucket's row of the grid, in GB (1 GB is 10^9 bytes), and
+  the row's bar shows how full the bucket is. Setting and removing a quota is for
+  `cluster-admin` (`admin:PutBucketQuota`, `admin:DeleteBucketQuota`), reading it also
+  for `auditor`; `bucket-admin` may do neither, and no bucket policy can grant it. Every
+  change is in the audit trail. Whoever may list a bucket is told its quota with its
+  usage. A quota below what the bucket holds is accepted: nothing is removed, and nothing
+  more is taken until enough has been deleted.
+- **When a write is refused.** A write that would take the bucket past its quota -
+  PutObject, CopyObject, UploadPart and UploadPartCopy, and an upload through the
+  management API - is answered `403` with the code `QuotaExceeded`, as an S3 XML error
+  or a problem of the management API; the AWS SDKs do not repeat it. An overwrite counts
+  what it adds less what it replaces where the bucket keeps no versions (or has them
+  suspended), and a part less the part of the same number it replaces. Deleting,
+  aborting an upload and completing one are never refused, so a full bucket can always
+  be emptied - but a bucket full of versions under Object Lock stays full until they
+  expire, and an upload that is never finished counts until it is aborted (a lifecycle
+  rule that aborts incomplete uploads gives the bytes back).
+- **Exact across nodes.** The limit is decided where the metadata entries are applied,
+  in their one order, so writers through different nodes cannot pass it together. Each
+  node also checks a write before it stores anything, from its own copy of the usage,
+  which may be a moment behind: just after a delete through another node, a write may
+  be refused and pass when repeated. A write whose length is not declared is refused
+  beforehand only when the bucket is already full; otherwise it is stored, refused at
+  the end if it does not fit, and its shards removed.
+- **A refusal reaches a client that is still sending.** A write refused before its body
+  is read would have the connection closed under the client, which sees a reset and not
+  the `403`. So the node reads what is left of such a body, up to 8 MiB and for 5
+  seconds, and then answers on a connection that stays open. A client that sends more
+  than 8 MiB without asking `Expect: 100-continue` first can still see the connection
+  closed. aws-sdk-go-v2 asks from 2 MiB: a refused body of up to 8 MiB is then sent and
+  read; one declared larger is answered without being invited, and the connection is
+  closed if the client has stopped waiting (aws-sdk-go-v2 waits one second) and begun
+  to send.
+- **Buckets you had before.** A bucket made by this release is counted from its
+  creation. Once every node runs this release (metadata level 5), the node that leads
+  counts the buckets you already had, by itself - ten thousand records an entry, ten
+  entries a second, the buckets taking turns - and that ends the way back to the
+  release before ("Going back", under [On Kubernetes](#on-kubernetes)). Until a bucket is counted its usage
+  says `exact: false`, the console "not counted yet", and a quota for it is refused with
+  `409`. While any node runs the release before, everything of quotas answers `503`.
+- **Recount.** `POST /api/v1/buckets/{bucket}/usage/recount` (`cluster-admin`) has a
+  bucket counted again while it is used. A recount that finds other figures than were
+  kept is a fault of CactusFS: it puts them right, logs the bucket's name, and counts
+  it in `cactusfs_bucket_usage_drift_total` - please report it.
+- **Watching it.** `cactusfs_buckets_quota{state}` counts the buckets with a quota, at
+  90 % of it or more, and full; `cactusfs_quota_refusals_total` the refused writes (not
+  in the audit trail; [threat model](docs/threat-model.md), open question 45). No metric
+  names a bucket. The alerts `CactusFSBucketQuotaFull`, `CactusFSBucketQuotasUnknown` and
+  `CactusFSBucketUsageDrift` are in [`deploy/observability`](deploy/observability/README.md).
 
 ## Users, keys and the audit trail
 

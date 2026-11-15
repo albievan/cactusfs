@@ -8,11 +8,15 @@ expensive to reverse.
 
 Sections marked **(implemented)** describe code that exists. What does not exist yet is
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
-events to NATS and webhooks, replication between sites and quotas (milestone 8, of
-which entry schema 5, the domain, the ports, the replicated store and the contracts
-exist, and no use case, worker or adapter). Sub-buckets (ADR-0017) and tag rules with a
-catalogue of tags (ADR-0018) are implemented end to end - domain, store, use cases,
-management API and console. The release is 0.7.0 (`internal/buildinfo/VERSION`, tagged
+events to NATS and webhooks and replication between sites (milestone 8, of which entry
+schema 5, the domain, the ports, the replicated store, the contracts, outbound
+connections and targets exist, and no delivery worker or adapter). Quotas on buckets
+(ADR-0024) are implemented end to end - the usage of every bucket counted, the quota
+enforced where entries are applied and checked before a write, the management API, the
+metrics and alerts, and the console (PLAN 8A; "Usage and quotas", section 5); no
+published release has them yet. Sub-buckets (ADR-0017) and tag rules with a catalogue
+of tags (ADR-0018) are implemented end to end - domain, store, use cases, management
+API and console. The release is 0.7.0 (`internal/buildinfo/VERSION`, tagged
 `v0.7.0` on 2026-11-13): its image (`ghcr.io/albievan/cactusfs:0.7.0`) and Helm chart
 (`ghcr.io/albievan/charts/cactusfs:0.7.0`) were published and signed keyless by the
 release workflow, which then failed to create the GitHub Release (cosign's bundle was not
@@ -81,7 +85,7 @@ Conventions that follow from it:
 | Package | Purpose |
 |---|---|
 | `internal/domain` | typed sentinel errors, and their names on the wire between nodes |
-| `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018), the usage record, notification and replication documents (ADR-0023 to 0026): rules only, used by no use case yet |
+| `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018), the usage record and the rule of a quota (`Usage.Admits`; ADR-0023, 0024); notification and replication documents (ADR-0025, 0026): rules only, used by no use case yet |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, conditions, tags, Object Lock, multipart, SSE, the record of who read an object (ADR-0016), the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals (a locked console session among them, ADR-0027), actions, the policy language and the decision, bucket policies, users, groups, roles, API keys, built-in roles, sealed secrets |
 | `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure (ADR-0023, 0025: used by the metadata store, by no use case yet) |
@@ -93,9 +97,9 @@ Conventions that follow from it:
 | `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
 | `internal/domain/release` | versions (semantic versioning 2.0), releases and their files, the channels, what may be installed (`Allowed`, `NextStep`), the signed lists `SHA256SUMS` and `digests.txt` read strictly, `Verified` - the one thing an upgrader takes - and the progress of an upgrade (ADR-0029) |
 | `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018), kept by `app.TagDefinitionService` |
-| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore`, `TargetStore`, `Outbox` and `ReplicationStore`, implemented by the metadata store and called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore` (kept by `app.UsageCounter`, read by `app.QuotaService` and the object use cases), `TargetStore` (of `app.TargetService`), `Outbox` and `ReplicationStore`, implemented by the metadata store, the last two called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
+| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; quotas and the usage of buckets (`QuotaService`, `UsageCounter`, ADR-0024); targets (`TargetService`); checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
 | `internal/buildinfo` | the version, build and commit of the binary, and whether it was built as the image's (section 8) |
 | `internal/tools` | tools of `make` targets, built with the tag `tools`: `trustedroot` fetches Sigstore's trusted root through its TUF client (`make trusted-root`) |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
@@ -482,9 +486,9 @@ Prometheus client and are not listed.
 | `cactusfs_object_access_dropped_total` | counter | - | reads not counted towards who read what |
 | `cactusfs_events_total` | counter | `type` | events derived from applied metadata entries |
 | `cactusfs_quota_refusals_total` | counter | - | writes this node refused for a bucket's quota (ADR-0024), by the pre-check before any shard was written or at commit; no bucket is named |
-| `cactusfs_buckets_quota` | gauge | `state` | buckets by how they stand against their quota: `set` (they have one), `over_90` (they hold 90 % of it or more), `full` (they hold all of it or more); each includes the next; read from the node's own copy of the usage records, so the same on every node that is current (aggregate with `max`); read again at most every 10 s; absent below metadata level 5 or when the node cannot read the buckets |
+| `cactusfs_buckets_quota` | gauge | `state` | buckets by how they stand against their quota: `set` (they have one), `over_90` (they hold 90 % of it or more), `full` (they hold all of it or more); each includes the next; read from the node's own copy of the usage records, so the same on every node that is current (aggregate with `max`); read again at most every 10 s; absent below metadata level 5 or when the node cannot read the buckets; alerts `CactusFSBucketQuotaFull` and, for its absence on every node, `CactusFSBucketQuotasUnknown` |
 | `cactusfs_bucket_usage_counting` | gauge | - | buckets whose usage is being counted, for the first time or by a recount (ADR-0023); like `cactusfs_buckets_quota`, the same on every node |
-| `cactusfs_bucket_usage_drift_total` | counter | - | recounts of a bucket's usage that found other totals than were kept, counted by the node that proposed the entry that ended them (a fault of whoever kept the record; ADR-0024) |
+| `cactusfs_bucket_usage_drift_total` | counter | - | recounts of a bucket's usage that found other totals than were kept, counted by the node that proposed the entry that ended them, so a sum over the nodes is the number of drifts (a fault of whoever kept the record; ADR-0024); a clamp of a count at its bound shows here when its recount ends, and has no metric of its own; alert `CactusFSBucketUsageDrift` |
 | `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
 | `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
 | `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
@@ -635,12 +639,15 @@ The store implements `ports.BucketUsageStore`, `ports.TargetStore`, `ports.Outbo
 `ports.ReplicationStore`; below level 5 every change of theirs is "unavailable", with
 nothing logged, and there is nothing to read.
 
-**What makes a state schema 5 today is one thing: a bucket that is created** at level 5.
-Nothing else in this build proposes an entry of schema 5 - the worker that counts
-buckets without being asked, the APIs of quotas, targets, notifications and replication
-are of later steps of milestone 8 and answer `501` - so a deployment upgraded to this
-build keeps its way back to the release of schema 4 until its first new bucket, and the
-buckets it had are not counted yet. That way back is walked with **every node stopped
+**A state becomes schema 5 within seconds of level 5** (ADR-0023, "Rollback", as it
+holds from PLAN 8.3.3): the leader's usage counter proposes a `bucket.usage.walk` for
+the first bucket that has no exact record, and that entry is of schema 5 - as are a
+bucket created at level 5, a quota set, a recount and a target defined. A deployment of
+one node is at level 5 from its first start with this build. So the way back to the
+release of schema 4 ends, for a deployment that holds a bucket, almost as soon as the
+last member has registered; to keep it, hold one member at the release before (the
+cluster stays at level 4, counts nothing and answers 503 to everything of milestone 8).
+Before that entry, the way back is walked with **every node stopped
 first** and then all started on the release of schema 4, never a node at a time: a node
 taken back has a record that says 5 until it registers again, the leader goes on
 writing schema 5 meanwhile, and one bucket created in that time stops the node taken
@@ -696,6 +703,50 @@ records cannot be read, the list fails. How much a bucket holds stays a question
 its own (`GET /api/v1/buckets/{bucket}/usage`), which the console asks row by row,
 four at a time.
 
+### Usage and quotas **(implemented, ADR-0023, ADR-0024; PLAN 8A)**
+
+- **Usage is kept by the state machine.** Every member keeps each bucket's usage record
+  as it applies entries (above); a bucket made at level 5 is exact from its creation.
+  `app.UsageCounter`, run on every node and active on the leader only, counts the
+  buckets that are not exact - those from before level 5, and any whose count was begun
+  again - in `bucket.usage.walk` entries of 10 000 records, one every 100 ms, the buckets
+  taking turns; it looks at every bucket at once on coming to lead and then every 10 s.
+  `POST /api/v1/buckets/{bucket}/usage/recount` (`admin:RecountBucketUsage`) begins a
+  recount through any node; it is audited by the use case in the background, since its
+  entry carries no record. A recount that finds other totals than were kept is drift:
+  logged with the bucket's name and counted once, by the node whose entry ended it.
+- **`GET /api/v1/buckets/{bucket}/usage`** answers from this node's own copy of the
+  record when it is exact (`exact: true`, with versions, stored bytes, the bytes of
+  uploads in progress and the quota) - not cached, and on a follower possibly a moment
+  behind the leader - and by the bounded walk of before otherwise (`exact: false`).
+- **A quota** is a hard limit in bytes on one bucket, 1 to 2^62, on what it stores:
+  every version, current or not, and the parts of uploads in progress
+  (`stored_bytes + upload_bytes`). `app.QuotaService` reads, sets and removes it
+  (`admin:GetBucketQuota`, `admin:PutBucketQuota`, `admin:DeleteBucketQuota`; held by
+  `cluster-admin`, and the first by `auditor`; never by `bucket-admin`), carrying the
+  audit record in the entry; a quota is refused with 409 until the bucket is exact, and
+  everything of quotas answers 503 below level 5.
+- **Where it is enforced.** In apply, by `bucket.Usage.Admits` on the net change of
+  a put or a part - the authority, in the one order of the log, so two writers racing for
+  the last bytes cannot both pass. Before a shard is written, `QuotaService.Admit` judges
+  the declared length less what the write would replace, from this node's copy: advice
+  that saves the shards of a write that cannot succeed. A write the store refuses at
+  commit has its shards removed at once. Nothing that removes or completes is refused,
+  so a full bucket can always be emptied. Both APIs answer `403 QuotaExceeded`; the
+  inbound adapters read what is left of a refused body, within 8 MiB and 5 s, so that the
+  client hears the 403 rather than a reset (`internal/adapters/httpdrain`).
+- **What is told.** `cactusfs_quota_refusals_total` (each refusal once, on the node that
+  refused it; not audited - ADR-0024, open point 4), `cactusfs_buckets_quota{state}` and
+  `cactusfs_bucket_usage_counting` (read by every node from its own copy, at most every
+  10 s: aggregate with `max`), `cactusfs_bucket_usage_drift_total` (sum it). The alerts
+  `CactusFSBucketQuotaFull`, `CactusFSBucketQuotasUnknown` (the gauges absent on every
+  node at level 5 with a leader) and `CactusFSBucketUsageDrift` are in
+  `deploy/observability`. No metric names a bucket. A clamp of a count at its bound is
+  counted by no metric: the recount it begins reports it as drift (ADR-0023).
+- **The console** shows a bucket's quota in the grid of buckets - a bar of what counts
+  against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
+  whoever may read it; the server decides every change.
+
 ## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
@@ -736,12 +787,13 @@ four at a time.
   `/buckets/{bucket}/object/preview` (an object's bytes for the console to show, below); `/search`;
   `/users`, `/users/{name}`, `/users/{name}/keys` and `/keys/{access_key_id}`; `/groups`,
   `/roles` and `/policies`, each with `/{name}`; `/cluster` and `/cluster/maintenance`;
-  `/settings`; `/audit`. The paths of milestone 8 are in the contract and have no use
-  case yet, so each answers 501 `NotImplemented` to a caller that has authenticated:
-  `/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`,
+  `/settings`; `/audit`. The paths of milestone 8 are in the contract; those of quotas
+  (`/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`; PLAN 8A, "Usage and
+  quotas" in section 5) and of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) are
+  implemented and answer 503 below metadata level 5, and the rest have no use case yet,
+  so each answers 501 `NotImplemented` to a caller that has authenticated:
   `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status`
-  and `/resync`), `/buckets/{bucket}/replica`, `/targets`, `/targets/{name}` and
-  `/targets/{name}/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  and `/resync`), `/buckets/{bucket}/replica` and `/targets/{name}/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
@@ -829,8 +881,9 @@ four at a time.
   restart that passes: what was parsed before the request gave up is remembered, and
   the next gets further. Past about 10 000 buckets with 16 KiB policies, or 150 000
   with 1 KiB policies, it is a limit of the deployment's size for everybody but root -
-  a search of one named bucket stays possible - and a quota on buckets (milestone 8)
-  is what keeps a deployment from being put there. A failure to read a page, damage to
+  a search of one named bucket stays possible - and nothing keeps a deployment from
+  growing past it: a quota (ADR-0024) limits the bytes of one bucket, not the number of
+  buckets or the size of their policies. A failure to read a page, damage to
   the store included, fails the search (503); one damaged policy leaves out its bucket
   alone. The walk is then
   given only buckets the caller may see, so `examined`, `complete`, the number of
@@ -1012,8 +1065,9 @@ four at a time.
   twenty events published inside the process (buckets, objects, versioning, Object
   Lock, bucket configuration, tags, the root credential, topology, nodes, the audit
   trail - and, of entry schema 5, the quota and the replica mode of a bucket and a
-  target defined or deleted, which the state machine tells of and no use case causes
-  yet), and two messages that are for targets outside the deployment only,
+  target defined or deleted, which the state machine tells of: a quota set or removed
+  through `app.QuotaService`, a target through `app.TargetService`, and the replica
+  mode by no use case yet), and two messages that are for targets outside the deployment only,
   `cactusfs.notification.object.v1` and `cactusfs.audit.exported.v1`, which nothing
   sends yet; and the in-process publisher (at most once per node; counted in
   `cactusfs_events_total`). NATS JetStream and webhooks are milestone 8 and do not

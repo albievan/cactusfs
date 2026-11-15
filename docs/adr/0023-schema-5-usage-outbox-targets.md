@@ -3,11 +3,13 @@
 - **Status:** accepted (2026-10-13, PLAN 8.0.10): entry schema 5 is in the codec and the
   state machine whole, the store proposes and reads it, and `MetadataVersion` is 5 - a
   node of this release registers it and a cluster of such nodes writes it. **The bytes
-  of schema 5 are frozen from that step on** ("Frozen", below). Not built yet, each
-  with the step of `PLAN.md` that brings it: the worker that counts without being asked
-  (8.3.1), the delivery worker (8.0.14), targets as a use case (8.0.13), outbound
-  connections (8.0.12), and everything of ADR-0024 to ADR-0026, which stay proposed.
-  It was proposed on 2026-10-12
+  of schema 5 are frozen from that step on** ("Frozen", below). Built since, each with
+  its step of `PLAN.md`: outbound connections (8.0.12), targets as a use case (8.0.13),
+  and the usage of buckets end to end - the worker that counts without being asked and
+  the recount (8.3.1, wired at 8.3.3), read through the management API, with its
+  metrics and alerts (8.3.3, 8.3.6) - which ADR-0024 (quotas, accepted at PLAN 8.3.6)
+  stands on. Not built yet: the delivery worker (8.0.14), and everything of ADR-0025 and
+  ADR-0026, which stay proposed. It was proposed on 2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found") and to the domain and the ports of PLAN
@@ -267,8 +269,22 @@ record, whether it clamped - and the record it returns then has a count begun, a
 stays exact and goes on being kept meanwhile). That is decided in apply, from the record
 and the entry alone, so every member does it alike; the leader's counter proposes walk
 entries for every record that has a count under way, the walk puts the totals right, and
-`Finish` reports the difference as drift. The flag itself is not stored: the store counts
-it in `cactusfs_bucket_usage_clamped_total` (PLAN 8.0.7).
+`Finish` reports the difference as drift. The flag itself is not stored, and **is no
+metric** (PLAN 8.3.6; this text named a `cactusfs_bucket_usage_clamped_total` until
+then, which nothing exposed). A clamp is decided by every member as it applies, so a
+counter of each member's clamps summed over the members would be the clamps times the
+members, and nobody proposes a clamp who could count it once, as the node that ends a
+recount counts its drift. What a clamp did is told by the recount it begins:
+`cactusfs_bucket_usage_counting` while the recount runs, and
+`cactusfs_bucket_usage_drift_total` (with the alert `CactusFSBucketUsageDrift` and a log
+line naming the bucket) when it ends with other totals than the clamped ones. A clamp
+that left a figure that was wrong - the only kind by which a quota could have been judged
+wrongly - is reported as drift by the node that ends the recount (not when that entry's
+outcome was unknown to it: `UsageCounter` compares the totals only after a walk entry it
+saw succeed, so then the drift is neither counted nor logged). A clamp that happens to
+leave the true figure is not told.
+Each member counts its clamps in memory for its tests (`raftmeta.Observation.UsageClamped`,
+PLAN 8.0.7); that count is exposed by nothing.
 
 **One `Add` is one key and one upload.** While a bucket is being counted, whether a
 change counts is decided by where its key and its upload are; an entry that changes
@@ -353,7 +369,8 @@ that record says `versions` is 0 (ADR-0026).
 go on being kept, and puts its result in their place at the end. A walk that was under
 way is thrown away and begun again. A result that differs from the totals it replaces is
 drift - a fault of this code - and is counted in `cactusfs_bucket_usage_drift_total`
-(`Finish` says so; a first count cannot drift). Without `restart`, a walk under way goes
+(`Finish` says so; a first count cannot drift), once, by the node whose entry ended the
+recount (PLAN 8.3.3), and alerted on as `CactusFSBucketUsageDrift` (PLAN 8.3.6). Without `restart`, a walk under way goes
 on, and an entry for a record that is exact and not being counted changes nothing.
 
 ### The outbox
@@ -1000,7 +1017,9 @@ Defaults are applied until answered.
    state nor in a snapshot ("Targets"). Whether an administrator should be able to read
    it back stays open, and the default stays: nobody can.
 4. **Should a count that was clamped stop being called exact?** Default: no - the record
-   stays exact, a recount begins in the same entry, and the clamp is counted. A quota
+   stays exact, a recount begins in the same entry, and the recount reports as drift a
+   clamp that left a wrong figure (the clamp itself is counted by no metric: "Bucket
+   usage", as changed at PLAN 8.3.6). A quota
    therefore goes on being judged by a figure that is known to be wrong until the
    recount ends (at 0: it admits more than it should; at the bound: nothing). Only a
    fault of this code clamps.
