@@ -1071,11 +1071,12 @@ func TestAnOlderNodeStopsRatherThanMisapply(t *testing.T) {
 			eventually(t, "the old node to stop", func() bool {
 				return errors.Is(c.store("s4").Check(ctx), domain.ErrUnsupportedFormat)
 			})
-			if _, err := c.store("s4").GetBucket(ctx, "too-new"); !errors.Is(err, domain.ErrUnsupportedFormat) {
-				t.Errorf("read on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+			// Requests are refused as unavailable, saying why.
+			if _, err := c.store("s4").GetBucket(ctx, "too-new"); !refusedAsStopped(err, domain.ErrUnsupportedFormat) {
+				t.Errorf("read on the stopped node = %v, want %v saying %v", err, domain.ErrUnavailable, domain.ErrUnsupportedFormat)
 			}
-			if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "x"}); !errors.Is(err, domain.ErrUnsupportedFormat) {
-				t.Errorf("write on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+			if err := c.store("s4").CreateBucket(ctx, bucket.Bucket{Name: "x"}); !refusedAsStopped(err, domain.ErrUnsupportedFormat) {
+				t.Errorf("write on the stopped node = %v, want %v saying %v", err, domain.ErrUnavailable, domain.ErrUnsupportedFormat)
 			}
 			// It did not apply the entry in some other way: nothing of
 			// schema 3 is in its state, and nothing of schema 5, and the

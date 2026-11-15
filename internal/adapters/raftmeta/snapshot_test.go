@@ -38,7 +38,7 @@ func TestAStoppedStateMachineTakesNoSnapshot(t *testing.T) {
 		snapshot.Release()
 		t.Fatal("Snapshot of a stopped state machine succeeded; want it refused")
 	}
-	if !errors.Is(err, f.health()) {
+	if !errors.Is(err, f.stopped()) {
 		t.Errorf("Snapshot = %v, want the error that stopped the state machine", err)
 	}
 }

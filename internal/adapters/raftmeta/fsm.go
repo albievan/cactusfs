@@ -435,8 +435,27 @@ func (f *fsm) close() error {
 	return err
 }
 
-// health returns the error that stopped the state machine, if any.
+// health returns the error that stopped the state machine, if any, as a
+// request that meets it is told: it wraps domain.ErrUnavailable, because what
+// is refused for it is refused before anything is logged - certain, and
+// another node can take it - and the message of the cause, never its chain.
+// The cause's own domain errors must not reach a proposer, here or across a
+// node boundary, where the domain errors of an error arrive: a cause that
+// wraps domain.ErrUnsupportedFormat (an entry or a record of a newer schema)
+// would make the refusal look like a leader's refusal of an entry for its
+// schema (isAboveLevel), and the proposer would write the entry again with
+// less in it - who created or deleted lost.
 func (f *fsm) health() error {
+	if err := f.stopped(); err != nil {
+		return fmt.Errorf("%w: %s", domain.ErrUnavailable, err.Error())
+	}
+	return nil
+}
+
+// stopped returns the error that stopped the state machine, if any, as it
+// is, its whole chain with it: for this node's own use, such as its start,
+// which waiting cannot cure, unlike what domain.ErrUnavailable says.
+func (f *fsm) stopped() error {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.failed

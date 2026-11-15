@@ -964,8 +964,8 @@ func TestARollingRollbackFromLevel5EndsAtTheFirstBucket(t *testing.T) {
 		!strings.Contains(stopped.Error(), "metadata entry schema version 5") {
 		t.Errorf("the node that stopped says %q", stopped)
 	}
-	if err := back.CreateBucket(ctx, bucket.Bucket{Name: "after-it-stopped"}); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("a write on the node that stopped = %v, want %v", err, domain.ErrUnsupportedFormat)
+	if err := back.CreateBucket(ctx, bucket.Bucket{Name: "after-it-stopped"}); !refusedAsStopped(err, domain.ErrUnsupportedFormat) {
+		t.Errorf("a write on the node that stopped = %v, want %v saying %v", err, domain.ErrUnavailable, domain.ErrUnsupportedFormat)
 	}
 	// It applied nothing of the entry: its state is the one it had.
 	if schema := stateSchema(t, back.fsm); schema != before {

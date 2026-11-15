@@ -572,8 +572,8 @@ func TestAStateMachineHeldToSchema3StopsAtAnEntryOfSchema4(t *testing.T) {
 			if r := m.raw(entrySchema4, e); !r.fatal || !errors.Is(r.err, domain.ErrUnsupportedFormat) {
 				t.Fatalf("an entry of schema 4 on a state machine of schema 3 = %+v, want it to stop with %v", r.err, domain.ErrUnsupportedFormat)
 			}
-			if !errors.Is(m.f.health(), domain.ErrUnsupportedFormat) {
-				t.Errorf("health = %v", m.f.health())
+			if !errors.Is(m.f.stopped(), domain.ErrUnsupportedFormat) {
+				t.Errorf("stopped = %v", m.f.stopped())
 			}
 			if after := rawState(t, m.f, everyBucket(t, m.f)...); !reflect.DeepEqual(after, before) {
 				t.Errorf("the entry it stopped at changed the state:\n%v\n%v", after, before)
@@ -914,8 +914,8 @@ func TestADamagedRecordOfABucketsUseStopsTheStateMachine(t *testing.T) {
 			if _, err := store.PutVersion(ctx, porttest.SampleVersion("b", "next", 2)); !errors.Is(err, test.want) || !errors.Is(err, domain.ErrOutcomeUnknown) {
 				t.Errorf("a put over the damaged record = %v, want %v and an unknown outcome", err, test.want)
 			}
-			if err := store.fsm.health(); !errors.Is(err, test.want) {
-				t.Errorf("health = %v, want the state machine stopped", err)
+			if err := store.fsm.stopped(); !errors.Is(err, test.want) {
+				t.Errorf("stopped = %v, want the state machine stopped", err)
 			}
 		})
 	}
@@ -1460,8 +1460,10 @@ func TestANodeOfSchema3StopsAtAnEntryOfSchema4(t *testing.T) {
 	eventually(t, "the node of schema 3 to stop", func() bool {
 		return errors.Is(c.store("s4").Check(ctx), domain.ErrUnsupportedFormat)
 	})
-	if _, err := c.store("s4").GetObject(ctx, "b", "before"); !errors.Is(err, domain.ErrUnsupportedFormat) {
-		t.Errorf("read on the stopped node = %v, want %v", err, domain.ErrUnsupportedFormat)
+	// A read is refused as unavailable - another node can answer it - and
+	// says why, without the cause's domain error.
+	if _, err := c.store("s4").GetObject(ctx, "b", "before"); !refusedAsStopped(err, domain.ErrUnsupportedFormat) {
+		t.Errorf("read on the stopped node = %v, want %v saying %v", err, domain.ErrUnavailable, domain.ErrUnsupportedFormat)
 	}
 	// It did not apply the entry in some other way: the version is not in
 	// its state, nothing of schema 4 is, and the state says what it said.

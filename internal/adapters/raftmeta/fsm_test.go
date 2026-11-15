@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -475,27 +476,57 @@ func TestStoppedStateMachineIsFailStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	boom := errors.New("disk full")
+	// The cause wraps a domain error of its own: a record of a newer
+	// schema, as decoding one says.
+	boom := fmt.Errorf("%w: a record of version 9: disk full", domain.ErrUnsupportedFormat)
 	store.fsm.mu.Lock()
 	store.fsm.failed = boom
 	store.fsm.mu.Unlock()
 
-	if err := store.Check(ctx); !errors.Is(err, boom) {
-		t.Errorf("Check = %v, want the node to be unready", err)
-	}
 	// A stopped state machine has entries it has not applied; whether
 	// their data is referenced cannot be answered, and the collector must
 	// not be told "no".
-	if referenced, err := store.IsDataReferenced(ctx, first.DataID); !errors.Is(err, boom) || referenced {
-		t.Errorf("IsDataReferenced on a stopped state machine = %v, %v; want an error", referenced, err)
+	referenced, referencedErr := store.IsDataReferenced(ctx, first.DataID)
+	if referencedErr == nil || referenced {
+		t.Errorf("IsDataReferenced on a stopped state machine = %v, %v; want an error", referenced, referencedErr)
 	}
 	_, err := store.PutVersion(ctx, porttest.SampleVersion("bkt", "k", 2))
-	if !errors.Is(err, boom) {
-		t.Fatalf("PutVersion on a stopped state machine = %v, want %v", err, boom)
+	if err == nil {
+		t.Fatal("PutVersion on a stopped state machine succeeded")
 	}
-	// Refused before it was logged: a definite "not committed".
-	if errors.Is(err, domain.ErrOutcomeUnknown) {
-		t.Errorf("the refusal is reported as an unknown outcome: %v", err)
+	// Refused before it was logged: a definite "not committed". Certain,
+	// and another node can take it: the APIs answer 503 as for any other
+	// unavailability, not 500. The message of the cause is kept; its
+	// domain errors are not, here or on the far side of a node boundary:
+	// they would make the refusal look like a leader's refusal of the
+	// entry's schema, and the proposer would write it again with less in
+	// it.
+	for name, err := range map[string]error{
+		"PutVersion": err, "IsDataReferenced": referencedErr,
+		"CreateBucket": store.CreateBucket(ctx, bucket.Bucket{Name: "another"}),
+	} {
+		crossed := domain.FromCodes(domain.Codes(err), err.Error())
+		for _, e := range []error{err, crossed} {
+			switch {
+			case !errors.Is(e, domain.ErrUnavailable) || !strings.Contains(e.Error(), boom.Error()):
+				t.Errorf("%s on a stopped state machine = %v, want domain.ErrUnavailable saying %v", name, e, boom)
+			case errors.Is(e, domain.ErrOutcomeUnknown):
+				t.Errorf("%s: the refusal is reported as an unknown outcome: %v", name, e)
+			case errors.Is(e, domain.ErrUnsupportedFormat), isAboveLevel(e):
+				t.Errorf("%s: the refusal carries the cause's domain error: %v", name, e)
+			}
+		}
+	}
+	// The node's own use has the whole cause, and its start is not told
+	// to wait: no waiting cures it.
+	if err := store.WaitReady(ctx); !errors.Is(err, boom) || errors.Is(err, domain.ErrUnavailable) {
+		t.Errorf("WaitReady on a stopped state machine = %v, want %v and not domain.ErrUnavailable", err, boom)
+	}
+	// So has its readiness, which goes to no proposer.
+	for name, err := range map[string]error{"Stopped": store.Stopped(), "Check": store.Check(ctx)} {
+		if !errors.Is(err, boom) {
+			t.Errorf("%s = %v, want %v", name, err, boom)
+		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

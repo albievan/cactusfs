@@ -295,6 +295,12 @@ func (s *Store) WaitReady(ctx context.Context) error {
 		if err == nil || ctx.Err() != nil || !errors.Is(err, domain.ErrUnavailable) {
 			return err
 		}
+		// A state machine that stopped is unavailable to every request,
+		// and for good: waiting does not cure it, and the node does not
+		// wait for it.
+		if stopped := s.fsm.stopped(); stopped != nil {
+			return fmt.Errorf("raftmeta.WaitReady: %w", stopped)
+		}
 	}
 }
 

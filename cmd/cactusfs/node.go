@@ -480,7 +480,10 @@ func (n *node) ensureTopology(
 	waiting := newProgress(logger, "waiting for the drive topology of the cluster")
 	for {
 		topology, err := app.EnsureTopology(ctx, meta, attached, opts)
-		if err == nil || !transient(err) {
+		if err == nil {
+			return topology, nil
+		}
+		if err := cannotWait(n.stoppedMeta(), err); err != nil {
 			return topology, err
 		}
 		if err := waiting.pause(ctx, err); err != nil {

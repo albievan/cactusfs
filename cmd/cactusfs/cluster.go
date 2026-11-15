@@ -72,6 +72,34 @@ func transient(err error) bool {
 		errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNoTopology)
 }
 
+// cannotWait returns the error a loop of the start ends with instead of
+// waiting on err, or nil when waiting may cure err. A metadata state machine
+// that stopped ends it whatever err is: requests meet it as
+// domain.ErrUnavailable, which transient takes for a cluster that is still
+// forming, but nothing short of a restart cures it, and a node that waited
+// would never be ready and never exit. stopped is nil before the metadata
+// store is open.
+func cannotWait(stopped func() error, err error) error {
+	if stopped != nil {
+		if cause := stopped(); cause != nil {
+			return cause
+		}
+	}
+	if !transient(err) {
+		return err
+	}
+	return nil
+}
+
+// stoppedMeta returns what tells whether this node's metadata state machine
+// stopped, or nil before its metadata store is open.
+func (n *node) stoppedMeta() func() error {
+	if n.meta == nil {
+		return nil
+	}
+	return n.meta.Stopped
+}
+
 // openCluster loads the node's certificate, starts node RPC and returns what
 // the metadata store needs to reach the other nodes. Node RPC is up before
 // the metadata store, because that is how the nodes of a new cluster find
@@ -478,6 +506,13 @@ func (n *node) joinCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		if ctx.Err() != nil || (!transient(err) && !errors.Is(err, context.DeadlineExceeded)) {
 			return err
 		}
+		// A wait for the group that a stopped state machine answers is
+		// no wait for a cluster that forms.
+		if stopped := n.stoppedMeta(); stopped != nil {
+			if cause := stopped(); cause != nil {
+				return cause
+			}
+		}
 		if err := waiting.pause(ctx, err); err != nil {
 			return err
 		}
@@ -488,7 +523,7 @@ func (n *node) joinCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		if err == nil {
 			break
 		}
-		if !transient(err) {
+		if err := cannotWait(n.stoppedMeta(), err); err != nil {
 			return err
 		}
 		if err := waiting.pause(ctx, err); err != nil {

@@ -447,7 +447,8 @@ func (s *Store) waitForLeadership(ctx context.Context) error {
 	if err := s.raft.Barrier(defaultApplyWait).Error(); err != nil {
 		return fmt.Errorf("applying committed metadata: %w", translateRaftError(err))
 	}
-	return s.fsm.health()
+	// A state machine that stopped stops the start: no waiting cures it.
+	return s.fsm.stopped()
 }
 
 // loadOrCreateNodeID returns the node's identity. The first start fixes it:
@@ -544,16 +545,29 @@ func (s *Store) NodeID() string {
 	return s.nodeID
 }
 
+// Stopped returns the error that stopped this node's metadata state machine,
+// with its whole chain, or nil while it runs. Requests meet a stopped state
+// machine as domain.ErrUnavailable, which another node can answer; a node
+// that is starting must not wait on it, for nothing but a restart cures it.
+func (s *Store) Stopped() error {
+	if err := s.fsm.stopped(); err != nil {
+		return fmt.Errorf("the metadata state machine of this node stopped: %w", err)
+	}
+	return nil
+}
+
 // Name implements ports.ReadinessCheck.
 func (s *Store) Name() string {
 	return "metadata"
 }
 
 // Check implements ports.ReadinessCheck: the node is ready when its state
-// machine is healthy and the metadata group has a leader it knows of.
+// machine is healthy and the metadata group has a leader it knows of. A
+// state machine that stopped is reported with its whole cause: the answer is
+// this node's, and goes to no proposer.
 func (s *Store) Check(context.Context) error {
 	return s.use(func() error {
-		if err := s.fsm.health(); err != nil {
+		if err := s.Stopped(); err != nil {
 			return err
 		}
 		if address, _ := s.raft.LeaderWithID(); address == "" {
