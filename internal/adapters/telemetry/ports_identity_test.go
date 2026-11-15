@@ -448,6 +448,8 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"ClusterView": tel.InstrumentClusterView(fixedView{}), "LocalConfig": tel.InstrumentLocalConfig(mem),
 		"SubBuckets": tel.InstrumentSubBuckets(mem), "LocalSubBuckets": tel.InstrumentLocalSubBuckets(mem),
 		"BucketUsage":     tel.InstrumentBucketUsage(mem),
+		"Outbox":          tel.InstrumentOutbox(mem),
+		"DeliveryStatus":  tel.InstrumentDeliveryStatus(porttest.ScriptedDeliveryStatusReader(porttest.DeliveryStatusScript{})),
 		"NodeSettings":    tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
 		"ReleaseSource":   tel.InstrumentReleaseSource(porttest.NewReleaseSource(nil, nil)),
 		"ReleaseVerifier": tel.InstrumentReleaseVerifier(&porttest.ReleaseVerifier{}),

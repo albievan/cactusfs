@@ -78,6 +78,32 @@ func metadataLevel(store *raftmeta.Store) func(ctx context.Context) (int, error)
 // often.
 const quotaGaugesReuse = 10 * time.Second
 
+// deliveryGauges is the delivery worker as the gauges of delivery read it:
+// counts by kind and state, none of a target named. It says something on
+// the node that leads only, once the outbox was read; the worker answers
+// from memory.
+type deliveryGauges struct {
+	worker *app.DeliveryWorker
+}
+
+// DeliveryState implements telemetry.DeliverySource.
+func (g deliveryGauges) DeliveryState() (telemetry.DeliveryState, bool) {
+	s, ok := g.worker.Summary()
+	if !ok {
+		return telemetry.DeliveryState{}, false
+	}
+	out := telemetry.DeliveryState{
+		Targets: map[string]map[string]int{}, OldestPending: map[string]time.Duration{}, Rows: s.Rows, Dropped: s.Dropped,
+	}
+	for kind, states := range s.Targets {
+		out.Targets[string(kind)] = states
+	}
+	for kind, waited := range s.OldestPending {
+		out.OldestPending[string(kind)] = waited
+	}
+	return out, true
+}
+
 // quotaGauges is the use case of quotas as the gauges of quotas read it:
 // counts of buckets, none named. It cannot say below metadata level 5, or
 // when the buckets cannot be read.

@@ -90,8 +90,13 @@ type node struct {
 	local       *localSettings
 	settings    *app.SettingsService
 	idempotency *app.IdempotencyService
-	// targets defines the places outside the deployment that it sends to.
-	targets *app.TargetService
+	// targets defines the places outside the deployment that it sends to;
+	// delivery sends to them, while this node leads (ADR-0023).
+	targets  *app.TargetService
+	delivery *app.DeliveryWorker
+	// delivering is delivery as node RPC sees it: node RPC serves before
+	// the worker exists, and from other goroutines.
+	delivering atomic.Pointer[app.DeliveryWorker]
 	// tagDefinitions holds the deployment's catalogue of tags (ADR-0018).
 	tagDefinitions *app.TagDefinitionService
 	// updates checks for releases and installs one (ADR-0029).
@@ -354,9 +359,23 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// endpoints are sealed through the KMS before they are proposed
 	// (ADR-0023). Until every member knows entry schema 5 the store
 	// refuses a change as unavailable.
+	targetStore := n.telemetry.InstrumentTargets(n.meta)
+	// Delivery to targets (ADR-0023): the node that leads the metadata
+	// group reads the outbox after each target's cursor and hands every row
+	// to what delivers its kind of consumer - none in this release: the
+	// notifier and the replicator are registered here by PLAN 8.2.5 and
+	// 8.1.4, and until a bucket's documents can name a target no row is
+	// appended. Any node answers how a target stands by asking the leader.
+	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
+		Targets: targetStore, Outbox: n.telemetry.InstrumentOutbox(n.meta), Active: n.meta.IsLeader, Clock: n.clock,
+		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
+		OnAttempt: n.telemetry.ObserveDeliveryAttempt,
+	})
+	n.delivering.Store(n.delivery)
+	n.telemetry.ObserveDelivery(deliveryGauges{worker: n.delivery})
 	n.targets = app.NewTargetService(app.TargetServiceConfig{
-		Store: n.telemetry.InstrumentTargets(n.meta), Authz: n.authorizer, Auditor: n.auditor, KMS: kms,
-		Clock: n.clock, Entropy: rand.Reader,
+		Store: targetStore, Authz: n.authorizer, Auditor: n.auditor, KMS: kms,
+		Clock: n.clock, Entropy: rand.Reader, Delivery: n.telemetry.InstrumentDeliveryStatus(leaderDelivery{node: n}),
 	})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
@@ -774,6 +793,8 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	// Counts the usage of buckets that are not exact, while this node
 	// leads; does nothing elsewhere.
 	n.background.Go(func() { n.counter.Run(ctx) })
+	// Delivers the outbox to its targets, while this node leads.
+	n.background.Go(func() { n.delivery.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases
@@ -788,6 +809,8 @@ func (n *node) Close() error {
 	n.telemetry.ObserveRaft(nil)
 	n.telemetry.ObserveDrives(nil)
 	n.telemetry.ObserveQuotas(nil)
+	n.telemetry.ObserveDelivery(nil)
+	n.delivering.Store(nil)
 	n.telemetry.ObserveNodeCertificate(nil)
 	n.telemetry.ObserveTLS(telemetry.TLSUseNode, nil)
 	n.telemetry.ObserveHandshakes(nil)

@@ -168,6 +168,9 @@ func (n *node) openCluster(ctx context.Context, cfg serverConfig, logger *slog.L
 		// How this node was configured, for the node that is asked for the
 		// settings of all of them.
 		Settings: n.local.Local,
+		// How delivery to targets stands, when this node leads, for the
+		// node that is asked GET /targets/{name}/status.
+		Delivery: nodeDelivery{node: n},
 		Meta:     metaRPC{node: n},
 		Drive:    n.localDrive,
 		Clock:    n.clock,
@@ -275,6 +278,61 @@ func (n *node) resolver(cfg serverConfig) func(ctx context.Context, nodeID strin
 		address, ok := cfg.Peers[nodeID]
 		return address, ok
 	}
+}
+
+// nodeDelivery is this node's delivery to targets as node RPC asks it: it
+// answers on the node that leads, and on every other - and before the
+// worker exists, or after it stopped - says that it does not lead.
+type nodeDelivery struct {
+	node *node
+}
+
+// DeliveryStatus implements ports.DeliveryStatusReader.
+func (d nodeDelivery) DeliveryStatus(ctx context.Context, targets []string) ([]ports.TargetStatus, error) {
+	worker := d.node.delivering.Load()
+	if worker == nil {
+		return nil, fmt.Errorf("%w: this node does not deliver now", domain.ErrNotLeader)
+	}
+	return worker.DeliveryStatus(ctx, targets)
+}
+
+// leaderDelivery asks the node that leads the metadata group how delivery to
+// targets stands: this node's own worker when it leads, the leader over node
+// RPC when another node does. It is the ports.DeliveryStatusReader of the
+// use case of targets, so that any node answers GET /targets/{name}/status.
+type leaderDelivery struct {
+	node *node
+}
+
+// DeliveryStatus implements ports.DeliveryStatusReader.
+func (d leaderDelivery) DeliveryStatus(ctx context.Context, targets []string) ([]ports.TargetStatus, error) {
+	meta := d.node.started.Load()
+	if meta == nil {
+		return nil, fmt.Errorf("%w: the node is starting or stopping", domain.ErrUnavailable)
+	}
+	if meta.IsLeader() {
+		statuses, err := nodeDelivery(d).DeliveryStatus(ctx, targets)
+		if errors.Is(err, domain.ErrNotLeader) {
+			// It stepped down a moment ago: the next leader is asked by
+			// the next request.
+			return nil, fmt.Errorf("%w: %w", domain.ErrUnavailable, err)
+		}
+		return statuses, err
+	}
+	leader := meta.Leader()
+	if leader == "" || leader == d.node.id || d.node.rpc == nil {
+		return nil, fmt.Errorf("%w: the metadata group has no leader to ask how delivery stands", domain.ErrUnavailable)
+	}
+	return d.node.rpc.DeliveryStatus(ctx, leader, targets)
+}
+
+// deliveryAttemptTimeout is the deadline of one attempt at one item of the
+// outbox: the connect and the handshake (5 s each, ADR-0023), the
+// delivery timeout for the headers of the answer, and as long again for
+// sending the request and reading the rest - every request a delivery sends
+// carries a deadline.
+func deliveryAttemptTimeout(deliveryTimeout time.Duration) time.Duration {
+	return 10*time.Second + 2*deliveryTimeout
 }
 
 // metaRPC is the metadata store as node RPC sees it.

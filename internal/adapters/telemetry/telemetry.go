@@ -108,6 +108,12 @@ type Telemetry struct {
 	// totals than were kept.
 	quotaRefusals prometheus.Counter
 	usageDrift    prometheus.Counter
+	// Delivery to targets (ADR-0023): attempts by kind and result, the
+	// requests the egress client got no answer to by class, and the gauges
+	// of the node that leads.
+	deliveryAttempts *prometheus.CounterVec
+	egressRefusals   *prometheus.CounterVec
+	delivery         *deliveryGauges
 	// Node RPC, on the calling and on the answering side.
 	rpcRequests       *prometheus.CounterVec
 	rpcSeconds        *prometheus.HistogramVec
@@ -220,11 +226,13 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	// What nodetls counts for the Raft port is added when the node is scraped.
 	t.handshakes = newHandshakes(t.handshakesRefused, cfg.StateTimeout)
 
+	t.deliveryAttempts, t.egressRefusals, t.delivery = newDeliveryAttempts(), newEgressRefusals(), newDeliveryGauges(cfg.StateTimeout)
+
 	t.updates = newUpdateMetrics()
 	for _, collector := range append([]prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
-		t.quotaRefusals, t.usageDrift, t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
+		t.quotaRefusals, t.usageDrift, t.deliveryAttempts, t.egressRefusals, t.delivery, t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	}, t.updates.collectors()...) {

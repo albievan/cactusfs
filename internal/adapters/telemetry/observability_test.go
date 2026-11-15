@@ -18,6 +18,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/s3api"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -106,6 +107,8 @@ func observedTelemetry(t *testing.T) *telemetry.Telemetry {
 	tel.ObserveTLS(telemetry.TLSUseNode, fixedTLS{NotAfter: time.Unix(1, 0)})
 	tel.ObserveReadiness(readyWhen(true))
 	tel.ObserveQuotas(fixedQuotas{known: true})
+	tel.ObserveDeliveryAttempt(delivery.KindWebhook, delivery.ClassNone)
+	tel.ObserveDelivery(fixedDelivery{known: true})
 	return tel
 }
 
