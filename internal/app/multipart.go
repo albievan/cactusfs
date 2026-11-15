@@ -189,6 +189,10 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 	if err != nil {
 		return object.Part{}, err
 	}
+	// Nothing is written that the quota cannot take.
+	if err := s.admitQuota(ctx, in.Bucket, in.Size, s.replacedPart(in.Bucket, in.Key, in.UploadID, in.Number)); err != nil {
+		return object.Part{}, err
+	}
 	random, err := s.random(object.IDSize + object.NoncePrefixSize)
 	if err != nil {
 		return object.Part{}, err
@@ -210,6 +214,7 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 		}
 		replaced, err := s.uploads.PutPart(ctx, in.Bucket, in.Key, in.UploadID, part)
 		if err != nil {
+			s.quotaRefused(err)
 			return part.Extent(), err
 		}
 		if replaced != nil {
@@ -226,6 +231,22 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 		return object.Part{}, err
 	}
 	return part, nil
+}
+
+// replacedPart returns what a part frees, as the store reckons it: the part
+// of the same number of the upload, which it replaces. A size below nothing
+// counts as nothing.
+func (s *ObjectService) replacedPart(bucketName, key string, id object.ID, number int) func(context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) {
+		parts, err := s.uploads.ListParts(ctx, bucketName, key, id, number-1, 1)
+		if err != nil {
+			return 0, err
+		}
+		if len(parts) == 1 && parts[0].Number == number {
+			return max(parts[0].Size, 0), nil
+		}
+		return 0, nil
+	}
 }
 
 // partStream returns the stream that encrypts one part, under the key

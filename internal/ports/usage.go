@@ -18,6 +18,12 @@ const (
 	MaxUsageWalk = 100000
 )
 
+// UsageLevel is the first metadata level - the newest entry schema every
+// member of the metadata group understands - at which the store counts the
+// usage of buckets and keeps their quotas (ADR-0023, ADR-0024). Below it
+// there is no record to read and no quota to keep.
+const UsageLevel = 5
+
 // BucketUsage is what a bucket holds and how much it may.
 type BucketUsage struct {
 	// Usage is the bucket's record; the zero record for a bucket that has

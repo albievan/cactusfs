@@ -245,6 +245,9 @@ func (m *MemMetadata) WalkBucketUsage(_ context.Context, name string, limit int,
 	if m.FailWrites != nil {
 		return ports.UsageWalk{}, m.FailWrites
 	}
+	if err := m.belowUsage(); err != nil {
+		return ports.UsageWalk{}, err
+	}
 	if limit < 1 || limit > ports.MaxUsageWalk {
 		return ports.UsageWalk{}, fmt.Errorf("%w: a walk of %d records, from 1 to %d", domain.ErrInvalidArgument, limit, ports.MaxUsageWalk)
 	}
@@ -307,6 +310,9 @@ func (m *MemMetadata) SetBucketQuota(ctx context.Context, name string, quotaByte
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.audited(ctx, record, func() error {
+		if err := m.belowUsage(); err != nil {
+			return err
+		}
 		b, ok := m.buckets[name]
 		if !ok {
 			return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, name)

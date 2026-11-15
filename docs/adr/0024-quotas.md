@@ -85,10 +85,14 @@ and reports it as drift. Until it ends the quota is judged by the clamped figure
 delete that makes a marker costs nothing.
 
 **A pre-check in the use case**, before a shard is written: `ObjectService.put`,
-`uploadPart`, `Copy` and `CopyPart` ask `QuotaService.Admit` with the declared length,
-answered from a local read. It is advice, and exists so that a request that cannot
-succeed does not first write its shards. With a length that is not known it refuses
-only when the bucket is full already.
+`uploadPart`, `Copy` and `CopyPart` ask `QuotaService.Admit` with the declared length
+and `frees` - what the write would replace: the null version of the key where versions
+are not kept or are suspended, the part of the same number - answered from a local read.
+It judges what the write adds less what it frees, by `Usage.Admits` as apply does, and
+reads what is freed only when the write would not pass without it. It is advice, and
+exists so that a request that cannot succeed does not first write its shards. With a
+length that is not known it refuses only when the bucket is full already and the write
+frees nothing. Below level 5 it admits everything: no bucket has a record then.
 
 **The race** of two writers each within the quota is settled in apply: one entry is
 applied first, the other is refused. The loser's shards are removed as for any commit

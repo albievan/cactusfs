@@ -14,6 +14,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -50,6 +51,10 @@ type ObjectService struct {
 	counts  ports.BucketUsageStore
 	usageMu sync.Mutex
 	usage   map[string]*usageEntry
+
+	// quota is the pre-check of the write path (ADR-0024); nil has none,
+	// and leaves every quota to the store.
+	quota *QuotaService
 
 	// previewMaxSize is the largest object previewed, but for the text
 	// kinds; previews counts the previews being read (ADR-0028).
@@ -92,6 +97,11 @@ type ObjectServiceConfig struct {
 	// it, and where it is not, Usage walks the index as far as
 	// MaxUsageScan.
 	Usage ports.BucketUsageStore
+	// Quota, when not nil, is asked before any shard of a put, a copy or
+	// a part is written whether the bucket's quota leaves room for it
+	// (ADR-0024). Without it a write past a quota still writes its shards
+	// and is refused by the store at commit, which removes them.
+	Quota *QuotaService
 	// PreviewMaxSize is the largest object previewed, but for text, CSV
 	// and JSON, of which the beginning is shown whatever their size: from
 	// MinPreviewMaxSize to MaxPreviewMaxSize bytes, or 0 for
@@ -116,7 +126,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
-		access: cfg.Access, accessStore: cfg.AccessStore, tagDefinitions: cfg.TagDefinitions, counts: cfg.Usage, previewMaxSize: previewMaxSize,
+		access: cfg.Access, accessStore: cfg.AccessStore, tagDefinitions: cfg.TagDefinitions, counts: cfg.Usage, quota: cfg.Quota, previewMaxSize: previewMaxSize,
 		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
@@ -204,6 +214,10 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	if err != nil {
 		return object.Version{}, err
 	}
+	// Nothing is written that the quota cannot take.
+	if err := s.admitQuota(ctx, in.Bucket, in.Size, s.replacedVersion(in.Bucket, in.Key)); err != nil {
+		return object.Version{}, err
+	}
 	version := object.Version{
 		Bucket: in.Bucket, Key: in.Key, Lock: in.Lock, Tags: tags,
 		// Who commits the version, in the words of the audit trail. What
@@ -226,6 +240,7 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		version.ModifiedAt = s.clock.Now().UTC()
 		committed, err := s.index.PutVersion(ctx, version)
 		if err != nil {
+			s.quotaRefused(err)
 			return version.Extent(), err
 		}
 		// What the put removed for good has no reader any more. A version
@@ -242,6 +257,47 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		return object.Version{}, err
 	}
 	return version, nil
+}
+
+// admitQuota asks the pre-check of the quota, when there is one, whether a
+// write of declared bytes (-1: not known) into a bucket may be made; frees
+// returns what the write would replace.
+func (s *ObjectService) admitQuota(ctx context.Context, bucketName string, declared int64, frees func(context.Context) (int64, error)) error {
+	if s.quota == nil {
+		return nil
+	}
+	return s.quota.Admit(ctx, bucketName, declared, frees)
+}
+
+// quotaRefused counts a commit the store refused for a quota.
+func (s *ObjectService) quotaRefused(err error) {
+	if s.quota != nil && errors.Is(err, domain.ErrQuotaExceeded) {
+		s.quota.refused()
+	}
+}
+
+// replacedVersion returns what a put of a key frees, as the store reckons
+// it: in a bucket that keeps no versions, or whose versioning is suspended,
+// the null version of the key, which the put replaces; otherwise nothing.
+// A size below nothing counts as nothing.
+func (s *ObjectService) replacedVersion(bucketName, key string) func(context.Context) (int64, error) {
+	return func(ctx context.Context) (int64, error) {
+		b, err := s.buckets.GetBucket(ctx, bucketName)
+		if err != nil {
+			return 0, err
+		}
+		if b.Versioning == bucket.VersioningEnabled {
+			return 0, nil
+		}
+		null, err := s.index.GetVersion(ctx, bucketName, key, object.VersionRef{Null: true})
+		switch {
+		case errors.Is(err, domain.ErrVersionNotFound), errors.Is(err, domain.ErrObjectNotFound):
+			return 0, nil
+		case err != nil:
+			return 0, err
+		}
+		return max(null.Size, 0), nil
+	}
 }
 
 // written is what the write path stored of one stream.

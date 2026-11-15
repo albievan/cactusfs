@@ -99,6 +99,40 @@ type MemMetadata struct {
 	// PolicyPage, when set, is how many buckets one page of BucketPolicies
 	// reads.
 	PolicyPage int
+	// Level, when set, is the metadata level of the fake's cluster, in
+	// place of the newest (MetadataLevel). Below ports.UsageLevel, as in
+	// the real store, a bucket is made without a usage record, and the
+	// changes of usage and quotas wrap domain.ErrUnavailable; the records
+	// are read as they are. Set it before the fake is used.
+	Level int
+}
+
+// newestLevel is the level of a fake whose Level is not set.
+const newestLevel = 6
+
+// MetadataLevel returns the metadata level of the fake's cluster, as the
+// real store's MetadataLevel does.
+func (m *MemMetadata) MetadataLevel() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.level(), nil
+}
+
+// level is Level, or the newest; the caller holds mu.
+func (m *MemMetadata) level() int {
+	if m.Level == 0 {
+		return newestLevel
+	}
+	return m.Level
+}
+
+// belowUsage wraps domain.ErrUnavailable below the level that counts usage,
+// as the real store refuses an entry of schema 5 then; the caller holds mu.
+func (m *MemMetadata) belowUsage() error {
+	if level := m.level(); level < ports.UsageLevel {
+		return fmt.Errorf("%w: the cluster is at metadata level %d, usage is counted from %d", domain.ErrUnavailable, level, ports.UsageLevel)
+	}
+	return nil
 }
 
 // NewMemMetadata returns an empty MemMetadata.
@@ -148,7 +182,9 @@ func (m *MemMetadata) CreateBucket(_ context.Context, b bucket.Bucket) error {
 	b.QuotaBytes, b.ReplicaFrom = 0, ""
 	m.buckets[b.Name] = b
 	m.objects[b.Name] = map[string][]object.Version{}
-	m.usage[b.Name] = &memUsage{exact: true}
+	if m.belowUsage() == nil {
+		m.usage[b.Name] = &memUsage{exact: true}
+	}
 	return nil
 }
 
