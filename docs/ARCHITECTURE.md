@@ -10,7 +10,8 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
 events to NATS and webhooks and replication between sites (milestone 8, of which entry
 schema 5, the domain, the ports, the replicated store, the contracts, outbound
-connections and targets exist, and no delivery worker or adapter). Quotas on buckets
+connections, targets and the delivery worker exist - which, with no notifier or
+replicator registered yet, delivers nothing - and no delivery adapter). Quotas on buckets
 (ADR-0024) are implemented end to end - the usage of every bucket counted, the quota
 enforced where entries are applied and checked before a write, the management API, the
 metrics and alerts, and the console (PLAN 8A; "Usage and quotas", section 5); no
@@ -88,7 +89,7 @@ Conventions that follow from it:
 | `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018), the usage record and the rule of a quota (`Usage.Admits`; ADR-0023, 0024); notification and replication documents (ADR-0025, 0026): rules only, used by no use case yet |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, conditions, tags, Object Lock, multipart, SSE, the record of who read an object (ADR-0016), the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals (a locked console session among them, ADR-0027), actions, the policy language and the decision, bucket policies, users, groups, roles, API keys, built-in roles, sealed secrets |
-| `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure (ADR-0023, 0025: used by the metadata store, by no use case yet) |
+| `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure and the pause between attempts (ADR-0023, 0025: used by the metadata store, the use case of targets and the delivery worker) |
 | `internal/domain/audit` | audit records and their hash chain |
 | `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement; a node's settings and their redaction (ADR-0022) |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
@@ -489,6 +490,12 @@ Prometheus client and are not listed.
 | `cactusfs_buckets_quota` | gauge | `state` | buckets by how they stand against their quota: `set` (they have one), `over_90` (they hold 90 % of it or more), `full` (they hold all of it or more); each includes the next; read from the node's own copy of the usage records, so the same on every node that is current (aggregate with `max`); read again at most every 10 s; absent below metadata level 5 or when the node cannot read the buckets; alerts `CactusFSBucketQuotaFull` and, for its absence on every node, `CactusFSBucketQuotasUnknown` |
 | `cactusfs_bucket_usage_counting` | gauge | - | buckets whose usage is being counted, for the first time or by a recount (ADR-0023); like `cactusfs_buckets_quota`, the same on every node |
 | `cactusfs_bucket_usage_drift_total` | counter | - | recounts of a bucket's usage that found other totals than were kept, counted by the node that proposed the entry that ended them, so a sum over the nodes is the number of drifts (a fault of whoever kept the record; ADR-0024); a clamp of a count at its bound shows here when its recount ends, and has no metric of its own; alert `CactusFSBucketUsageDrift` |
+| `cactusfs_delivery_attempts_total` | counter | `kind`, `result` | attempts at handing an item of the outbox to a target, made by this node while it led the metadata group (ADR-0023): `kind` is `webhook`, `nats` or `s3`, `result` is `ok` or the class of the failure (`rejected`, `timeout`, `connect`, `tls`, `server`, `redirect`, `egress_refused`, `auth`, `no_stream`, ...; a word this release does not know is `other`); no target is named; each attempt is counted once, on the node that made it, so a sum over the nodes is the number of attempts |
+| `cactusfs_delivery_targets` | gauge | `kind`, `state` | targets by kind and state of delivery: `ok`, `retrying`, `stalled`; every kind and state is a series, 0 where none is; exposed by the node that leads the metadata group and absent on every other, so aggregate with `max` (during a change of leader two nodes may expose it for one scrape); the state of one target is `GET /api/v1/targets/{name}/status` |
+| `cactusfs_delivery_oldest_pending_seconds` | gauge | `kind` | how long the oldest item of the outbox that waits for a target of the kind has waited, 0 when none waits; the leader's, absent elsewhere (aggregate with `max`) |
+| `cactusfs_outbox_rows` | gauge | - | rows the outbox holds, as the leader read them last (at most every 5 s); absent on every other node (aggregate with `max`) |
+| `cactusfs_outbox_dropped_total` | counter | - | rows pushed out of the outbox at its bound since the deployment began, a count the metadata keeps (`outboxdropped`) and the leader exposes: it does not begin again with a new leader, so aggregate with `max`, never `sum` |
+| `cactusfs_egress_refusals_total` | counter | `class` | requests to a place outside the deployment that got no answer, by class: `egress_refused` (an address the policy refuses), `redirect`, `tls`, `timeout`, `connect`, `internal`; every class a series from the start; no target and no URL is named; counted by the node that sent the request (sum over the nodes) |
 | `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
 | `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
 | `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
@@ -497,7 +504,7 @@ Prometheus client and are not listed.
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
 `identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`, `release_source`,
-`release_verifier`, `upgrader`, `bucket_usage`.
+`release_verifier`, `upgrader`, `bucket_usage`, `outbox`, `delivery_status`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
@@ -747,6 +754,57 @@ four at a time.
   against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
   whoever may read it; the server decides every change.
 
+### Delivery to targets **(implemented: the worker and its status, ADR-0023; PLAN 8.0.14 - no notifier or replicator is registered until 8B and 8C)**
+
+- **One node delivers.** `app.DeliveryWorker` runs on every node and works on the one that
+  leads the metadata group (it asks every second); when the node stops leading it stops
+  sending - not the next item, not the next attempt - and forgets what it kept. Every
+  5 s it reads the targets and the cursors: a new target gets a loop, a deleted one loses
+  it, a changed one is delivered to as it now is.
+- **A loop a target.** It reads the outbox after the target's cursor, 100 items at a time
+  (`app.DeliveryBatch`), hands each to the `app.Deliverer` registered for its kind of
+  consumer (`n:` or `r:`), in order, and acknowledges through Raft (`outbox.ack`) after
+  every 100 delivered items or once a delivered item has waited 1 s - so a new leader
+  sends again at most one batch. An acknowledgement that fails holds the target as a
+  failed attempt does: it is tried again after `delivery.Backoff` and nothing more is
+  delivered until it is taken. While the node does not lead a loop sends nothing and
+  looks again every second, so a lead lost for a moment stops nothing for good; a loop
+  that finds its target deleted ends, and a target made again under the name gets a new
+  loop at the next refresh. Rows for other targets are passed over and acknowledged
+  with the rest. A failure holds the target at the item, tried again after
+  `delivery.Backoff` (1 s doubling to 5 min, up to a quarter off at random), with what
+  was delivered before acknowledged first; a failure whose class passes (`rejected`,
+  `sse_c`) gives the item up, counted. Results of replication (`COMPLETED`, `FAILED`)
+  go with the acknowledgement, for a target of kind `s3` only. An item of a kind that
+  nothing delivers fails as `internal` and holds its target.
+- **Deadlines.** Every call to the metadata carries 30 s; every attempt at an item
+  carries 10 s + 2 x `--delivery-timeout` (the connect and the handshake, the answer's
+  headers, and as long again for the rest).
+- **What is told.** Of a failure, its class and nothing else: the log line names the
+  target, its kind, the class, the failures in a row and the pause - never the words of
+  the error, which may name an endpoint, whose path may be a token. How a target stands
+  is kept in memory since the node came to lead: `ok`, `retrying`, or `stalled` (a class
+  somebody has to act on - `auth`, `tls`, `redirect`, `egress_refused`, `no_stream`,
+  `no_such_bucket`, `versioning`, `not_replica`, `quota` - or 10 failures in a row), pending,
+  the oldest pending, the last success, the last class, rejected, failed; `lost` and
+  `resync_needed` come from the cursor. **Pending** is the items in hand (read, not
+  acknowledged) and those found after them by a count that reads at most 10 x 1 000
+  items, at most every 10 s, while the target is behind: a target further behind shows
+  that bound.
+- **Status from any node.** `GET /api/v1/targets/{name}/status` (`admin:GetTargetStatus`)
+  is answered by the node that leads from its worker and by any other through
+  `NodeService.DeliveryStatus` over mutual TLS (`ports.DeliveryStatusReader`, port label
+  `delivery_status`). A leader of a release without the call (UNIMPLEMENTED) is shown as
+  `unsupported` with figures of 0; no leader, one that stepped down or one that does not
+  answer in 5 s is 503. A word where a state or a class belongs that cannot be one is
+  not shown, on both sides of the wire.
+- **Metrics.** `cactusfs_delivery_attempts_total{kind,result}` (sum over the nodes),
+  `cactusfs_delivery_targets{kind,state}`, `cactusfs_delivery_oldest_pending_seconds{kind}`,
+  `cactusfs_outbox_rows` and `cactusfs_outbox_dropped_total` (the leader's, absent
+  elsewhere: aggregate with `max`), and at the egress boundary
+  `cactusfs_egress_refusals_total{class}` (`telemetry.InstrumentEgress`, which the
+  delivery adapters of 8B and 8C are wired through). No metric names a target.
+
 ## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
@@ -790,10 +848,12 @@ four at a time.
   `/settings`; `/audit`. The paths of milestone 8 are in the contract; those of quotas
   (`/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`; PLAN 8A, "Usage and
   quotas" in section 5) and of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) are
-  implemented and answer 503 below metadata level 5, and the rest have no use case yet,
-  so each answers 501 `NotImplemented` to a caller that has authenticated:
+  implemented and answer 503 below metadata level 5; `/targets/{name}/status` (PLAN
+  8.0.14) is answered by any node, which asks the node that leads ("Delivery to
+  targets", section 5); the rest have no use case yet, so each answers 501
+  `NotImplemented` to a caller that has authenticated:
   `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status`
-  and `/resync`), `/buckets/{bucket}/replica` and `/targets/{name}/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  and `/resync`) and `/buckets/{bucket}/replica`. A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and

@@ -8,8 +8,9 @@
   and the usage of buckets end to end - the worker that counts without being asked and
   the recount (8.3.1, wired at 8.3.3), read through the management API, with its
   metrics and alerts (8.3.3, 8.3.6) - which ADR-0024 (quotas, accepted at PLAN 8.3.6)
-  stands on. Not built yet: the delivery worker (8.0.14), and everything of ADR-0025 and
-  ADR-0026, which stay proposed. It was proposed on 2026-10-12
+  stands on; the delivery worker and the status of a target from any node (8.0.14,
+  written, awaiting the gate), with no notifier or replicator registered. Not built yet:
+  everything of ADR-0025 and ADR-0026, which stay proposed. It was proposed on 2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found") and to the domain and the ports of PLAN
