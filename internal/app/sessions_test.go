@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/quick"
+	"testing/synctest"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
@@ -1120,25 +1121,28 @@ func TestUploadLeaseNeverLapsesUnderAnUpload(t *testing.T) {
 	}
 }
 
-// machineClock is the clock of the machine, for the one test that must see what
-// a ticker really does.
+// machineClock is the clock of the package time, for the one test that must
+// see what a ticker really does.
 type machineClock struct{}
 
 func (machineClock) Now() time.Time { return time.Now() }
 
 // TestUploadLeaseCadenceOnARealClock: Run, on the clock and the ticker of
-// the machine, writes the lease of an upload in flight at every tick - a
+// the package time, writes the lease of an upload in flight at every tick - a
 // third of a grace - and not at every second one, which a comparison of the
 // time since the last write with the tick itself comes to whenever a tick is
-// a microsecond early.
+// not late. In a synctest bubble the ticker is the real one and every tick
+// comes exactly on time, which is that case every time; and a machine busy
+// with other tests cannot make a tick late.
 func TestUploadLeaseCadenceOnARealClock(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, uploadLeaseCadence)
+}
+
+func uploadLeaseCadence(t *testing.T) {
 	const (
 		grace = 900 * time.Millisecond
 		tick  = grace / 3
-		// What a tick may be late by on a machine that is busy with the
-		// other tests. A skipped tick is a whole tick more.
-		late  = 200 * time.Millisecond
 		ticks = 10
 	)
 	f := newLockFixture(t, func(cfg *app.SessionServiceConfig) { cfg.Clock, cfg.UploadGrace = machineClock{}, grace })
@@ -1158,7 +1162,7 @@ func TestUploadLeaseCadenceOnARealClock(t *testing.T) {
 			t.Fatalf("no lease was written for %v after the %d before: the lease of an upload in flight has lapsed", grace, n)
 		}
 		now := time.Now()
-		if gap := now.Sub(last); n > 0 && gap > tick+late {
+		if gap := now.Sub(last); n > 0 && gap != tick {
 			t.Errorf("write %d came %v after the one before; a tick is %v", n, gap, tick)
 		}
 		last = now
