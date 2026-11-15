@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/app"
@@ -25,6 +26,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
+	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
 // The marks of the secret scan: a secret, the path of an endpoint that is a
@@ -50,8 +52,23 @@ func newTargetFixture(t *testing.T) *targetFixture {
 		iamFixture: f,
 		targets: app.NewTargetService(app.TargetServiceConfig{
 			Store: f.meta, Authz: f.authz, Auditor: f.auditor, KMS: f.kms, Clock: f.clock, Entropy: rand.Reader,
+			Delivery: porttest.ScriptedDeliveryStatusReader(porttest.DeliveryStatusScript{
+				Leader: porttest.DeliveryLeaderAnswering,
+				Statuses: []ports.TargetStatus{
+					{Name: "hook", Kind: delivery.KindWebhook, State: ports.DeliveryOK},
+					{Name: "other", Kind: delivery.KindWebhook, State: ports.DeliveryOK},
+				},
+			}),
 		}),
 	}
+}
+
+// withDelivery returns the target use cases of the fixture asking a
+// leader that does as the script says, or none.
+func (f *targetFixture) withDelivery(reader ports.DeliveryStatusReader) *app.TargetService {
+	return app.NewTargetService(app.TargetServiceConfig{
+		Store: f.meta, Authz: f.authz, Auditor: f.auditor, KMS: f.kms, Clock: f.clock, Entropy: rand.Reader, Delivery: reader,
+	})
 }
 
 // webhook is a well-formed definition of a webhook with a bearer token.
@@ -132,6 +149,10 @@ func TestTargetsAreAuthorized(t *testing.T) {
 		{"delete", iam.ActionDeleteTarget, "arn:cactusfs:admin:::target/other", func(p iam.Principal) error {
 			return f.targets.Delete(ctx, p, "other")
 		}, []string{iam.RoleClusterAdmin}},
+		{"status", iam.ActionGetTargetStatus, "arn:cactusfs:admin:::target/hook", func(p iam.Principal) error {
+			_, err := f.targets.Status(ctx, p, "hook")
+			return err
+		}, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
 	}
 	for _, op := range operations {
 		for role, p := range principals {
@@ -802,5 +823,79 @@ func TestAChangeThatStopsWaitingForItsName(t *testing.T) {
 	}
 	if changes != 4 {
 		t.Errorf("%d changes of targets in the trail, want 4", changes)
+	}
+}
+
+// TestTargetStatus: the status of a target is what the node that leads
+// says of it, with nothing shown where a word belongs that cannot be one; a
+// leader of an older release makes it "unsupported"; no leader, or one that
+// does not answer in time, is unavailable; a target that is none, here or on
+// the leader, is not found.
+func TestTargetStatus(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	answered := []ports.TargetStatus{
+		{
+			Name: "hook", Kind: delivery.KindWebhook, State: ports.DeliveryStalled, Pending: 3, OldestPendingAt: at,
+			LastErrorClass: delivery.ClassAuth, Lost: 2, Rejected: 1,
+		},
+		{Name: "wrong", Kind: delivery.KindWebhook, State: porttest.DeliveryMark, LastErrorClass: porttest.DeliveryMark},
+	}
+	for name, tt := range map[string]struct {
+		leader string
+		// none is a node that cannot ask.
+		none    bool
+		target  string
+		want    ports.TargetStatus
+		wantErr error
+	}{
+		"the leader's answer": {
+			leader: porttest.DeliveryLeaderAnswering, target: "hook", want: answered[0],
+		},
+		"words that are none are not shown": {
+			leader: porttest.DeliveryLeaderAnswering, target: "wrong",
+			want: ports.TargetStatus{Name: "wrong", Kind: delivery.KindWebhook, State: ports.DeliveryUnsupported, LastErrorClass: delivery.ClassInternal},
+		},
+		"a leader of an older release": {
+			leader: porttest.DeliveryLeaderOld, target: "hook",
+			want: ports.TargetStatus{Name: "hook", Kind: delivery.KindWebhook, State: ports.DeliveryUnsupported},
+		},
+		"no leader":                      {leader: porttest.DeliveryLeaderGone, target: "hook", wantErr: domain.ErrUnavailable},
+		"a leader that does not answer":  {leader: porttest.DeliveryLeaderSilent, target: "hook", wantErr: domain.ErrUnavailable},
+		"a node that cannot ask":         {none: true, target: "hook", wantErr: domain.ErrUnavailable},
+		"no such target":                 {leader: porttest.DeliveryLeaderAnswering, target: "missing", wantErr: domain.ErrEntityNotFound},
+		"a target the leader knows not":  {leader: porttest.DeliveryLeaderAnswering, target: "unknown", wantErr: domain.ErrEntityNotFound},
+		"a target the old leader cannot": {leader: porttest.DeliveryLeaderOld, target: "missing", wantErr: domain.ErrEntityNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				f := newTargetFixture(t)
+				for _, defined := range []string{"hook", "wrong", "unknown"} {
+					if _, err := f.targets.Put(t.Context(), f.root, webhook(defined)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var reader ports.DeliveryStatusReader
+				if !tt.none {
+					reader = porttest.ScriptedDeliveryStatusReader(porttest.DeliveryStatusScript{Leader: tt.leader, Statuses: answered})
+				}
+				began := time.Now()
+				got, err := f.withDelivery(reader).Status(t.Context(), f.root, tt.target)
+				if tt.wantErr != nil {
+					if !errors.Is(err, tt.wantErr) {
+						t.Errorf("Status = %+v, %v; want %v", got, err, tt.wantErr)
+					}
+				} else if err != nil || got != tt.want {
+					t.Errorf("Status = %+v, %v; want %+v", got, err, tt.want)
+				}
+				if waited := time.Since(began); waited > app.TargetStatusTimeout {
+					t.Errorf("Status waited %s, longer than %s", waited, app.TargetStatusTimeout)
+				}
+				if text := fmt.Sprintf("%+v %v", got, err); strings.Contains(text, "MARK-7c1e") {
+					t.Errorf("the words of an error are shown: %s", text)
+				}
+			})
+		})
 	}
 }

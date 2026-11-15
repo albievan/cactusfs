@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
@@ -42,6 +43,8 @@ type TargetService struct {
 	auditor *Auditor
 	kms     ports.KMS
 	clock   ports.Clock
+	// delivery asks the node that leads how delivery to a target stands.
+	delivery ports.DeliveryStatusReader
 	// names orders the changes of one target made through this service.
 	names nameLocks
 
@@ -59,13 +62,76 @@ type TargetServiceConfig struct {
 	Clock   ports.Clock
 	// Entropy must be a cryptographically secure random source.
 	Entropy io.Reader
+	// Delivery asks the node that leads the metadata group how delivery
+	// to a target stands. Nil is a node that cannot ask: Status answers
+	// unavailable.
+	Delivery ports.DeliveryStatusReader
 }
 
 // NewTargetService returns a TargetService.
 func NewTargetService(cfg TargetServiceConfig) *TargetService {
 	return &TargetService{
 		store: cfg.Store, authz: cfg.Authz, auditor: cfg.Auditor, kms: cfg.KMS, clock: cfg.Clock, entropy: cfg.Entropy,
+		delivery: cfg.Delivery,
 	}
+}
+
+// TargetStatusTimeout bounds the question to the node that leads of how
+// delivery to a target stands.
+const TargetStatusTimeout = 5 * time.Second
+
+// Status returns how delivery to a target stands, as the node that leads
+// the metadata group - which does the delivering - has it in memory; any
+// node answers, and asks the leader. When the leader is of a release that
+// cannot be asked the state is ports.DeliveryUnsupported and the figures
+// are zero.
+//
+// Nothing of the endpoint and none of the words of an error are part of
+// the answer: a word where a state or a class belongs that cannot be one is
+// not shown. The error wraps domain.ErrEntityNotFound when there is no such
+// target, and domain.ErrUnavailable when there is no leader to ask or it did
+// not answer in TargetStatusTimeout.
+func (s *TargetService) Status(ctx context.Context, p iam.Principal, name string) (ports.TargetStatus, error) {
+	if _, err := s.allow(ctx, p, iam.ActionGetTargetStatus, "target/"+name); err != nil {
+		return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w", err)
+	}
+	t, err := s.store.GetTarget(ctx, name)
+	if err != nil {
+		return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w", err)
+	}
+	if s.delivery == nil {
+		return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w: this node cannot ask how delivery stands", domain.ErrUnavailable)
+	}
+	askCtx, cancel := context.WithTimeout(ctx, TargetStatusTimeout)
+	defer cancel()
+	statuses, err := s.delivery.DeliveryStatus(askCtx, []string{name})
+	switch {
+	case errors.Is(err, domain.ErrNotSupported):
+		return ports.TargetStatus{Name: t.Name, Kind: t.Kind, State: ports.DeliveryUnsupported}, nil
+	case err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
+		return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w: the node that leads did not answer in time: %w", domain.ErrUnavailable, err)
+	case err != nil:
+		return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w", err)
+	}
+	for _, status := range statuses {
+		if status.Name == name {
+			return shownStatus(status), nil
+		}
+	}
+	// The node that leads knows no such target: it was deleted a moment
+	// ago, after this node read it.
+	return ports.TargetStatus{}, fmt.Errorf("targets.Status: %w: target %s", domain.ErrEntityNotFound, name)
+}
+
+// shownStatus returns a status with what stands where a word belongs shown
+// only when it is one: the class of a failure as delivery.ShownClass has it,
+// a state that cannot be one as ports.DeliveryUnsupported.
+func shownStatus(status ports.TargetStatus) ports.TargetStatus {
+	status.LastErrorClass = delivery.ShownClass(string(status.LastErrorClass))
+	if status.State == "" || delivery.ShownClass(status.State) != delivery.Class(status.State) {
+		status.State = ports.DeliveryUnsupported
+	}
+	return status
 }
 
 // TargetInput is what is said of a target when it is defined or changed.
