@@ -1808,9 +1808,39 @@ func (o *operations) DeleteTarget(ctx context.Context, request api.DeleteTargetR
 	return api.DeleteTarget204Response{}, nil
 }
 
-// GetTargetStatus implements api.StrictServerInterface (PLAN 8.0.14).
-func (o *operations) GetTargetStatus(context.Context, api.GetTargetStatusRequestObject) (api.GetTargetStatusResponseObject, error) {
-	return nil, notYet("target status")
+// GetTargetStatus implements api.StrictServerInterface. Who may ask, and
+// whom this node asks - the node that leads, which does the delivering - is
+// the use case's; this maps what it says to the contract. The figures are
+// counts and times, and the words are a state and a class: nothing of an
+// endpoint or of the words of an error is in a status to leave out.
+func (o *operations) GetTargetStatus(ctx context.Context, request api.GetTargetStatusRequestObject) (api.GetTargetStatusResponseObject, error) {
+	targets, err := o.targets()
+	if err != nil {
+		return nil, err
+	}
+	status, err := targets.Status(ctx, who(ctx), request.Name)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetTargetStatus200JSONResponse(targetStatusOf(status)), nil
+}
+
+// targetStatusOf maps the status of delivery to a target to the contract:
+// a time that is none and a class that is none are left out.
+func targetStatusOf(s ports.TargetStatus) api.TargetStatus {
+	count := func(n uint64) int64 { return int64(min(n, math.MaxInt64)) }
+	at := func(t time.Time) *time.Time {
+		if t.IsZero() {
+			return nil
+		}
+		utc := t.UTC()
+		return &utc
+	}
+	return api.TargetStatus{
+		Name: s.Name, State: s.State, Pending: count(s.Pending), OldestPendingAt: at(s.OldestPendingAt),
+		LastSuccessAt: at(s.LastSuccessAt), LastErrorClass: stringOrNil(string(s.LastErrorClass)), Lost: count(s.Lost),
+		Rejected: count(s.Rejected),
+	}
 }
 
 // GetBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).

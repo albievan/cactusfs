@@ -456,7 +456,6 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	// say so before anybody is asked what the caller may do. One that is
 	// written is taken from this list, and must then answer 423.
 	notWritten := []string{
-		"getTargetStatus",
 		"getBucketNotifications", "putBucketNotifications", "deleteBucketNotifications",
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
 		"getBucketReplicaMode", "putBucketReplicaMode",

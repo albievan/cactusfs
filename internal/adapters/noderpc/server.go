@@ -19,6 +19,7 @@ import (
 
 	nodev1 "github.com/albievan/cactusfs/internal/adapters/noderpc/nodev1/cactusfs/node/v1"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -64,6 +65,11 @@ type ServerConfig struct {
 	// Settings says how this node was configured, for the Settings call. A
 	// nil one is a node that cannot say, and answers so.
 	Settings ports.LocalSettings
+	// Delivery says how delivery to targets stands, on the node that leads
+	// the metadata group; on any other it fails with domain.ErrNotLeader.
+	// A nil one is a node that cannot be asked, and answers as a release
+	// without the call.
+	Delivery ports.DeliveryStatusReader
 	Meta     Meta
 	// Drive returns one of this node's drives.
 	Drive  func(driveID string) (ports.ShardStore, bool)
@@ -282,14 +288,44 @@ func (s *Server) Settings(ctx context.Context, _ *nodev1.SettingsRequest) (*node
 	return settingsToWire(bounded), nil
 }
 
-// DeliveryStatus implements nodev1.NodeServiceServer. The call is in the
-// contract before the worker that delivers to targets (PLAN 8.0.14). Until
-// that is written this node answers as a release without the call does -
-// the RPC fails with UNIMPLEMENTED - so that a node that asks reads "cannot
-// be asked" and never an answer that says nothing waits. Like every call it
-// has passed the authorizer first.
-func (s *Server) DeliveryStatus(context.Context, *nodev1.DeliveryStatusRequest) (*nodev1.DeliveryStatusResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "delivery status is not served by this release")
+// errDeliveryStatusFailed is the message of an answer of a node that could
+// not say how delivery stands: why is in its codes and in its log.
+var errDeliveryStatusFailed = errors.New("this node could not say how delivery stands")
+
+// DeliveryStatus implements nodev1.NodeServiceServer: how delivery to the
+// targets named stands, as this node - when it leads the metadata group -
+// has it (ServerConfig.Delivery). A node that does not lead answers with the
+// error "not_leader". Like every call it has passed the authorizer first.
+//
+// A node that was given no source answers as a release without the call
+// does - the RPC fails with UNIMPLEMENTED - so that a node that asks reads
+// "cannot be asked", and never an answer that says nothing waits. What is
+// sent is bounded, and a word that is no word, where a state or the class of
+// a failure belongs, is not sent: never the text of an error or an endpoint.
+func (s *Server) DeliveryStatus(ctx context.Context, req *nodev1.DeliveryStatusRequest) (*nodev1.DeliveryStatusResponse, error) {
+	if s.cfg.Delivery == nil {
+		return nil, status.Error(codes.Unimplemented, "delivery status is not served by this node")
+	}
+	if len(req.GetTargets()) > delivery.MaxTargets {
+		err := fmt.Errorf("%w: at most %d targets are asked about at once", domain.ErrInvalidArgument, delivery.MaxTargets)
+		return &nodev1.DeliveryStatusResponse{Error: toWire(err)}, nil
+	}
+	names, named := deliveryNames(req.GetTargets())
+	if named && len(names) == 0 {
+		// Only names no target can have: none is a target's.
+		return &nodev1.DeliveryStatusResponse{}, nil
+	}
+	statuses, err := s.cfg.Delivery.DeliveryStatus(ctx, names)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, status.FromContextError(ctxErr).Err()
+		}
+		if !errors.Is(err, domain.ErrNotLeader) && s.cfg.Logger != nil {
+			s.cfg.Logger.WarnContext(ctx, "the status of delivery could not be read for another node", slog.Any("error", err))
+		}
+		return &nodev1.DeliveryStatusResponse{Error: &nodev1.Error{Codes: domain.Codes(err), Message: errDeliveryStatusFailed.Error()}}, nil
+	}
+	return deliveryToWire(statuses), nil
 }
 
 // Propose implements nodev1.MetaServiceServer.

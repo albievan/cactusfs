@@ -119,6 +119,31 @@ type fixture struct {
 	drifts   atomic.Int32
 	seen     []adminapi.Observation
 	seenMu   sync.Mutex
+	// leader is the node that leads, as the use case of targets asks it
+	// how delivery stands; a test says what it does.
+	leader *scriptedLeader
+}
+
+// scriptedLeader is the node that leads the metadata group, as a node that
+// asks it how delivery stands meets it: it does as its script says, which a
+// test may change.
+type scriptedLeader struct {
+	mu     sync.Mutex
+	script porttest.DeliveryStatusScript
+}
+
+func (l *scriptedLeader) set(script porttest.DeliveryStatusScript) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.script = script
+}
+
+// DeliveryStatus implements ports.DeliveryStatusReader.
+func (l *scriptedLeader) DeliveryStatus(ctx context.Context, targets []string) ([]ports.TargetStatus, error) {
+	l.mu.Lock()
+	script := l.script
+	l.mu.Unlock()
+	return porttest.ScriptedDeliveryStatusReader(script).DeliveryStatus(ctx, targets)
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -228,8 +253,9 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	// Changes of targets carry their audit record to the trail, as the
 	// store of a deployment does in the entry that makes them.
 	meta.Audit = f.store
+	f.leader = &scriptedLeader{script: porttest.DeliveryStatusScript{Leader: porttest.DeliveryLeaderAnswering}}
 	targets := app.NewTargetService(app.TargetServiceConfig{
-		Store: meta, Authz: authz, Auditor: f.auditor, KMS: kms, Clock: f.clock, Entropy: rand.Reader,
+		Store: meta, Authz: authz, Auditor: f.auditor, KMS: kms, Clock: f.clock, Entropy: rand.Reader, Delivery: f.leader,
 	})
 	// What may be a secret in a repeated request is concealed with
 	// Argon2id itself, at the fixed cost of Conceal; the cost given here is
@@ -1573,8 +1599,76 @@ func TestSettingsOnANodeWithoutTheUseCase(t *testing.T) {
 	}
 }
 
-// TestOperationsThatAreNotWrittenYet: the operations of target status,
-// notifications and replication are in the contract before their use cases
+// TestTargetStatus: GET /targets/{name}/status answers what the node that
+// leads says of the target, as the contract has it - a time and a class
+// that are none left out - to who may read it; a leader of an older release
+// makes it "unsupported"; no leader is 503; a target that is none is 404;
+// nothing of the endpoint or the words of an error is in the answer.
+func TestTargetStatus(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	auditor := f.userKey("auditor", iam.RoleAuditor)
+	reader := f.userKey("reader", iam.RoleReadOnly)
+	f.must(http.StatusOK, call{method: "PUT", path: "/targets/hook", body: map[string]any{
+		"kind": "webhook", "endpoint": "https://hooks.example.com" + concealedPathMark, "buckets": []string{"photos"},
+	}})
+	at := testNow.Add(-time.Minute)
+	f.leader.set(porttest.DeliveryStatusScript{Leader: porttest.DeliveryLeaderAnswering, Statuses: []ports.TargetStatus{
+		{
+			Name: "hook", Kind: delivery.KindWebhook, State: ports.DeliveryRetrying, Pending: 7, OldestPendingAt: at,
+			LastErrorClass: delivery.ClassTimeout, Lost: 1, Rejected: 2,
+		},
+	}})
+
+	var got map[string]any
+	f.must(http.StatusOK, call{method: "GET", path: "/targets/hook/status", bearer: auditor}).decode(t, &got)
+	want := map[string]any{
+		"name": "hook", "state": "retrying", "pending": float64(7), "oldest_pending_at": at.Format(time.RFC3339),
+		"last_error_class": "timeout", "lost": float64(1), "rejected": float64(2),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("status\n%v\nwant\n%v", got, want)
+	}
+
+	// A leader of a release that cannot be asked.
+	f.leader.set(porttest.DeliveryStatusScript{Leader: porttest.DeliveryLeaderOld})
+	got = nil
+	f.must(http.StatusOK, call{method: "GET", path: "/targets/hook/status"}).decode(t, &got)
+	if want := map[string]any{"name": "hook", "state": "unsupported", "pending": float64(0), "lost": float64(0), "rejected": float64(0)}; !reflect.DeepEqual(got, want) {
+		t.Errorf("status with an old leader\n%v\nwant\n%v", got, want)
+	}
+
+	f.leader.set(porttest.DeliveryStatusScript{Leader: porttest.DeliveryLeaderGone})
+	for name, tt := range map[string]struct {
+		c      call
+		status int
+		code   string
+	}{
+		"no credential":        {call{method: "GET", path: "/targets/hook/status", bearer: "AKIDNOBODY:not-a-secret"}, http.StatusUnauthorized, "Unauthenticated"},
+		"a reader":             {call{method: "GET", path: "/targets/hook/status", bearer: reader}, http.StatusForbidden, "AccessDenied"},
+		"no such target":       {call{method: "GET", path: "/targets/missing/status"}, http.StatusNotFound, "NoSuchEntity"},
+		"no leader":            {call{method: "GET", path: "/targets/hook/status"}, http.StatusServiceUnavailable, "ServiceUnavailable"},
+		"a name no target has": {call{method: "GET", path: "/targets/Not_A_Name/status"}, http.StatusNotFound, "NoSuchEntity"},
+	} {
+		if tt.c.bearer == "" {
+			tt.c.bearer = f.root
+		}
+		r := f.do(tt.c)
+		if r.status != tt.status {
+			t.Errorf("%s: %s %s = %d, want %d: %s", name, tt.c.method, tt.c.path, r.status, tt.status, r.body)
+			continue
+		}
+		if p := r.problem(t); tt.code != "" && p["code"] != tt.code {
+			t.Errorf("%s: problem = %s, want code %s", name, r.body, tt.code)
+		}
+		if strings.Contains(string(r.body), "hooks.example") || strings.Contains(string(r.body), concealedPathMark) {
+			t.Errorf("%s: the answer names the endpoint: %s", name, r.body)
+		}
+	}
+}
+
+// TestOperationsThatAreNotWrittenYet: the operations of notifications and
+// replication are in the contract before their use cases
 // (PLAN 8.0.3). Until each is written it answers 501 as a problem, to a
 // caller it has authenticated - to any such caller: the authorizer is not
 // asked, because there is nothing yet that it could let through - and says
@@ -1588,7 +1682,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 	// The request without a body says the media type all the same: the
 	// adapter takes no POST that does not, and the contract says so.
 	for _, c := range []call{
-		{method: "GET", path: "/targets/hook/status"},
 		{method: "GET", path: "/buckets/some-bucket/notifications"},
 		{method: "PUT", path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},
 		{method: "DELETE", path: "/buckets/some-bucket/notifications"},

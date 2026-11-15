@@ -393,8 +393,41 @@ func (c *Client) NodeSettings(ctx context.Context, nodeID string) (cluster.NodeS
 	return bounded.Normalized(), nil
 }
 
+// DeliveryStatus asks the node that leads the metadata group, leaderID, how
+// delivery to the targets named stands - to every target when none is
+// named. What it answers is taken as deliveryFromWire takes it: of the
+// targets asked for, in name order, with a word where a word belongs and
+// nothing else, whatever the node sent.
+//
+// The error wraps domain.ErrNotSupported when the node's release has no such
+// call, context.DeadlineExceeded when it was reached and did not answer in
+// the time of ctx, domain.ErrUnavailable when it could not be reached or does
+// not lead, and none of them when it was reached and could not say.
+func (c *Client) DeliveryStatus(ctx context.Context, leaderID string, targets []string) ([]ports.TargetStatus, error) {
+	conn, err := c.ready(ctx, leaderID)
+	if err != nil {
+		return nil, fmt.Errorf("noderpc.DeliveryStatus: %w", err)
+	}
+	ctx, cancel := withTimeout(ctx)
+	defer cancel()
+	resp, err := nodev1.NewNodeServiceClient(conn).DeliveryStatus(ctx, &nodev1.DeliveryStatusRequest{Targets: targets})
+	if err != nil {
+		return nil, fmt.Errorf("noderpc.DeliveryStatus: %w", settingsCallError(leaderID, err))
+	}
+	if err := fromWire(leaderID, resp.GetError()); err != nil {
+		if errors.Is(err, domain.ErrNotLeader) {
+			// The leader that was asked has stepped down: there is no
+			// answer until the next one is found.
+			return nil, fmt.Errorf("noderpc.DeliveryStatus: %w: %w", domain.ErrUnavailable, err)
+		}
+		return nil, fmt.Errorf("noderpc.DeliveryStatus: %w", err)
+	}
+	return deliveryFromWire(resp, targets), nil
+}
+
 // settingsCallError sorts a call that got no answer by how gRPC says it
-// failed.
+// failed. It is used for the calls that a node of an older release may not
+// know: Settings and DeliveryStatus.
 func settingsCallError(nodeID string, err error) error {
 	switch status.Code(err) {
 	case codes.Unimplemented:

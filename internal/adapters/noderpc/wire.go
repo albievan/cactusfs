@@ -11,8 +11,85 @@ import (
 	nodev1 "github.com/albievan/cactusfs/internal/adapters/noderpc/nodev1/cactusfs/node/v1"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 )
+
+// shownState returns the state of delivery to a target as it may be shown:
+// a word, or - for what can be the words of an error, or nothing -
+// ports.DeliveryUnsupported. It is applied on both sides of the wire.
+func shownState(state string) string {
+	if state == "" || delivery.ShownClass(state) != delivery.Class(state) {
+		return ports.DeliveryUnsupported
+	}
+	return state
+}
+
+// shownDelivery returns the status of a target as it may cross the wire or
+// be handed on: a word where a word belongs, and nothing else.
+func shownDelivery(status ports.TargetStatus) ports.TargetStatus {
+	status.State = shownState(status.State)
+	status.LastErrorClass = delivery.ShownClass(string(status.LastErrorClass))
+	if !status.Kind.Valid() {
+		status.Kind = ""
+	}
+	return status
+}
+
+// deliveryNames returns the names of a question of delivery status that can
+// be the names of targets, each once, and whether any was asked for at all:
+// a name that cannot be a target's is no target's, and is left out of the
+// answer.
+func deliveryNames(asked []string) (names []string, named bool) {
+	for _, name := range asked {
+		if delivery.ValidateTargetName(name) == nil && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names, len(asked) > 0
+}
+
+// deliveryToWire returns the answer of DeliveryStatus: at most
+// delivery.MaxTargets statuses, as they may be shown.
+func deliveryToWire(statuses []ports.TargetStatus) *nodev1.DeliveryStatusResponse {
+	resp := &nodev1.DeliveryStatusResponse{}
+	for _, status := range statuses[:min(len(statuses), delivery.MaxTargets)] {
+		status = shownDelivery(status)
+		resp.Targets = append(resp.Targets, &nodev1.TargetDelivery{
+			Name: status.Name, Kind: string(status.Kind), State: status.State, Pending: status.Pending,
+			OldestPendingUnix: unixOf(status.OldestPendingAt), LastSuccessUnix: unixOf(status.LastSuccessAt),
+			LastErrorClass: string(status.LastErrorClass), Lost: status.Lost, Rejected: status.Rejected, Failed: status.Failed,
+			ResyncNeeded: status.ResyncNeeded,
+		})
+	}
+	return resp
+}
+
+// deliveryFromWire reads the answer of DeliveryStatus, whatever the node that
+// sent it put in it: of the targets that were asked for (any, when none
+// was), those with a name a target can have, each once, at most
+// delivery.MaxTargets, in name order, with a word where a word belongs.
+func deliveryFromWire(resp *nodev1.DeliveryStatusResponse, asked []string) []ports.TargetStatus {
+	names, named := deliveryNames(asked)
+	out := []ports.TargetStatus{}
+	seen := map[string]bool{}
+	for _, t := range resp.GetTargets() {
+		name := t.GetName()
+		if len(out) == delivery.MaxTargets || seen[name] || delivery.ValidateTargetName(name) != nil || (named && !slices.Contains(names, name)) {
+			continue
+		}
+		seen[name] = true
+		out = append(out, shownDelivery(ports.TargetStatus{
+			Name: name, Kind: delivery.Kind(t.GetKind()), State: t.GetState(), Pending: t.GetPending(),
+			OldestPendingAt: timeOf(t.GetOldestPendingUnix()), LastSuccessAt: timeOf(t.GetLastSuccessUnix()),
+			LastErrorClass: delivery.Class(t.GetLastErrorClass()), Lost: t.GetLost(), Rejected: t.GetRejected(), Failed: t.GetFailed(),
+			ResyncNeeded: t.GetResyncNeeded(),
+		}))
+	}
+	slices.SortFunc(out, func(a, b ports.TargetStatus) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
 
 // NodeInfo is what a node says about itself.
 type NodeInfo struct {
