@@ -23,6 +23,8 @@ export type BucketDetails = Schemas['BucketDetails'];
 export type BucketActivityEntry = Schemas['BucketActivityEntry'];
 /** How much a bucket holds. */
 export type BucketUsage = Schemas['BucketUsage'];
+/** The quota of a bucket and what counts against it; `quota_bytes` is absent when it has none. */
+export type BucketQuota = Schemas['BucketQuota'];
 /** The policy of a bucket; `document` is absent when it has none. */
 export type BucketPolicy = Schemas['BucketPolicy'];
 /** A sub-bucket of a bucket, as a list of them names it: without its policy. */

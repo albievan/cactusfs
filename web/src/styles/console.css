@@ -1920,6 +1920,55 @@ textarea[readonly] {
   font-size: 0.85rem;
 }
 
+/* The quota of a bucket: a bar of what counts against it over the quota,
+   and the share in figures beside it - not told by the length of a bar
+   alone. A meter, drawn in the console's colours in every engine; the
+   figures are in the hint and, for whoever has them read, in words. */
+.quota-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 9rem;
+}
+
+.quota-bar {
+  flex: 1 1 5rem;
+  min-width: 4rem;
+  height: 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+  appearance: none;
+}
+
+.quota-bar::-webkit-meter-bar {
+  height: 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.quota-bar::-webkit-meter-optimum-value,
+.quota-bar::-webkit-meter-suboptimum-value,
+.quota-bar::-webkit-meter-even-less-good-value {
+  border-radius: 999px;
+  background: var(--saguaro);
+}
+
+.quota-bar::-moz-meter-bar {
+  border-radius: 999px;
+  background: var(--saguaro);
+}
+
+.quota-share {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .grid-badges {
   display: inline-flex;
   flex-wrap: wrap;
@@ -2719,6 +2768,12 @@ details[open] > summary .node-card-mark {
 
   .grid-keep .btn-link-row {
     white-space: nowrap;
+  }
+
+  /* The bar of a quota keeps a length that can be read; the grid scrolls
+     sideways for it, as for any other column. */
+  .grid-keep .quota-cell {
+    min-width: 7rem;
   }
 
   /* The name is a control a finger can hit. A long key goes onto further

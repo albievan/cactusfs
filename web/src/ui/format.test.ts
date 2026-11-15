@@ -5,12 +5,17 @@ import {
   formatExactBytes,
   formatGigabytes,
   formatPolicyDocument,
+  formatShare,
   formatTime,
+  gigabytesOf,
+  isExactBytes,
   joinNames,
   MOST_POLICY_BYTES,
+  parseGigabytes,
   parseNames,
   parsePolicyDocument,
   policyLayout,
+  quotaBody,
   typedPolicy,
   utf8Bytes,
 } from './format';
@@ -50,6 +55,90 @@ describe('formatting', () => {
     expect(formatExactBytes(0)).toBe('0 bytes');
     expect(formatExactBytes(1)).toBe('1 byte');
     expect(formatExactBytes(5 * 1024 * 1024)).toBe('5,242,880 bytes');
+    expect(formatExactBytes(Number.MAX_SAFE_INTEGER)).toBe('9,007,199,254,740,991 bytes');
+  });
+
+  it('says "about" of a figure beyond 2^53 - 1 bytes, which the client may have read rounded', () => {
+    // 2^62 - 1 as the API wrote it reads as 2^62.
+    const read = Number('4611686018427387903');
+    expect(isExactBytes(read)).toBe(false);
+    expect(isExactBytes(Number.MAX_SAFE_INTEGER)).toBe(true);
+    expect(isExactBytes(2 ** 53)).toBe(false);
+    expect(formatExactBytes(read)).toMatch(/^about 4,611,686,018,427,3\d\d,\d{3} bytes$/);
+    expect(formatExactBytes(2 ** 53)).toMatch(/^about /);
+  });
+
+  it.each([
+    ['1', 1_000_000_000n],
+    ['0', 0n],
+    [' 2.5 ', 2_500_000_000n],
+    ['10.73741824', 10_737_418_240n],
+    ['0.000000001', 1n],
+    ['1.000000000', 1_000_000_000n],
+    // The greatest quota there is, 2^62 bytes, and the bytes either side of
+    // it, which a JavaScript number would both make 2^62: the API, not the
+    // console, refuses more.
+    ['4611686018.427387904', 2n ** 62n],
+    ['4611686018.427387903', 2n ** 62n - 1n],
+    ['4611686018.427387905', 2n ** 62n + 1n],
+    ['4611686019', 4_611_686_019_000_000_000n],
+  ])('reads %j GB as %d bytes, exactly', (text, bytes) => {
+    expect(parseGigabytes(text)).toBe(bytes);
+  });
+
+  it.each([
+    [1n, '{"quota_bytes":1}'],
+    [2n ** 62n + 1n, '{"quota_bytes":4611686018427387905}'],
+    [0n, '{"quota_bytes":0}'],
+  ])('writes a quota of %d bytes as the integer it is', (bytes, body) => {
+    expect(quotaBody(bytes)).toBe(body);
+    // What JSON reads, where it can read it exactly.
+    if (bytes <= BigInt(Number.MAX_SAFE_INTEGER)) {
+      expect(JSON.parse(body)).toEqual({ quota_bytes: Number(bytes) });
+    }
+  });
+
+  it.each(['', 'ten', '1,5', '1.', '.5', '-1', '1e9', '0.0000000001', '1 GB', '0x10'])(
+    'refuses %j as a number of GB, saying what one is',
+    (text) => {
+      expect(() => parseGigabytes(text)).toThrow(/not a number of GB: digits, with "\." as the decimal point.*1,000,000,000 bytes/);
+    },
+  );
+
+  it.each([
+    [1_000_000_000n, '1'],
+    [0n, '0'],
+    [1n, '0.000000001'],
+    [2_500_000_000n, '2.5'],
+    [10_737_418_240n, '10.73741824'],
+    [123_000_000_000n, '123'],
+    [2n ** 62n - 1n, '4611686018.427387903'],
+  ])('writes %d bytes as %s GB, which reads back as the same bytes', (bytes, text) => {
+    expect(gigabytesOf(bytes)).toBe(text);
+    expect(parseGigabytes(text)).toBe(bytes);
+  });
+
+  it('reads back every quota it writes, for quotas of every size up to 2^62 bytes', () => {
+    // A property, over sizes spread across every power of ten a quota may have.
+    for (let digits = 0n; digits <= 18n; digits += 1n) {
+      for (const lead of [1n, 3n, 4n, 9n]) {
+        // 9 * 10^18 is beyond the greatest quota there is: 2^62 stands in for it.
+        const bytes = [lead * 10n ** digits + digits, 2n ** 62n].reduce((a, b) => (a < b ? a : b));
+        expect(parseGigabytes(gigabytesOf(bytes)), String(bytes)).toBe(bytes);
+      }
+    }
+  });
+
+  it.each([
+    [0, 100, '0 %'],
+    [29, 100, '29 %'],
+    [999, 1000, '99 %'],
+    [1000, 1000, '100 %'],
+    [1300, 1000, '130 %'],
+    [100_000, 1, '10,000,000 %'],
+    [1, 0, '-'],
+  ])('shows %d used of a quota of %d as %s, rounded down', (used, quota, text) => {
+    expect(formatShare(used, quota)).toBe(text);
   });
 
   it('shows a missing time as a dash and an unreadable one as it is', () => {

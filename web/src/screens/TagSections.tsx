@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import { api, unwrap, type RequiredTag, type Tag, type TagRules } from '../api/client';
 import { useCatalogue } from '../ui/catalogue';
@@ -6,7 +6,7 @@ import { ConfirmButton } from '../ui/ConfirmButton';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
-import { firstOf, Fold, LoadFailure, olderNode, onCode, refused, type Explain } from '../ui/sections';
+import { firstOf, Fold, LoadFailure, olderNode, onCode, refused, Said, useFocusAfterChange, type Explain } from '../ui/sections';
 import { TagRows } from '../ui/TagRows';
 import {
   joinValues,
@@ -115,36 +115,6 @@ export function TagListForm({
       </div>
     </form>
   );
-}
-
-/** A region that says how the last change ended, in the page before there is anything to say, so that it is announced. */
-export function Said({ text }: { text: string | null }) {
-  return (
-    <div className="notice-region" role="status">
-      {text === null ? null : <p className="tag-said">{text}</p>}
-    </div>
-  );
-}
-
-/**
- * Where the keyboard goes after a change: a save or a removal makes a fresh
- * form, and the button it was on goes with the old one. Once `askedRef` is
- * set, the Save button of the form inside `areaRef` takes it. The change
- * lands after an answer of the API, outside any event, where React would run
- * a plain effect after the fresh form is shown: a layout effect moves the
- * keyboard in the commit that shows it.
- */
-function useFocusAfterChange(areaRef: RefObject<HTMLDivElement | null>, askedRef: RefObject<boolean>) {
-  useLayoutEffect(() => {
-    if (!askedRef.current) {
-      return;
-    }
-    const save = areaRef.current?.querySelector<HTMLButtonElement>('button[type="submit"]');
-    if (save !== null && save !== undefined) {
-      askedRef.current = false;
-      save.focus();
-    }
-  });
 }
 
 /**

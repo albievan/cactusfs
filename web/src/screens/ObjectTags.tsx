@@ -5,9 +5,9 @@ import { useCatalogue } from '../ui/catalogue';
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { reasonOf } from '../ui/reason';
-import { firstOf, olderNode, onCode, refused, type Explain } from '../ui/sections';
+import { firstOf, olderNode, onCode, refused, Said, type Explain } from '../ui/sections';
 import { MOST_OBJECT_TAGS, suggestionsOf, TAG_RULE } from '../ui/tags';
-import { Said, TagListForm, TAGS_SAVED } from './TagSections';
+import { TagListForm, TAGS_SAVED } from './TagSections';
 
 const OBJECT_TAGS_ON_AN_OLDER_NODE = olderNode('Object tags are');
 

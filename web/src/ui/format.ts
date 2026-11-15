@@ -42,9 +42,85 @@ export function formatGigabytes(size: number): string {
   return `${value.toLocaleString('en', { minimumFractionDigits: digits, maximumFractionDigits: digits })} GB`;
 }
 
-/** Shows a number of bytes exactly, for the hint of a rounded figure. */
+/**
+ * Whether a number of bytes the API answered with is the number it sent. The
+ * generated client reads JSON numbers as JavaScript numbers, which hold every
+ * whole number only up to 2^53 - 1 (about 9 PB): beyond that the API's figure
+ * arrives as the nearest one they hold.
+ */
+export function isExactBytes(size: number): boolean {
+  return Number.isSafeInteger(size);
+}
+
+/**
+ * Shows a number of bytes exactly, for the hint of a rounded figure; beyond
+ * 2^53 - 1, where the figure read is not certain to be the API's (see
+ * isExactBytes), as "about" it.
+ */
 export function formatExactBytes(size: number): string {
-  return `${size.toLocaleString('en')} ${size === 1 ? 'byte' : 'bytes'}`;
+  const text = `${size.toLocaleString('en')} ${size === 1 ? 'byte' : 'bytes'}`;
+  return isExactBytes(size) ? text : `about ${text}`;
+}
+
+/** A GB as the quota editor reads and writes it: 10^9 bytes, as formatGigabytes shows sizes. */
+const BYTES_PER_GB = 1_000_000_000n;
+
+/** A number of GB as the quota editor reads it: digits, and at most nine of them after a point. */
+const GIGABYTES = /^(\d+)(?:\.(\d{1,9}))?$/;
+
+/**
+ * Reads a number of decimal gigabytes (10^9 bytes) typed into the quota
+ * editor and gives the bytes it is, exactly: a GB has nine decimal places of
+ * bytes, so more are refused rather than rounded away. The bytes are a
+ * bigint, sent as written by quotaBody: a JavaScript number would round a
+ * quota beyond 2^53 bytes, and 2^62 + 1, which the API refuses, would reach
+ * it as 2^62. Only the syntax is checked here: which quotas there may be is
+ * for the API to decide, and 0 is sent for it to refuse. "." is the decimal
+ * point; "," is refused, not read as one.
+ */
+export function parseGigabytes(text: string): bigint {
+  const match = GIGABYTES.exec(text.trim());
+  if (match === null) {
+    throw new Error(
+      'The quota is not a number of GB: digits, with "." as the decimal point and at most nine digits after it (1 GB is 1,000,000,000 bytes).',
+    );
+  }
+  const whole = BigInt(match[1] ?? '0');
+  const fraction = BigInt((match[2] ?? '').padEnd(9, '0'));
+  return whole * BYTES_PER_GB + fraction;
+}
+
+/**
+ * The JSON body of the request that sets a quota: `{"quota_bytes": <bytes>}`,
+ * the bytes written as the integer they are. JSON.stringify cannot write a
+ * bigint, and a number would be rounded beyond 2^53.
+ */
+export function quotaBody(bytes: bigint): string {
+  return `{"quota_bytes":${bytes.toString()}}`;
+}
+
+/**
+ * Shows a number of bytes as decimal gigabytes, exactly, as the quota editor
+ * begins with it: what parseGigabytes reads back as the same bytes.
+ */
+export function gigabytesOf(bytes: bigint): string {
+  const size = bytes < 0n ? 0n : bytes;
+  const whole = (size / BYTES_PER_GB).toString();
+  const fraction = (size % BYTES_PER_GB).toString().padStart(9, '0').replace(/0+$/, '');
+  return fraction === '' ? whole : `${whole}.${fraction}`;
+}
+
+/**
+ * How much of a quota is used, as a whole percentage rounded down - a quota
+ * all but used is not shown as used up - and as much above 100 as a bucket
+ * holds beyond a quota set below what it held.
+ */
+export function formatShare(used: number, quota: number): string {
+  if (quota <= 0) {
+    return '-';
+  }
+  // Multiplied first: 29 of 100 is 29 %, where 0.29 * 100 is 28.999….
+  return `${Math.floor((used * 100) / quota).toLocaleString('en')} %`;
 }
 
 /** Splits a list of names typed with commas or spaces between them. */

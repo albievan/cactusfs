@@ -6,9 +6,8 @@ import { formatTime } from '../ui/format';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { ProblemNotice } from '../ui/ProblemNotice';
-import { firstOf, LoadFailure, olderNode, onCode, refused, type Explain } from '../ui/sections';
+import { firstOf, LoadFailure, olderNode, onCode, refused, Said, type Explain } from '../ui/sections';
 import { joinValues, MOST_TAG_DEFINITIONS, MOST_TAG_VALUES, splitValues, TAG_KEY_LENGTH, TAG_VALUE_LENGTH } from '../ui/tags';
-import { Said } from './TagSections';
 
 const CATALOGUE_ON_AN_OLDER_NODE = olderNode('The catalogue of tags is');
 

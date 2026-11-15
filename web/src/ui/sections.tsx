@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useLayoutEffect, useState, type ReactNode, type RefObject } from 'react';
 
 import { ApiError, type Problem } from '../api/client';
 import { ProblemNotice } from './ProblemNotice';
@@ -106,6 +106,36 @@ export function LoadFailure({ error, explain, onRetry, what }: LoadFailureProps)
       <button type="button" className="btn btn-outline-secondary btn-sm" onClick={onRetry} title={`Ask for ${what} again`}>
         <i className="bi bi-arrow-clockwise" aria-hidden="true" /> <span className="btn-text">Try again</span>
       </button>
+    </div>
+  );
+}
+
+/**
+ * Where the keyboard goes after a change: a save or a removal makes a fresh
+ * form, and the button it was on goes with the old one. Once `askedRef` is
+ * set, the Save button of the form inside `areaRef` takes it. The change
+ * lands after an answer of the API, outside any event, where React would run
+ * a plain effect after the fresh form is shown: a layout effect moves the
+ * keyboard in the commit that shows it.
+ */
+export function useFocusAfterChange(areaRef: RefObject<HTMLDivElement | null>, askedRef: RefObject<boolean>) {
+  useLayoutEffect(() => {
+    if (!askedRef.current) {
+      return;
+    }
+    const save = areaRef.current?.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (save !== null && save !== undefined) {
+      askedRef.current = false;
+      save.focus();
+    }
+  });
+}
+
+/** A region that says how the last change ended, in the page before there is anything to say, so that it is announced. */
+export function Said({ text }: { text: string | null }) {
+  return (
+    <div className="notice-region" role="status">
+      {text === null ? null : <p className="tag-said">{text}</p>}
     </div>
   );
 }
