@@ -5,6 +5,7 @@ package integration_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -27,6 +28,9 @@ import (
 // from: the one whose binary wrote the fixture testdata/schema-4, and whose
 // MetadataVersion is 4.
 const schema4Commit = "84334a7"
+
+// schema5Quota is the quota a bucket is given at level 5.
+const schema5Quota int64 = 1 << 30
 
 // schema5Only names the buckets of bbolt that only an entry of schema 5
 // makes (ADR-0023, "New in the state").
@@ -75,32 +79,26 @@ type schema5Written struct {
 // release, through a node of that one, and through each node as soon as it
 // is upgraded: the deployment says it is at level 4; a bucket is created, an
 // object put, read and deleted, a multipart upload completed - all succeed;
-// what was written before is read back as the bytes it was; a quota is not
-// taken; and the state of every member that is stopped - the node of this
-// release, and each node of the release before as it leaves - says schema 4
-// and holds nothing only schema 5 makes.
+// what was written before is read back as the bytes it was; a quota is
+// refused as "unavailable" (503) by every node of this release; and the state of every member that is stopped - the node
+// of this release, and each node of the release before as it leaves - says
+// schema 4 and holds nothing only schema 5 makes: the counter of the nodes of
+// this release proposes no walk while the cluster is at level 4.
 //
 // When the last has registered that it knows schema 5 the deployment says
-// level 5, and still the state says 4: registering is no entry of schema 5.
-// The first bucket that is created is. From then on the state of every
-// member says 5 and holds the usage record of that bucket, exact and the
-// same bytes on every member - also after a change of leader, under which a
-// second bucket is counted like the first - and everything that was written
-// at level 4 is still the bytes it was.
-//
-// What this build does not do yet, and so is not asserted - each is of the
-// step that brings it, which changes the lines that say so below:
-//
-//   - a quota is answered 501, not 503, below level 5, and 501 above it: the
-//     use case of PUT /buckets/{bucket}/quota is PLAN 8.3.3's. What is held
-//     here is that it is never taken below level 5, and never "unavailable"
-//     above it;
-//   - a bucket that was there before the upgrade has no usage record after
-//     it: nothing counts without being asked before the worker of PLAN 8.3.1.
-//     That the walk counts such a bucket to what it holds is proved on the
-//     state of the fixture (TestUpgradeFromSchema4,
-//     TestTheSchema4FixtureIsCountedToItsManifest) and on stores that stand
-//     in for the two releases (TestRollingUpgradeToSchema5).
+// level 5, and the counter of the node that leads counts every bucket that
+// was there before, by nobody's asking (ADR-0023, "Rollback"): its walk is an
+// entry of schema 5, so the state says 5 from then on, without a bucket being
+// created or anything being written. Every node answers the usage of those
+// buckets as exact, of exactly what was written into them, and the state of
+// a member holds their records. The first bucket that is created at level 5
+// is counted from its creation, through whichever node its changes come; a
+// quota is taken, read back through every node, and removed. The state of
+// every member says 5 and holds the usage records of every bucket - of
+// before and of level 5 - exact and the same bytes on every member, also
+// after a change of leader, under which a second bucket is counted like the
+// first; and everything that was written at level 4 is still the bytes it
+// was.
 func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 	old := rollingFrom(t, schema4Commit)
 	// Not beside the others: one cluster a test file, and every step of
@@ -166,6 +164,8 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 		})
 	}
 
+	// want is what each bucket holds, as its usage record counts it.
+	want := map[string]bucket.UsageTotals{}
 	var written []schema5Written
 	put := func(id, bucketName, key string, size int) []byte {
 		t.Helper()
@@ -224,26 +224,74 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 			t.Fatalf("CompleteMultipartUpload through %s at level 4: %v", id, err)
 		}
 		written = append(written, schema5Written{bucket: name, key: "multi", sum: sumOf(reel), size: len(reel)})
+		// Where versions are not kept: k and multi, and nothing of gone.
+		const held = 100_000 + 70_000
+		want[name] = bucket.UsageTotals{Objects: 2, CurrentBytes: held, Versions: 2, StoredBytes: held}
 	}
-	// quota asks a node of this release to give a bucket a quota, and
-	// returns the status of the answer.
-	quota := func(id, name string) int {
+	// quota asks a node of this release to give a bucket a quota of
+	// schema5Quota bytes, and returns the answer.
+	quota := func(id, name string) (int, []byte) {
 		t.Helper()
-		status, _, body, err := gridCall(ctx, c, id, root, http.MethodPut, "/buckets/"+name+"/quota", map[string]any{"quota_bytes": 1 << 30})
+		status, _, body, err := gridCall(ctx, c, id, root, http.MethodPut, "/buckets/"+name+"/quota", map[string]any{"quota_bytes": schema5Quota})
 		if err != nil {
 			t.Fatalf("PUT the quota of %s through %s: %v", name, id, err)
 		}
-		if status >= 200 && status < 300 {
-			t.Errorf("PUT the quota of %s through %s = %d %s", name, id, status, body)
-		}
-		return status
+		return status, body
 	}
-	// notTaken says that a quota is not taken below level 5: 503 once the
-	// use case is there (PLAN 8.3.3), 501 until then.
+	// notTaken says that a quota is not taken below level 5: the use case
+	// refuses it as "unavailable", since its entry is of schema 5.
 	notTaken := func(id, name string) {
 		t.Helper()
-		if status := quota(id, name); status != http.StatusNotImplemented && status != http.StatusServiceUnavailable {
-			t.Errorf("at level 4, PUT the quota of %s through %s = %d; want 503, or 501 while the use case is not written", name, id, status)
+		if status, body := quota(id, name); status != http.StatusServiceUnavailable {
+			t.Errorf("at level 4, PUT the quota of %s through %s = %d %s; want 503", name, id, status, body)
+		}
+	}
+	// usageThrough asks a node for the usage of a bucket, and returns its
+	// figures and whether they are the exact count of the bucket's record.
+	usageThrough := func(id, name string) (bucket.UsageTotals, bool, error) {
+		status, _, body, err := gridCall(ctx, c, id, root, http.MethodGet, "/buckets/"+name+"/usage", nil)
+		if err != nil {
+			return bucket.UsageTotals{}, false, err
+		}
+		if status != http.StatusOK {
+			return bucket.UsageTotals{}, false, fmt.Errorf("the usage of %s through %s = %d %s", name, id, status, body)
+		}
+		var shown schema5Shown
+		if err := json.Unmarshal(body, &shown); err != nil {
+			return bucket.UsageTotals{}, false, fmt.Errorf("the usage of %s through %s, %s: %w", name, id, body, err)
+		}
+		if !shown.Exact {
+			return bucket.UsageTotals{}, false, nil
+		}
+		if !shown.Complete || shown.Versions == nil || shown.StoredBytes == nil || shown.UploadBytes == nil {
+			return bucket.UsageTotals{}, false, fmt.Errorf("the usage of %s through %s is exact and not complete, or without the figures of the record: %s", name, id, body)
+		}
+		return bucket.UsageTotals{
+			Objects: shown.ObjectCount, CurrentBytes: shown.TotalSize, Versions: *shown.Versions, StoredBytes: *shown.StoredBytes, UploadBytes: *shown.UploadBytes,
+		}, true, nil
+	}
+	// exact waits until every node answers the usage of every bucket named
+	// as exact, and says of each answer that it is what the bucket holds:
+	// the same figures on every node.
+	exact := func(when string, names ...string) {
+		t.Helper()
+		c.Eventually(fmt.Sprintf("%s: every node to answer the usage of %v as exact", when, names), 2*time.Minute, func() bool {
+			for _, id := range nodes {
+				for _, name := range names {
+					if _, counted, err := usageThrough(id, name); err != nil || !counted {
+						return false
+					}
+				}
+			}
+			return true
+		})
+		for _, id := range nodes {
+			for _, name := range names {
+				got, counted, err := usageThrough(id, name)
+				if err != nil || !counted || got != want[name] {
+					t.Errorf("%s: the usage of %s through %s = exact %v, %+v (%v); want exact, %+v", when, name, id, counted, got, err, want[name])
+				}
+			}
 		}
 	}
 	// below says of a state database that it is one the release of schema 4
@@ -256,6 +304,31 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 		for _, name := range schema5Only() {
 			if slices.Contains(state.Buckets, name) {
 				t.Errorf("%s: the state of %s holds %q, which only schema 5 makes", when, id, name)
+			}
+		}
+	}
+
+	// holds says of the state of a stopped member that it says schema 5
+	// and holds the usage records of exactly the buckets named, each exact,
+	// not being counted, and of the totals wanted.
+	holds := func(when, id string, member schema5State, counted ...string) {
+		t.Helper()
+		// A walk and a bucket are entries of schema 5 at any level from 5
+		// on; only the revocation of a node writes schema 6 (ADR-0030).
+		if member.Schema != 5 {
+			t.Errorf("%s: the state of %s says schema %d, want 5", when, id, member.Schema)
+		}
+		if got := slices.Sorted(maps.Keys(member.Usage)); !slices.Equal(got, slices.Sorted(slices.Values(counted))) {
+			t.Errorf("%s: the state of %s holds the usage records of %v; want those of %v", when, id, got, counted)
+		}
+		for _, name := range counted {
+			usage, err := bucket.ParseUsage([]byte(member.Usage[name]))
+			if err != nil {
+				t.Errorf("%s: the usage record of %s on %s: %v (%s)", when, name, id, err, member.Usage[name])
+				continue
+			}
+			if !usage.Exact || usage.Walking() || usage.UsageTotals != want[name] {
+				t.Errorf("%s: on %s the bucket %s holds exact = %v, being counted = %v, %+v; want %+v", when, id, name, usage.Exact, usage.Walking(), usage.UsageTotals, want[name])
 			}
 		}
 	}
@@ -303,27 +376,29 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 
 	// Every member has registered that it knows schema 5: the deployment is
 	// at level 5, as each node says of itself - and each must have seen it
-	// before it is asked to write, or it writes as at level 4. Nothing of
-	// schema 5 was written: registering is no entry of it, and this build
-	// counts nothing without being asked (PLAN 8.3.1).
+	// before it is asked to write, or it writes as at level 4. Registering
+	// is no entry of schema 5; the walk of the counter of the node that
+	// leads is, and it counts every bucket that was there before without
+	// anybody asking - nothing is written here until every node answers
+	// their usage as exact, and of what was written into them.
 	for _, id := range nodes {
 		level(id, mine)
 	}
-	readBack("at level 5, before anything of schema 5", "node1")
+	readBack("at level 5, as the buckets of before are counted", "node1")
+	exact("at level 5, counted by the leader of its own accord", created...)
 	answering("node4")
 	c.Stop("node4")
-	below("at level 5, before the first entry of schema 5", "node4", schema5MemberOf(t, c.MetaFile("node4", "state.db")))
+	holds("at level 5, before anything was written", "node4", schema5MemberOf(t, c.MetaFile("node4", "state.db")), created...)
 	c.Restart("node4")
 	answering("node4")
 	level("node4", mine)
 
-	// The first bucket that is created is the first entry of schema 5: it
-	// is counted from the start, through whichever node its changes come.
+	// The first bucket that is created at level 5 is counted from its
+	// creation, through whichever node its changes come.
 	const first, second = "level-five", "level-five-after"
 	if _, err := c.S3("node1").CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(first)}); err != nil {
 		t.Fatalf("CreateBucket through node1 at level 5: %v", err)
 	}
-	want := map[string]bucket.UsageTotals{}
 	put("node2", first, "a", 100_000)
 	if err := c.Put(ctx, "node3", first, "b", []byte("soon gone")); err != nil {
 		t.Fatalf("Put through node3 at level 5: %v", err)
@@ -341,13 +416,41 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 		t.Fatalf("UploadPart through node2 at level 5: %v", err)
 	}
 	want[first] = bucket.UsageTotals{Objects: 1, CurrentBytes: 100_000, Versions: 1, StoredBytes: 100_000, UploadBytes: 70_000}
-	// The cluster is at level 5: whatever a quota is answered with, it is
-	// not "unavailable". (501 until the use case is written, PLAN 8.3.3.)
-	if status := quota("node4", first); status == http.StatusServiceUnavailable {
-		t.Errorf("at level 5, PUT the quota of %s = %d", first, status)
+	exact("after the first bucket of level 5", first)
+	// The cluster is at level 5: a quota is taken, through a node that does
+	// not lead, and every node reads it back with what counts against it -
+	// the stored versions and the parts of the upload in progress; removed,
+	// no node reads one.
+	if status, body := quota("node4", first); status != http.StatusOK {
+		t.Fatalf("at level 5, PUT the quota of %s through node4 = %d %s; want 200", first, status, body)
 	}
+	quotaRead := func(when string, quotaBytes *int64) {
+		t.Helper()
+		used := want[first].Used()
+		c.Eventually(fmt.Sprintf("%s: every node to read the quota of %s", when, first), 2*time.Minute, func() bool {
+			for _, id := range nodes {
+				status, _, body, err := gridCall(ctx, c, id, root, http.MethodGet, "/buckets/"+first+"/quota", nil)
+				var got struct {
+					QuotaBytes *int64 `json:"quota_bytes"`
+					UsedBytes  int64  `json:"used_bytes"`
+					Exact      bool   `json:"exact"`
+				}
+				if err != nil || status != http.StatusOK || json.Unmarshal(body, &got) != nil || !got.Exact || got.UsedBytes != used ||
+					(got.QuotaBytes == nil) != (quotaBytes == nil) || (quotaBytes != nil && *got.QuotaBytes != *quotaBytes) {
+					return false
+				}
+			}
+			return true
+		})
+	}
+	set := schema5Quota
+	quotaRead("after the quota was set", &set)
+	if status, _, body, err := gridCall(ctx, c, "node3", root, http.MethodDelete, "/buckets/"+first+"/quota", nil); err != nil || status != http.StatusNoContent {
+		t.Fatalf("at level 5, DELETE the quota of %s through node3 = %d %s (%v); want 204", first, status, body, err)
+	}
+	quotaRead("after the quota was removed", nil)
 	for _, id := range nodes {
-		readBack("after the first entry of schema 5", id)
+		readBack("after the first bucket of level 5", id)
 	}
 
 	// leading waits until the metadata group has a leader and returns it.
@@ -371,9 +474,8 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 		return schema5MemberOf(t, c.MetaFile(id, "state.db"))
 	}
 	// alike says of the members that their states say schema 5 and hold
-	// the usage records of exactly the buckets made at level 5 - each exact,
-	// of the totals wanted, and the same bytes on every member - and none of
-	// a bucket that was there before.
+	// the usage records of exactly the buckets named (holds) - every bucket,
+	// of before and of level 5 - and the same bytes on every member.
 	alike := func(when string, members map[string]schema5State, counted ...string) {
 		t.Helper()
 		reference := members[nodes[0]]
@@ -382,27 +484,9 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 			if !read {
 				t.Fatalf("%s: the state of %s was not read", when, id)
 			}
-			// A bucket is an entry of schema 5 at any level from 5 on;
-			// only the revocation of a node writes schema 6 (ADR-0030).
-			if member.Schema != 5 {
-				t.Errorf("%s: the state of %s says schema %d, want 5", when, id, member.Schema)
-			}
-			if got := slices.Sorted(maps.Keys(member.Usage)); !slices.Equal(got, slices.Sorted(slices.Values(counted))) {
-				t.Errorf("%s: the state of %s holds the usage records of %v; want those of %v, the buckets made at level 5, and of no bucket of before (%v)",
-					when, id, got, counted, created)
-			}
+			holds(when, id, member, counted...)
 			if !maps.Equal(member.Usage, reference.Usage) {
 				t.Errorf("%s: bucketusage on %s:\n%v\non %s:\n%v", when, id, member.Usage, nodes[0], reference.Usage)
-			}
-			for _, name := range counted {
-				usage, err := bucket.ParseUsage([]byte(member.Usage[name]))
-				if err != nil {
-					t.Errorf("%s: the usage record of %s on %s: %v (%s)", when, name, id, err, member.Usage[name])
-					continue
-				}
-				if !usage.Exact || usage.Walking() || usage.UsageTotals != want[name] {
-					t.Errorf("%s: on %s the bucket %s holds exact = %v, %+v; want %+v", when, id, name, usage.Exact, usage.UsageTotals, want[name])
-				}
 			}
 		}
 	}
@@ -425,7 +509,7 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 			c.Restart(id)
 		}
 	}
-	alike("at level 5", members, first)
+	alike("at level 5", members, append(slices.Clone(created), first)...)
 
 	// Another node leads. Through the node that never does: a second
 	// bucket, counted like the first, and an object more in the first. Each
@@ -459,7 +543,7 @@ func TestRollingUpgradeFromSchema4ToSchema5(t *testing.T) {
 		members[id] = stopped(id)
 		c.Restart(id)
 	}
-	alike("after a change of leader", members, first, second)
+	alike("after a change of leader", members, append(slices.Clone(created), first, second)...)
 	// With every member stopped and started once more, everything that was
 	// written - at level 4, during the upgrade and at level 5 - is the bytes
 	// it was, through every node.

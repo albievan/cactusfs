@@ -734,6 +734,29 @@ With stores that stand in for the two releases the upgrade is
 form below schema 5 is answered "unavailable" with nothing logged, through a node of
 either release.
 
+**As changed at PLAN 8.3.3 (2026-11-15).** With the counter wired into the node
+(`app.UsageCounter`, run in `startBackground`, leader only), the steps of
+`TestUpgradeFromSchema4` that said "the state says 4" after the deployment was opened,
+read and written to cannot hold, and are not meant to: a node that runs alone is at
+level 5 from its first start, its counter proposes a `bucket.usage.walk` for every
+bucket of the fixture at its first look, and the state is of schema 5 within seconds,
+by nobody's doing - the rule of "Rollback" below, as designed. The test now says so:
+the state of the copy is of schema 4 before any node opens it; once the node has read
+everything the manifest lists, the management API answers every bucket's usage (`GET
+/api/v1/buckets/{bucket}/usage`, polled at most two minutes) as `exact` and of exactly
+the manifest's figures, `cactusfs_bucket_usage_drift_total` is 0, and the stopped
+state is of schema 5 with the records of exactly the fixture's buckets. A put, a
+delete, a part and an abort in a bucket of the fixture move its record by exactly
+what they are (through the API after each, and in the stored record); the bucket this
+binary creates is exact from its creation; `POST .../usage/recount` (202) of every
+bucket finds no drift - each bucket holds fewer records than one entry of the walk
+(`app.UsageWalkLimit`), so the recount ends in the entry the request proposes, and
+the stored records are exact and not being counted afterwards; the steps of the put,
+the marker, the part and the abort and of the restart are as before. The walk through
+the metadata store in entries of fifty records is gone from this test:
+`TestTheSchema4FixtureIsCountedToItsManifest` makes it, and a recount in as many
+entries, on a copy of the same state.
+
 ### Rollback
 
 Possible until the first schema-5 entry is applied; from then on the release before
@@ -770,8 +793,9 @@ in a state the release of schema 4 opens - for as long as that holds - and a dep
 that creates one has lost its way back with that entry, whether the bucket was made or
 the entry refused (a bucket of a name that exists). Registering is no such entry: with
 every member at level 5 and nothing created, every state still says 4
-(`TestRollingUpgradeToSchema5`, `TestUpgradeFromSchema4`). From PLAN 8.3.1 on the text
-above holds as written: within seconds of the last registration.
+(`TestRollingUpgradeToSchema5`). From PLAN 8.3.3 on - the worker of PLAN 8.3.1, wired into
+the node at 8.3.3 - the text above holds as written: within seconds of the last
+registration (`TestUpgradeFromSchema4`).
 
 **From level 5 the way back is not walked a node at a time** (ruled at the review of
 PLAN 8.0.10 and 8.0.11, 2026-10-13). While a member of the release before remains, the

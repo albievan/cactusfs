@@ -1850,8 +1850,9 @@ func TestUsageIsARecountThroughAnyHistory(t *testing.T) {
 }
 
 // TestAStoreShowsWhatItsStateMachineCounted: the clamps and the drift a
-// node's state machine has counted are what its metrics read
-// (cactusfs_bucket_usage_clamped_total, cactusfs_bucket_usage_drift_total).
+// node's state machine has counted are what its observation shows. Neither
+// is a metric: cactusfs_bucket_usage_drift_total counts the drift once, on
+// the node whose entry ended the recount (PLAN 8.3.3).
 func TestAStoreShowsWhatItsStateMachineCounted(t *testing.T) {
 	t.Parallel()
 	store := openStore(t, t.TempDir())

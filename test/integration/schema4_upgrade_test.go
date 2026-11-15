@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -103,17 +104,47 @@ func schema4StateOf(t *testing.T, metaDir string) schema4State {
 	return state
 }
 
+// schema3Totals gives what a bucket of the schema-3 fixture holds as a usage
+// record counts it (ADR-0023, "What is counted"): the current versions and
+// their bytes, every version - a delete marker is one of no bytes - and its
+// bytes, and the bytes of the parts of the uploads in progress.
+func schema3Totals(b *schema3Bucket) bucket.UsageTotals {
+	u := bucket.UsageTotals{Versions: int64(len(b.Objects) + len(b.Markers))}
+	for _, o := range b.Objects {
+		u.StoredBytes += o.Size
+		if o.Latest {
+			u.Objects++
+			u.CurrentBytes += o.Size
+		}
+	}
+	for _, upload := range b.Uploads {
+		for _, p := range upload.Parts {
+			u.UploadBytes += p.Size
+		}
+	}
+	return u
+}
+
 // TestUpgradeFromSchema3ToSchema4: the schema-3 deployment that the binary
 // of commit d2d6861 wrote is opened by this binary. Migration: none
-// (ADR-0019). The state opens as it is, everything the manifest lists is
-// there, and for as long as nothing is uploaded and no download is handed in
-// it stays a state of schema 3, which the release that wrote it still opens.
-// The first upload makes it a state of schema 4: the bucket that was
-// uploaded to has a record of its latest use, and no other has one. A bucket
-// created from then on has its creator; those of the fixture have none. All
-// of it is there after a restart, beside everything the fixture held. (That
-// bucket, made by a node of this release on its own, is an entry of schema 5:
-// the state says 5 from there on, ADR-0023.)
+// (ADR-0019, ADR-0023). The state opens as it is, and everything the
+// manifest lists is there. Before any node of this tree opens it, it is the
+// state of schema 3 the manifest says; once one has, it is not: a node that
+// runs alone is at the level of this release from its first start, and its
+// counter (app.UsageCounter) counts the usage of every bucket of the
+// fixture by itself, with the walk of ADR-0023 - an entry of schema 5. So
+// the state says 5 within seconds of the first start, by nobody's doing, and
+// there the way back to the release that wrote it ends (ADR-0023,
+// "Rollback"). The node answers the usage of every bucket as exact and of
+// exactly what the manifest lists; the state holds their records, and still
+// nothing else that schema 3 did not keep: no record of a bucket's latest
+// use, no creator.
+//
+// The first upload gives the bucket that was uploaded to a record of its
+// latest use, and no other has one; it moves that bucket's usage by exactly
+// what it is. A bucket created from then on has its creator, and is counted
+// from its creation; those of the fixture have no creator. All of it is there
+// after a restart, beside everything the fixture held.
 func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	// Not beside the others: this test starts one node as a process and is
 	// done in seconds when it has the machine, and it ran out of its three
@@ -135,20 +166,29 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 		t.Fatalf("the manifest of the fixture: %d buckets, %v", len(contents.Buckets), err)
 	}
 	var names []string
+	want := map[string]bucket.UsageTotals{}
+	var sum bucket.UsageTotals
 	for _, b := range contents.Buckets {
 		names = append(names, b.Name)
+		want[b.Name] = schema3Totals(b)
+		sum = schema5Moved(sum, want[b.Name])
 	}
-	// untouched says of a state that it is the one the fixture is: of
-	// schema 3, with the buckets of the state its manifest names and
-	// nothing of what schema 4 keeps.
-	untouched := func(when string) {
+	// Guards against proving less than is said: versions that are not
+	// current, a delete marker, and parts of an upload in progress.
+	if sum.Objects == 0 || sum.Versions <= sum.Objects || sum.StoredBytes <= sum.CurrentBytes || sum.UploadBytes == 0 {
+		t.Fatalf("the buckets of the fixture together hold %+v: the test proves less than it says", sum)
+	}
+	// untouched says of a state that it is of the schema given, with the
+	// buckets of the state the fixture's manifest names and nothing else of
+	// what schema 4 keeps: no place for records of buckets' use, no creator.
+	untouched := func(when string, schema uint64) {
 		t.Helper()
-		if schema, buckets := stateOf(t, meta); schema != 3 || !slices.Equal(buckets, contents.StateBuckets) {
-			t.Fatalf("%s: schema %d, buckets %v; want 3 and %v", when, schema, buckets, contents.StateBuckets)
+		if got, buckets := stateOf(t, meta); got != schema || !slices.Equal(buckets, contents.StateBuckets) {
+			t.Fatalf("%s: schema %d, buckets %v; want %d and %v", when, got, buckets, schema, contents.StateBuckets)
 		}
 		state := schema4StateOf(t, meta)
-		if state.Schema != 3 || state.Kept || len(state.Creators) != len(names) {
-			t.Fatalf("%s: schema %d, a place for records of buckets' use: %t, %d buckets; want a state of schema 3 without", when, state.Schema, state.Kept, len(state.Creators))
+		if state.Schema != schema || state.Kept || len(state.Creators) != len(names) {
+			t.Fatalf("%s: schema %d, a place for records of buckets' use: %t, %d buckets; want a state of schema %d without", when, state.Schema, state.Kept, len(state.Creators), schema)
 		}
 		for name, by := range state.Creators {
 			if by != "" {
@@ -156,7 +196,30 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 			}
 		}
 	}
-	untouched("the fixture")
+	// counted says of the state, while no node has it open, that it holds
+	// the usage records of exactly the buckets named, each exact, not being
+	// counted, and of the totals wanted.
+	counted := func(when string, of ...string) {
+		t.Helper()
+		state := schema5StateOf(t, meta)
+		if got := slices.Sorted(maps.Keys(state.Usage)); !slices.Equal(got, slices.Sorted(slices.Values(of))) {
+			t.Fatalf("%s: the state holds the usage records of %v; want those of %v", when, got, of)
+		}
+		for _, name := range of {
+			usage, err := bucket.ParseUsage([]byte(state.Usage[name]))
+			if err != nil {
+				t.Fatalf("%s: the stored usage record of %s: %v (%s)", when, name, err, state.Usage[name])
+			}
+			if !usage.Exact || usage.Walking() || usage.UsageTotals != want[name] {
+				t.Errorf("%s: %s holds exact = %v, being counted = %v, %+v; want %+v", when, name, usage.Exact, usage.Walking(), usage.UsageTotals, want[name])
+			}
+		}
+	}
+	// Before any node of this tree has opened it.
+	untouched("the fixture", 3)
+	if state := schema5StateOf(t, meta); len(state.Usage) != 0 {
+		t.Fatalf("the fixture holds %d usage records", len(state.Usage))
+	}
 
 	// Opened and read by this binary: everything the manifest lists is
 	// there - asked about without downloading, which is counted and handed
@@ -191,8 +254,14 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 			}
 		}
 	}
+	// Nobody asked for anything to be counted: the node counts every
+	// bucket of the fixture by itself, to exactly what the manifest lists.
+	schema5Counted(ctx, t, node, want, "counted by the node of its own accord", names...)
 	node.srv.stop(t)
-	untouched("after this binary opened and read the deployment")
+	// The walk is of schema 5: the state is, holds the records of the
+	// buckets that were there, and nothing else schema 4 would keep.
+	untouched("after this binary opened and read the deployment", 5)
+	counted("after this binary opened and read the deployment", names...)
 
 	// The first upload, with the key of the fixture's user, and a download
 	// of it. The node hands the download in when it stops.
@@ -211,6 +280,9 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	if got, err := schema3Get(ctx, writer, first.Name, added); err != nil || sumOf(got) != added.SHA256 {
 		t.Fatalf("GetObject with the key of the fixture's user: %d bytes, %v", len(got), err)
 	}
+	// Where versions are not kept, a put of a new key adds an object.
+	want[first.Name] = schema5Moved(want[first.Name], bucket.UsageTotals{Objects: 1, CurrentBytes: added.Size, Versions: 1, StoredBytes: added.Size})
+	schema5Counted(ctx, t, node, want, "after the first upload", first.Name)
 	node.srv.stop(t)
 
 	// used says of a state that it is of the schema given and holds, of the
@@ -243,7 +315,9 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 		}
 		return state
 	}
-	state := used("after the first upload", 4, true)
+	// The record of the upload is of schema 4; the state is of schema 5
+	// already, by the walk, and stays so.
+	state := used("after the first upload", 5, true)
 	if len(state.Activity) != 1 {
 		t.Errorf("after the first upload there are records of %d buckets, want only that of %s: %+v", len(state.Activity), first.Name, state.Activity)
 	}
@@ -252,9 +326,12 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 		t.Errorf("after the first upload the state holds %v of what schema 3 keeps, want %v", buckets, contents.StateBuckets)
 	}
 
+	counted("after the first upload", names...)
+
 	// Who creates a bucket is recorded from now on. The use cases and the
 	// management API say it in a later step; here the metadata store of this
-	// tree is asked directly, on the deployment's own state.
+	// tree is asked directly, on the deployment's own state. The bucket is
+	// counted from its creation: it holds nothing.
 	const made = "made-at-schema-four"
 	store, err := raftmeta.Open(ctx, raftmeta.Config{Dir: meta, Logger: slog.New(slog.DiscardHandler), Entropy: rand.Reader})
 	if err != nil {
@@ -305,14 +382,18 @@ func TestUpgradeFromSchema3ToSchema4(t *testing.T) {
 	if err != nil || len(listed.Buckets) != len(names)+1 {
 		t.Fatalf("ListBuckets after a restart = %d buckets, %v; want %d", len(listed.Buckets), err, len(names)+1)
 	}
+	want[made] = bucket.UsageTotals{}
+	all := append(slices.Clone(names), made)
+	schema5Counted(ctx, t, node, want, "after a restart", all...)
 	node.srv.stop(t)
 
 	// (Root has read more of the first bucket since than a record names:
 	// the user's download is no longer among the latest three.) The state is
-	// of schema 5 by now: the bucket that was created above, by a store on
-	// its own, is an entry of schema 5 (ADR-0023) - what becomes of a
-	// deployment of schema 4 then is TestUpgradeFromSchema4.
+	// of schema 5 since the node's first walk (ADR-0023); what becomes of a
+	// deployment of schema 4 is TestUpgradeFromSchema4. Every bucket has
+	// its record, of exactly what it holds.
 	state = used("after a restart", 5, false)
+	counted("after a restart", all...)
 	if record := state.Activity[first.Name]; len(record.Downloads) != bucket.MaxRecentDownloads || record.Downloads[0].By != schema3Root {
 		t.Errorf("after a restart the downloads of %s = %+v; want the latest %d, by %s", first.Name, record.Downloads, bucket.MaxRecentDownloads, schema3Root)
 	}

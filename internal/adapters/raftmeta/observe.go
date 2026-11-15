@@ -25,11 +25,16 @@ type Observation struct {
 	StateSchema uint64
 	// UsageClamped is how many changes this node has applied, since it
 	// started, that held a count of a bucket's usage record at one of its
-	// bounds - each began a recount (ADR-0023); it is what the counter
-	// cactusfs_bucket_usage_clamped_total shows. UsageDrift is how many
-	// recounts it has finished that found other totals than were kept:
-	// cactusfs_bucket_usage_drift_total. Every member counts for itself,
-	// and neither is in the replicated state.
+	// bounds - each began a recount (ADR-0023). UsageDrift is how many
+	// recounts it has applied that found other totals than were kept. Every
+	// member counts for itself, as it applies, and neither is in the
+	// replicated state.
+	//
+	// Neither is a metric (PLAN 8.3.3): cactusfs_bucket_usage_drift_total
+	// counts app.UsageCounterConfig.OnDrift, once on the node whose entry
+	// ended the recount, so that a sum over the nodes is the number of
+	// drifts - a sum of UsageDrift would be that times the members.
+	// cactusfs_bucket_usage_clamped_total is not exposed yet (PLAN 8.3.6).
 	UsageClamped, UsageDrift uint64
 }
 
