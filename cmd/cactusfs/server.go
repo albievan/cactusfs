@@ -207,7 +207,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
 			Settings: n.settings, SubBuckets: n.subBuckets, Targets: n.targets, TagDefinitions: n.tagDefinitions, Updates: n.updates,
-			Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
+			Quotas: n.quotas, Counter: n.counter, Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
 			Build: build,
 		})))

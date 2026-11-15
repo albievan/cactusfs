@@ -533,3 +533,88 @@ func (q *QuotaService) refused() {
 		q.onRefusal()
 	}
 }
+
+// QuotaSummary is how the buckets of the deployment stand against their
+// quotas, as counts with no bucket named (ADR-0024: no metric carries a
+// bucket's name). Each count of a quota includes the next: a full bucket is
+// over 90 % too, and both have a quota.
+type QuotaSummary struct {
+	// Set is the number of buckets with a quota.
+	Set int
+	// Over90 is the number of those that hold 90 % of their quota or more.
+	Over90 int
+	// Full is the number of those that hold their quota or more: one more
+	// byte would be refused.
+	Full int
+	// Counting is the number of buckets whose usage is being counted: for
+	// the first time, or again by a recount.
+	Counting int
+}
+
+// Summary returns how the buckets stand against their quotas, from this
+// node's copy of the usage records (cactusfs_buckets_quota,
+// cactusfs_bucket_usage_counting). It names no bucket and authorizes
+// nothing: it is what the node's metrics show, to whoever may read those.
+// The figures are the same on every node that is current.
+//
+// A bucket deleted between the list of buckets and the read of the records
+// has the zero record, and is counted once among those being counted. The
+// error wraps domain.ErrUnavailable until every member of the metadata group
+// counts usage: below that there is nothing to summarise, and a summary of
+// zero records would say that every bucket is being counted.
+func (q *QuotaService) Summary(ctx context.Context) (QuotaSummary, error) {
+	if err := q.counts(ctx); err != nil {
+		return QuotaSummary{}, fmt.Errorf("quota.Summary: %w", err)
+	}
+	list, err := q.buckets.ListBuckets(ctx)
+	if err != nil {
+		return QuotaSummary{}, fmt.Errorf("quota.Summary: %w", err)
+	}
+	names := make([]string, len(list))
+	for i, b := range list {
+		names[i] = b.Name
+	}
+	var s QuotaSummary
+	for chunk := range slices.Chunk(names, ports.MaxBucketUsages) {
+		// A caller that has given up is not read for any further: each
+		// call is one read transaction of the store, which does not look
+		// at ctx while it runs.
+		if err := ctx.Err(); err != nil {
+			return QuotaSummary{}, fmt.Errorf("quota.Summary: %w", err)
+		}
+		records, err := q.usage.BucketUsages(ctx, chunk)
+		if err != nil {
+			return QuotaSummary{}, fmt.Errorf("quota.Summary: %w", err)
+		}
+		for _, record := range records {
+			s.add(record)
+		}
+	}
+	return s, nil
+}
+
+// add counts one bucket's record.
+func (s *QuotaSummary) add(record ports.BucketUsage) {
+	if counting(record.Usage) {
+		s.Counting++
+	}
+	quota := record.QuotaBytes
+	if quota <= 0 {
+		return
+	}
+	s.Set++
+	// Judged by what the store judges by; while a recount runs the totals
+	// kept go on being kept and are what a write is judged by.
+	if !record.Usage.Exact {
+		return
+	}
+	used := record.Usage.Used()
+	// 90 % of the quota, rounded up, without a product that could wrap:
+	// a quota is at most 2^62.
+	if used >= quota-quota/10 {
+		s.Over90++
+	}
+	if used >= quota {
+		s.Full++
+	}
+}

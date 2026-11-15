@@ -734,3 +734,43 @@ func (s *tagDefinitionStore) ListTagDefinitions(ctx context.Context) ([]tagging.
 	done(err)
 	return definitions, err
 }
+
+// InstrumentBucketUsage returns next wrapped so that every call is traced
+// and counted (ADR-0023, ADR-0024). A bucket is neither a label nor an
+// attribute: its name is chosen by a tenant.
+func (t *Telemetry) InstrumentBucketUsage(next ports.BucketUsageStore) ports.BucketUsageStore {
+	return &bucketUsageStore{t: t, next: next}
+}
+
+type bucketUsageStore struct {
+	t    *Telemetry
+	next ports.BucketUsageStore
+}
+
+const portBucketUsage = "bucket_usage"
+
+func (*bucketUsageStore) instrumented() {}
+
+// BucketUsages implements ports.BucketUsageStore.
+func (s *bucketUsageStore) BucketUsages(ctx context.Context, names []string) ([]ports.BucketUsage, error) {
+	ctx, done := s.t.call(ctx, portBucketUsage, "BucketUsages")
+	usages, err := s.next.BucketUsages(ctx, names)
+	done(err)
+	return usages, err
+}
+
+// WalkBucketUsage implements ports.BucketUsageStore.
+func (s *bucketUsageStore) WalkBucketUsage(ctx context.Context, name string, limit int, restart bool) (ports.UsageWalk, error) {
+	ctx, done := s.t.call(ctx, portBucketUsage, "WalkBucketUsage")
+	walk, err := s.next.WalkBucketUsage(ctx, name, limit, restart)
+	done(err)
+	return walk, err
+}
+
+// SetBucketQuota implements ports.BucketUsageStore.
+func (s *bucketUsageStore) SetBucketQuota(ctx context.Context, name string, quotaBytes int64, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portBucketUsage, "SetBucketQuota")
+	err := s.next.SetBucketQuota(ctx, name, quotaBytes, record)
+	done(err)
+	return err
+}

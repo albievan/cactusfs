@@ -148,12 +148,44 @@ type ReadinessSource interface {
 	Ready(ctx context.Context) bool
 }
 
+// QuotaState is how the buckets of the deployment stand against their
+// quotas, as the gauges show it (ADR-0024): counts, with no bucket named.
+// Each count of a quota includes the next.
+type QuotaState struct {
+	// Set is the number of buckets with a quota; Over90 of those that hold
+	// 90 % of it or more; Full of those that hold all of it or more.
+	Set, Over90, Full int
+	// Counting is the number of buckets whose usage is being counted.
+	Counting int
+}
+
+// QuotaSource says how the buckets stand against their quotas. It reports
+// false when it cannot say: while the cluster is below the metadata level
+// that counts usage, or the buckets cannot be read.
+type QuotaSource interface {
+	QuotaState(ctx context.Context) (QuotaState, bool)
+}
+
+// The values of the state label of cactusfs_buckets_quota.
+const (
+	quotaStateSet    = "set"
+	quotaStateOver90 = "over_90"
+	quotaStateFull   = "full"
+)
+
+// quotaAnswer is what a quota source said, and whether it could say.
+type quotaAnswer struct {
+	state QuotaState
+	known bool
+}
+
 // state is the collector of the gauges read at scrape time.
 type state struct {
 	raft        atomic.Pointer[RaftSource]
 	drives      atomic.Pointer[DriveSource]
 	certificate atomic.Pointer[CertificateSource]
 	readiness   atomic.Pointer[ReadinessSource]
+	quotas      atomic.Pointer[QuotaSource]
 	// tls holds, by use, the source of a certificate's gauges; the uses are
 	// those of tlsUses, and the map is not written after newState.
 	tls     map[string]*tlsObserved
@@ -164,6 +196,7 @@ type state struct {
 	drivesProbe      probe[[]DriveState]
 	certificateProbe probe[certificateAnswer]
 	readinessProbe   probe[bool]
+	quotasProbe      probe[quotaAnswer]
 
 	mu sync.Mutex
 	// known are the drives of the last answer of knownOf, the source that
@@ -176,6 +209,7 @@ type state struct {
 	driveOnline, driveFree, driveTotal     *prometheus.Desc
 	certificateNotAfter, ready             *prometheus.Desc
 	tlsNotAfter, tlsPending, tlsRefused    *prometheus.Desc
+	bucketsQuota, usageCounting            *prometheus.Desc
 }
 
 // tlsObserved is the source of one certificate's gauges, the probe it is
@@ -249,6 +283,11 @@ func newState(timeout time.Duration) *state {
 		tlsRefused: desc("cactusfs_tls_reload_refused_total",
 			"Contents of the certificate files that were refused as a replacement, by use and reason; one that stays on disk is counted once.",
 			"use", "reason"),
+		bucketsQuota: desc("cactusfs_buckets_quota",
+			"Buckets by how they stand against their quota: set (they have one), over_90 (they hold 90 % of it or more), full (they hold all of it or more); each includes the next. The same on every node.",
+			"state"),
+		usageCounting: desc("cactusfs_bucket_usage_counting",
+			"Buckets whose usage is being counted, for the first time or by a recount. The same on every node."),
 	}
 }
 
@@ -257,7 +296,7 @@ func (s *state) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		s.isLeader, s.term, s.applied, s.commit, s.peers, s.schemaLevel, s.schemaSupported, s.schema,
 		s.driveOnline, s.driveFree, s.driveTotal, s.certificateNotAfter, s.ready,
-		s.tlsNotAfter, s.tlsPending, s.tlsRefused,
+		s.tlsNotAfter, s.tlsPending, s.tlsRefused, s.bucketsQuota, s.usageCounting,
 	} {
 		ch <- d
 	}
@@ -290,11 +329,13 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, value, labels...)
 	}
 	raft, drives, certificate, readiness := s.raft.Load(), s.drives.Load(), s.certificate.Load(), s.readiness.Load()
+	quotas := s.quotas.Load()
 	var (
 		raftAsked        *question[raftAnswer]
 		drivesAsked      *question[[]DriveState]
 		certificateAsked *question[certificateAnswer]
 		readinessAsked   *question[bool]
+		quotasAsked      *question[quotaAnswer]
 	)
 	if raft != nil {
 		raftAsked = s.raftProbe.ask(raft, func() raftAnswer {
@@ -318,6 +359,16 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 			ctx, done := context.WithTimeout(context.Background(), s.timeout)
 			defer done()
 			return (*readiness).Ready(ctx)
+		})
+	}
+	if quotas != nil {
+		quotasAsked = s.quotasProbe.ask(quotas, func() quotaAnswer {
+			// As for readiness: the source is given as long as the scrape
+			// waits for it.
+			ctx, done := context.WithTimeout(context.Background(), s.timeout)
+			defer done()
+			q, known := (*quotas).QuotaState(ctx)
+			return quotaAnswer{state: q, known: known}
 		})
 	}
 	tlsSources, tlsAsked := map[string]*TLSSource{}, map[string]*question[TLSState]{}
@@ -360,6 +411,13 @@ func (s *state) Collect(ch chan<- prometheus.Metric) {
 	}
 	if ready, ok := readinessAsked.wait(expired, readiness); ok {
 		gauge(s.ready, flag(ready))
+	}
+	if answer, ok := quotasAsked.wait(expired, quotas); ok && answer.known {
+		q := answer.state
+		gauge(s.bucketsQuota, float64(q.Set), quotaStateSet)
+		gauge(s.bucketsQuota, float64(q.Over90), quotaStateOver90)
+		gauge(s.bucketsQuota, float64(q.Full), quotaStateFull)
+		gauge(s.usageCounting, float64(q.Counting))
 	}
 	for _, use := range tlsUses() {
 		source := tlsSources[use]
@@ -533,6 +591,16 @@ func (t *Telemetry) ObserveReadiness(source ReadinessSource) {
 		return
 	}
 	t.state.readiness.Store(&source)
+}
+
+// ObserveQuotas attaches the source of the gauges of quotas and of usage
+// being counted; nil detaches it.
+func (t *Telemetry) ObserveQuotas(source QuotaSource) {
+	if source == nil {
+		t.state.quotas.Store(nil)
+		return
+	}
+	t.state.quotas.Store(&source)
 }
 
 // ObserveTLS attaches the source of the gauges of one of the node's

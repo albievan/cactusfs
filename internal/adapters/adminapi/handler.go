@@ -179,7 +179,15 @@ type Config struct {
 	// Updates checks for releases and installs one (ADR-0029). It may be
 	// nil on a node that was not given the use case: its operations then
 	// answer 501.
-	Updates     *app.UpdateService
+	Updates *app.UpdateService
+	// Quotas reads, sets and removes the quotas of buckets (ADR-0024). It
+	// may be nil on a node that was not given the use case: its operations
+	// then answer 501.
+	Quotas *app.QuotaService
+	// Counter has the usage of a bucket counted again when asked
+	// (ADR-0023). It may be nil on a node that was not given the use case:
+	// the recount then answers 501.
+	Counter     *app.UsageCounter
 	Idempotency *app.IdempotencyService
 	Identities  Identities
 	Clock       ports.Clock

@@ -80,6 +80,8 @@ func observedTelemetry(t *testing.T) *telemetry.Telemetry {
 	tel.ObserveGC(app.GCStats{Shards: 1, Removed: 1})
 	tel.ObserveLifecycle(app.LifecycleStats{Expired: 1})
 	tel.ObserveAccessDropped(1)
+	tel.ObserveQuotaRefusal()
+	tel.ObserveUsageDrift()
 	tel.ObserveEvent(ctx, ports.Event{Type: "cactusfs.bucket.created.v1"})
 	kms, err := porttest.NewKMS("test:1")
 	if err != nil {
@@ -103,6 +105,7 @@ func observedTelemetry(t *testing.T) *telemetry.Telemetry {
 	tel.ObserveNodeCertificate(fixedCertificate{notAfter: time.Unix(1, 0), present: true})
 	tel.ObserveTLS(telemetry.TLSUseNode, fixedTLS{NotAfter: time.Unix(1, 0)})
 	tel.ObserveReadiness(readyWhen(true))
+	tel.ObserveQuotas(fixedQuotas{known: true})
 	return tel
 }
 

@@ -481,6 +481,10 @@ Prometheus client and are not listed.
 | `cactusfs_lifecycle_actions_total` | counter | `action` | what lifecycle rules did, by kind |
 | `cactusfs_object_access_dropped_total` | counter | - | reads not counted towards who read what |
 | `cactusfs_events_total` | counter | `type` | events derived from applied metadata entries |
+| `cactusfs_quota_refusals_total` | counter | - | writes this node refused for a bucket's quota (ADR-0024), by the pre-check before any shard was written or at commit; no bucket is named |
+| `cactusfs_buckets_quota` | gauge | `state` | buckets by how they stand against their quota: `set` (they have one), `over_90` (they hold 90 % of it or more), `full` (they hold all of it or more); each includes the next; read from the node's own copy of the usage records, so the same on every node that is current (aggregate with `max`); read again at most every 10 s; absent below metadata level 5 or when the node cannot read the buckets |
+| `cactusfs_bucket_usage_counting` | gauge | - | buckets whose usage is being counted, for the first time or by a recount (ADR-0023); like `cactusfs_buckets_quota`, the same on every node |
+| `cactusfs_bucket_usage_drift_total` | counter | - | recounts of a bucket's usage that found other totals than were kept, counted by the node that proposed the entry that ended them (a fault of whoever kept the record; ADR-0024) |
 | `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
 | `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
 | `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
@@ -489,7 +493,7 @@ Prometheus client and are not listed.
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
 `identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`, `release_source`,
-`release_verifier`, `upgrader`.
+`release_verifier`, `upgrader`, `bucket_usage`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.

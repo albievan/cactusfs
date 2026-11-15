@@ -37,12 +37,13 @@ import (
 //     they are in node.go, and so cross a boundary without a decorator:
 //     Leader: n.meta.Leader (the cluster and the settings service), Ready:
 //     n.meta.Check (the access recorder and the collector) and Active:
-//     n.meta.IsLeader (the scrubber and the lifecycle worker). All three
-//     answer from memory - Check after a look at the state machine, under
-//     its lock - and none has a context that a span could belong to but
-//     Check; what Check says is exposed as cactusfs_ready. A fourth is made
-//     of one: Level: metadataLevel(n.meta) (the settings service), over
-//     Store.Observe, which reads as Check does and is what the gauge
+//     n.meta.IsLeader (the scrubber, the lifecycle worker and the usage
+//     counter). All three answer from memory - Check after a look at the
+//     state machine, under its lock - and none has a context that a span
+//     could belong to but Check; what Check says is exposed as
+//     cactusfs_ready. A fourth is made of one: Level: metadataLevel(n.meta)
+//     (the settings and the quota services), over Store.Observe, which
+//     reads as Check does and is what the gauge
 //     cactusfs_metadata_schema_level shows. A function that did I/O would
 //     have to be a port, with a decorator, to be seen here;
 //   - what an adapter holds is the adapter's business (see ours): an
@@ -197,7 +198,7 @@ var wiredKinds = []string{
 	"ports.BucketActivityStore", "ports.ObjectAccessStore", "ports.ShardStore", "ports.KMS", "ports.IAMStore",
 	"ports.AuditLog", "ports.SessionStore", "ports.IdempotencyStore", "ports.PasswordHasher", "ports.IdentityProvider",
 	"ports.EventPublisher", "ports.ClusterView", "app.BucketPolicySource", "ports.TargetStore", "ports.SubBucketLister", "ports.SubBucketStore",
-	"ports.ReleaseVerifier", "ports.Upgrader",
+	"ports.ReleaseVerifier", "ports.Upgrader", "ports.BucketUsageStore",
 }
 
 // TestEveryPortIsWiredThroughItsDecorator: a node on its own, started as

@@ -110,8 +110,15 @@ type fixture struct {
 	// a test made it otherwise (newUpdatesFixture).
 	authz   *app.Authorizer
 	updates *app.UpdateService
-	seen    []adminapi.Observation
-	seenMu  sync.Mutex
+	// quotas and counter are the use cases of quotas and of the recount;
+	// refusals counts the writes refused for a quota, drifts the recounts
+	// that found other totals.
+	quotas   *app.QuotaService
+	counter  *app.UsageCounter
+	refusals atomic.Int32
+	drifts   atomic.Int32
+	seen     []adminapi.Observation
+	seenMu   sync.Mutex
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -180,10 +187,21 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Quotas, and the usage they are judged by, as a node has them: the
+	// level is the store's, refusals are counted, the counter counts.
+	f.quotas = app.NewQuotaService(app.QuotaServiceConfig{
+		Buckets: meta, Usage: meta, Authz: authz, Auditor: f.auditor,
+		Level:     func(context.Context) (int, error) { return meta.MetadataLevel() },
+		OnRefusal: func() { f.refusals.Add(1) },
+	})
+	f.counter = app.NewUsageCounter(app.UsageCounterConfig{
+		Buckets: meta, Usage: meta, Authz: authz, Auditor: f.auditor, Logger: logger,
+		OnDrift: func() { f.drifts.Add(1) },
+	})
 	objects, err := app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: porttest.NewCodec(), KMS: kms,
 		Authz: authz, Clock: f.clock, Entropy: rand.Reader, Logger: logger,
-		Access: f.access, AccessStore: meta, TagDefinitions: meta,
+		Access: f.access, AccessStore: meta, TagDefinitions: meta, Usage: meta, Quota: f.quotas,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +245,8 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	f.updates = updates(f)
 	config := adminapi.Config{
 		Updates:    f.updates,
+		Quotas:     f.quotas,
+		Counter:    f.counter,
 		Targets:    targets,
 		SubBuckets: app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
 		// The catalogue of tags carries its audit record to the trail, as
@@ -1553,7 +1573,7 @@ func TestSettingsOnANodeWithoutTheUseCase(t *testing.T) {
 	}
 }
 
-// TestOperationsThatAreNotWrittenYet: the operations of quotas, targets,
+// TestOperationsThatAreNotWrittenYet: the operations of target status,
 // notifications and replication are in the contract before their use cases
 // (PLAN 8.0.3). Until each is written it answers 501 as a problem, to a
 // caller it has authenticated - to any such caller: the authorizer is not
@@ -1565,13 +1585,9 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
-	// The two requests without a body say the media type all the same: the
+	// The request without a body says the media type all the same: the
 	// adapter takes no POST that does not, and the contract says so.
 	for _, c := range []call{
-		{method: "GET", path: "/buckets/some-bucket/quota"},
-		{method: "PUT", path: "/buckets/some-bucket/quota", body: map[string]any{"quota_bytes": 1}},
-		{method: "DELETE", path: "/buckets/some-bucket/quota"},
-		{method: "POST", path: "/buckets/some-bucket/usage/recount", headers: map[string]string{"Content-Type": "application/json"}},
 		{method: "GET", path: "/targets/hook/status"},
 		{method: "GET", path: "/buckets/some-bucket/notifications"},
 		{method: "PUT", path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},

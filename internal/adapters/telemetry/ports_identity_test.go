@@ -447,6 +447,7 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"IdentityProvider": tel.InstrumentIdentityProvider(fixedProvider{}), "Passwords": tel.InstrumentPasswords(fixedHasher{}),
 		"ClusterView": tel.InstrumentClusterView(fixedView{}), "LocalConfig": tel.InstrumentLocalConfig(mem),
 		"SubBuckets": tel.InstrumentSubBuckets(mem), "LocalSubBuckets": tel.InstrumentLocalSubBuckets(mem),
+		"BucketUsage":     tel.InstrumentBucketUsage(mem),
 		"NodeSettings":    tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
 		"ReleaseSource":   tel.InstrumentReleaseSource(porttest.NewReleaseSource(nil, nil)),
 		"ReleaseVerifier": tel.InstrumentReleaseVerifier(&porttest.ReleaseVerifier{}),

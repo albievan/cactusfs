@@ -72,6 +72,16 @@ type readyWhen bool
 
 func (r readyWhen) Ready(ctx context.Context) bool { return bool(r) && ctx.Err() == nil }
 
+// fixedQuotas says how the buckets stand, or that it cannot say.
+type fixedQuotas struct {
+	state telemetry.QuotaState
+	known bool
+}
+
+func (q fixedQuotas) QuotaState(context.Context) (telemetry.QuotaState, bool) {
+	return q.state, q.known
+}
+
 // The gauges that say how a node is, by name.
 var stateGauges = []string{
 	"cactusfs_raft_is_leader", "cactusfs_raft_term", "cactusfs_raft_applied_index", "cactusfs_raft_commit_index",
@@ -79,6 +89,7 @@ var stateGauges = []string{
 	"cactusfs_metadata_state_schema", "cactusfs_drive_online", "cactusfs_drive_free_bytes", "cactusfs_drive_total_bytes",
 	"cactusfs_node_certificate_not_after_seconds", "cactusfs_ready",
 	"cactusfs_tls_certificate_not_after_seconds", "cactusfs_tls_reload_pending", "cactusfs_tls_reload_refused_total",
+	"cactusfs_buckets_quota", "cactusfs_bucket_usage_counting",
 }
 
 func hasSeries(samples map[string]float64, name string) bool {
@@ -116,9 +127,14 @@ func TestStateGauges(t *testing.T) {
 	})
 	tel.ObserveNodeCertificate(fixedCertificate{notAfter: notAfter, present: true})
 	tel.ObserveReadiness(readyWhen(true))
+	tel.ObserveQuotas(fixedQuotas{known: true, state: telemetry.QuotaState{Set: 5, Over90: 2, Full: 1, Counting: 3}})
 
 	samples := gauges(t, tel)
 	for name, want := range map[string]float64{
+		"cactusfs_buckets_quota{state=set}":             5,
+		"cactusfs_buckets_quota{state=over_90}":         2,
+		"cactusfs_buckets_quota{state=full}":            1,
+		"cactusfs_bucket_usage_counting{}":              3,
 		"cactusfs_raft_is_leader{}":                     1,
 		"cactusfs_raft_term{}":                          7,
 		"cactusfs_raft_applied_index{}":                 1234,
@@ -150,6 +166,9 @@ func TestStateGauges(t *testing.T) {
 	tel.ObserveRaft(fixedRaft{known: true, state: telemetry.RaftState{Term: 8, Voters: 3}})
 	tel.ObserveNodeCertificate(fixedCertificate{})
 	tel.ObserveReadiness(readyWhen(false))
+	// A deployment below the level that counts usage says nothing of
+	// quotas: not zero, which would say there are none.
+	tel.ObserveQuotas(fixedQuotas{})
 	samples = gauges(t, tel)
 	if got, ok := samples["cactusfs_raft_is_leader{}"]; !ok || got != 0 {
 		t.Errorf("cactusfs_raft_is_leader = %v (exposed: %v), want 0", got, ok)
@@ -159,7 +178,7 @@ func TestStateGauges(t *testing.T) {
 	}
 	for _, name := range []string{
 		"cactusfs_metadata_schema_level", "cactusfs_metadata_schema_supported", "cactusfs_metadata_state_schema",
-		"cactusfs_node_certificate_not_after_seconds",
+		"cactusfs_node_certificate_not_after_seconds", "cactusfs_buckets_quota", "cactusfs_bucket_usage_counting",
 	} {
 		if hasSeries(samples, name) {
 			t.Errorf("%s is exposed though it is not known", name)
@@ -175,6 +194,7 @@ func TestStateGauges(t *testing.T) {
 	tel.ObserveDrives(nil)
 	tel.ObserveNodeCertificate(nil)
 	tel.ObserveReadiness(nil)
+	tel.ObserveQuotas(nil)
 	after := gauges(t, tel)
 	for _, name := range stateGauges {
 		if hasSeries(after, name) {
@@ -287,6 +307,12 @@ func (h *heldSource) TLSState() telemetry.TLSState {
 	return telemetry.TLSState{NotAfter: time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC), Refused: map[string]uint64{"pair": 1}}
 }
 
+// QuotaState implements telemetry.QuotaSource.
+func (h *heldSource) QuotaState(context.Context) (telemetry.QuotaState, bool) {
+	h.answer()
+	return telemetry.QuotaState{Set: 3, Over90: 2, Full: 1, Counting: 4}, true
+}
+
 // HandshakesRefused implements telemetry.HandshakeSource.
 func (h *heldSource) HandshakesRefused() map[string]uint64 {
 	h.answer()
@@ -303,6 +329,10 @@ var sourceSeries = map[string][]string{
 	"drives":      {"cactusfs_drive_online{drive=drive-a}", "cactusfs_drive_free_bytes{drive=drive-a}", "cactusfs_drive_total_bytes{drive=drive-a}"},
 	"certificate": {"cactusfs_node_certificate_not_after_seconds{}"},
 	"readiness":   {"cactusfs_ready{}"},
+	"quotas": {
+		"cactusfs_buckets_quota{state=set}", "cactusfs_buckets_quota{state=over_90}", "cactusfs_buckets_quota{state=full}",
+		"cactusfs_bucket_usage_counting{}",
+	},
 	"tls-node": {
 		"cactusfs_tls_certificate_not_after_seconds{use=node}", "cactusfs_tls_reload_pending{use=node}",
 		"cactusfs_tls_reload_refused_total{reason=pair,use=node}", "cactusfs_tls_reload_refused_total{reason=usage,use=node}",
@@ -332,11 +362,12 @@ func TestASourceThatHangsDoesNotHoldUpTheScrape(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sources := map[string]*heldSource{"raft": {}, "drives": {}, "certificate": {}, "readiness": {}, "tls-node": {}, "tls-s3": {}}
+			sources := map[string]*heldSource{"raft": {}, "drives": {}, "certificate": {}, "readiness": {}, "quotas": {}, "tls-node": {}, "tls-s3": {}}
 			tel.ObserveRaft(sources["raft"])
 			tel.ObserveDrives(sources["drives"])
 			tel.ObserveNodeCertificate(sources["certificate"])
 			tel.ObserveReadiness(sources["readiness"])
+			tel.ObserveQuotas(sources["quotas"])
 			tel.ObserveTLS(telemetry.TLSUseNode, sources["tls-node"])
 			tel.ObserveTLS(telemetry.TLSUseS3, sources["tls-s3"])
 

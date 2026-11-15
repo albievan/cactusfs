@@ -96,6 +96,11 @@ type node struct {
 	tagDefinitions *app.TagDefinitionService
 	// updates checks for releases and installs one (ADR-0029).
 	updates *app.UpdateService
+	// quotas holds the quotas of buckets and the pre-check of the write
+	// path; counter counts the usage of buckets on the node that leads
+	// (ADR-0023, ADR-0024).
+	quotas  *app.QuotaService
+	counter *app.UsageCounter
 	// readiness is what /readyz answers by; the server gives it once the
 	// node has started (an upgrade in Kubernetes waits for it).
 	readiness   atomic.Pointer[app.HealthService]
@@ -258,9 +263,28 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.tagDefinitions = app.NewTagDefinitionService(app.TagDefinitionServiceConfig{
 		Store: tagDefinitions, Authz: n.authorizer, Auditor: n.auditor, Clock: n.clock,
 	})
+	// What every bucket holds and how much it may (ADR-0023, ADR-0024):
+	// the records the store keeps, the quotas judged by them before a write
+	// and at its commit, and the counter that brings a bucket's record to
+	// exact. The level is the store's own reading, as for the settings;
+	// below level 5 Get answers unavailable and Admit admits everything.
+	usage := n.telemetry.InstrumentBucketUsage(n.meta)
+	n.quotas = app.NewQuotaService(app.QuotaServiceConfig{
+		Buckets: meta, Usage: usage, Authz: n.authorizer, Auditor: n.auditor, Level: metadataLevel(n.meta),
+		OnRefusal: n.telemetry.ObserveQuotaRefusal,
+	})
+	n.counter = app.NewUsageCounter(app.UsageCounterConfig{
+		Buckets: meta, Usage: usage, Authz: n.authorizer, Auditor: n.auditor, Logger: logger,
+		// One node counts at a time: the one that leads the metadata
+		// group, as one node scrubs.
+		Active: n.meta.IsLeader, OnDrift: n.telemetry.ObserveUsageDrift,
+	})
+	// How the buckets stand against their quotas, read when the metrics
+	// are scraped - and at most once every quotaGaugesReuse.
+	n.telemetry.ObserveQuotas(&quotaGauges{quotas: n.quotas, clock: n.clock})
 	n.objects, err = app.NewObjectService(app.ObjectServiceConfig{
 		Index: meta, Buckets: meta, Uploads: meta, Drives: drives, Codec: erasurecodec.New(), KMS: kms,
-		TagDefinitions: tagDefinitions,
+		TagDefinitions: tagDefinitions, Usage: usage, Quota: n.quotas,
 		OnHeal: func(r app.HealResult) {
 			n.telemetry.ObserveHeal(r)
 			n.maintenance.ObserveHeal(r)
@@ -744,6 +768,9 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.sessions.Run(ctx) })
 	// Asks the update source now and then, when one is configured.
 	n.background.Go(func() { n.updates.Run(ctx) })
+	// Counts the usage of buckets that are not exact, while this node
+	// leads; does nothing elsewhere.
+	n.background.Go(func() { n.counter.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases
@@ -757,6 +784,7 @@ func (n *node) Close() error {
 	// The gauges stop describing what is about to be closed.
 	n.telemetry.ObserveRaft(nil)
 	n.telemetry.ObserveDrives(nil)
+	n.telemetry.ObserveQuotas(nil)
 	n.telemetry.ObserveNodeCertificate(nil)
 	n.telemetry.ObserveTLS(telemetry.TLSUseNode, nil)
 	n.telemetry.ObserveHandshakes(nil)

@@ -104,6 +104,10 @@ type Telemetry struct {
 	lifecycle      *prometheus.CounterVec
 	accessDropped  prometheus.Counter
 	events         *prometheus.CounterVec
+	// Quotas (ADR-0024): writes refused, and recounts that found other
+	// totals than were kept.
+	quotaRefusals prometheus.Counter
+	usageDrift    prometheus.Counter
 	// Node RPC, on the calling and on the answering side.
 	rpcRequests       *prometheus.CounterVec
 	rpcSeconds        *prometheus.HistogramVec
@@ -186,6 +190,14 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	t.events = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_events_total", Help: "Events derived from applied metadata entries on this node, by type.",
 	}, []string{"type"})
+	t.quotaRefusals = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_quota_refusals_total",
+		Help: "Writes this node refused because they would take a bucket past its quota, before any shard was written or when the commit was refused.",
+	})
+	t.usageDrift = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cactusfs_bucket_usage_drift_total",
+		Help: "Recounts of a bucket's usage, ended by an entry this node proposed, that found other totals than were kept.",
+	})
 
 	// The method is one of the node's own, the code one of gRPC's.
 	t.rpcRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -212,7 +224,7 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 	for _, collector := range append([]prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
-		t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
+		t.quotaRefusals, t.usageDrift, t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
 	}, t.updates.collectors()...) {
@@ -403,6 +415,19 @@ func (t *Telemetry) ObserveLifecycle(s app.LifecycleStats) {
 // of who read an object.
 func (t *Telemetry) ObserveAccessDropped(reads int64) {
 	t.accessDropped.Add(float64(reads))
+}
+
+// ObserveQuotaRefusal counts a write refused for a bucket's quota
+// (app.QuotaServiceConfig.OnRefusal). Which bucket is not said.
+func (t *Telemetry) ObserveQuotaRefusal() {
+	t.quotaRefusals.Inc()
+}
+
+// ObserveUsageDrift counts a recount of a bucket's usage that found other
+// totals than were kept (app.UsageCounterConfig.OnDrift). Which bucket is
+// not said.
+func (t *Telemetry) ObserveUsageDrift() {
+	t.usageDrift.Inc()
 }
 
 // ObserveGC records a completed pass of the garbage collector.

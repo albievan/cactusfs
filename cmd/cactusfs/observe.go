@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/disk"
@@ -11,6 +12,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // The sources of the gauges that say how the node is. Each stands between
@@ -67,6 +69,50 @@ func metadataLevel(store *raftmeta.Store) func(ctx context.Context) (int, error)
 			return 0, fmt.Errorf("metadata level: %w", ctx.Err())
 		}
 	}
+}
+
+// quotaGaugesReuse is how long a summary of the quotas is shown again
+// before the buckets are read anew: the interval of the usage counter's
+// look at every bucket (ADR-0023). A summary reads every bucket's record
+// twice; scraped every few seconds on every node, it is read at most this
+// often.
+const quotaGaugesReuse = 10 * time.Second
+
+// quotaGauges is the use case of quotas as the gauges of quotas read it:
+// counts of buckets, none named. It cannot say below metadata level 5, or
+// when the buckets cannot be read.
+//
+// A summary that was made is shown for quotaGaugesReuse. One that takes
+// longer than a scrape waits is not lost: the probe lets it finish, and the
+// scrapes that follow show it.
+type quotaGauges struct {
+	quotas *app.QuotaService
+	clock  ports.Clock
+
+	// mu guards the last summary that was made, and when.
+	mu   sync.Mutex
+	last telemetry.QuotaState
+	at   time.Time
+	held bool
+}
+
+// QuotaState implements telemetry.QuotaSource.
+func (g *quotaGauges) QuotaState(ctx context.Context) (telemetry.QuotaState, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.clock.Now()
+	if g.held && !now.Before(g.at) && now.Sub(g.at) < quotaGaugesReuse {
+		return g.last, true
+	}
+	s, err := g.quotas.Summary(ctx)
+	if err != nil {
+		// Nothing older than quotaGaugesReuse is shown in its place.
+		g.held = false
+		return telemetry.QuotaState{}, false
+	}
+	g.last = telemetry.QuotaState{Set: s.Set, Over90: s.Over90, Full: s.Full, Counting: s.Counting}
+	g.at, g.held = now, true
+	return g.last, true
 }
 
 // driveGauges is this node's drives as the drive gauges read them: by their

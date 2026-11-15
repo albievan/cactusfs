@@ -272,7 +272,16 @@ func (o *operations) GetBucketUsage(ctx context.Context, request api.GetBucketUs
 	if err != nil {
 		return nil, err
 	}
-	return api.GetBucketUsage200JSONResponse{ObjectCount: usage.Objects, TotalSize: usage.Bytes, Complete: usage.Complete}, nil
+	out := api.GetBucketUsage200JSONResponse{
+		ObjectCount: usage.Objects, TotalSize: usage.Bytes, Complete: usage.Complete, Exact: usage.Exact,
+		QuotaBytes: positiveOrNil(usage.QuotaBytes),
+	}
+	if usage.Exact {
+		// The figures of the record; absent when they were counted for
+		// this request, which does not count them.
+		out.Versions, out.StoredBytes, out.UploadBytes = &usage.Versions, &usage.StoredBytes, &usage.UploadBytes
+	}
+	return out, nil
 }
 
 // ListObjects implements api.StrictServerInterface.
@@ -1170,8 +1179,8 @@ func (o *operations) ListAudit(ctx context.Context, request api.ListAuditRequest
 //
 // The operations below that answer notYet are in the contract and have no
 // use case yet: the contract comes first, and each is written with the step
-// of PLAN.md that names it (targets were, with PLAN 8.0.13; their status
-// comes with 8.0.14). Until then a caller that has authenticated is told 501, as for
+// of PLAN.md that names it (targets were, with PLAN 8.0.13, their status
+// comes with 8.0.14; quotas were, with PLAN 8.3.3). Until then a caller that has authenticated is told 501, as for
 // any operation this node was not given the use case for - which says
 // nothing of any bucket or target, so it is said before anybody is asked
 // what the caller may do.
@@ -1181,24 +1190,91 @@ func notYet(operation string) error {
 	return fmt.Errorf("%s: %w", operation, errNotImplemented)
 }
 
-// GetBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
-func (o *operations) GetBucketQuota(context.Context, api.GetBucketQuotaRequestObject) (api.GetBucketQuotaResponseObject, error) {
-	return nil, notYet("quota")
+// --- quotas and the recount of usage (ADR-0023, ADR-0024) ---
+//
+// Who may read, set or remove a quota, or have a bucket counted again, is
+// the use cases' to decide (QuotaService, UsageCounter): each asks the
+// single authorizer with an admin: action on the bucket. These carry the
+// figures between the contract and the use cases.
+
+// quotas is the use case of quotas, or the answer of a node that was not
+// given it.
+func (o *operations) quotas() (*app.QuotaService, error) {
+	if o.h.cfg.Quotas == nil {
+		return nil, notYet("quota")
+	}
+	return o.h.cfg.Quotas, nil
 }
 
-// PutBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
-func (o *operations) PutBucketQuota(context.Context, api.PutBucketQuotaRequestObject) (api.PutBucketQuotaResponseObject, error) {
-	return nil, notYet("quota")
+// bucketQuotaOf maps a quota to the contract: quota_bytes absent when the
+// bucket has none.
+func bucketQuotaOf(q app.BucketQuota) api.BucketQuota {
+	return api.BucketQuota{QuotaBytes: positiveOrNil(q.QuotaBytes), UsedBytes: q.UsedBytes, Exact: q.Exact}
 }
 
-// DeleteBucketQuota implements api.StrictServerInterface (PLAN 8.3.3).
-func (o *operations) DeleteBucketQuota(context.Context, api.DeleteBucketQuotaRequestObject) (api.DeleteBucketQuotaResponseObject, error) {
-	return nil, notYet("quota")
+// positiveOrNil is n, or nil when it is not above nothing: a quota of 0 is
+// none.
+func positiveOrNil(n int64) *int64 {
+	if n <= 0 {
+		return nil
+	}
+	return &n
 }
 
-// RecountBucketUsage implements api.StrictServerInterface (PLAN 8.3.3).
-func (o *operations) RecountBucketUsage(context.Context, api.RecountBucketUsageRequestObject) (api.RecountBucketUsageResponseObject, error) {
-	return nil, notYet("usage recount")
+// GetBucketQuota implements api.StrictServerInterface.
+func (o *operations) GetBucketQuota(ctx context.Context, request api.GetBucketQuotaRequestObject) (api.GetBucketQuotaResponseObject, error) {
+	quotas, err := o.quotas()
+	if err != nil {
+		return nil, err
+	}
+	q, err := quotas.Get(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketQuota200JSONResponse(bucketQuotaOf(q)), nil
+}
+
+// PutBucketQuota implements api.StrictServerInterface. The bounds of a
+// quota are the use case's to judge: a body that is no quota is the
+// decoder's to refuse.
+func (o *operations) PutBucketQuota(ctx context.Context, request api.PutBucketQuotaRequestObject) (api.PutBucketQuotaResponseObject, error) {
+	quotas, err := o.quotas()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	q, err := quotas.Set(ctx, who(ctx), request.Bucket, request.Body.QuotaBytes)
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketQuota200JSONResponse(bucketQuotaOf(q)), nil
+}
+
+// DeleteBucketQuota implements api.StrictServerInterface.
+func (o *operations) DeleteBucketQuota(ctx context.Context, request api.DeleteBucketQuotaRequestObject) (api.DeleteBucketQuotaResponseObject, error) {
+	quotas, err := o.quotas()
+	if err != nil {
+		return nil, err
+	}
+	if err := quotas.Delete(ctx, who(ctx), request.Bucket); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketQuota204Response{}, nil
+}
+
+// RecountBucketUsage implements api.StrictServerInterface. 202 says that
+// the count was begun: its first entry is committed, and the rest follow
+// on the node that leads the metadata group.
+func (o *operations) RecountBucketUsage(ctx context.Context, request api.RecountBucketUsageRequestObject) (api.RecountBucketUsageResponseObject, error) {
+	if o.h.cfg.Counter == nil {
+		return nil, notYet("usage recount")
+	}
+	if err := o.h.cfg.Counter.Recount(ctx, who(ctx), request.Bucket); err != nil {
+		return nil, err
+	}
+	return api.RecountBucketUsage202Response{}, nil
 }
 
 // --- bucket policies and sub-buckets (ADR-0017) ---
