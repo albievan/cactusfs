@@ -34,6 +34,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/moby/moby/api/types/container"
@@ -542,6 +543,12 @@ func (c *Cluster) transport(id, port string) *http.Transport {
 		},
 		TLSClientConfig:       &tls.Config{RootCAs: c.roots, ServerName: id, MinVersion: tls.VersionTLS13},
 		ResponseHeaderTimeout: 30 * time.Second,
+		// As the SDK's own transport does: a request that asks
+		// "Expect: 100-continue" waits for the node's answer before its
+		// body, so a refusal reaches it without the body being sent. Left
+		// at zero, the body went at once, and a node that refused first
+		// closed the connection under it.
+		ExpectContinueTimeout: awshttp.DefaultHTTPTransportExpectContinueTimeout,
 		DisableKeepAlives:     true,
 	}
 }

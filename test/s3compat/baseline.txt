@@ -70,3 +70,4 @@ github.com/albievan/cactusfs/test/s3compat TestAWSCLIS3API
 github.com/albievan/cactusfs/test/s3compat TestAWSCLISync
 github.com/albievan/cactusfs/test/s3compat TestCephS3Tests
 github.com/albievan/cactusfs/test/s3compat TestMultipartUploadWithTags
+github.com/albievan/cactusfs/test/s3compat TestQuotaExceededIsNotRetried

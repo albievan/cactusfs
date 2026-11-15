@@ -4,13 +4,17 @@ package s3compat_test
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1715,5 +1719,140 @@ func TestListObjectsV1(t *testing.T) {
 	slices.Sort(seen)
 	if !slices.Equal(seen, []string{"a", "b", "dir/", "e"}) {
 		t.Errorf("ListObjects, page by page, listed %v", seen)
+	}
+}
+
+// attempts is an HTTP client of the SDK that counts the requests it sends:
+// one for each attempt of an operation.
+type attempts struct {
+	next s3.HTTPClient
+	sent *atomic.Int32
+}
+
+// Do implements s3.HTTPClient.
+func (a attempts) Do(req *http.Request) (*http.Response, error) {
+	a.sent.Add(1)
+	return a.next.Do(req)
+}
+
+// quotaAdmin makes one call to the management API's listener as root, at a
+// path below its address, and returns the status and the body of the
+// answer.
+func quotaAdmin(t *testing.T, method, path string, body []byte) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, "https://"+target.adminAddr+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+target.accessKey+":"+target.secretKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c := &http.Client{
+		Timeout:   time.Minute,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: target.pool, MinVersion: tls.VersionTLS12}},
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	answer, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return resp.StatusCode, answer
+}
+
+// quotaRefusalsSoFar returns how many writes the server has refused for a
+// quota since it started (cactusfs_quota_refusals_total).
+func quotaRefusalsSoFar(t *testing.T) int64 {
+	t.Helper()
+	status, body := quotaAdmin(t, http.MethodGet, "/metrics", nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /metrics = %d", status)
+	}
+	for line := range strings.Lines(string(body)) {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "cactusfs_quota_refusals_total "); ok {
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				t.Fatalf("cactusfs_quota_refusals_total = %q: %v", value, err)
+			}
+			return n
+		}
+	}
+	t.Fatal("GET /metrics: cactusfs_quota_refusals_total is not shown")
+	return 0
+}
+
+// TestQuotaExceededIsNotRetried: a write that a bucket's quota refuses is
+// answered 403 QuotaExceeded (ADR-0024), which the SDK takes for the
+// caller's fault: it makes one attempt and does not try again - where a 503
+// or a 507 would be tried again by the same client, whose retryer, as the
+// SDK makes it by default, makes up to three attempts. A PutObject and an
+// UploadPart past the quota are each refused after one request, the server
+// counted one refusal for each, and nothing was stored.
+func TestQuotaExceededIsNotRetried(t *testing.T) {
+	name := newBucket(t)
+	if status, body := quotaAdmin(t, http.MethodPut, "/api/v1/buckets/"+name+"/quota", []byte(`{"quota_bytes":1024}`)); status != http.StatusOK {
+		t.Fatalf("PUT the quota of %s = %d %s", name, status, body)
+	}
+	put(t, name, "fits", randomBytes(t, 1000))
+	c := client()
+	upload, err := c.CreateMultipartUpload(t.Context(), &s3.CreateMultipartUploadInput{Bucket: aws.String(name), Key: aws.String("parts")})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	// Registered after the bucket's own clean-up, so run before it: a
+	// bucket with an upload in progress is not deleted.
+	t.Cleanup(func() {
+		_, _ = c.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
+			Bucket: aws.String(name), Key: aws.String("parts"), UploadId: upload.UploadId,
+		})
+	})
+
+	before := quotaRefusalsSoFar(t)
+	for _, call := range []struct {
+		name string
+		do   func(count func(*s3.Options)) error
+	}{
+		{"PutObject", func(count func(*s3.Options)) error {
+			_, err := c.PutObject(t.Context(), &s3.PutObjectInput{
+				Bucket: aws.String(name), Key: aws.String("too-much"), Body: bytes.NewReader(randomBytes(t, 100)),
+			}, count)
+			return err
+		}},
+		{"UploadPart", func(count func(*s3.Options)) error {
+			_, err := c.UploadPart(t.Context(), &s3.UploadPartInput{
+				Bucket: aws.String(name), Key: aws.String("parts"), UploadId: upload.UploadId, PartNumber: aws.Int32(1),
+				Body: bytes.NewReader(randomBytes(t, 100)),
+			}, count)
+			return err
+		}},
+	} {
+		var sent atomic.Int32
+		allowed := 0
+		err := call.do(func(o *s3.Options) {
+			if o.Retryer != nil {
+				allowed = o.Retryer.MaxAttempts()
+			}
+			o.HTTPClient = attempts{next: o.HTTPClient, sent: &sent}
+		})
+		var failed interface{ HTTPStatusCode() int }
+		if !errors.As(err, &failed) || failed.HTTPStatusCode() != http.StatusForbidden || errorCode(err) != "QuotaExceeded" {
+			t.Errorf("%s past the quota: %v; want 403 QuotaExceeded", call.name, err)
+		}
+		if allowed < 2 {
+			t.Errorf("%s: the client makes %d attempts at most: the test shows nothing of retries", call.name, allowed)
+		}
+		if got := sent.Load(); got != 1 {
+			t.Errorf("%s past the quota was sent %d times; want one attempt", call.name, got)
+		}
+	}
+	if got := quotaRefusalsSoFar(t) - before; got != 2 {
+		t.Errorf("the server counted %d refusals for the quota; want 2, one for each request", got)
+	}
+	if _, err := c.HeadObject(t.Context(), &s3.HeadObjectInput{Bucket: aws.String(name), Key: aws.String("too-much")}); errorCode(err) != "NotFound" {
+		t.Errorf("HeadObject of the refused object: %v; want NotFound", err)
 	}
 }
