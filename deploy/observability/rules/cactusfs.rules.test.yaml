@@ -987,6 +987,201 @@ tests:
               summary: "A drive is nearly full"
               description: "Less than 10 % of the file system of drive d1 of a:9001 has been free for fifteen minutes. Writes fail when a write quorum of drives has no room."
 
+  # --- CactusFSBucketQuotaFull: max by (job) (quota{state="full"}) > 0, 15m ---
+  # Three nodes say the same, as nodes that are current do: a bucket with a
+  # quota in each state, and from 5m one of them full.
+  #   a, b: full is 0 at 0m-4m and 1 from 5m.
+  #   c:    the same until it cannot say from 10m (its series stale).
+  #   max(full) is 1 from 5m: true from 5m, fires at 20m - once for the job,
+  #   not once a node; c's absence changes nothing. set and over_90 are not
+  #   selected.
+  # The quota series are there, so CactusFSBucketQuotasUnknown is quiet.
+  - name: a bucket at its quota
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="set"}'
+        values: '3x45'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="over_90"}'
+        values: '2x45'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="full"}'
+        values: '0x4 1x40'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="b:9001", state="full"}'
+        values: '0x4 1x40'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="c:9001", state="full"}'
+        values: '0x4 1x4 stale'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '5x45'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x45'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "A bucket has reached its quota"
+              description: "For fifteen minutes at least one bucket of the job cactusfs has held all of its quota or more: writes into it that would add bytes are refused with 403 QuotaExceeded, and deletes still work. The console's grid of buckets, or the usage of a bucket in the management API, says which; raise its quota or delete what it holds."
+      - eval_time: 40m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+
+  # a: a bucket full at 5m-14m and emptied at 15m: true for ten minutes, not
+  #    fifteen. Another at 90 % of its quota throughout: not full. Never fires.
+  - name: a bucket filled and emptied, and one near its quota
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="set"}'
+        values: '2x45'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="over_90"}'
+        values: '1x4 2x9 1x30'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="full"}'
+        values: '0x4 1x9 0x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts: []
+
+  # --- CactusFSBucketQuotasUnknown: for 30m, -----------------------------------
+  #       absent(quota) and on () max(level) >= 5 and on () max(ready) == 1
+  # a and b say how the buckets stand at 0m-9m and cannot from 10m (their
+  # series stale), while the cluster is at level 5 and both are ready.
+  #   absent(quota): 1 from 10m.  max(level): 5.  max(ready): 1.
+  #   True from 10m, fires at 40m, with the labels of absent()'s selector.
+  # CactusFSBucketQuotaFull cannot fire: there is nothing to take the max of.
+  - name: quotas that no node can say
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="full"}'
+        values: '0x9 stale'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="b:9001", state="full"}'
+        values: '0x9 stale'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '5x60'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="b:9001"}'
+        values: '5x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "How the buckets stand against their quotas is not known"
+              description: "For thirty minutes no node of the job cactusfs has said how its buckets stand against their quotas, though the cluster counts usage and a node knows of a leader: a bucket at its quota would raise no alert. Each node reads the list of buckets and their usage records for this; failing calls of the ports metadata and bucket_usage (cactusfs_port_calls_total) show where."
+      - eval_time: 45m
+        alertname: CactusFSBucketQuotaFull
+        exp_alerts: []
+
+  # b cannot say from 10m; a still can, and says 0. Not absent: one node
+  # that can say is enough. Never true.
+  - name: one node that can still say how the buckets stand
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="a:9001", state="full"}'
+        values: '0x60'
+      - series: 'cactusfs_buckets_quota{job="cactusfs", instance="b:9001", state="full"}'
+        values: '0x9 stale'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '5x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+
+  # Below level 5 there are no quotas: the series is absent, the level is 4,
+  # and both nodes are ready. max(level) >= 5 is never true. Never fires.
+  - name: no quotas below metadata level 5
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '4x60'
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="b:9001"}'
+        values: '4x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '1x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="b:9001"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+
+  # Level 5, the series absent, and no node ready (none knows of a leader,
+  # so none can list the buckets): CactusFSNoMetadataLeader and
+  # CactusFSNotReady speak, and this alert does not. max(ready) == 1 is
+  # never true. Never fires.
+  - name: quotas not known while no node is ready
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_metadata_schema_level{job="cactusfs", instance="a:9001"}'
+        values: '5x60'
+      - series: 'cactusfs_ready{job="cactusfs", instance="a:9001"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CactusFSBucketQuotasUnknown
+        exp_alerts: []
+
+  # --- CactusFSBucketUsageDrift: increase in 1h > 0, fires at once ----------
+  # a: 0 until 10m, 1 from 11m - one recount ended by a with drift. At 15m
+  #    the increase is 1 (or more, as increase() extrapolates): fires, by
+  #    instance. At 100m the window is (40m, 100m] and every sample is 1: 0,
+  #    not true.
+  # b: stays at 0.
+  # c: had counted 3 and restarts at 11m: the counter begins again at 0. A
+  #    fall is a reset, not a drift: increase() adds what came before the
+  #    fall, 3 - 3 + 0 = 0. Not true.
+  - name: a recount that found other totals
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_bucket_usage_drift_total{job="cactusfs", instance="a:9001"}'
+        values: '0x10 1x110'
+      - series: 'cactusfs_bucket_usage_drift_total{job="cactusfs", instance="b:9001"}'
+        values: '0x120'
+      - series: 'cactusfs_bucket_usage_drift_total{job="cactusfs", instance="c:9001"}'
+        values: '3x10 0x110'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSBucketUsageDrift
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSBucketUsageDrift
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              instance: "a:9001"
+            exp_annotations:
+              summary: "The usage of a bucket was found counted wrong"
+              description: "a:9001 has ended a recount of a bucket's usage in the last hour that found other totals than were kept. The recount has put them right. It is a fault of CactusFS: the node's log names the bucket; please report it."
+      - eval_time: 100m
+        alertname: CactusFSBucketUsageDrift
+        exp_alerts: []
+
   # --- The node certificate: ends within 14 days (1h), within 3 days (10m) ---
   # The clock of a test starts at 0, so time() at t minutes is 60*t seconds.
   # Fourteen days are 1209600 seconds, three days 259200.

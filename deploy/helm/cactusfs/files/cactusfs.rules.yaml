@@ -316,6 +316,89 @@ groups:
           summary: "A drive is nearly full"
           description: "Less than 10 % of the file system of drive {{ $labels.drive }} of {{ $labels.instance }} has been free for fifteen minutes. Writes fail when a write quorum of drives has no room."
 
+  # How the buckets stand against their quotas (ADR-0024), and whether what
+  # every bucket holds is counted right (ADR-0023). No metric names a bucket:
+  # the console's grid of buckets and the usage of a bucket in the management
+  # API say which.
+  #
+  # cactusfs_buckets_quota is read by every node from its own copy of the
+  # usage records, so every node that is current says the same: across the
+  # job it is taken with max, never summed (a sum would count a bucket once a
+  # node). Its states include one another: set >= over_90 >= full.
+  - name: cactusfs.quotas
+    rules:
+      # A bucket at its quota refuses every write that would add bytes with
+      # 403 QuotaExceeded; deletes, aborts and completions of uploads still
+      # work. A warning: the limit doing its work is no fault of the
+      # deployment, but whoever looks after the bucket wants to know before
+      # its writers say so. Fifteen minutes, so that a bucket that is filled
+      # and emptied again soon passes.
+      #
+      # The series is absent where a node cannot say - below metadata level
+      # 5, where there are no quotas, and on a node that cannot read the
+      # buckets - and a max over nothing is nothing, so while no node says,
+      # this alert is quiet whatever the buckets hold. That silence is not
+      # left unsaid: CactusFSBucketQuotasUnknown, below.
+      - alert: CactusFSBucketQuotaFull
+        expr: max by (job) (cactusfs_buckets_quota{state="full"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A bucket has reached its quota"
+          description: "For fifteen minutes at least one bucket of the job {{ $labels.job }} has held all of its quota or more: writes into it that would add bytes are refused with 403 QuotaExceeded, and deletes still work. The console's grid of buckets, or the usage of a bucket in the management API, says which; raise its quota or delete what it holds."
+
+      # No node says how the buckets stand against their quotas, though the
+      # cluster counts usage and a node knows of a leader - so a full bucket
+      # would go unnoticed. The other reasons for the absence are said by
+      # other alerts and are left out here:
+      #
+      #   - below metadata level 5 there are no quotas to watch (an upgrade
+      #     left half done is CactusFSMetadataUpgradeUnfinished's);
+      #   - no node ready: a node without a leader cannot list the buckets,
+      #     and CactusFSNoMetadataLeader and CactusFSNotReady speak;
+      #   - no node scraped at all: the level and readiness are absent too,
+      #     and CactusFSAbsent speaks.
+      #
+      # What is left is a summary that fails on every node while a leader
+      # is there: a usage record that cannot be read, a read of the buckets
+      # that keeps failing or keeps taking longer than a scrape waits. One
+      # node that can still say is enough: then the series is not absent.
+      #
+      # absent() gives the labels of its selector, job="cactusfs". '>=' and
+      # '==' bind tighter than 'and'.
+      - alert: CactusFSBucketQuotasUnknown
+        expr: |-
+          absent(cactusfs_buckets_quota{job="cactusfs"})
+            and on ()
+          max(cactusfs_metadata_schema_level{job="cactusfs"}) >= 5
+            and on ()
+          max(cactusfs_ready{job="cactusfs"}) == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "How the buckets stand against their quotas is not known"
+          description: "For thirty minutes no node of the job {{ $labels.job }} has said how its buckets stand against their quotas, though the cluster counts usage and a node knows of a leader: a bucket at its quota would raise no alert. Each node reads the list of buckets and their usage records for this; failing calls of the ports metadata and bucket_usage (cactusfs_port_calls_total) show where."
+
+      # A recount of a bucket's usage found other totals than the record had
+      # kept: a fault of this code, not of the deployment, which the recount
+      # itself has put right (until it ended, the bucket's quota was judged
+      # by the figure that was wrong). A count held at one of its bounds - a
+      # clamp - begins such a recount and shows here when the recount ends
+      # with other totals. The counter is counted once, on the node whose
+      # entry ended the recount, and that node's log names the bucket: so
+      # the alert is by instance. At once, and for the hour the increase is
+      # in the window.
+      - alert: CactusFSBucketUsageDrift
+        expr: increase(cactusfs_bucket_usage_drift_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The usage of a bucket was found counted wrong"
+          description: "{{ $labels.instance }} has ended a recount of a bucket's usage in the last hour that found other totals than were kept. The recount has put them right. It is a fault of CactusFS: the node's log names the bucket; please report it."
+
   - name: cactusfs.nodes
     rules:
       - alert: CactusFSNodeCertificateExpiresSoon

@@ -66,10 +66,21 @@ Prometheus data source (`DS_PROMETHEUS`) and one for the nodes shown.
 | `cactusfs.storage` | the KMS, shard operations, objects that cannot be rebuilt, shards rebuilt, lifecycle rules, reads not counted |
 | `cactusfs.metadata` | no leader of the metadata group, elections that do not stop, a node behind, an upgrade of the schema that is not finished |
 | `cactusfs.drives` | a drive that is offline, a drive that is nearly full |
+| `cactusfs.quotas` | a bucket at its quota, quotas that no node can say anything of, a recount that found the usage of a bucket counted wrong |
 | `cactusfs.nodes` | a node certificate that ends within 14 and within 3 days, a certificate on disk that was refused, refused handshakes, failing calls between nodes, a node that is not ready |
 | `cactusfs.audit` | an audit trail that cannot be written |
 
 A drive is named in an alert by its generated ID, never by its directory.
+
+No alert names a bucket. The gauges of quotas (`cactusfs_buckets_quota`) are the same on
+every node that is current and are taken with `max` across the job, never summed; they
+are absent where a node cannot say - below metadata level 5, and when it cannot read the
+buckets - so `CactusFSBucketQuotaFull` cannot fire while no node says, and
+`CactusFSBucketQuotasUnknown` fires instead when that lasts half an hour at level 5 with
+a node ready. `cactusfs_bucket_usage_drift_total` is counted once, by the node that ended
+the recount, and its alert names that node, whose log names the bucket. Which bucket is
+full is in the console's grid of buckets and in each bucket's usage
+(`GET /api/v1/buckets/{bucket}/usage`).
 
 ## What is not here yet
 
