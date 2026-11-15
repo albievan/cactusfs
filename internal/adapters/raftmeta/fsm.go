@@ -237,8 +237,8 @@ type fsm struct {
 	// usageClamped counts the changes this state machine applied since it
 	// was opened that held a count of a usage record at a bound, and
 	// usageDrift the recounts it finished that found other totals than
-	// were kept (ADR-0023). Both are for a counter and are not in the
-	// state.
+	// were kept (ADR-0023). Both are read through Observe, are exposed as
+	// no metric (see Observation) and are not in the state.
 	usageClamped atomic.Uint64
 	usageDrift   atomic.Uint64
 	// outboxRows, when a test sets it (under mu), is the bound of the

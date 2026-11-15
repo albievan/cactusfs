@@ -82,9 +82,12 @@ const quotaGaugesReuse = 10 * time.Second
 // counts of buckets, none named. It cannot say below metadata level 5, or
 // when the buckets cannot be read.
 //
-// A summary that was made is shown for quotaGaugesReuse. One that takes
-// longer than a scrape waits is not lost: the probe lets it finish, and the
-// scrapes that follow show it.
+// A summary that was made is shown for quotaGaugesReuse. The probe of the
+// telemetry adapter gives a summary the time a scrape waits (two seconds)
+// as the deadline of its context, and Summary honours it: a summary that
+// takes longer fails, is not shown by that scrape nor by those that follow,
+// and leaves nothing held. While every summary takes that long the gauges
+// are absent, which CactusFSBucketQuotasUnknown reports.
 type quotaGauges struct {
 	quotas *app.QuotaService
 	clock  ports.Clock

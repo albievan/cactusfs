@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -33,11 +34,14 @@ func (d creatingDrive) Create(ctx context.Context, id object.ShardID) (ports.Sha
 
 // quotaFixture is a bucket "b" behind an object service with the pre-check
 // of the quota in its write path; the shards begun on its drives and the
-// refusals of the quota are counted.
+// refusals of the quota are counted, and the object service, the quota
+// service and the store write to one audit trail.
 type quotaFixture struct {
 	*fixture
 	creates  atomic.Int32
 	refusals atomic.Int32
+	trail    *porttest.MemIAM
+	auditor  *app.Auditor
 	// upload is the upload a setup began, for the parts a write adds.
 	upload object.Upload
 }
@@ -46,14 +50,16 @@ type quotaFixture struct {
 // advice makes of the metadata fake; nil reads the fake itself.
 func newQuotaFixture(t *testing.T, advice func(*porttest.MemMetadata) ports.BucketUsageStore) *quotaFixture {
 	t.Helper()
-	f := &quotaFixture{fixture: newFixture(t)}
+	f := &quotaFixture{fixture: newFixture(t), trail: porttest.NewMemIAM()}
+	f.auditor = app.NewAuditor(f.trail, f.clock, slog.New(slog.NewJSONHandler(f.logs, nil)))
+	f.meta.Audit = f.trail
 	f.createBucket(t, "b")
 	var usage ports.BucketUsageStore = f.meta
 	if advice != nil {
 		usage = advice(f.meta)
 	}
 	quotas := app.NewQuotaService(app.QuotaServiceConfig{
-		Buckets: f.meta, Usage: usage, Authz: f.authz, OnRefusal: func() { f.refusals.Add(1) },
+		Buckets: f.meta, Usage: usage, Authz: f.authz, Auditor: f.auditor, OnRefusal: func() { f.refusals.Add(1) },
 	})
 	drives := make([]ports.ShardStore, len(f.drives))
 	for i, d := range f.drives {
@@ -62,8 +68,21 @@ func newQuotaFixture(t *testing.T, advice func(*porttest.MemMetadata) ports.Buck
 	f.objects = f.objectServiceWith(t, func(cfg *app.ObjectServiceConfig) {
 		cfg.Drives = fixed(t, f.topology, drives)
 		cfg.Quota = quotas
+		cfg.Auditor = f.auditor
 	})
 	return f
+}
+
+// trailLength returns how many records the audit trail holds, with what
+// was queued written first.
+func (f *quotaFixture) trailLength(t *testing.T) int {
+	t.Helper()
+	f.auditor.Flush(context.Background())
+	records, err := f.trail.ListAudit(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	return len(records)
 }
 
 func (f *quotaFixture) setQuota(t *testing.T, quotaBytes int64) {
@@ -170,6 +189,7 @@ func filled(sizes map[string]int) func(*testing.T, *quotaFixture) {
 // the bucket is full; what a write replaces is reckoned as the store
 // reckons it, so that an overwrite of the same size where versions are not
 // kept, and a part in place of one of the same size, pass a full bucket.
+// A refusal writes nothing to the audit trail.
 func TestQuotaPreCheck(t *testing.T) {
 	t.Parallel()
 	withUpload := func(sizes map[string]int, parts ...int) func(*testing.T, *quotaFixture) {
@@ -231,7 +251,7 @@ func TestQuotaPreCheck(t *testing.T) {
 		if tt.quota != 0 {
 			f.setQuota(t, tt.quota)
 		}
-		used := f.used(t)
+		used, trail := f.used(t), f.trailLength(t)
 		f.creates.Store(0)
 		err := tt.write(t.Context(), f)
 		switch {
@@ -251,6 +271,9 @@ func TestQuotaPreCheck(t *testing.T) {
 			if got := f.used(t); got != used {
 				t.Errorf("%s: the bucket holds %d after the refusal, %d before", tt.name, got, used)
 			}
+			if got := f.trailLength(t); got != trail {
+				t.Errorf("%s: the refusal wrote %d records to the audit trail", tt.name, got-trail)
+			}
 		}
 	}
 }
@@ -258,8 +281,9 @@ func TestQuotaPreCheck(t *testing.T) {
 // TestQuotaRefusedAtCommit: a write the pre-check let through - its advice
 // was behind, or another writer won the race - and that the store refuses
 // at commit with domain.ErrQuotaExceeded has its shards removed and returns
-// that error; the refusal is counted once, and nothing is counted against
-// the quota.
+// that error; the refusal is counted once, nothing is counted against the
+// quota, and nothing is written to the audit trail: a refusal for a quota
+// is a limit, not a denial (ADR-0024, open point 4).
 func TestQuotaRefusedAtCommit(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -276,11 +300,14 @@ func TestQuotaRefusedAtCommit(t *testing.T) {
 		f.put(t, "b", "a", make([]byte, 60))
 		f.upload = f.createUpload(t, "big.mp4")
 		f.setQuota(t, 100)
-		shards, used := f.shardCount(), f.used(t)
+		shards, used, trail := f.shardCount(), f.used(t), f.trailLength(t)
 		f.creates.Store(0)
 		err := tt.write(t.Context(), f)
 		if !errors.Is(err, domain.ErrQuotaExceeded) {
 			t.Errorf("%s: error = %v, want %v", tt.name, err, domain.ErrQuotaExceeded)
+		}
+		if got := f.trailLength(t); got != trail {
+			t.Errorf("%s: the refusal wrote %d records to the audit trail", tt.name, got-trail)
 		}
 		if f.creates.Load() == 0 {
 			t.Errorf("%s: no shard was begun: the pre-check refused, not the store", tt.name)
@@ -694,11 +721,19 @@ func TestQuotaServiceIsAuthorized(t *testing.T) {
 		}
 	}
 	// The pre-check asks nobody: it is the write's, which was authorized.
+	// Neither a write it admits nor one it refuses is in the trail: a
+	// refusal for a quota is a limit, not a denial (ADR-0024, open point 4).
 	before := len(f.trail(t))
 	if err := quotas.Admit(ctx, "photos", 1, nil); err != nil {
 		t.Errorf("Admit: %v", err)
 	}
 	if after := len(f.trail(t)); after != before {
-		t.Errorf("Admit wrote %d records to the trail", after-before)
+		t.Errorf("Admit of a write that fits wrote %d records to the trail", after-before)
+	}
+	if err := quotas.Admit(ctx, "photos", 501, nil); !errors.Is(err, domain.ErrQuotaExceeded) {
+		t.Errorf("Admit of a write past the quota = %v, want %v", err, domain.ErrQuotaExceeded)
+	}
+	if after := len(f.trail(t)); after != before {
+		t.Errorf("Admit of a write past the quota wrote %d records to the trail", after-before)
 	}
 }

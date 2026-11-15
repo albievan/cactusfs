@@ -30,11 +30,12 @@ type Observation struct {
 	// member counts for itself, as it applies, and neither is in the
 	// replicated state.
 	//
-	// Neither is a metric (PLAN 8.3.3): cactusfs_bucket_usage_drift_total
-	// counts app.UsageCounterConfig.OnDrift, once on the node whose entry
-	// ended the recount, so that a sum over the nodes is the number of
-	// drifts - a sum of UsageDrift would be that times the members.
-	// cactusfs_bucket_usage_clamped_total is not exposed yet (PLAN 8.3.6).
+	// Neither is a metric, and neither is meant to be: a sum of either over
+	// the members would be what happened times the members.
+	// cactusfs_bucket_usage_drift_total counts app.UsageCounterConfig.OnDrift,
+	// once on the node whose entry ended the recount (PLAN 8.3.3). A clamp is
+	// counted by no metric (PLAN 8.3.6, ADR-0023 "Bucket usage"): the recount
+	// it begins reports it as drift whenever it left a figure that was wrong.
 	UsageClamped, UsageDrift uint64
 }
 
