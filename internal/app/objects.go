@@ -44,7 +44,10 @@ type ObjectService struct {
 	entropyMu sync.Mutex
 	entropy   io.Reader
 
-	// usage holds the last count of every bucket that was asked about.
+	// counts is the count the metadata store keeps of every bucket; nil
+	// has none. usage holds the last walk of every bucket that was asked
+	// about whose count is not exact.
+	counts  ports.BucketUsageStore
 	usageMu sync.Mutex
 	usage   map[string]*usageEntry
 
@@ -84,6 +87,11 @@ type ObjectServiceConfig struct {
 	// is read where a bucket's tag rules take only tags of it; without it
 	// such a bucket takes no tags (domain.ErrUnavailable).
 	TagDefinitions ports.TagDefinitionStore
+	// Usage, when not nil, is the count the metadata store keeps of every
+	// bucket (ADR-0023): Usage answers from it where it is exact. Without
+	// it, and where it is not, Usage walks the index as far as
+	// MaxUsageScan.
+	Usage ports.BucketUsageStore
 	// PreviewMaxSize is the largest object previewed, but for text, CSV
 	// and JSON, of which the beginning is shown whatever their size: from
 	// MinPreviewMaxSize to MaxPreviewMaxSize bytes, or 0 for
@@ -108,7 +116,7 @@ func NewObjectService(cfg ObjectServiceConfig) (*ObjectService, error) {
 	return &ObjectService{
 		index: cfg.Index, buckets: cfg.Buckets, uploads: cfg.Uploads, storage: storage, kms: cfg.KMS,
 		authz: cfg.Authz, clock: cfg.Clock, logger: cfg.Logger, entropy: cfg.Entropy, auditor: cfg.Auditor,
-		access: cfg.Access, accessStore: cfg.AccessStore, tagDefinitions: cfg.TagDefinitions, previewMaxSize: previewMaxSize,
+		access: cfg.Access, accessStore: cfg.AccessStore, tagDefinitions: cfg.TagDefinitions, counts: cfg.Usage, previewMaxSize: previewMaxSize,
 		healer: newHealer(cfg.Index, cfg.Uploads, storage, cfg.Logger, cfg.OnHeal),
 	}, nil
 }
@@ -1113,8 +1121,25 @@ type BucketUsage struct {
 	Objects int64
 	// Bytes is their sizes added up.
 	Bytes int64
-	// Complete is false when the count stopped at MaxUsageScan.
+	// Complete is false when the count stopped at MaxUsageScan. It is
+	// true whenever Exact is.
 	Complete bool
+	// Exact says that the figures are the count the metadata store keeps
+	// of the bucket, which every change keeps right (ADR-0023), and that
+	// Versions, StoredBytes, UploadBytes and QuotaBytes are filled. Without
+	// it the figures were counted for this call by walking the index, and
+	// those four are 0.
+	Exact bool
+	// Versions are all the versions the bucket keeps, current or not,
+	// delete markers among them.
+	Versions int64
+	// StoredBytes are the sizes of all those versions added up.
+	StoredBytes int64
+	// UploadBytes are the sizes of the parts of multipart uploads that are
+	// neither completed nor aborted.
+	UploadBytes int64
+	// QuotaBytes is the bucket's quota, or 0 when it has none.
+	QuotaBytes int64
 }
 
 // MaxUsageScan bounds how many keys Usage counts in one call. The count is
@@ -1138,14 +1163,27 @@ type usageEntry struct {
 }
 
 // Usage counts the objects of a bucket and adds up their sizes. It needs
-// what listing the bucket needs: it tells nothing a listing does not.
+// what listing the bucket needs: it tells nothing a listing does not - and
+// the quota, which who may fill a bucket may know (ADR-0024).
 //
-// A figure is up to half a minute old: every caller is authorized, but the
-// walk is made once in that time for a bucket, however many ask.
+// Where the metadata store keeps an exact count of the bucket, that is the
+// answer, from this node's copy of the state: Exact and Complete, with
+// every figure. Otherwise - a bucket older than the count that has not been
+// counted yet, a deployment that does not count yet - the index is walked
+// as far as MaxUsageScan, and such a figure is up to half a minute old:
+// every caller is authorized, but the walk is made once in that time for a
+// bucket, however many ask.
 func (s *ObjectService) Usage(ctx context.Context, principal iam.Principal, bucketName string) (BucketUsage, error) {
 	resource := iam.Resource{Bucket: bucketName}
 	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListBucket, Resource: resource}); err != nil {
 		return BucketUsage{}, fmt.Errorf("object.Usage: %w", err)
+	}
+	kept, ok, err := s.keptUsage(ctx, bucketName)
+	if err != nil {
+		return BucketUsage{}, fmt.Errorf("object.Usage: %w", err)
+	}
+	if ok {
+		return kept, nil
 	}
 	s.usageMu.Lock()
 	if s.usage == nil {
@@ -1176,6 +1214,30 @@ func (s *ObjectService) Usage(ctx context.Context, principal iam.Principal, buck
 	}
 	entry.usage, entry.at, entry.known = usage, s.clock.Now(), true
 	return usage, nil
+}
+
+// keptUsage returns the count the metadata store keeps of a bucket, when
+// there is one and it is exact.
+func (s *ObjectService) keptUsage(ctx context.Context, bucketName string) (BucketUsage, bool, error) {
+	if s.counts == nil {
+		return BucketUsage{}, false, nil
+	}
+	records, err := s.counts.BucketUsages(ctx, []string{bucketName})
+	switch {
+	case errors.Is(err, domain.ErrUnavailable):
+		return BucketUsage{}, false, nil
+	case err != nil:
+		return BucketUsage{}, false, err
+	}
+	record := records[0]
+	if !record.Usage.Exact {
+		return BucketUsage{}, false, nil
+	}
+	t := record.Usage.UsageTotals
+	return BucketUsage{
+		Objects: t.Objects, Bytes: t.CurrentBytes, Complete: true, Exact: true,
+		Versions: t.Versions, StoredBytes: t.StoredBytes, UploadBytes: t.UploadBytes, QuotaBytes: record.QuotaBytes,
+	}, true, nil
 }
 
 // countObjects walks the index of a bucket, for at most limit keys.

@@ -3,6 +3,7 @@ package porttest
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"slices"
@@ -196,6 +197,31 @@ func (m *MemMetadata) ForgetUsage(bucketName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.usage, bucketName)
+}
+
+// Fill gives a bucket that exists n more keys, named by the format given
+// (fmt.Sprintf of it and the number, from 0), of one version each of size
+// bytes, without what PutVersion checks: for tests of a bucket larger than
+// PutVersion - which looks through every version there is for each -
+// makes in good time. A key that is there is replaced. The usage record is
+// left as it is; it is counted by looking.
+func (m *MemMetadata) Fill(bucketName, format string, n int, size int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.buckets[bucketName]; !ok {
+		return fmt.Errorf("%w: %s", domain.ErrBucketNotFound, bucketName)
+	}
+	for i := range n {
+		m.seq++
+		key := fmt.Sprintf(format, i)
+		// An ID no other fake makes: a mark, then the sequence.
+		id := object.ID{0xf1}
+		binary.BigEndian.PutUint64(id[len(id)-8:], m.seq)
+		m.objects[bucketName][key] = []object.Version{{
+			Bucket: bucketName, Key: key, VersionID: id, DataID: id, Size: size, Seq: m.seq,
+		}}
+	}
+	return nil
 }
 
 // BucketUsages implements ports.BucketUsageStore.

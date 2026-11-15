@@ -138,6 +138,13 @@ drive space, not quota.
   who may fill a bucket may know how full it may get.
 - A change carries its audit record in the same entry. A refusal by the authorizer is
   audited as every denial is.
+- **A recount is the exception** (PLAN 8.3.1): its entry, `bucket.usage.walk` of schema 5,
+  carries no audit record, and that schema is frozen. The recount is audited by the use
+  case in the background right after its first entry is committed, as other changes that
+  do not carry their record are (`Auditor.Succeeded`): `success`, or `failed` with
+  `outcome: unknown` when the entry may or may not have been committed. A node that stops
+  in between leaves a recount without its record; a recount changes no figure a caller
+  can see unless the count had drifted.
 
 ### What is told
 
