@@ -1516,6 +1516,11 @@ Notes:
 - The builder reaches the container engine through its socket (`/var/run/docker.sock` by
   default). For rootless Podman:
   `make check ENGINE=podman ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock`.
+  `make test-int` (within `make check`) pauses a container (`TestSiteReplication`), which
+  rootless Podman can do only on cgroup v2 with the `freezer` controller delegated to the
+  user: `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers` must list
+  the controllers the test containers use, and `podman info` must show
+  `cgroupVersion: v2`.
 - The builder runs as root inside its container. With rootful Docker on Linux, files it
   creates (`bin/`, `dist/`, `web/dist/`) are owned by root; `make clean` removes them.
 - On a shared machine the builder can be held to a part of it:
