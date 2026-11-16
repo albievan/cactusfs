@@ -461,35 +461,37 @@ func serverSettings() []settingSpec {
 				"of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never " +
 				"connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one " +
 				"address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source " +
-				"now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C",
+				"(ADR-0029) and by notification targets, the export of the audit trail included (ADR-0025), and will be by " +
+				"replication when it comes with PLAN 8C",
 			bind: func(t *settingTargets) any { return &t.egressAllow },
 		},
 		{
 			Name: "delivery-timeout", Env: envDeliveryTimeout, Flag: true, Default: durationText(egress.DefaultResponseTimeout),
 			Group: groupDelivery, Kind: plain, Scope: all,
 			Usage: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
-				"progress reading or writing; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+				"progress reading or writing; read by notification targets, and by replication once it exists (PLAN 8C)",
 			Doc: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
 				"progress reading or writing (`" +
 				durationText(minDeliveryTimeout) + "` to `" + durationText(maxDeliveryTimeout) + "`); one that does not is tried " +
-				"again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+				"again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the " +
+				"export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C",
 			bind: func(t *settingTargets) any { return &t.cfg.DeliveryTimeout },
 		},
 		{
 			Name: "replication-workers", Env: envReplWorkers, Flag: true, Default: strconv.Itoa(defaultReplicationWorkers),
 			Group: groupDelivery, Kind: plain, Scope: all,
 			Usage: "how many versions are replicated to other sites at once, " + strconv.Itoa(minReplicationWorkers) + " to " +
-				strconv.Itoa(maxReplicationWorkers) + "; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+				strconv.Itoa(maxReplicationWorkers) + "; no effect yet: read once replication exists (PLAN 8C)",
 			Doc: "how many versions are replicated to other sites at once (`" + strconv.Itoa(minReplicationWorkers) + "` to `" +
-				strconv.Itoa(maxReplicationWorkers) + "`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+				strconv.Itoa(maxReplicationWorkers) + "`). It has no effect yet: it is read by replication, which comes with PLAN 8C",
 			bind: func(t *settingTargets) any { return &t.cfg.ReplicationWorkers },
 		},
 		{
 			Name: "replication-rate-mib", Env: envReplRate, Flag: true, Default: "0",
 			Group: groupDelivery, Kind: plain, Scope: all,
-			Usage: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once notifications and replication exist (PLAN 8B, 8C)",
+			Usage: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once replication exists (PLAN 8C)",
 			Doc: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `" +
-				strconv.Itoa(maxReplicationRateMiB) + "`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C",
+				strconv.Itoa(maxReplicationRateMiB) + "`); `0` is no limit. It has no effect yet: it is read by replication, which comes with PLAN 8C",
 			bind: func(t *settingTargets) any { return &t.cfg.ReplicationRateMiB },
 		},
 
