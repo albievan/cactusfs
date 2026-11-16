@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -40,9 +43,16 @@ func (m ReplicaMode) Replica() bool {
 // Each passes the single authorizer with an admin: action on the bucket, so
 // that a bucket's own administrator, who holds s3:*, can do neither; each
 // change carries its audit record in the entry that makes it.
+//
+// It holds the use cases of a bucket's replication configuration too - the
+// source side: reading it (s3:GetReplicationConfiguration), and setting and
+// removing it (s3:PutReplicationConfiguration, as S3 has no action of its
+// own for removing it), each through the single authorizer and each change
+// audited.
 type ReplicationService struct {
 	buckets ports.BucketStore
 	store   ports.ReplicationStore
+	targets ports.TargetStore
 	authz   ports.Authorizer
 	auditor *Auditor
 }
@@ -51,6 +61,9 @@ type ReplicationService struct {
 type ReplicationServiceConfig struct {
 	Buckets ports.BucketStore
 	Store   ports.ReplicationStore
+	// Targets is where the target a replication configuration names is
+	// read; without it every configuration is refused.
+	Targets ports.TargetStore
 	Authz   ports.Authorizer
 	// Auditor builds the records of changes; without one every change is
 	// refused.
@@ -59,7 +72,7 @@ type ReplicationServiceConfig struct {
 
 // NewReplicationService returns a ReplicationService.
 func NewReplicationService(cfg ReplicationServiceConfig) *ReplicationService {
-	return &ReplicationService{buckets: cfg.Buckets, store: cfg.Store, authz: cfg.Authz, auditor: cfg.Auditor}
+	return &ReplicationService{buckets: cfg.Buckets, store: cfg.Store, targets: cfg.Targets, authz: cfg.Authz, auditor: cfg.Auditor}
 }
 
 // ReplicaMode returns whether a bucket is a replica, and of which
@@ -128,6 +141,202 @@ func (r *ReplicationService) read(ctx context.Context, bucketName string) (Repli
 		return ReplicaMode{}, err
 	}
 	return ReplicaMode{Source: b.ReplicaFrom}, nil
+}
+
+// Configuration returns the replication configuration of a bucket: where
+// its versions are copied to, and the rules in the order they were put. A
+// bucket without one has none (bucket.ReplicationConfig.Empty), which each
+// API answers as its own "not found". It needs
+// s3:GetReplicationConfiguration on the bucket. The error wraps
+// domain.ErrAccessDenied, domain.ErrBucketNotFound, domain.ErrUnavailable for
+// a configuration of a later release, and domain.ErrIntegrity for one that
+// cannot be read.
+func (r *ReplicationService) Configuration(ctx context.Context, principal iam.Principal, bucketName string) (bucket.ReplicationConfig, error) {
+	if err := r.authz.Authorize(ctx, bucketRequest(principal, iam.ActionGetReplication, bucketName)); err != nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.Configuration: %w", err)
+	}
+	raw, err := r.buckets.GetBucketConfig(ctx, bucketName, bucket.ConfigReplication)
+	if err != nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.Configuration: %w", err)
+	}
+	config, err := bucket.ParseReplicationConfig(raw)
+	switch {
+	case errors.Is(err, domain.ErrUnsupportedFormat):
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.Configuration: %w: the replication configuration of bucket %s is of a later release: %s",
+			domain.ErrUnavailable, bucketName, err.Error())
+	case err != nil:
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.Configuration: %w: stored replication configuration of bucket %s: %s",
+			domain.ErrIntegrity, bucketName, err.Error())
+	}
+	return config, nil
+}
+
+// SetConfiguration replaces the replication configuration of a bucket and
+// returns it as it is kept (ADR-0026, "Configuration"). It needs
+// s3:PutReplicationConfiguration on the bucket, and the change is audited.
+//
+// A rule without an ID is given one, "rule-<n>", that no other rule of the
+// configuration has. Then the configuration is judged
+// (bucket.ReplicationConfig.Validate: one target, one bucket there, 1 to
+// bucket.MaxReplicationRules rules) and, in this order, the bucket: it must
+// be there, must not be a replica itself, and must keep versions; then the
+// target: it must exist, be another deployment (delivery.KindS3) and admit
+// the bucket. Which of the three a target fails is not said, so that a
+// caller who may configure a bucket learns nothing of targets that are not
+// open to it. The store decides all of it again when the change is
+// committed, which is what holds.
+//
+// The error wraps domain.ErrAccessDenied; domain.ErrInvalidArgument for a
+// configuration that cannot be kept or a target it may not name (nothing is
+// proposed); domain.ErrBucketNotFound; domain.ErrInvalidBucketState for a
+// bucket that is a replica; domain.ErrVersioningRequired for one whose
+// versioning is not enabled; and domain.ErrUnavailable until every member of
+// the metadata group knows replication, or when there is no audit trail to
+// record the change in.
+func (r *ReplicationService) SetConfiguration(ctx context.Context, principal iam.Principal, bucketName string, config bucket.ReplicationConfig) (bucket.ReplicationConfig, error) {
+	if err := r.authz.Authorize(ctx, bucketRequest(principal, iam.ActionPutReplication, bucketName)); err != nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.SetConfiguration: %w", err)
+	}
+	kept, err := r.setConfiguration(ctx, principal, bucketName, config)
+	if err != nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("replication.SetConfiguration: %w", err)
+	}
+	return kept, nil
+}
+
+// DeleteConfiguration removes the replication configuration of a bucket; a
+// bucket without one is left as it is. It is asked as setting one is
+// (s3:PutReplicationConfiguration, as in S3), and audited. Rows of the
+// outbox appended before are sent all the same, and nothing is removed at
+// the other deployment. The error wraps domain.ErrAccessDenied,
+// domain.ErrBucketNotFound, and domain.ErrUnavailable until every member of
+// the metadata group knows replication, or when there is no audit trail to
+// record the change in.
+func (r *ReplicationService) DeleteConfiguration(ctx context.Context, principal iam.Principal, bucketName string) error {
+	if err := r.authz.Authorize(ctx, bucketRequest(principal, iam.ActionPutReplication, bucketName)); err != nil {
+		return fmt.Errorf("replication.DeleteConfiguration: %w", err)
+	}
+	if r.auditor == nil {
+		return fmt.Errorf("replication.DeleteConfiguration: %w: no audit trail to record the change in", domain.ErrUnavailable)
+	}
+	if err := r.buckets.SetBucketConfig(ctx, bucketName, bucket.ConfigReplication, nil); err != nil {
+		return fmt.Errorf("replication.DeleteConfiguration: %w", err)
+	}
+	details := map[string]string{"replication": "removed"}
+	r.auditor.Succeeded(ctx, r.auditor.Record(principal, iam.ActionPutReplication, iam.Resource{Bucket: bucketName}, audit.Succeeded, details))
+	return nil
+}
+
+// setConfiguration judges the configuration, the bucket and the target,
+// proposes the document and audits the change.
+func (r *ReplicationService) setConfiguration(ctx context.Context, principal iam.Principal, bucketName string, config bucket.ReplicationConfig) (bucket.ReplicationConfig, error) {
+	if r.auditor == nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("%w: no audit trail to record the change in", domain.ErrUnavailable)
+	}
+	if r.targets == nil {
+		return bucket.ReplicationConfig{}, fmt.Errorf("%w: no targets to send versions to on this node", domain.ErrUnavailable)
+	}
+	config = withRuleIDs(config)
+	if err := refuseTies(config.Rules); err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	document, err := config.Document()
+	if err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	// The configuration is returned as Configuration reads it: from the
+	// document.
+	kept, err := bucket.ParseReplicationConfig(document)
+	if err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	b, err := r.buckets.GetBucket(ctx, bucketName)
+	if err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	switch {
+	case b.ReplicaFrom != "":
+		// A replica bucket is never the source of another: one hop.
+		return bucket.ReplicationConfig{}, fmt.Errorf("%w: bucket %s is a replica and is not replicated again", domain.ErrInvalidBucketState, bucketName)
+	case b.Versioning != bucket.VersioningEnabled:
+		return bucket.ReplicationConfig{}, fmt.Errorf("%w: bucket %s", domain.ErrVersioningRequired, bucketName)
+	}
+	if err := r.open(ctx, kept.Target, bucketName); err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	if err := r.buckets.SetBucketConfig(ctx, bucketName, bucket.ConfigReplication, document); err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	details := map[string]string{"target": kept.Target, "destination": kept.Bucket, "rules": strconv.Itoa(len(kept.Rules))}
+	r.auditor.Succeeded(ctx, r.auditor.Record(principal, iam.ActionPutReplication, iam.Resource{Bucket: bucketName}, audit.Succeeded, details))
+	return kept, nil
+}
+
+// open reports, with an error that wraps domain.ErrInvalidArgument, a
+// target that the replication configuration of the bucket may not name: one
+// that is not there, is no other deployment, or does not admit the bucket -
+// in one sentence for all three.
+func (r *ReplicationService) open(ctx context.Context, name, bucketName string) error {
+	target, err := r.targets.GetTarget(ctx, name)
+	switch {
+	case errors.Is(err, domain.ErrEntityNotFound):
+	case err != nil:
+		return err
+	case target.Kind.Serves(delivery.ConsumerReplication) && target.Admits(bucketName):
+		return nil
+	}
+	return fmt.Errorf("%w: target %s is not another deployment that is open to bucket %s", domain.ErrInvalidArgument, name, bucketName)
+}
+
+// refuseTies refuses, with an error that wraps domain.ErrInvalidArgument, two
+// enabled rules of one priority of which one's prefix begins the other's:
+// some key would match both, and which of them decides for it would be
+// settled by the order they were put in and by nothing the caller said. In
+// the first form of S3's schema every rule has the priority 0, so there any
+// two enabled rules that overlap are refused. It is the use case's rule, not
+// the store's: bucket.ReplicationConfig.Validate, and with it what every
+// member applies, is unchanged (Decides still settles a tie, for documents
+// stored before).
+func refuseTies(rules []bucket.ReplicationRule) error {
+	for i, a := range rules {
+		for _, b := range rules[i+1:] {
+			if !a.Enabled || !b.Enabled || a.Priority != b.Priority {
+				continue
+			}
+			if strings.HasPrefix(a.Prefix, b.Prefix) || strings.HasPrefix(b.Prefix, a.Prefix) {
+				return fmt.Errorf("%w: replication: rules %s and %s both match some keys at the priority %d: give them different priorities or prefixes that do not overlap",
+					domain.ErrInvalidArgument, a.ID, b.ID, a.Priority)
+			}
+		}
+	}
+	return nil
+}
+
+// withRuleIDs returns a copy of the configuration in which every rule put
+// without an ID has one, as S3 makes one: "rule-<n>", the least n that no
+// rule of the configuration has taken. The IDs given are deterministic, so
+// that a request made again keeps the same rules.
+func withRuleIDs(config bucket.ReplicationConfig) bucket.ReplicationConfig {
+	rules := slices.Clone(config.Rules)
+	taken := map[string]bool{}
+	for _, rule := range rules {
+		taken[rule.ID] = true
+	}
+	next := 1
+	for i := range rules {
+		if rules[i].ID != "" {
+			continue
+		}
+		id := generatedRuleID + strconv.Itoa(next)
+		for taken[id] {
+			next++
+			id = generatedRuleID + strconv.Itoa(next)
+		}
+		rules[i].ID, taken[id] = id, true
+		next++
+	}
+	config.Rules = rules
+	return config
 }
 
 // ReplicaWrite says that a write is the copy of a version or of a delete

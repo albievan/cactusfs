@@ -55,6 +55,12 @@ var (
 	// sub-bucket - not confined to the sub-bucket (ADR-0017). It is an
 	// ErrInvalidArgument, and crosses a node boundary as one.
 	ErrInvalidPolicy = fmt.Errorf("%w: invalid policy", ErrInvalidArgument)
+	// ErrVersioningRequired reports a change that only a bucket which keeps
+	// versions can take - a replication configuration (ADR-0026) - asked of
+	// one that does not. It is an ErrInvalidArgument, and crosses a node
+	// boundary as one; the S3 API tells it apart, as AWS does, with
+	// InvalidRequest.
+	ErrVersioningRequired = fmt.Errorf("%w: the bucket must keep versions", ErrInvalidArgument)
 	// ErrAccessDenied reports that the authorizer refused the request.
 	ErrAccessDenied = errors.New("access denied")
 	// ErrCredentialNotFound reports an access key ID that does not exist or
@@ -376,6 +382,7 @@ func LocalSentinels() []error {
 		ErrTagRule,
 		ErrObjectKeyTooLong,
 		ErrInvalidPolicy,
+		ErrVersioningRequired,
 		ErrIdempotencyKeyReused,
 		ErrRequestInProgress,
 		ErrTooManyAttempts,

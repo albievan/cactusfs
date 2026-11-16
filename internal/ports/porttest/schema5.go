@@ -501,14 +501,13 @@ func (m *MemMetadata) checkDelivered(b bucket.Bucket, kind string, document []by
 		names = config.Targets()
 	}
 	for _, name := range names {
-		target, ok := m.targets[name]
-		switch {
-		case !ok:
-			return fmt.Errorf("%w: there is no target %s", domain.ErrInvalidArgument, name)
-		case !target.Kind.Serves(consumer):
-			return fmt.Errorf("%w: target %s is a %s target", domain.ErrInvalidArgument, name, target.Kind)
-		case !target.Admits(b.Name):
-			return fmt.Errorf("%w: target %s is not open to bucket %s", domain.ErrInvalidArgument, name, b.Name)
+		// One sentence for the three, as the store of Raft and bbolt says it.
+		if target, ok := m.targets[name]; !ok || !target.Kind.Serves(consumer) || !target.Admits(b.Name) {
+			what := "a webhook or NATS target"
+			if consumer == delivery.ConsumerReplication {
+				what = "another deployment"
+			}
+			return fmt.Errorf("%w: target %s is not %s that is open to bucket %s", domain.ErrInvalidArgument, name, what, b.Name)
 		}
 	}
 	return nil

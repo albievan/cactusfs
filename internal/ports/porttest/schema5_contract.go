@@ -805,6 +805,29 @@ func Schema5Contract(t *testing.T, open func(t *testing.T) Schema5) {
 				t.Errorf("%s: SetBucketConfig = %v, want %v", name, err, tt.want)
 			}
 		}
+		// Which of the three ways a target fails is not told: a target that
+		// is not there, one of a kind that does not serve, and one that does
+		// not admit the bucket are refused in one sentence, the names apart.
+		for kind, refused := range map[string][]struct{ bucket, target string }{
+			bucket.ConfigNotification: {{"photos", "missing"}, {"photos", "site-b"}, {"private", "hook"}},
+			bucket.ConfigReplication:  {{"photos", "missing"}, {"photos", "hook"}, {"logs", "site-b"}},
+		} {
+			said := map[string]bool{}
+			for _, r := range refused {
+				document := notification(r.target)
+				if kind == bucket.ConfigReplication {
+					document = replication(r.target)
+				}
+				err := s.SetBucketConfig(ctx, r.bucket, kind, document)
+				if !errors.Is(err, domain.ErrInvalidArgument) {
+					t.Fatalf("%s of %s naming %s = %v", kind, r.bucket, r.target, err)
+				}
+				said[strings.NewReplacer("target "+r.target+" ", "target T ", "bucket "+r.bucket, "bucket B").Replace(err.Error())] = true
+			}
+			if len(said) != 1 {
+				t.Errorf("the refusals of the targets a %s document names differ: %v", kind, said)
+			}
+		}
 		for _, name := range []string{"photos", "logs", "private"} {
 			for _, kind := range []string{bucket.ConfigNotification, bucket.ConfigReplication} {
 				if stored, err := s.GetBucketConfig(ctx, name, kind); err != nil || stored != nil {
