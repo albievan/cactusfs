@@ -495,6 +495,11 @@ func SiteClientContract(t *testing.T, source string, open func(t *testing.T) (po
 		if _, err := store.GetObject(ctx, "replica", "k"); !errors.Is(err, domain.ErrObjectNotFound) {
 			t.Errorf("the object behind the marker: %v", err)
 		}
+		// Asked for, the marker is there with no entity tag: what a resync
+		// asks before it sends a marker (PLAN 8.1.6).
+		if etag, found, err := client.HeadVersion(ctx, "replica", "k", marker.Ref()); etag != "" || !found || err != nil {
+			t.Errorf("HeadVersion of the marker = %q, %v, %v; want there with no entity tag", etag, found, err)
+		}
 	})
 
 	t.Run("a version of parts arrives through a multipart upload", func(t *testing.T) {

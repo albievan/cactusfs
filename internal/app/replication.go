@@ -48,7 +48,8 @@ func (m ReplicaMode) Replica() bool {
 // source side: reading it (s3:GetReplicationConfiguration), and setting and
 // removing it (s3:PutReplicationConfiguration, as S3 has no action of its
 // own for removing it), each through the single authorizer and each change
-// audited.
+// audited; and the start of a resync (admin:ResyncReplication), which the
+// ResyncWorker walks.
 type ReplicationService struct {
 	buckets ports.BucketStore
 	store   ports.ReplicationStore
@@ -225,6 +226,70 @@ func (r *ReplicationService) DeleteConfiguration(ctx context.Context, principal 
 	details := map[string]string{"replication": "removed"}
 	r.auditor.Succeeded(ctx, r.auditor.Record(principal, iam.ActionPutReplication, iam.Resource{Bucket: bucketName}, audit.Succeeded, details))
 	return nil
+}
+
+// Resync starts the walk that sends the other deployment what it lacks of a
+// bucket (ADR-0026, "Resync"), or starts it again from the beginning, and
+// returns the record it stored: running, nothing looked at yet. The walk is
+// the ResyncWorker's, on the node that leads; this only stores where it
+// begins, through Raft, so that any node may be asked.
+//
+// It needs admin:ResyncReplication on the bucket - a load on the link and on
+// the other deployment that a bucket's own administrator, who holds s3:*,
+// cannot start - and is audited. The walk is of the target the bucket's
+// replication configuration names now; that target must still be another
+// deployment open to the bucket.
+//
+// The error wraps domain.ErrAccessDenied; domain.ErrBucketNotFound;
+// domain.ErrEntityNotFound for a bucket without a replication configuration;
+// domain.ErrInvalidArgument when its target is no longer another deployment
+// open to the bucket; domain.ErrIntegrity for a configuration that cannot be
+// read; and domain.ErrUnavailable for one of a later release, until every
+// member of the metadata group knows replication, or when there is no audit
+// trail to record the start in.
+func (r *ReplicationService) Resync(ctx context.Context, principal iam.Principal, bucketName string) (bucket.Resync, error) {
+	if err := r.authz.Authorize(ctx, bucketRequest(principal, iam.ActionResyncReplication, bucketName)); err != nil {
+		return bucket.Resync{}, fmt.Errorf("replication.Resync: %w", err)
+	}
+	record, err := r.resync(ctx, principal, bucketName)
+	if err != nil {
+		return bucket.Resync{}, fmt.Errorf("replication.Resync: %w", err)
+	}
+	return record, nil
+}
+
+// resync judges the configuration and its target, stores the start of the
+// walk and audits it.
+func (r *ReplicationService) resync(ctx context.Context, principal iam.Principal, bucketName string) (bucket.Resync, error) {
+	if r.auditor == nil {
+		return bucket.Resync{}, fmt.Errorf("%w: no audit trail to record the start in", domain.ErrUnavailable)
+	}
+	if r.targets == nil {
+		return bucket.Resync{}, fmt.Errorf("%w: no targets to send versions to on this node", domain.ErrUnavailable)
+	}
+	raw, err := r.buckets.GetBucketConfig(ctx, bucketName, bucket.ConfigReplication)
+	if err != nil {
+		return bucket.Resync{}, err
+	}
+	config, err := bucket.ParseReplicationConfig(raw)
+	switch {
+	case errors.Is(err, domain.ErrUnsupportedFormat):
+		return bucket.Resync{}, fmt.Errorf("%w: the replication configuration of bucket %s is of a later release: %s", domain.ErrUnavailable, bucketName, err.Error())
+	case err != nil:
+		return bucket.Resync{}, fmt.Errorf("%w: stored replication configuration of bucket %s: %s", domain.ErrIntegrity, bucketName, err.Error())
+	case config.Empty():
+		return bucket.Resync{}, fmt.Errorf("%w: bucket %s has no replication configuration", domain.ErrEntityNotFound, bucketName)
+	}
+	if _, err := r.open(ctx, config.Target, bucketName); err != nil {
+		return bucket.Resync{}, err
+	}
+	record := bucket.Resync{Bucket: bucketName, Target: config.Target, State: bucket.ResyncRunning}
+	if err := r.store.PutResync(ctx, record); err != nil {
+		return bucket.Resync{}, err
+	}
+	details := map[string]string{"target": config.Target, "resync": "started"}
+	r.auditor.Succeeded(ctx, r.auditor.Record(principal, iam.ActionResyncReplication, iam.Resource{Bucket: bucketName}, audit.Succeeded, details))
+	return record, nil
 }
 
 // setConfiguration judges the configuration, the bucket and the target,
