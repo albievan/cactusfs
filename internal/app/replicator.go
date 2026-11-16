@@ -222,7 +222,31 @@ type Replicator struct {
 	// maxUploads and maxParts are maxRememberedUploads and
 	// maxRememberedParts, but in a test.
 	maxUploads, maxParts int
+	// sending are the objects at the other deployments that a version or a
+	// change is being sent to now, by ObjectOf's name. The delivery worker's
+	// waves never hand over two items of one object at once; this keeps a
+	// resync (resync.go) and the outbox apart too.
+	sending map[string]*sendingObject
+	// preempted counts, by object there and version, the resync sends the
+	// outbox ended; at ResyncPreemptions the outbox waits for the next one
+	// instead. A version's count goes once its send ends by itself; all of
+	// them go beyond maxRememberedUploads versions.
+	preempted map[string]int
 }
+
+// sendingObject is a send to an object there in progress: done is closed
+// when it ends; cancel, for a resync's send, ends it - the outbox does not
+// wait for a resync, but for a version it has ended the send of
+// ResyncPreemptions times. version names the version a resync sends.
+type sendingObject struct {
+	done    chan struct{}
+	cancel  context.CancelCauseFunc
+	version string
+}
+
+// errPreempted is why a resync's send was ended: the outbox has the object
+// to send.
+var errPreempted = errors.New("replicator: the outbox sends the object")
 
 // siteConn is a target as it was last sent to, and the generation of its
 // connection: a new one whenever the target was made again under its name,
@@ -273,7 +297,7 @@ func NewReplicator(cfg ReplicatorConfig) *Replicator {
 	r := &Replicator{
 		objects: cfg.Objects, buckets: cfg.Buckets, sites: cfg.Sites, source: cfg.Source, clock: cfg.Clock, logger: cfg.Logger,
 		conns: map[string]siteConn{}, checked: map[siteBucket]probed{}, uploads: map[siteVersion]*siteUpload{},
-		maxUploads: maxRememberedUploads, maxParts: maxRememberedParts,
+		maxUploads: maxRememberedUploads, maxParts: maxRememberedParts, sending: map[string]*sendingObject{}, preempted: map[string]int{},
 	}
 	if r.logger == nil {
 		r.logger = slog.New(slog.DiscardHandler)
@@ -317,37 +341,208 @@ func isChange(event delivery.Event) bool {
 // later change of it, to the other deployment the target is, and returns the
 // status of replication it gives.
 func (r *Replicator) Deliver(ctx context.Context, target delivery.Target, item delivery.Item) (object.ReplicationStatus, error) {
+	status, _, err := r.deliver(ctx, target, item, false)
+	return status, err
+}
+
+// Resend implements ResyncSender: it sends a version a resync walks (PLAN
+// 8.1.6) as the outbox would send the row of its commit - the same reads,
+// classes, probe, locks, uploads that go on, rate and statuses - and asks
+// first whether the other deployment has it, a delete marker too. It reports
+// whether anything was sent: false when the version was there already, and
+// for a version that is passed or FAILED without a byte sent.
+//
+// Unlike a row it never waits and never passes what it cannot send now: an
+// object the outbox is sending is ErrResyncObjectBusy at once, and the
+// outbox ends a resync's send to an object it comes to send (also
+// ErrResyncObjectBusy); a configuration that no longer sends the bucket to
+// the target, or a target that no longer admits it, is
+// ErrResyncConfiguration. A version that is FAILED is neither sent nor
+// given another status: a resync never lifts FAILED.
+func (r *Replicator) Resend(ctx context.Context, target delivery.Target, v object.Version) (object.ReplicationStatus, bool, error) {
+	event := delivery.EventPut
+	switch {
+	case v.DeleteMarker:
+		event = delivery.EventMarker
+	case v.Multipart():
+		event = delivery.EventComplete
+	}
+	item := delivery.Item{
+		Event: event, Bucket: v.Bucket, Key: v.Key, Version: v.Ref(), Size: v.Size, ETag: v.ETag, At: v.ModifiedAt,
+		To: []delivery.Consumer{{Kind: delivery.ConsumerReplication, Target: target.Name}},
+	}
+	return r.deliver(ctx, target, item, true)
+}
+
+// deliver is Deliver and Resend: resync says the item is a version a resync
+// walks, not a row of the outbox. sent reports whether anything was sent.
+func (r *Replicator) deliver(ctx context.Context, target delivery.Target, item delivery.Item, resync bool) (object.ReplicationStatus, bool, error) {
 	if r.objects == nil || r.buckets == nil || r.sites == nil || object.ValidateReplicaSource(r.source) != nil {
-		return "", delivery.Failed(delivery.ClassInternal, errNoReplicator)
+		return "", false, delivery.Failed(delivery.ClassInternal, errNoReplicator)
+	}
+	if resync && !target.Admits(item.Bucket) {
+		return "", false, fmt.Errorf("replicator.Resend: %w: the target no longer admits the bucket", ErrResyncConfiguration)
 	}
 	if class, err := heldOrPassed(target, item); err != nil {
-		return "", r.notSent(ctx, target, class, err)
+		return "", false, r.notSent(ctx, target, class, err)
 	}
 	config, err := r.configuration(ctx, item.Bucket)
 	switch {
 	case gone(err):
-		return "", r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: the bucket is gone", errNotSent))
+		return "", false, r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: the bucket is gone", errNotSent))
 	case err != nil:
-		return "", replicaFailure(err)
+		return "", false, replicaFailure(err)
+	case config.Target != target.Name && resync:
+		// A row of the outbox is passed; a resync waits rather than move
+		// its cursor over what it did not send.
+		return "", false, fmt.Errorf("replicator.Resend: %w", ErrResyncConfiguration)
 	case config.Target != target.Name:
-		return "", r.notSent(ctx, target, delivery.ClassRejected,
+		return "", false, r.notSent(ctx, target, delivery.ClassRejected,
 			fmt.Errorf("%w: the bucket's replication configuration no longer names the target", errNotSent))
 	}
+	// One send to an object there at a time, whoever sends: a row of the
+	// outbox and a version a resync walks may name the same object. The
+	// outbox waits for another row, and ends a resync's send - but for a
+	// version whose send it ended ResyncPreemptions times, which it waits
+	// for; a resync waits for nobody.
+	name := objectThere(target, config, item.Key)
+	var release func()
+	if resync {
+		ctx, release, err = r.tryExclusive(ctx, name, item.Version.String())
+	} else {
+		release, err = r.exclusive(ctx, name)
+	}
+	if err != nil {
+		if errors.Is(err, ErrResyncObjectBusy) {
+			return "", false, err
+		}
+		return "", false, replicaFailure(err)
+	}
+	defer release()
+	status, sent, err := r.sendRead(ctx, target, item, config, resync)
+	if resync {
+		if errors.Is(context.Cause(ctx), errPreempted) {
+			// The outbox has the object now; what this send did is found
+			// there when the walk comes back to it.
+			return "", false, fmt.Errorf("replicator.Resend: %w", ErrResyncPreempted)
+		}
+		r.mu.Lock()
+		delete(r.preempted, preemptionOf(name, item.Version.String()))
+		r.mu.Unlock()
+	}
+	return status, sent, err
+}
+
+// sendRead reads the version an item names and sends it.
+func (r *Replicator) sendRead(
+	ctx context.Context, target delivery.Target, item delivery.Item, config bucket.ReplicationConfig, resync bool,
+) (object.ReplicationStatus, bool, error) {
 	v, err := r.objects.ReplicationVersion(ctx, replicationPrincipal(), item.Bucket, item.Key, item.Version)
 	switch {
 	case gone(err):
-		return "", r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: the version is gone", errNotSent))
+		return "", false, r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: the version is gone", errNotSent))
 	case err != nil:
-		return "", replicaFailure(err)
+		return "", false, replicaFailure(err)
+	case resync && v.Replication == object.ReplicationFailed:
+		// FAILED is final: a resync neither sends the version nor gives it
+		// another status, whatever the other deployment holds.
+		return "", false, nil
 	}
-	status, err := r.send(ctx, target, item, config, v)
+	status, sent, err := r.send(ctx, target, item, config, v, resync)
 	if err != nil {
 		r.forget(target, config.Bucket)
 		if !delivery.ClassOf(err).Passes() {
-			return "", err
+			return "", false, err
 		}
 	}
-	return status, err
+	return status, sent, err
+}
+
+// objectThere names the object at the other deployment an item is about:
+// the target, the bucket there the configuration names, and the key.
+func objectThere(target delivery.Target, config bucket.ReplicationConfig, key string) string {
+	return target.Name + "\x00" + config.Bucket + "\x00" + key
+}
+
+// preemptionOf names a version at an object there, as preempted counts it.
+func preemptionOf(name, version string) string {
+	return name + "\x00" + version
+}
+
+// exclusive is the outbox's: it waits until no other send to the object
+// named is in progress, or ctx ends, and marks one as in progress; the
+// function it returns ends it. A resync's send to the object is ended at
+// once rather than waited for to its end - but for a version whose send it
+// ended ResyncPreemptions times already: that one it waits for, so that a
+// key written to again and again does not keep a large old version from
+// ever crossing. A wait that outlasts ctx is a failure that holds, never
+// FAILED.
+func (r *Replicator) exclusive(ctx context.Context, name string) (func(), error) {
+	for {
+		r.mu.Lock()
+		busy, ok := r.sending[name]
+		if !ok {
+			release := r.holdLocked(name, nil, "")
+			r.mu.Unlock()
+			return release, nil
+		}
+		cancel := busy.cancel
+		if cancel != nil {
+			key := preemptionOf(name, busy.version)
+			if r.preempted[key] < ResyncPreemptions {
+				if len(r.preempted) >= maxRememberedUploads {
+					clear(r.preempted)
+				}
+				r.preempted[key]++
+				// Ended once: the next look waits for it to end.
+				busy.cancel = nil
+			} else {
+				cancel = nil
+			}
+		}
+		r.mu.Unlock()
+		if cancel != nil {
+			cancel(errPreempted)
+		}
+		select {
+		case <-busy.done:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("replicator: waiting for another send to the object: %w", ctx.Err())
+		}
+	}
+}
+
+// tryExclusive is a resync's: it marks a send of the version to the object
+// named as in progress, under a context the outbox may end (errPreempted),
+// and returns ErrResyncObjectBusy at once when another send to it is in
+// progress.
+func (r *Replicator) tryExclusive(ctx context.Context, name, version string) (context.Context, func(), error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.sending[name]; ok {
+		return nil, nil, fmt.Errorf("replicator.Resend: %w", ErrResyncObjectBusy)
+	}
+	sendCtx, cancel := context.WithCancelCause(ctx)
+	release := r.holdLocked(name, cancel, version)
+	return sendCtx, func() {
+		release()
+		cancel(nil)
+	}, nil
+}
+
+// holdLocked marks a send to the object named as in progress and returns
+// the function that ends it; r.mu is held.
+func (r *Replicator) holdLocked(name string, cancel context.CancelCauseFunc, version string) func() {
+	held := &sendingObject{done: make(chan struct{}), cancel: cancel, version: version}
+	r.sending[name] = held
+	return func() {
+		r.mu.Lock()
+		if r.sending[name] == held {
+			delete(r.sending, name)
+		}
+		r.mu.Unlock()
+		close(held.done)
+	}
 }
 
 // ObjectOf implements ObjectNamer: the object an item is about at the other
@@ -364,7 +559,7 @@ func (r *Replicator) ObjectOf(ctx context.Context, target delivery.Target, item 
 	if err != nil || config.Target != target.Name {
 		return "", false
 	}
-	return target.Name + "\x00" + config.Bucket + "\x00" + item.Key, true
+	return objectThere(target, config, item.Key), true
 }
 
 // heldOrPassed returns the failure of an item that is not to be sent, and
@@ -426,51 +621,56 @@ func (r *Replicator) configuration(ctx context.Context, bucketName string) (buck
 	return config, nil
 }
 
-// send sends a version that was read, or a later change of it.
-func (r *Replicator) send(ctx context.Context, target delivery.Target, item delivery.Item, config bucket.ReplicationConfig, v object.Version) (object.ReplicationStatus, error) {
+// send sends a version that was read, or a later change of it, and reports
+// whether anything was sent. For a resync a delete marker is asked for
+// before it is sent, as a version always is.
+func (r *Replicator) send(
+	ctx context.Context, target delivery.Target, item delivery.Item, config bucket.ReplicationConfig, v object.Version, resync bool,
+) (object.ReplicationStatus, bool, error) {
 	change := isChange(item.Event)
 	switch {
 	case v.Replication == object.ReplicationReplica:
-		return "", r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: a replica is never sent on", errNotSent))
+		return "", false, r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: a replica is never sent on", errNotSent))
 	case v.DeleteMarker != (item.Event == delivery.EventMarker):
 		// A version ID names one version, which does not change: the
 		// row and the version disagree, and nothing is decided on either.
 		// A delete marker has no tags, retention or legal hold.
-		return "", delivery.Failed(delivery.ClassInternal, fmt.Errorf("replicator.Deliver: %w: the row and the version are not of one kind", errNotSent))
+		return "", false, delivery.Failed(delivery.ClassInternal, fmt.Errorf("replicator.Deliver: %w: the row and the version are not of one kind", errNotSent))
 	case v.DeleteMarker && len(config.Replicates(delivery.EventMarker, v.Key, item.By, false, "")) == 0:
 		// A marker crosses only while the deciding rule copies markers,
 		// and never one the lifecycle service made: one that crosses
 		// can hide a version at the destination.
-		return "", r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: no rule copies the marker", errNotSent))
+		return "", false, r.notSent(ctx, target, delivery.ClassRejected, fmt.Errorf("%w: no rule copies the marker", errNotSent))
 	case change && v.Encryption.Mode == object.SSEC:
 		// The version itself never crossed, and is FAILED already.
-		return "", r.notSent(ctx, target, delivery.ClassSSEC, fmt.Errorf("%w: a change of a version of a customer's key", errNotSent))
+		return "", false, r.notSent(ctx, target, delivery.ClassSSEC, fmt.Errorf("%w: a change of a version of a customer's key", errNotSent))
 	case !v.DeleteMarker && v.Encryption.Mode == object.SSEC:
-		return object.ReplicationFailed, delivery.Failed(delivery.ClassSSEC,
+		return object.ReplicationFailed, false, delivery.Failed(delivery.ClassSSEC,
 			fmt.Errorf("replicator.Deliver: %w: encrypted with a key of the customer's", errNotSent))
 	case v.Seq > object.MaxReplicaSeq && !change:
 		// A bucket promoted above a replica at the bound (ADR-0026,
 		// "Order"): no deployment takes a copy at such a sequence.
-		return object.ReplicationFailed, delivery.Failed(delivery.ClassRejected,
+		return object.ReplicationFailed, false, delivery.Failed(delivery.ClassRejected,
 			fmt.Errorf("replicator.Deliver: %w: a sequence beyond the bound of a replica", errNotSent))
 	}
 	site, err := r.sites.Site(ctx, target)
 	if err != nil {
-		return "", replicaFailure(err)
+		return "", false, replicaFailure(err)
 	}
 	generation := r.generation(target)
 	answer, err := r.check(ctx, site, target.Name, generation, config.Bucket)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if change {
-		return r.sendChange(ctx, target, site, item, config.Bucket, v, answer)
+		status, err := r.sendChange(ctx, target, site, item, config.Bucket, v, answer)
+		return status, false, err
 	}
 	if !v.DeleteMarker && r.locked(v.Lock) && !answer.ObjectLock {
 		// The bucket there could keep neither the retention nor the legal
 		// hold: an operator gives it Object Lock, or the rule here
 		// another bucket.
-		return "", delivery.Failed(delivery.ClassObjectLock,
+		return "", false, delivery.Failed(delivery.ClassObjectLock,
 			fmt.Errorf("replicator.Deliver: %w: it has no Object Lock, and the version carries a lock", errSiteBucket))
 	}
 	copied := v
@@ -479,18 +679,43 @@ func (r *Replicator) send(ctx context.Context, target delivery.Target, item deli
 	// before versions, at sequence 0 here, at 1 - below every version its
 	// bucket made since (ADR-0026, "Open", 6).
 	copied.Replica = &object.Replica{From: r.source, Seq: max(v.Seq, 1), Null: !v.Versioned}
+	var sent bool
 	if v.DeleteMarker {
-		err = site.PutMarker(ctx, copied)
+		sent, err = r.sendMarker(ctx, site, item, copied, resync)
 	} else {
-		err = r.sendVersion(ctx, target.Name, generation, site, item, copied)
+		sent, err = r.sendVersion(ctx, target.Name, generation, site, item, copied)
 	}
 	switch class := delivery.ClassOf(err); {
 	case err == nil:
-		return object.ReplicationCompleted, nil
+		return object.ReplicationCompleted, sent, nil
 	case class.Passes():
-		return object.ReplicationFailed, fmt.Errorf("replicator.Deliver: %w", err)
+		return object.ReplicationFailed, false, fmt.Errorf("replicator.Deliver: %w", err)
 	}
-	return "", replicaFailure(err)
+	return "", false, replicaFailure(err)
+}
+
+// sendMarker sends a delete marker, and reports whether it was sent. A row
+// of the outbox sends it as it is - a marker sent twice is taken the second
+// time as there - but a resync asks first (HeadVersion), so that what it
+// counts as sent is what the other deployment lacked: a marker there is
+// there with no entity tag, and anything there with one under the marker's
+// ID holds other bytes (delivery.ClassRejected).
+func (r *Replicator) sendMarker(ctx context.Context, site ports.SiteClient, item delivery.Item, copied object.Version, resync bool) (bool, error) {
+	if resync {
+		etag, found, err := site.HeadVersion(ctx, copied.Bucket, copied.Key, item.Version)
+		switch {
+		case err != nil:
+			return false, err
+		case found && etag == "":
+			return false, nil
+		case found:
+			return false, delivery.Failed(delivery.ClassRejected, errOtherBytes)
+		}
+	}
+	if err := site.PutMarker(ctx, copied); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // locked reports whether a lock is one to send: a legal hold, or a
@@ -687,29 +912,30 @@ func (r *Replicator) forget(target delivery.Target, bucketName string) {
 }
 
 // sendVersion sends a version that has bytes, unless the other deployment
-// has it already: in one PUT, or as an upload of the same parts.
-func (r *Replicator) sendVersion(ctx context.Context, target string, generation uint64, site ports.SiteClient, item delivery.Item, copied object.Version) error {
+// has it already: in one PUT, or as an upload of the same parts. It reports
+// whether it was sent.
+func (r *Replicator) sendVersion(ctx context.Context, target string, generation uint64, site ports.SiteClient, item delivery.Item, copied object.Version) (bool, error) {
 	etag, found, err := site.HeadVersion(ctx, copied.Bucket, copied.Key, item.Version)
 	switch {
 	case err != nil:
-		return err
+		return false, err
 	case found && etag == copied.ETag:
 		// An attempt before completed it, and its answer was lost: what
 		// was remembered of its upload is of no more use.
 		r.forgetUpload(uploadOf(target, generation, item, copied))
-		return nil
+		return false, nil
 	case found:
-		return delivery.Failed(delivery.ClassRejected, errOtherBytes)
+		return false, delivery.Failed(delivery.ClassRejected, errOtherBytes)
 	}
 	if !copied.Multipart() {
 		body, err := r.open(ctx, item, object.Range{Offset: 0, Length: copied.Size})
 		if err != nil {
-			return err
+			return false, err
 		}
 		defer func() { _ = body.Close() }()
-		return site.PutReplica(ctx, copied, body)
+		return true, site.PutReplica(ctx, copied, body)
 	}
-	return r.sendParts(ctx, target, generation, site, item, copied)
+	return true, r.sendParts(ctx, target, generation, site, item, copied)
 }
 
 // sendParts sends a version of parts as an upload of the same parts: the

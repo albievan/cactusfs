@@ -37,6 +37,8 @@ type replicatorWorld struct {
 	dest       *porttest.MemMetadata
 	site       *porttest.MemSite
 	replicator *app.Replicator
+	// name is the name of the bucket, "b" but for newReplicatorWorldOf.
+	name string
 }
 
 // siteRecord is the target of another deployment, open to the buckets named.
@@ -61,19 +63,26 @@ func newReplicatorWorld(t *testing.T, markers bool) *replicatorWorld {
 // there has Object Lock.
 func newReplicatorWorldLocked(t *testing.T, markers, destLock bool) *replicatorWorld {
 	t.Helper()
+	return newReplicatorWorldOf(t, markers, destLock, "b")
+}
+
+// newReplicatorWorldOf makes the world with its bucket named name in place
+// of "b": a record of a resync needs a name a bucket can have.
+func newReplicatorWorldOf(t *testing.T, markers, destLock bool, name string) *replicatorWorld {
+	t.Helper()
 	ctx := context.Background()
-	w := &replicatorWorld{fixture: newFixture(t), dest: porttest.NewMemMetadata()}
+	w := &replicatorWorld{fixture: newFixture(t), dest: porttest.NewMemMetadata(), name: name}
 	// Both stores judge retentions by the fixture's clock.
 	w.meta.Now, w.dest.Now = w.clock.Now, w.clock.Now
 	// Both buckets have Object Lock, so that retentions and legal holds
 	// travel.
-	if err := w.meta.CreateBucket(ctx, bucket.Bucket{Name: "b", CreatedAt: testNow, ObjectLock: true}); err != nil {
+	if err := w.meta.CreateBucket(ctx, bucket.Bucket{Name: name, CreatedAt: testNow, ObjectLock: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.meta.SetBucketVersioning(ctx, "b", bucket.VersioningEnabled); err != nil {
+	if err := w.meta.SetBucketVersioning(ctx, name, bucket.VersioningEnabled); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.meta.PutTarget(ctx, siteRecord("site-b", "b"), audit.Record{}); err != nil {
+	if err := w.meta.PutTarget(ctx, siteRecord("site-b", name), audit.Record{}); err != nil {
 		t.Fatalf("PutTarget: %v", err)
 	}
 	target, err := w.meta.GetTarget(ctx, "site-b")
@@ -118,7 +127,7 @@ func (w *replicatorWorld) configure(t *testing.T, config bucket.ReplicationConfi
 			t.Fatal(err)
 		}
 	}
-	if err := w.meta.SetBucketConfig(context.Background(), "b", bucket.ConfigReplication, document); err != nil {
+	if err := w.meta.SetBucketConfig(context.Background(), w.name, bucket.ConfigReplication, document); err != nil {
 		t.Fatalf("SetBucketConfig: %v", err)
 	}
 }
@@ -167,7 +176,7 @@ func (w *replicatorWorld) settle(t *testing.T, item delivery.Item, status object
 func (w *replicatorWorld) putIn(t *testing.T, key string, data []byte, sse object.SSE) object.Version {
 	t.Helper()
 	v, err := w.objects.Put(context.Background(), porttest.Root(), app.PutInput{
-		Bucket: "b", Key: key, Body: bytes.NewReader(data), Size: int64(len(data)), SSE: sse, ContentType: "text/plain",
+		Bucket: w.name, Key: key, Body: bytes.NewReader(data), Size: int64(len(data)), SSE: sse, ContentType: "text/plain",
 		UserMetadata: map[string]string{"owner": "albie"},
 	})
 	if err != nil {
