@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -890,6 +891,19 @@ func TestDeliveryStatusAndSummary(t *testing.T) {
 		}
 		if summary.OldestPending[delivery.KindWebhook] != 0 {
 			t.Errorf("nothing of a webhook waits, the summary says %s", summary.OldestPending[delivery.KindWebhook])
+		}
+		// What waits is added up by kind, as the targets' statuses have it
+		// (the lag of replication is the kind s3's, PLAN 8.1.7).
+		statuses, err := w.worker.DeliveryStatus(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := map[delivery.Kind]uint64{}
+		for _, st := range statuses {
+			pending[st.Kind] += st.Pending
+		}
+		if pending[delivery.KindNATS] == 0 || !maps.Equal(summary.Pending, pending) {
+			t.Errorf("pending by kind = %v, the statuses say %v", summary.Pending, pending)
 		}
 	})
 }

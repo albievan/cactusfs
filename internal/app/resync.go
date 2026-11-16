@@ -80,6 +80,34 @@ const (
 	ResyncWaitingObject = "object"
 )
 
+// What the walks tell ResyncWorkerConfig.OnEvent of (PLAN 8.1.7): no bucket,
+// target or version is part of it.
+const (
+	// ResyncEventHeld is a pass held at a version by a failure that holds
+	// the target: the version is tried again after delivery.Backoff.
+	ResyncEventHeld = "held"
+	// ResyncEventPreempted is a send of the walk that the outbox ended,
+	// as it came to send that object itself (ErrResyncPreempted).
+	ResyncEventPreempted = "preempted"
+	// ResyncEventRestarted is a walk begun again from the first version,
+	// because its target lost rows while it walked.
+	ResyncEventRestarted = "restarted"
+)
+
+// How the resyncs this node walks stand, as ResyncWorker.Summary counts
+// them.
+const (
+	// ResyncWalking is a walk that goes on.
+	ResyncWalking = "walking"
+	// ResyncHeld is a walk held at a version by a failure: its sending is
+	// retrying or stalled (ResyncProgress.State).
+	ResyncHeld = "held"
+	// ResyncWaiting is a walk that waits for something other than a
+	// failure (ResyncProgress.Waiting): a configuration, a target, an
+	// object the outbox sends, or the other buckets of its target.
+	ResyncWaiting = "waiting"
+)
+
 // What a ResyncSender answers that is no failure of the version or of the
 // target; the walk stops at the version and stores what came before it.
 var (
@@ -138,6 +166,10 @@ type ResyncWorkerConfig struct {
 	// Auditor, when not nil, records the resyncs the worker starts by
 	// itself (ResyncWorker).
 	Auditor *Auditor
+	// OnEvent, when not nil, is told of every pass held at a version, every
+	// send the outbox ended and every walk begun again: ResyncEventHeld,
+	// ResyncEventPreempted, ResyncEventRestarted. Nothing else is said.
+	OnEvent func(event string)
 }
 
 // ResyncWorker walks the resyncs that are running, on the node that leads
@@ -190,6 +222,7 @@ type ResyncWorker struct {
 	clock   ports.Clock
 	logger  *slog.Logger
 	auditor *Auditor
+	onEvent func(string)
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
@@ -283,7 +316,7 @@ func (s ResyncStats) moved() bool {
 func NewResyncWorker(cfg ResyncWorkerConfig) *ResyncWorker {
 	w := &ResyncWorker{
 		buckets: cfg.Buckets, index: cfg.Index, store: cfg.Store, targets: cfg.Targets, outbox: cfg.Outbox, sender: cfg.Sender,
-		timeout: cfg.AttemptTimeout, active: cfg.Active, clock: cfg.Clock, logger: cfg.Logger, auditor: cfg.Auditor,
+		timeout: cfg.AttemptTimeout, active: cfg.Active, clock: cfg.Clock, logger: cfg.Logger, auditor: cfg.Auditor, onEvent: cfg.OnEvent,
 		entropy: cfg.Entropy, runs: map[string]*resyncRun{}, running: map[string]bool{}, warned: map[string]bool{},
 	}
 	if w.logger == nil {
@@ -294,6 +327,13 @@ func NewResyncWorker(cfg ResyncWorkerConfig) *ResyncWorker {
 
 func (w *ResyncWorker) isActive() bool {
 	return w.active == nil || w.active()
+}
+
+// tell tells OnEvent of an event, when there is one to tell.
+func (w *ResyncWorker) tell(event string) {
+	if w.onEvent != nil {
+		w.onEvent(event)
+	}
 }
 
 // jitter draws a number from 0 up to 1 for delivery.Backoff.
@@ -631,11 +671,25 @@ func (w *ResyncWorker) advance(ctx context.Context, record bucket.Resync, round 
 	return w.pass(ctx, run, record, config, target, round)
 }
 
-// wait records why a resync does not go on.
+// wait records why a resync does not go on. A walk that waits for its
+// configuration or its target is held by no failure of the target: the
+// failures it had are forgotten, so that it neither shows that target as
+// retrying or stalled (ResyncHeld) nor counts as held (Summary), and it is
+// not kept from going on when what it waits for comes back.
 func (w *ResyncWorker) wait(run *resyncRun, reason string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	run.waiting = reason
+	if waitsForConfiguration(reason) {
+		run.failures, run.lastClass, run.retryAt = 0, delivery.ClassNone, time.Time{}
+	}
+}
+
+// waitsForConfiguration reports whether a walk that waits for reason waits
+// for its configuration or its target rather than for the target to take
+// what it sends.
+func waitsForConfiguration(reason string) bool {
+	return reason == ResyncWaitingConfiguration || reason == ResyncWaitingTarget
 }
 
 // configuration reads the replication configuration of a bucket.
@@ -737,13 +791,18 @@ func (w *ResyncWorker) pass(
 	case held != nil:
 		round.stats.Held++
 		w.held(ctx, run, record, target, held)
+		w.tell(ResyncEventHeld)
 	case errors.Is(stopped, ErrResyncObjectBusy):
 		w.mu.Lock()
 		run.retryAt, run.waiting = w.clock.Now().Add(resyncBusyAgain), ResyncWaitingObject
-		if errors.Is(stopped, ErrResyncPreempted) {
+		preempted := errors.Is(stopped, ErrResyncPreempted)
+		if preempted {
 			run.preempted++
 		}
 		w.mu.Unlock()
+		if preempted {
+			w.tell(ResyncEventPreempted)
+		}
 	case stopped != nil:
 		w.wait(run, ResyncWaitingConfiguration)
 	default:
@@ -904,6 +963,7 @@ func (w *ResyncWorker) restart(ctx context.Context, run *resyncRun, cursor deliv
 	}
 	w.mu.Unlock()
 	round.stats.Restarted++
+	w.tell(ResyncEventRestarted)
 	attrs := []any{slog.String("bucket", record.Bucket), slog.String("target", record.Target), slog.Int("restarts", restarts)}
 	if restarts >= 2 {
 		w.logger.WarnContext(ctx, "a resync begins again, once more: its target keeps losing rows, and it ends only when it loses none while a walk goes on", attrs...)
@@ -1150,10 +1210,61 @@ func (w *ResyncWorker) start(ctx context.Context, bucketName, target string, rou
 	return nil
 }
 
+// Summary counts the resyncs this node walks by how they stand -
+// ResyncWalking, ResyncHeld, ResyncWaiting, each a key - and reports false
+// on a node that does not lead (PLAN 8.1.7). A walk held by a failure counts
+// as held - but one that waits for its configuration or its target is held
+// by no failure of a target, and counts as waiting. No bucket is named.
+func (w *ResyncWorker) Summary() (map[string]int, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.isActive() {
+		return nil, false
+	}
+	out := map[string]int{ResyncWalking: 0, ResyncHeld: 0, ResyncWaiting: 0}
+	for _, run := range w.runs {
+		switch {
+		case run.failures > 0 && !waitsForConfiguration(run.waiting):
+			out[ResyncHeld]++
+		case run.waiting != "":
+			out[ResyncWaiting]++
+		default:
+			out[ResyncWalking]++
+		}
+	}
+	return out, true
+}
+
+// ResyncHeld implements ResyncHolds: of the resyncs this node walks to the
+// target named, the one whose sending stands worst - held at a version by a
+// failure, judged as a target's is (deliveryState) - with its failures in a
+// row and the class of its last; 0 and delivery.ClassNone when none is held,
+// and on a node that does not lead. A walk that succeeds, ends or is
+// forgotten is held no more: nothing is kept of it here.
+func (w *ResyncWorker) ResyncHeld(target string) (int, delivery.Class) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.isActive() {
+		return 0, delivery.ClassNone
+	}
+	failures, class := 0, delivery.ClassNone
+	for _, run := range w.runs {
+		if run.failures == 0 || run.record.Target != target || waitsForConfiguration(run.waiting) {
+			continue
+		}
+		worse := stateRank(deliveryState(run.failures, run.lastClass)) - stateRank(deliveryState(failures, class))
+		if worse > 0 || (worse == 0 && run.failures > failures) {
+			failures, class = run.failures, run.lastClass
+		}
+	}
+	return failures, class
+}
+
 // Progress returns how the resync of a bucket stands on this node, which
 // walks it, and false on a node that does not lead or knows of no resync of
-// the bucket running. The full status of a bucket's replication reads it
-// (PLAN 8.1.7).
+// the bucket running. It is this node's memory and no part of the status of
+// a bucket's replication, which is the same on every node
+// (ReplicationService.Status); Summary and OnEvent carry it to the metrics.
 func (w *ResyncWorker) Progress(bucketName string) (ResyncProgress, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

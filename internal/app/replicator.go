@@ -152,6 +152,10 @@ type ReplicatorConfig struct {
 	// DeliveryWorker logs the target and the class of every failure
 	// already.
 	Logger *slog.Logger
+	// OnVersion, when not nil, is told of every status of replication the
+	// Replicator gives a version, a row's or a resync's: COMPLETED or
+	// FAILED (PLAN 8.1.7). Neither the version nor the target is said.
+	OnVersion func(status object.ReplicationStatus)
 }
 
 // Replicator is the Deliverer of the consumers of kind r (ADR-0026). For an
@@ -204,6 +208,8 @@ type Replicator struct {
 	clock   ports.Clock
 	logger  *slog.Logger
 	rate    *byteRate
+	// onVersion is told of every status given (ReplicatorConfig.OnVersion).
+	onVersion func(object.ReplicationStatus)
 
 	mu sync.Mutex
 	// conns are the targets as last sent to, by name, each with the
@@ -298,6 +304,7 @@ func NewReplicator(cfg ReplicatorConfig) *Replicator {
 		objects: cfg.Objects, buckets: cfg.Buckets, sites: cfg.Sites, source: cfg.Source, clock: cfg.Clock, logger: cfg.Logger,
 		conns: map[string]siteConn{}, checked: map[siteBucket]probed{}, uploads: map[siteVersion]*siteUpload{},
 		maxUploads: maxRememberedUploads, maxParts: maxRememberedParts, sending: map[string]*sendingObject{}, preempted: map[string]int{},
+		onVersion: cfg.OnVersion,
 	}
 	if r.logger == nil {
 		r.logger = slog.New(slog.DiscardHandler)
@@ -429,6 +436,9 @@ func (r *Replicator) deliver(ctx context.Context, target delivery.Target, item d
 		r.mu.Lock()
 		delete(r.preempted, preemptionOf(name, item.Version.String()))
 		r.mu.Unlock()
+	}
+	if r.onVersion != nil && (status == object.ReplicationCompleted || status == object.ReplicationFailed) {
+		r.onVersion(status)
 	}
 	return status, sent, err
 }

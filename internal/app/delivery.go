@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,6 +164,12 @@ type DeliveryWorkerConfig struct {
 	// kind of the target, and the class of the failure or
 	// delivery.ClassNone.
 	OnAttempt func(kind delivery.Kind, class delivery.Class)
+	// Resyncs, when not nil, says which resyncs this node walks are held
+	// at a version by a failure to a target (ResyncWorker): such a target
+	// is shown no better than its held resync - retrying or stalled, with
+	// the class - in DeliveryStatus and Summary, until the resync's next
+	// attempt succeeds. Its own outbox may have nothing for it meanwhile.
+	Resyncs ResyncHolds
 	// Auditor, when not nil, is given the audit record that says rows of
 	// the outbox were dropped at its bound (OutboxResource), at most every
 	// OutboxReportEvery, and once more when the node's lead ends. Its Run
@@ -203,6 +210,7 @@ type DeliveryWorker struct {
 	timeouts       map[delivery.ConsumerKind]func(delivery.Item) time.Duration
 	parallel       map[delivery.ConsumerKind]int
 	onAttempt      func(delivery.Kind, delivery.Class)
+	resyncs        ResyncHolds
 	auditor        *Auditor
 	auditExport    *AuditExporter
 
@@ -225,7 +233,7 @@ func NewDeliveryWorker(cfg DeliveryWorkerConfig) *DeliveryWorker {
 	w := &DeliveryWorker{
 		targets: cfg.Targets, outbox: cfg.Outbox, deliverers: map[delivery.ConsumerKind]Deliverer{}, active: cfg.Active,
 		clock: cfg.Clock, logger: cfg.Logger, attemptTimeout: cfg.AttemptTimeout, onAttempt: cfg.OnAttempt, entropy: cfg.Entropy,
-		auditor: cfg.Auditor, auditExport: cfg.AuditExport,
+		auditor: cfg.Auditor, auditExport: cfg.AuditExport, resyncs: cfg.Resyncs,
 		timeouts: map[delivery.ConsumerKind]func(delivery.Item) time.Duration{}, parallel: map[delivery.ConsumerKind]int{},
 	}
 	for kind, timeout := range cfg.AttemptTimeouts {
@@ -1258,6 +1266,34 @@ func pause(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// ResyncHolds says how the resyncs a node walks to a target stand (PLAN
+// 8.1.7); the ResyncWorker is one.
+type ResyncHolds interface {
+	// ResyncHeld returns, of the resyncs held at a version by a failure
+	// to the target named, the failures in a row and the class of the
+	// last of the one that stands worst; 0 and delivery.ClassNone when
+	// none is held.
+	ResyncHeld(target string) (failures int, class delivery.Class)
+}
+
+// withResyncs shows each target no better than a resync held by it: a
+// resync sends to the target as the outbox does, and a target that refuses
+// a resync while its outbox has nothing for it would otherwise say ok.
+func (w *DeliveryWorker) withResyncs(statuses []ports.TargetStatus) {
+	if w.resyncs == nil {
+		return
+	}
+	for i := range statuses {
+		failures, class := w.resyncs.ResyncHeld(statuses[i].Name)
+		if failures == 0 {
+			continue
+		}
+		if state := deliveryState(failures, class); stateRank(state) > stateRank(statuses[i].State) {
+			statuses[i].State, statuses[i].LastErrorClass = state, class
+		}
+	}
+}
+
 // DeliveryStatus implements ports.DeliveryStatusReader on the node that
 // leads: how delivery to the targets named stands, in name order - to every
 // target when none is named. A name that is not known is looked for once
@@ -1271,6 +1307,7 @@ func (w *DeliveryWorker) DeliveryStatus(ctx context.Context, names []string) ([]
 		return nil, fmt.Errorf("delivery.Status: %w: this node does not deliver", domain.ErrNotLeader)
 	}
 	if out, missing := s.statuses(names); !missing {
+		w.withResyncs(out)
 		return out, nil
 	}
 	// A target defined a moment ago is looked for before it is said to be
@@ -1280,6 +1317,7 @@ func (w *DeliveryWorker) DeliveryStatus(ctx context.Context, names []string) ([]
 		return nil, fmt.Errorf("delivery.Status: %w", err)
 	}
 	out, _ := s.statuses(names)
+	w.withResyncs(out)
 	return out, nil
 }
 
@@ -1320,6 +1358,10 @@ type DeliverySummary struct {
 	// OldestPending is, by kind of target, how long the oldest item that
 	// waits has waited; a kind with targets and nothing waiting has 0.
 	OldestPending map[delivery.Kind]time.Duration
+	// Pending is, by kind of target, how many items wait for the targets
+	// of that kind together (ports.TargetStatus.Pending); a kind with
+	// targets and nothing waiting has 0.
+	Pending map[delivery.Kind]uint64
 	// Rows and Dropped are the counts of the outbox (ports.OutboxState).
 	Rows, Dropped uint64
 }
@@ -1339,8 +1381,12 @@ func (w *DeliveryWorker) Summary() (DeliverySummary, bool) {
 	if !known {
 		return DeliverySummary{}, false
 	}
-	out := DeliverySummary{Targets: map[delivery.Kind]map[string]int{}, OldestPending: map[delivery.Kind]time.Duration{}, Rows: rows, Dropped: dropped}
+	out := DeliverySummary{
+		Targets: map[delivery.Kind]map[string]int{}, OldestPending: map[delivery.Kind]time.Duration{}, Pending: map[delivery.Kind]uint64{},
+		Rows: rows, Dropped: dropped,
+	}
 	statuses, _ := s.statuses(nil)
+	w.withResyncs(statuses)
 	now := w.clock.Now()
 	for _, st := range statuses {
 		if out.Targets[st.Kind] == nil {
@@ -1352,6 +1398,11 @@ func (w *DeliveryWorker) Summary() (DeliverySummary, bool) {
 			waited = max(now.Sub(st.OldestPendingAt), 0)
 		}
 		out.OldestPending[st.Kind] = max(out.OldestPending[st.Kind], waited)
+		if pending := out.Pending[st.Kind] + st.Pending; pending >= st.Pending {
+			out.Pending[st.Kind] = pending
+		} else {
+			out.Pending[st.Kind] = math.MaxUint64
+		}
 	}
 	return out, true
 }

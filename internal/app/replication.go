@@ -56,6 +56,11 @@ type ReplicationService struct {
 	targets ports.TargetStore
 	authz   ports.Authorizer
 	auditor *Auditor
+	// usage and delivery are what the status of a bucket's replication
+	// reads (Status): its usage record, and the node that leads.
+	usage    ports.BucketUsageStore
+	delivery ports.DeliveryStatusReader
+	outbox   ports.Outbox
 }
 
 // ReplicationServiceConfig lists what a ReplicationService depends on.
@@ -69,11 +74,27 @@ type ReplicationServiceConfig struct {
 	// Auditor builds the records of changes; without one every change is
 	// refused.
 	Auditor *Auditor
+	// Usage is where the counts of a bucket's versions that are PENDING
+	// and FAILED are read (Status). Nil is a node that cannot say: Status
+	// answers unavailable.
+	Usage ports.BucketUsageStore
+	// Delivery asks the node that leads the metadata group how delivery
+	// to the bucket's target stands (Status). Nil is a node that cannot
+	// ask: Status answers unavailable.
+	Delivery ports.DeliveryStatusReader
+	// Outbox is where the cursor of the bucket's target is read (Status):
+	// the rows it lost and whether it needs a resync, as the metadata
+	// keeps them. Nil is a node that cannot say: Status answers
+	// unavailable.
+	Outbox ports.Outbox
 }
 
 // NewReplicationService returns a ReplicationService.
 func NewReplicationService(cfg ReplicationServiceConfig) *ReplicationService {
-	return &ReplicationService{buckets: cfg.Buckets, store: cfg.Store, targets: cfg.Targets, authz: cfg.Authz, auditor: cfg.Auditor}
+	return &ReplicationService{
+		buckets: cfg.Buckets, store: cfg.Store, targets: cfg.Targets, authz: cfg.Authz, auditor: cfg.Auditor,
+		usage: cfg.Usage, delivery: cfg.Delivery, outbox: cfg.Outbox,
+	}
 }
 
 // ReplicaMode returns whether a bucket is a replica, and of which
