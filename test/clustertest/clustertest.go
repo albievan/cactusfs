@@ -57,6 +57,11 @@ const (
 	rpcPort   = "9002/tcp"
 
 	startTimeout = 3 * time.Minute
+	// buildTimeout bounds the one build of the product image a test binary
+	// makes. It is not part of startTimeout: the build is made once, for
+	// every cluster of the binary, and from a cold cache (the console, then
+	// the binary) it takes longer than forming a cluster does.
+	buildTimeout = 20 * time.Minute
 )
 
 // Nodes are the nodes of the test cluster. The first three vote in the
@@ -131,7 +136,9 @@ var (
 )
 
 // image returns the product image under test: $CACTUSFS_TEST_IMAGE when set,
-// otherwise it is built from this repository, once per test binary.
+// otherwise it is built from this repository, once per test binary, within
+// buildTimeout - whatever deadline the first caller's ctx has, since every
+// later caller gets the same result.
 func image(ctx context.Context) (string, error) {
 	imageOnce.Do(func() {
 		if name := os.Getenv("CACTUSFS_TEST_IMAGE"); name != "" {
@@ -144,6 +151,8 @@ func image(ctx context.Context) (string, error) {
 			return
 		}
 		imageName = "cactusfs:test"
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildTimeout)
+		defer cancel()
 		build := exec.CommandContext(ctx, "docker", "build", "--quiet", "-t", imageName, root)
 		if out, err := build.CombinedOutput(); err != nil {
 			errImage = fmt.Errorf("docker build: %w\n%s", err, out)
@@ -181,13 +190,14 @@ func randomHex(t *testing.T, bytesLen int) string {
 // Start forms a new cluster and waits until every node serves.
 func Start(t *testing.T, opts Options) *Cluster {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
-	defer cancel()
-
-	img, err := image(ctx)
+	img, err := image(t.Context())
 	if err != nil {
 		t.Fatalf("product image: %v", err)
 	}
+	// Forming the cluster has startTimeout of its own, after the image.
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+
 	provider, err := testcontainers.NewDockerClientWithOpts(ctx)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
