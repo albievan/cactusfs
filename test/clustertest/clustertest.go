@@ -846,6 +846,15 @@ func (c *Cluster) WriteConfig(files ...ConfigFile) {
 	}
 }
 
+// Network returns the name of the network the nodes reach each other on. A
+// container a test runs on it, under an alias, is reached by every node
+// under that name - a receiver of notifications, a NATS server - as an
+// address of the engine's private range, which a node connects to without
+// --egress-allow (ADR-0023: only loopback and link-local need it).
+func (c *Cluster) Network() string {
+	return c.cluster.Name
+}
+
 // Address returns where a port of a node - 9000 for S3, 9001 for the admin
 // listener, 9002 for node RPC when Options.PublishNodeRPC is set - is reached
 // from the test, for a test that

@@ -138,6 +138,7 @@ BUILDER_RUN = $(ENGINE) run --rm \
 	-e HOST_GOOS=$(HOST_GOOS) -e HOST_GOARCH=$(HOST_GOARCH) \
 	-e CONTRACT_BASE -e CACTUSFS_TEST_IMAGE \
 	-e ROLLING_FROM_COMMIT=$(ROLLING_FROM_COMMIT) -e ROLLING_TEST=$(ROLLING_TEST) \
+	-e INT_RUN='$(INT_RUN)' \
 	$(if $(GO_P),-e GOFLAGS=-p=$(GO_P) -e GOMAXPROCS=$(GO_P))
 
 builder:
@@ -269,9 +270,23 @@ cover:
 
 # The cluster tests run containers of the product image; they build it
 # themselves, from this tree, unless CACTUSFS_TEST_IMAGE names one.
+# INT_RUN narrows the run to the tests of test/integration whose names match
+# it (go test -run), verbosely, and fails when none does:
+#   make test-int INT_RUN=TestBucketNotifications
+# `make check` runs them all, and refuses INT_RUN.
+ifneq ($(and $(INT_RUN),$(filter check,$(MAKECMDGOALS))),)
+$(error INT_RUN narrows test-int to some tests; make check runs every one - unset it)
+endif
 test-int:
+ifneq ($(INT_RUN),)
+	@go test -tags=integration -list '$(INT_RUN)' ./test/integration/ | grep -q '^Test' || \
+		{ echo "test-int: FAIL - no test of test/integration matches $(INT_RUN): nothing would run" >&2; exit 1; }
+	go test -race -count=1 -timeout 30m -v -tags=integration -run '$(INT_RUN)' ./test/integration/
+	@echo "test-int: PASS ($(INT_RUN) only)"
+else
 	go test -race -count=1 -timeout 30m -tags=integration ./...
 	@echo "test-int: PASS"
+endif
 
 s3-compat:
 	@scripts/s3compat.sh check
