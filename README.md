@@ -152,10 +152,15 @@ Said plainly, so that nobody finds out by trying:
   `digests.txt`, and a node's check for releases, which reads GitHub's releases, finds
   none. The binaries ship with the next release. `v0.7.0` predates tag rules and their
   catalogue: no published release enforces them yet.
-- **Milestone 8: replication between sites.** It does not work. A bucket's
-  replication and replica mode are in the contract of the management API and answer
-  `501 Not Implemented`, and a target of kind `s3` (another deployment) can be defined
-  and is sent nothing. (Quotas and bucket notifications, the other parts of milestone
+- **Milestone 8: replication between sites.** It does not work yet. A bucket can be
+  made a replica (`/buckets/{bucket}/replica`) and given a replication configuration
+  (S3's `?replication`, `/buckets/{bucket}/replication`), and a target of kind `s3`
+  (another deployment) can be defined - but nothing is sent to it: the replicator, the
+  status and the resync of a bucket's replication are still to come (`/status` and
+  `/resync` answer `501 Not Implemented`). A configuration takes effect only with the
+  replicator (PLAN 8.1.4), which is released together with it: until the replicator is
+  there, the new versions a configuration matches say `PENDING` in
+  `x-amz-replication-status` and wait. (Quotas and bucket notifications, the other parts of milestone
   8, are built: [Quotas](#quotas), [Notifications](#notifications).)
 - **Quotas are on buckets, in bytes, and nothing else.** There is no quota by user, by
   tenant or by number of objects, no soft quota, and no limit on the number of buckets;
@@ -809,12 +814,13 @@ days) and for signed streaming (`aws-chunked`) uploads. Errors are S3 XML.
 | Object Lock | buckets created with it; Put/GetObjectLockConfiguration (default retention); Put/GetObjectRetention; Put/GetObjectLegalHold; governance bypass. A version under compliance retention or legal hold is deleted by nobody, root included |
 | Bucket configuration | Get/Put/Delete of BucketPolicy, BucketCors, BucketTagging and BucketLifecycle; CORS preflight. A bucket policy is the only thing that can open a bucket to anonymous readers, and only to read |
 | Object tags | GetObjectTagging, PutObjectTagging, DeleteObjectTagging |
+| Replication configuration | PutBucketReplication, GetBucketReplication, DeleteBucketReplication: the role `arn:cactusfs:replication:::<target>` names a target of kind `s3`, every rule names one destination bucket, with a prefix, a priority and delete markers; two enabled rules of one priority whose prefixes overlap are refused. `Filter` with `Tag` or `And`, `SourceSelectionCriteria`, `ExistingObjectReplication`, and the destination's `StorageClass`, `EncryptionConfiguration`, `ReplicationTime`, `Metrics`, `Account` and `AccessControlTranslation` answer `501`. A rule of the first form of the schema (`<Prefix>` in the rule) that says nothing of delete markers does not copy them, where S3 would; one of the later form (`<Filter>`) must say. Versions are not sent yet (milestone 8): until the replicator is there they say `PENDING` |
 | Notifications | PutBucketNotificationConfiguration, GetBucketNotificationConfiguration: `QueueConfiguration` and `TopicConfiguration` whose ARN is `arn:cactusfs:notify:::<target>`, the events `s3:ObjectCreated:*`, `:Put`, `:CompleteMultipartUpload`, `s3:ObjectRemoved:*`, `:Delete`, `:DeleteMarkerCreated`, and `prefix` and `suffix` filters ([Notifications](#notifications)) |
 | Lifecycle rules | expire objects, remove old versions, abort unfinished multipart uploads; carried out by the node that leads, every `--lifecycle-interval` |
 | Server-side encryption | always on. SSE-S3 (the default, and `AES256`), SSE-KMS (`aws:kms`, with an encryption context) and SSE-C (a key of the customer's, over TLS and in signed headers only) |
 | Payloads | literal, `UNSIGNED-PAYLOAD` and streaming, with `Content-MD5` and CRC32, CRC32C, CRC64NVME and SHA-256 checksums, verified before anything is stored |
 
-Everything else - ACLs, conditional writes, replication and the rest -
+Everything else - ACLs, conditional writes and the rest -
 answers `501 NotImplemented`, after authentication. The contract is the compatibility
 suite in `test/s3compat` (`make s3-compat`): the AWS SDK for Go, the AWS CLI and a
 selected list of the S3 tests of Ceph, held to a recorded baseline.
@@ -862,7 +868,8 @@ What the API has, under `/api/v1` (the contract is
 | `/audit` | the audit trail |
 | `/targets`, `/targets/{name}`, `/targets/{name}/status` | define, read, list and delete the targets things are sent to (webhooks and NATS servers; other deployments for replication, to come); a secret and the path of an endpoint are written and never read back, a webhook's signing key is shown once; how delivery to each stands, from the node that leads ([Notifications](#notifications)) |
 | `/buckets/{bucket}/notifications` | a bucket's notification rules: read, set (in order) and remove - the configuration S3's `?notification` reads and writes |
-| `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
+| `/buckets/{bucket}/replication`, `/buckets/{bucket}/replica` | milestone 8: a bucket's replication configuration (read, set, removed - the document S3's `?replication` reads and writes) and whether it is a replica of another deployment; nothing is sent yet |
+| `/buckets/{bucket}/replication/status`, `/buckets/{bucket}/replication/resync` | milestone 8: in the contract, and both answer `501` - not built yet |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's

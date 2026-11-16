@@ -12,7 +12,9 @@
   the copy of a marker has an ID, a result by version is of a bucket that is sent to
   the target, when a resync clears the mark of its target, what "the order is total"
   holds for, and what a lifecycle delete of a late proposer loses; 2026-11-16, to the
-  destination as PLAN 8.1.1 built it ("The destination, as built")
+  destination as PLAN 8.1.1 built it ("The destination, as built"), and to the
+  configuration as PLAN 8.1.3 built it and its review amended it ("Configuration", "As
+  built")
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -552,6 +554,86 @@ under `/buckets/{bucket}/replication`.
 | `GET` when there is none | `404 ReplicationConfigurationNotFoundError` |
 | anything else that is not the document above | `400 MalformedXML` |
 | any of it below level 5 | `503 ServiceUnavailable` |
+
+**As built (PLAN 8.1.3, and its review)**, the stricter reading where the text above
+leaves a choice:
+
+- **A configuration and the replicator are released together.** Once a configuration
+  is put, every version a rule matches appends a row for `r:<target>` to the outbox,
+  and only the replicator (PLAN 8.1.4) delivers such rows. A release with the one and
+  not the other would hold the target's cursor on the first row, stop the trimming of
+  the outbox for every target, let it grow towards its bound, and leave the matched
+  versions `PENDING`. So PLAN 8.1.3 and 8.1.4 land in the same commit series and the
+  same release, as 8.1.1 and 8.1.1a did; until 8.1.4 is merged a configuration is not
+  put outside tests.
+
+- **Who and where.** `app.ReplicationService.Configuration`, `SetConfiguration` and
+  `DeleteConfiguration` ask the single authorizer for `s3:GetReplicationConfiguration`
+  or `s3:PutReplicationConfiguration` on the bucket (a denial is in the trail like any
+  other), judge, propose and audit (`s3:PutReplicationConfiguration` with the target,
+  the destination bucket and the number of rules, or `replication: removed`). The S3
+  adapter (`s3api/replication.go`) and the management API only carry the document; the
+  store judges the bucket and the target again in apply, and the applied entry is told
+  as `bucket.configuration-changed`. No entry, on-disk format or contract changed:
+  `bucket.config.put` of kind `replication` (schema 5) and `/buckets/{bucket}/replication`
+  (PLAN 8.0.3) held everything.
+- **The order of the judgements**, each refusal with nothing proposed: the document
+  (the adapter's `MalformedXML`, `501` and `InvalidArgument`, then
+  `bucket.ReplicationConfig.Validate`); the bucket is there (`404 NoSuchBucket`); it is
+  no replica (`409 InvalidBucketState`); its versioning is `Enabled`
+  (`domain.ErrVersioningRequired`, `400 InvalidRequest` in S3, `400 InvalidArgument` in
+  the management API); then the target. A bucket that is a replica keeps versions, so
+  the second of the two bucket answers is never hidden by the first.
+- **The target** must exist, be of kind `s3` and admit the bucket - a target always
+  restricts: one whose `buckets` names none admits none. Which of the three it fails is
+  not told: one sentence for all, as for notification rules, so that a bucket's
+  administrator learns nothing of targets not open to the bucket. A target the store
+  cannot read is passed on as that failure, never taken for one that is not there. The
+  store, which judges again when the change is committed, refuses the three in one
+  sentence too (since the review of 8.1.3; the text only, not the decision), so that a
+  change that raced the use case's own check tells no more.
+- **No two enabled rules of one priority may match one key** (since the review of
+  8.1.3): two such rules of which one's prefix begins the other's - an empty prefix
+  begins every prefix - are refused with `400 InvalidArgument` by the use case, before
+  the document is made. Which of them decided would otherwise be settled by the order
+  they were put in, and nothing the caller said; in the first form of the schema every
+  rule has the priority 0, so any two enabled rules that overlap there are refused. It
+  is the use case's rule and not `bucket.ReplicationConfig.Validate`'s: what every
+  member applies is unchanged, and `Decides` still settles a tie of a document stored
+  before.
+- **The document is read strictly.** `<Role>` and at least one `<Rule>` are required, and
+  each rule's `<Status>` (`Enabled` or `Disabled`, exactly) and
+  `<Destination><Bucket>`: missing, any of them is `400 MalformedXML`, as is a
+  `DeleteMarkerReplication` whose `Status` is neither. `<Role>` must begin with
+  `arn:cactusfs:replication:::` and the bucket with `arn:aws:s3:::` (`400
+  InvalidArgument` otherwise). A `<Priority>` is decimal digits without a sign, a space
+  or a leading zero, from 0 to 2^31 - 1 (`400 InvalidArgument` otherwise); left out, it
+  is 0. An `<ID>` that is there and empty is `400 InvalidArgument`; one left out is
+  given `rule-<n>`, the least `n` the configuration has not taken, as a notification
+  rule is. `<Prefix>` in the rule and `<Filter>` in the same rule is `400
+  InvalidArgument`; an empty `<Filter>` is every key. **A rule says which keys it is
+  for, and one document has one form** (since the review of 8.1.3): a rule with neither
+  `<Prefix>` nor `<Filter>`, a document whose rules are of both forms, and a rule of the
+  later form (`<Filter>`) without `<DeleteMarkerReplication>` - which S3 also requires
+  of it - are `400 MalformedXML`. The elements of the first table
+  are `501` wherever they are, before anything else is read; so is the object lock token
+  header (`x-amz-bucket-object-lock-token`), as every `x-amz-*` header this API does not
+  know.
+- **Delete markers are not copied unless a rule says so.** A rule of the later form must
+  say (above). S3 copies them by default for a rule of the first form (a `<Prefix>` in
+  the rule, no `<Filter>`) that says nothing of them; here such a rule copies none, since
+  a marker that crosses can hide a version at the destination.
+- **GET writes every rule in the later form**: `ID`, `Status`, `Priority`,
+  `<Filter><Prefix>` (empty for every key), `DeleteMarkerReplication` and
+  `Destination`, in the order the rules were put; what it writes, put again, is the same
+  configuration. DELETE answers `204`, also for a bucket without one.
+- **The management API** answers a bucket without a configuration `404 NoSuchEntity`
+  (the bucket that is not there is `404 NoSuchBucket`), and a body of no rules `400`: a
+  configuration is removed with `DELETE`, never by an empty `PUT`. Each rule must give
+  `id`, `enabled`, `priority` and `delete_markers`, as the contract requires (`400`
+  otherwise; since the review of 8.1.3): the generated decoder would take one left out
+  for its zero value, so the adapter refuses the body before it is decoded
+  (`requiredItemFields`, held to the contract by a test).
 
 **The canonical document**, which is replicated and matched in apply
 (`bucket.ReplicationConfig.Document`; the plan did not write it down):
