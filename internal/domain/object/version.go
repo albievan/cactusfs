@@ -181,6 +181,14 @@ func ValidateReplicaSource(source string) error {
 // sequence is the index of an entry of its log.
 const MaxReplicaSeq = 1 << 62
 
+// RetentionMargin is how far past the source's clock a retention must end to
+// be sent to another deployment, with a copy or as a later change (ADR-0026,
+// "Open", 7): the other deployment refuses a retention that does not end
+// after its own clock, the two clocks may differ by as much as a SigV4
+// signature allows (15 minutes), and a copy takes time to send. A retention
+// that ends sooner is not sent.
+const RetentionMargin = 15 * time.Minute
+
 // Replica says of a version, a delete marker or a multipart upload that it
 // is the copy of one of another deployment (ADR-0026).
 type Replica struct {

@@ -252,3 +252,47 @@ func TestServicePrincipal(t *testing.T) {
 		t.Errorf("the service is called %q, anonymous = %v", service.Name(), service.Anonymous())
 	}
 }
+
+// TestReplicationServicePrincipal: the replicator reads a version named by
+// its ID and does nothing else - not a current version by its key, not a
+// listing, not a write, not a replica request of its own. A bucket policy
+// neither binds nor widens it, and it is a service only when it is nothing
+// else.
+func TestReplicationServicePrincipal(t *testing.T) {
+	t.Parallel()
+	service := iam.Principal{Service: iam.ServiceReplication}
+	resource := iam.Resource{Bucket: "site", Key: "k"}
+	deny := mustBucketPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":"arn:aws:s3:::site/*"}]}`, "site")
+	for action, want := range map[iam.Action]bool{
+		iam.ActionGetObjectVersion: true,
+		iam.ActionGetObject:        false, iam.ActionListBucket: false, iam.ActionListBucketVersions: false, iam.ActionPutObject: false,
+		iam.ActionDeleteObject: false, iam.ActionDeleteObjectVersion: false, iam.ActionAbortMultipartUpload: false,
+		iam.ActionOverrideGovernance: false, iam.ActionPutObjectRetention: false, iam.ActionPutObjectLegalHold: false,
+		iam.ActionReplicateObject: false, iam.ActionReplicateDelete: false, "s3:PutReplicationConfiguration": false,
+		"admin:ListUsers": false, iam.ActionNodeRPC: false,
+	} {
+		for _, policy := range []*iam.BucketPolicy{nil, deny} {
+			err := iam.Decide(iam.Request{Principal: service, Action: action, Resource: resource, BucketPolicy: policy})
+			if (err == nil) != want {
+				t.Errorf("the replication service and %s: %v, want allowed = %v", action, err, want)
+			}
+		}
+	}
+	for name, p := range map[string]iam.Principal{
+		"a service that is root":   {Service: iam.ServiceReplication, Root: true, AccessKeyID: "ROOT"},
+		"a service with a key":     {Service: iam.ServiceReplication, AccessKeyID: "K"},
+		"a service that is a user": {Service: iam.ServiceReplication, User: "u"},
+		"a service that is a node": {Service: iam.ServiceReplication, NodeID: "n1"},
+	} {
+		if err := iam.Decide(iam.Request{Principal: p, Action: iam.ActionGetObjectVersion, Resource: resource}); !errors.Is(err, domain.ErrAccessDenied) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The lifecycle service reads nothing.
+	if err := iam.Decide(iam.Request{Principal: iam.Principal{Service: iam.ServiceLifecycle}, Action: iam.ActionGetObjectVersion, Resource: resource}); err == nil {
+		t.Error("the lifecycle service may read a version")
+	}
+	if service.Anonymous() || service.Name() != "service/replication" {
+		t.Errorf("the service is called %q, anonymous = %v", service.Name(), service.Anonymous())
+	}
+}

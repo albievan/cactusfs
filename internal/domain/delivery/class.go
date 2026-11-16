@@ -57,6 +57,11 @@ const (
 	ClassNotReplica Class = "not_replica"
 	// ClassQuota is a bucket of the other deployment that is full.
 	ClassQuota Class = "quota"
+	// ClassObjectLock is a bucket of the other deployment without Object
+	// Lock, sent a version that carries a retention or a legal hold: it
+	// could keep neither, so nothing is sent until an operator gives the
+	// bucket there Object Lock, or the rule here a bucket that has it.
+	ClassObjectLock Class = "object_lock"
 	// ClassInternal is a failure on this side of the connection: the
 	// version could not be read, the credential could not be opened.
 	ClassInternal Class = "internal"

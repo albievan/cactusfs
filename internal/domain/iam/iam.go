@@ -375,8 +375,9 @@ type Principal struct {
 	Session Session
 	// Service is set, and nothing else is, when the node itself acts by a
 	// standing instruction of the deployment and not for a caller: the
-	// worker that carries out lifecycle rules is ServiceLifecycle. No
-	// request can authenticate as a service.
+	// worker that carries out lifecycle rules is ServiceLifecycle, the
+	// replicator ServiceReplication. No request can authenticate as a
+	// service.
 	Service string
 	// LockedSession marks the user of a console session that has reached
 	// its timeout and is kept because the user is uploading objects
@@ -390,16 +391,25 @@ type Principal struct {
 // buckets.
 const ServiceLifecycle = "lifecycle"
 
+// ServiceReplication is the service that sends the versions of buckets to
+// another deployment (ADR-0026): it reads the version it sends, by its ID,
+// and nothing else.
+const ServiceReplication = "replication"
+
 // serviceMay reports what a service may do. The lifecycle worker removes
 // what rules say has expired - and nothing a lock keeps: lifting a retention
-// is not among its actions, so no rule ever removes a retained version.
+// is not among its actions, so no rule ever removes a retained version. The
+// replicator reads a version named by its ID (s3:GetObjectVersion): it lists
+// nothing, reads no current version by its key, and changes nothing here.
 func serviceMay(service string, action Action) bool {
-	if service != ServiceLifecycle {
-		return false
-	}
-	switch action {
-	case ActionDeleteObject, ActionDeleteObjectVersion, ActionAbortMultipartUpload:
-		return true
+	switch service {
+	case ServiceLifecycle:
+		switch action {
+		case ActionDeleteObject, ActionDeleteObjectVersion, ActionAbortMultipartUpload:
+			return true
+		}
+	case ServiceReplication:
+		return action == ActionGetObjectVersion
 	}
 	return false
 }

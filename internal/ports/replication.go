@@ -65,6 +65,10 @@ type SiteBucket struct {
 	// when what answered does not know what a replica is. A source sends
 	// nothing until it has read its own ID here.
 	ReplicaOf string
+	// ObjectLock is whether the bucket has Object Lock, as the other
+	// deployment says it: a version that carries a retention or a legal
+	// hold is not sent to a bucket that could keep neither.
+	ObjectLock bool
 }
 
 // SitePart names one part of a multipart upload at another deployment.
@@ -72,6 +76,9 @@ type SitePart struct {
 	Number int
 	// ETag is the entity tag the other deployment gave for the part.
 	ETag string
+	// Size is the size of the part, as a listing of the parts of an
+	// upload says it; a completion does not read it.
+	Size int64
 }
 
 // SiteClient is another deployment, as the source of a replication speaks
@@ -106,6 +113,12 @@ type SiteClient interface {
 	// AbortUpload ends an upload of this deployment's and gives up its
 	// parts.
 	AbortUpload(ctx context.Context, bucketName, key, uploadID string) error
+	// ListParts returns the parts there are of an upload this deployment
+	// began, in the order of their numbers, with their entity tags and
+	// sizes: what an attempt that was cut off sent already, so that the
+	// next goes on from there. An upload that is not there (no longer)
+	// is not found, and no error.
+	ListParts(ctx context.Context, bucketName, key, uploadID string) (parts []SitePart, found bool, err error)
 	// ListReplicaUploads returns the IDs of the uploads in progress for a
 	// key that this deployment began: what an attempt that was cut off
 	// left behind.

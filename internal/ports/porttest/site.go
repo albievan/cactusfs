@@ -142,7 +142,7 @@ func (s *MemSite) Check(ctx context.Context, bucketName string) (ports.SiteBucke
 	if err != nil {
 		return ports.SiteBucket{}, classed(err)
 	}
-	return ports.SiteBucket{Versioning: b.Versioning, ReplicaOf: b.ReplicaFrom}, nil
+	return ports.SiteBucket{Versioning: b.Versioning, ReplicaOf: b.ReplicaFrom, ObjectLock: b.ObjectLock}, nil
 }
 
 // arriving returns the version as the other deployment commits it: with
@@ -246,8 +246,35 @@ func (s *MemSite) AbortUpload(ctx context.Context, bucketName, key, uploadID str
 	if err != nil {
 		return delivery.Failed(delivery.ClassRejected, err)
 	}
-	_, err = s.Store.AbortUpload(ctx, bucketName, key, id)
+	// An upload that is not there is gone already: success, as the S3
+	// client takes a 404 NoSuchUpload of an abort.
+	if _, err = s.Store.AbortUpload(ctx, bucketName, key, id); errors.Is(err, domain.ErrUploadNotFound) {
+		return nil
+	}
 	return classed(err)
+}
+
+// ListParts implements ports.SiteClient.
+func (s *MemSite) ListParts(ctx context.Context, bucketName, key, uploadID string) ([]ports.SitePart, bool, error) {
+	if err := s.begin("ListParts", bucketName, key); err != nil {
+		return nil, false, classed(err)
+	}
+	id, err := object.ParseID(uploadID)
+	if err != nil {
+		return nil, false, delivery.Failed(delivery.ClassRejected, err)
+	}
+	stored, err := s.Store.ListParts(ctx, bucketName, key, id, 0, object.MaxParts)
+	switch {
+	case errors.Is(err, domain.ErrUploadNotFound):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, classed(err)
+	}
+	parts := make([]ports.SitePart, 0, len(stored))
+	for _, part := range stored {
+		parts = append(parts, ports.SitePart{Number: part.Number, ETag: part.ETag, Size: part.Size})
+	}
+	return parts, true, nil
 }
 
 // ListReplicaUploads implements ports.SiteClient.
@@ -379,6 +406,7 @@ func SiteClientContract(t *testing.T, source string, open func(t *testing.T) (po
 		client, _ := prepare(t)
 		for name, want := range map[string]ports.SiteBucket{
 			"replica":  {Versioning: bucket.VersioningEnabled, ReplicaOf: source},
+			"vault":    {Versioning: bucket.VersioningEnabled, ReplicaOf: source, ObjectLock: true},
 			"writable": {Versioning: bucket.VersioningEnabled},
 			"plain":    {},
 		} {
@@ -512,8 +540,21 @@ func SiteClientContract(t *testing.T, source string, open func(t *testing.T) (po
 		if _, err := client.PutPart(ctx, "replica", "large", id, 3, 100, body(99)); err == nil {
 			t.Error("a part cut short was taken")
 		}
+		// What arrived is listed, as the next attempt asks for it.
+		listed, there, err := client.ListParts(ctx, "replica", "large", id)
+		if err != nil || !there || len(listed) != 2 {
+			t.Fatalf("ListParts = %+v, %v, %v", listed, there, err)
+		}
+		for i, part := range listed {
+			if part.Number != i+1 || part.ETag != parts[i].ETag || part.Size != []int64{first, second}[i] {
+				t.Errorf("part %d listed as %+v", i+1, part)
+			}
+		}
 		if err := client.CompleteReplica(ctx, v, id, parts); err != nil {
 			t.Fatalf("CompleteReplica: %v", err)
+		}
+		if _, there, err := client.ListParts(ctx, "replica", "large", id); err != nil || there {
+			t.Errorf("ListParts of a completed upload = %v, %v", there, err)
 		}
 		got, err := store.GetVersion(ctx, "replica", "large", v.Ref())
 		if err != nil || got.VersionID != v.VersionID || got.Seq != 50 || got.Size != first+second || !got.Multipart() || got.Parts != 2 ||

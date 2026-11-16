@@ -126,7 +126,7 @@ func TestClasses(t *testing.T) {
 		delivery.ClassNone: false, delivery.ClassTimeout: false, delivery.ClassConnect: false, delivery.ClassTLS: false,
 		delivery.ClassServer: false, delivery.ClassRedirect: false, delivery.ClassEgressRefused: false, delivery.ClassAuth: false,
 		delivery.ClassNoStream: false, delivery.ClassNoSuchBucket: false, delivery.ClassVersioning: false,
-		delivery.ClassNotReplica: false, delivery.ClassQuota: false, delivery.ClassInternal: false,
+		delivery.ClassNotReplica: false, delivery.ClassQuota: false, delivery.ClassObjectLock: false, delivery.ClassInternal: false,
 	}
 	for class, want := range passes {
 		if class.Passes() != want {
@@ -169,7 +169,8 @@ func TestShownClass(t *testing.T) {
 	for _, class := range []delivery.Class{
 		delivery.ClassNone, delivery.ClassRejected, delivery.ClassSSEC, delivery.ClassTimeout, delivery.ClassConnect, delivery.ClassTLS,
 		delivery.ClassServer, delivery.ClassRedirect, delivery.ClassEgressRefused, delivery.ClassAuth, delivery.ClassNoStream,
-		delivery.ClassNoSuchBucket, delivery.ClassVersioning, delivery.ClassNotReplica, delivery.ClassQuota, delivery.ClassInternal,
+		delivery.ClassNoSuchBucket, delivery.ClassVersioning, delivery.ClassNotReplica, delivery.ClassQuota, delivery.ClassObjectLock,
+		delivery.ClassInternal,
 	} {
 		if got := delivery.ShownClass(string(class)); got != class {
 			t.Errorf("the class %q is shown as %q", class, got)

@@ -255,6 +255,25 @@ func appendJSONString(dst []byte, s string) []byte {
 	return append(dst, '"')
 }
 
+// SameConnection reports whether what is sent to t would be sent to o as it
+// is to t: the same name, kind, endpoint, subject, region, certificates, way
+// of proving who it is, and sealed fields - a sealed field that was sealed
+// again (a secret or a signing key that changed) has another ciphertext and
+// another wrapped key. What connects to nothing - the buckets a target
+// admits, whether it is sent the audit trail, its counts and times - may
+// differ.
+func (t Target) SameConnection(o Target) bool {
+	return t.Name == o.Name && t.Kind == o.Kind && t.Endpoint == o.Endpoint && t.Subject == o.Subject && t.Region == o.Region &&
+		slices.Equal(t.CAPEM, o.CAPEM) && t.Auth == o.Auth &&
+		sameSealed(t.SealedPath, o.SealedPath) && sameSealed(t.Secret, o.Secret) && sameSealed(t.SignKey, o.SignKey)
+}
+
+// sameSealed reports whether two sealed fields are the same bytes.
+func sameSealed(a, b iam.SealedSecret) bool {
+	return a.KMSKeyID == b.KMSKeyID && slices.Equal(a.WrappedKey, b.WrappedKey) && slices.Equal(a.Nonce, b.Nonce) &&
+		slices.Equal(a.Ciphertext, b.Ciphertext)
+}
+
 // Clone returns a copy that shares nothing with the target.
 func (t Target) Clone() Target {
 	t.CAPEM = slices.Clone(t.CAPEM)
