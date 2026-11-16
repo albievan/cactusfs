@@ -801,7 +801,15 @@ func judgeTrail(held []audit.Record, trail []trailRecord, groups []string) error
 // trailChange creates the group of the i-th administrative change through
 // the nodes, beginning with the i-th, until one answers 201. Every attempt
 // carries the same Idempotency-Key, so an attempt made again after one that
-// was taken and not answered is answered as that one was.
+// was taken and not answered is answered as that one was - unless the node
+// that took it was killed before it answered: its key then stays reserved
+// for idempotencyPending (15 minutes) and every repeat is told
+// RequestInProgress, which says nothing of whether the group was made. The
+// group is asked for then: there, it was made (and its record with it, in
+// the same entry); not there, the change is sent again under a key of its
+// own, and should the lost attempt be committed after all, that one is told
+// EntityAlreadyExists - which is taken as made only for an attempt that
+// follows another.
 func trailChange(ctx context.Context, c *clustertest.Cluster, root map[string]string, i int) (string, error) {
 	name := fmt.Sprintf("trail-%02d", i)
 	headers := map[string]string{"Idempotency-Key": "trail-change-" + name}
@@ -814,14 +822,24 @@ func trailChange(ctx context.Context, c *clustertest.Cluster, root map[string]st
 		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
 		status, _, body, err := gridCall(attempt, c, id, headers, http.MethodPost, "/groups", map[string]any{"name": name, "roles": []string{"read-only"}})
 		cancel()
+		code := problemCode(body)
 		switch {
 		case err == nil && status == http.StatusCreated:
 			return name, nil
-		case err == nil && status == http.StatusConflict && try > 0:
+		case err == nil && status == http.StatusConflict && code == "EntityAlreadyExists" && try > 0:
 			// An attempt before was committed and its answer lost with
 			// the node that gave it: the group is there, and so is its
 			// record, which judgeTrail looks for.
 			return name, nil
+		case err == nil && status == http.StatusConflict && code == "RequestInProgress":
+			made, known := groupExists(ctx, c, root, id, name)
+			if made {
+				return name, nil
+			}
+			if known {
+				// Not made: the reserved key is of no more use.
+				headers["Idempotency-Key"] = fmt.Sprintf("trail-change-%s-%d", name, try)
+			}
 		case err == nil && status >= 400 && status < 500:
 			return name, fmt.Errorf("POST /groups %s through %s = %d %s", name, id, status, body)
 		case time.Now().After(deadline) && err != nil:
@@ -835,6 +853,34 @@ func trailChange(ctx context.Context, c *clustertest.Cluster, root map[string]st
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// problemCode returns the code of a problem+json answer, or "".
+func problemCode(body []byte) string {
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(body, &problem) != nil {
+		return ""
+	}
+	return problem.Code
+}
+
+// groupExists asks a node for a group: made is whether it is there, known
+// whether the answer said so either way.
+func groupExists(ctx context.Context, c *clustertest.Cluster, root map[string]string, id, name string) (made, known bool) {
+	attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	status, _, _, err := gridCall(attempt, c, id, root, http.MethodGet, "/groups/"+name, nil)
+	switch {
+	case err != nil:
+		return false, false
+	case status == http.StatusOK:
+		return true, true
+	case status == http.StatusNotFound:
+		return false, true
+	}
+	return false, false
 }
 
 // trailChangesFrom makes the administrative changes from first up to, not
