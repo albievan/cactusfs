@@ -219,7 +219,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		admin.Handle("/", console.NewHandler(web.Dist()))
 	}
 	s3Handler.set(tel.TraceS3(s3api.NewHandler(s3api.Config{
-		Buckets: n.buckets, Objects: n.objects, Identities: n.identities, Notifications: n.notifications,
+		Buckets: n.buckets, Objects: n.objects, Identities: n.identities, Notifications: n.notifications, Replication: n.replication,
 		Clock: n.clock, Logger: logger, Region: cfg.Region, Domain: cfg.S3Domain,
 		Observe: tel.ObserveS3,
 	})))

@@ -166,6 +166,10 @@ func startTestServer(t *testing.T, domainName string, secure bool, tune ...func(
 		Notifications: app.NewNotificationService(app.NotificationServiceConfig{
 			Buckets: s.meta, Targets: s.meta, Authz: authz, Auditor: s.auditor,
 		}),
+		// So does the replication configuration.
+		Replication: app.NewReplicationService(app.ReplicationServiceConfig{
+			Buckets: s.meta, Store: s.meta, Targets: s.meta, Authz: authz, Auditor: s.auditor,
+		}),
 		Clock: clock, Logger: logger, Domain: domainName, Observe: s.seen.add,
 	}
 	for _, change := range tune {

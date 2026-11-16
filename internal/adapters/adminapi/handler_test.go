@@ -277,7 +277,7 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 		// The notification rules of buckets name the targets above.
 		Notifications: app.NewNotificationService(app.NotificationServiceConfig{Buckets: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
 		// Replica mode carries its audit record to the trail, as targets do.
-		Replication: app.NewReplicationService(app.ReplicationServiceConfig{Buckets: meta, Store: meta, Authz: authz, Auditor: f.auditor}),
+		Replication: app.NewReplicationService(app.ReplicationServiceConfig{Buckets: meta, Store: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
 		SubBuckets:  app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
 		// The catalogue of tags carries its audit record to the trail, as
 		// targets do.
@@ -1686,9 +1686,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 	// The request without a body says the media type all the same: the
 	// adapter takes no POST that does not, and the contract says so.
 	for _, c := range []call{
-		{method: "GET", path: "/buckets/some-bucket/replication"},
-		{method: "PUT", path: "/buckets/some-bucket/replication", body: map[string]any{"target": "site-b", "destination_bucket": "copy", "rules": []any{}}},
-		{method: "DELETE", path: "/buckets/some-bucket/replication"},
 		{method: "GET", path: "/buckets/some-bucket/replication/status"},
 		{method: "POST", path: "/buckets/some-bucket/replication/resync", headers: map[string]string{"Content-Type": "application/json"}},
 	} {

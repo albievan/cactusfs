@@ -81,6 +81,9 @@ func errorMappings() []mapping {
 		{domain.ErrQuotaExceeded, apiError{http.StatusForbidden, "QuotaExceeded", "The bucket quota has been reached."}},
 		{domain.ErrObjectLocked, apiError{http.StatusForbidden, "AccessDenied", "Access Denied because object protected by object lock."}},
 		{domain.ErrLockNotConfigured, apiError{http.StatusBadRequest, "InvalidRequest", "Bucket is missing Object Lock Configuration."}},
+		// Before the argument error it is one of: S3 answers a replication
+		// configuration of a bucket that keeps no versions so (ADR-0026).
+		{domain.ErrVersioningRequired, apiError{http.StatusBadRequest, "InvalidRequest", "Versioning must be 'Enabled' on the bucket to apply a replication configuration."}},
 		{domain.ErrCustomerKeyRequired, apiError{http.StatusBadRequest, "InvalidRequest", "The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object."}},
 		{domain.ErrCustomerKeyUnexpected, apiError{http.StatusBadRequest, "InvalidRequest", "The encryption parameters are not applicable to this object."}},
 		{domain.ErrCustomerKeyMismatch, apiError{http.StatusForbidden, "AccessDenied", "Access Denied."}},

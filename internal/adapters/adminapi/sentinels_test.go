@@ -95,6 +95,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrTagRule:              {400, "TagRuleViolated"},
 		domain.ErrObjectKeyTooLong:     {400, "InvalidObjectKey"},
 		domain.ErrInvalidPolicy:        {400, "InvalidPolicy"},
+		domain.ErrVersioningRequired:   {400, "InvalidArgument"},
 		domain.ErrIdempotencyKeyReused: {422, "IdempotencyKeyReused"},
 		domain.ErrRequestInProgress:    {409, "RequestInProgress"},
 		domain.ErrTooManyAttempts:      {429, "TooManyAttempts"},

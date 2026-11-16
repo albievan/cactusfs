@@ -410,16 +410,24 @@ func checkDelivered(tx *bbolt.Tx, b *bucketRecord, kind string, document []byte)
 		if err != nil {
 			return nil, nil, err
 		}
-		switch {
-		case record == nil:
-			return nil, refusal(domain.ErrInvalidArgument, "there is no target %s", name), nil
-		case !delivery.Kind(record.Kind).Serves(consumer):
-			return nil, refusal(domain.ErrInvalidArgument, "target %s is a %s target", name, record.Kind), nil
-		case !record.toDomain().Admits(b.Name):
-			return nil, refusal(domain.ErrInvalidArgument, "target %s is not open to bucket %s", name, b.Name), nil
+		// The three refusals are one sentence: which of them a target
+		// fails is not told to whoever may configure the bucket, the
+		// answer of a change that raced the use case's own check included.
+		if record == nil || !delivery.Kind(record.Kind).Serves(consumer) || !record.toDomain().Admits(b.Name) {
+			return nil, refusal(domain.ErrInvalidArgument, "%s", unnamableTarget(consumer, name, b.Name)), nil
 		}
 	}
 	return names, nil, nil
+}
+
+// unnamableTarget is the one sentence of a refusal of a target that a
+// document of the bucket may not name: one that is not there, is of a kind
+// that does not serve the consumer, or does not admit the bucket.
+func unnamableTarget(consumer delivery.ConsumerKind, name, bucketName string) string {
+	if consumer == delivery.ConsumerReplication {
+		return fmt.Sprintf("target %s is not another deployment that is open to bucket %s", name, bucketName)
+	}
+	return fmt.Sprintf("target %s is not a webhook or NATS target that is open to bucket %s", name, bucketName)
 }
 
 // replaceDelivered keeps the counts of the targets when the document of a

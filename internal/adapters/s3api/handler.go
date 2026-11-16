@@ -129,8 +129,12 @@ type Config struct {
 	// (ADR-0025). It may be nil on a node that was not given the use
 	// case: ?notification then answers 501.
 	Notifications Notifications
-	Clock         ports.Clock
-	Logger        *slog.Logger
+	// Replication reads, sets and removes the replication configuration
+	// of buckets (ADR-0026). It may be nil on a node that was not given
+	// the use case: ?replication then answers 501.
+	Replication Replications
+	Clock       ports.Clock
+	Logger      *slog.Logger
 	// Region is the region name reported to clients; DefaultRegion when
 	// empty.
 	Region string

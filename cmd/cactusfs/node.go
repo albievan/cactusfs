@@ -99,8 +99,9 @@ type node struct {
 	// notifications holds the notification rules of buckets, which name
 	// targets (ADR-0025).
 	notifications *app.NotificationService
-	// replication holds the replica mode of buckets: whether a bucket
-	// takes its versions from another deployment (ADR-0026).
+	// replication holds the replica mode of buckets - whether a bucket
+	// takes its versions from another deployment - and their replication
+	// configuration, which sends them to one (ADR-0026).
 	replication *app.ReplicationService
 	// publishers makes the publisher of a target for the notifier, and
 	// closes those of targets that are gone.
@@ -412,10 +413,13 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.notifications = app.NewNotificationService(app.NotificationServiceConfig{
 		Buckets: meta, Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
 	})
-	// Replica mode (ADR-0026): a change carries its audit record in the
-	// entry that makes it; below level 5 the store answers unavailable.
+	// Replica mode and the replication configuration of buckets
+	// (ADR-0026): a change of the mode carries its audit record in the
+	// entry that makes it; a configuration names a target, judged against
+	// the targets here and again when it is committed. Below level 5 the
+	// store answers unavailable.
 	n.replication = app.NewReplicationService(app.ReplicationServiceConfig{
-		Buckets: meta, Store: n.telemetry.InstrumentReplication(n.meta), Authz: n.authorizer, Auditor: n.auditor,
+		Buckets: meta, Store: n.telemetry.InstrumentReplication(n.meta), Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
 	})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,

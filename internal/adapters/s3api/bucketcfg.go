@@ -19,8 +19,8 @@ import (
 
 // Bucket policy, cross-origin rules and tags: the sub-resources ?policy,
 // ?cors and ?tagging of a bucket, and ?tagging of an object. Lifecycle and
-// notification rules, routed here too, are in lifecycle.go and
-// notification.go.
+// notification rules and the replication configuration, routed here too,
+// are in lifecycle.go, notification.go and replication.go.
 
 const headerTagging = "x-amz-tagging"
 
@@ -332,6 +332,8 @@ func (h *Handler) routeBucketConfig(ctx context.Context, req *request, query url
 		ops = operations{"lifecycle", h.getBucketLifecycle, h.putBucketLifecycle, h.deleteBucketLifecycle}
 	case query.Has("notification"):
 		ops = operations{"notification", h.getBucketNotification, h.putBucketNotification, nil}
+	case query.Has("replication"):
+		ops = operations{"replication", h.getBucketReplication, h.putBucketReplication, h.deleteBucketReplication}
 	default:
 		return false, nil
 	}
@@ -340,7 +342,7 @@ func (h *Handler) routeBucketConfig(ctx context.Context, req *request, query url
 	}
 	title := map[string]string{
 		"policy": "BucketPolicy", "cors": "BucketCors", "tagging": "BucketTagging", "lifecycle": "BucketLifecycle",
-		"notification": "BucketNotificationConfiguration",
+		"notification": "BucketNotificationConfiguration", "replication": "BucketReplication",
 	}[ops.name]
 	// S3 has no DELETE of every sub-resource: one without is refused as
 	// any other method is, and is no operation of the sub-resource.

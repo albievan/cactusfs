@@ -13,6 +13,12 @@ func RequiredFields() map[string][]string {
 	return requiredFields()
 }
 
+// RequiredItemFields returns, for each operation, the fields each item of an
+// array of its body must give.
+func RequiredItemFields() map[string]map[string][]string {
+	return requiredItemFields()
+}
+
 // AskedFirst returns the operations whose first question to the authorizer
 // the request alone decides.
 func AskedFirst() map[string]bool {

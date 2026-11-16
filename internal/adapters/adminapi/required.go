@@ -45,6 +45,25 @@ func requiredFields() map[string][]string {
 	}
 }
 
+// requiredItemFields are, for each operation as the router matches it, for
+// an array at the top of its body, the fields the contract requires of each
+// item. The generated types keep them as plain values (a bool, an int), so
+// that an item that leaves one out is decoded as its zero value: a rule of
+// a replication configuration without "enabled" would be a rule that is
+// off, one without "delete_markers" a rule that copies none, and nobody
+// would have said so. An operation listed here is listed in requiredFields
+// too, with the array.
+//
+// Only the replication configuration is held to it (PLAN 8.1.3 review).
+// The rules of notifications are not: their contract also requires "id",
+// and the use case gives one to a rule without (PLAN 8.2.2); holding them
+// to it would change what those requests are answered.
+func requiredItemFields() map[string]map[string][]string {
+	return map[string]map[string][]string{
+		"PUT " + BasePath + "/buckets/{bucket}/replication": {"rules": {"id", "enabled", "priority", "delete_markers"}},
+	}
+}
+
 // policyFields are, for each operation as the router matches it whose JSON
 // body carries a policy document, the field that holds it. The document
 // reaches the parser as it was sent (api.PolicyDocument is a
@@ -135,6 +154,43 @@ func requireFields(pattern string, body []byte) error {
 	}
 	if missing != "" {
 		return fmt.Errorf("%w: the body must give %q a value", domain.ErrInvalidArgument, missing)
+	}
+	return requireItemFields(pattern, body)
+}
+
+// requireItemFields refuses a body an item of whose arrays lacks a field the
+// contract requires of it (requiredItemFields), or is not a JSON object. An
+// array given under its name in another case is held to it too: the
+// generated decoder would read it. A value that is not an array is left to
+// the decoder, which refuses it. Nothing of the body is in the error.
+func requireItemFields(pattern string, body []byte) error {
+	arrays := requiredItemFields()[pattern]
+	if len(arrays) == 0 {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return fmt.Errorf("%w: the body must be a JSON object", domain.ErrInvalidArgument)
+	}
+	for field, fields := range arrays {
+		for key, value := range object {
+			if !strings.EqualFold(key, field) {
+				continue
+			}
+			var items []json.RawMessage
+			if json.Unmarshal(value, &items) != nil {
+				continue
+			}
+			for _, item := range items {
+				missing, err := missingField(item, fields)
+				if err != nil {
+					return fmt.Errorf("%w: each of %q must be a JSON object", domain.ErrInvalidArgument, field)
+				}
+				if missing != "" {
+					return fmt.Errorf("%w: each of %q must give %q a value", domain.ErrInvalidArgument, field, missing)
+				}
+			}
+		}
 	}
 	return nil
 }

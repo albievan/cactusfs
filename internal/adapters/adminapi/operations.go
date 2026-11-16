@@ -1938,19 +1938,90 @@ func (o *operations) DeleteBucketNotifications(ctx context.Context, request api.
 	return api.DeleteBucketNotifications204Response{}, nil
 }
 
-// GetBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
-func (o *operations) GetBucketReplication(context.Context, api.GetBucketReplicationRequestObject) (api.GetBucketReplicationResponseObject, error) {
-	return nil, notYet("replication")
+// --- replication configuration of buckets (ADR-0026) ---
+//
+// Who may read or change a bucket's replication configuration, and which
+// target it may name, is the use case's to decide (ReplicationService): it
+// asks the single authorizer, judges the bucket and the target, and records
+// each change. These carry the configuration between the contract and the
+// use case.
+
+// replicationConfigs is the use case of replication configuration, or the
+// answer of a node that was not given it.
+func (o *operations) replicationConfigs() (*app.ReplicationService, error) {
+	if o.h.cfg.Replication == nil {
+		return nil, notYet("replication")
+	}
+	return o.h.cfg.Replication, nil
 }
 
-// PutBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
-func (o *operations) PutBucketReplication(context.Context, api.PutBucketReplicationRequestObject) (api.PutBucketReplicationResponseObject, error) {
-	return nil, notYet("replication")
+// bucketReplicationOf maps a configuration to the contract, its rules in
+// their order; a prefix that is none is left out.
+func bucketReplicationOf(config bucket.ReplicationConfig) api.BucketReplication {
+	rules := make([]api.ReplicationRule, len(config.Rules))
+	for i, r := range config.Rules {
+		rules[i] = api.ReplicationRule{
+			Id: r.ID, Enabled: r.Enabled, Priority: r.Priority, Prefix: stringOrNil(r.Prefix), DeleteMarkers: r.Markers,
+		}
+	}
+	return api.BucketReplication{Target: config.Target, DestinationBucket: config.Bucket, Rules: rules}
 }
 
-// DeleteBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).
-func (o *operations) DeleteBucketReplication(context.Context, api.DeleteBucketReplicationRequestObject) (api.DeleteBucketReplicationResponseObject, error) {
-	return nil, notYet("replication")
+// replicationConfigOf maps the configuration of a request to the use
+// case's. Whether it can be kept is the use case's to say.
+func replicationConfigOf(body api.BucketReplicationPut) bucket.ReplicationConfig {
+	config := bucket.ReplicationConfig{Target: body.Target, Bucket: body.DestinationBucket}
+	for _, r := range body.Rules {
+		config.Rules = append(config.Rules, bucket.ReplicationRule{
+			ID: r.Id, Enabled: r.Enabled, Priority: r.Priority, Prefix: optional(r.Prefix), Markers: r.DeleteMarkers,
+		})
+	}
+	return config
+}
+
+// GetBucketReplication implements api.StrictServerInterface. A bucket
+// without a configuration is answered 404, as the contract says.
+func (o *operations) GetBucketReplication(ctx context.Context, request api.GetBucketReplicationRequestObject) (api.GetBucketReplicationResponseObject, error) {
+	replication, err := o.replicationConfigs()
+	if err != nil {
+		return nil, err
+	}
+	config, err := replication.Configuration(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	if config.Empty() {
+		return nil, fmt.Errorf("%w: bucket %s has no replication configuration", domain.ErrEntityNotFound, request.Bucket)
+	}
+	return api.GetBucketReplication200JSONResponse(bucketReplicationOf(config)), nil
+}
+
+// PutBucketReplication implements api.StrictServerInterface.
+func (o *operations) PutBucketReplication(ctx context.Context, request api.PutBucketReplicationRequestObject) (api.PutBucketReplicationResponseObject, error) {
+	replication, err := o.replicationConfigs()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	kept, err := replication.SetConfiguration(ctx, who(ctx), request.Bucket, replicationConfigOf(*request.Body))
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketReplication200JSONResponse(bucketReplicationOf(kept)), nil
+}
+
+// DeleteBucketReplication implements api.StrictServerInterface.
+func (o *operations) DeleteBucketReplication(ctx context.Context, request api.DeleteBucketReplicationRequestObject) (api.DeleteBucketReplicationResponseObject, error) {
+	replication, err := o.replicationConfigs()
+	if err != nil {
+		return nil, err
+	}
+	if err := replication.DeleteConfiguration(ctx, who(ctx), request.Bucket); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketReplication204Response{}, nil
 }
 
 // GetBucketReplicationStatus implements api.StrictServerInterface (PLAN 8.1.7).
