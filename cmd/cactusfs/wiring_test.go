@@ -1,16 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
+	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -38,7 +45,8 @@ import (
 //     Leader: n.meta.Leader (the cluster and the settings service), Ready:
 //     n.meta.Check (the access recorder and the collector) and Active:
 //     n.meta.IsLeader (the scrubber, the lifecycle worker, the usage
-//     counter and the delivery worker). All three answer from memory - Check after a look at the
+//     counter, the delivery worker and the publishers of targets). All
+//     three answer from memory - Check after a look at the
 //     state machine, under its lock - and none has a context that a span
 //     could belong to but Check; what Check says is exposed as
 //     cactusfs_ready. A fourth is made of one: Level: metadataLevel(n.meta)
@@ -47,7 +55,10 @@ import (
 //     cactusfs_metadata_schema_level shows. A function that did I/O would
 //     have to be a port, with a decorator, to be seen here;
 //   - what an adapter holds is the adapter's business (see ours): an
-//     adapter that was handed another adapter is not found out;
+//     adapter that was handed another adapter is not found out. The egress
+//     client and the dial function a publisher of a target is given are
+//     such; TestThePublishersOfTargetsAreDecorated sees them by what they
+//     count;
 //   - a port that is held only while a request runs, or by the server and
 //     not by the node, is not there when the walk comes by: shard readers
 //     and the readiness checks, which are on the list below for that reason.
@@ -219,6 +230,74 @@ func TestEveryPortIsWiredThroughItsDecorator(t *testing.T) {
 		if w.allowed[kind] == 0 {
 			t.Errorf("%s is listed as wired without a decorator, and the node holds none: take it off the list", kind)
 		}
+	}
+}
+
+// TestThePublishersOfTargetsAreDecorated: the publishers a node makes for
+// its targets are decorated - which the walk sees once they are made - and
+// they reach the network through an egress client observed by the
+// telemetry and a dial function behind its decorator, which the walk cannot
+// see: a webhook and a NATS server
+// at an address the node may not connect to are each a failed connection
+// counted in cactusfs_egress_refusals_total and a span of the egress
+// boundary.
+func TestThePublishersOfTargetsAreDecorated(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	recorder := tracetest.NewSpanRecorder()
+	tel, err := telemetry.New(ctx, telemetry.Config{Version: buildinfo.Get().Tag(), SpanProcessor: recorder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notice bytes.Buffer
+	// No --egress-allow: loopback is an address the node does not
+	// connect to.
+	n, err := openNode(ctx, nodeConfig(t.TempDir()), tel, slog.New(slog.DiscardHandler), &notice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = n.Close() })
+	root := iam.Principal{AccessKeyID: "ROOT", Root: true}
+	port := closedPort(t)
+	for _, in := range []app.TargetInput{
+		{Name: "hook", Kind: delivery.KindWebhook, Endpoint: "https://127.0.0.1:" + port + "/hooks/in", Buckets: []string{"photos"}},
+		{Name: "stream", Kind: delivery.KindNATS, Endpoint: "tls://127.0.0.1:" + port, Subject: "cactusfs.events", Buckets: []string{"photos"}},
+	} {
+		if _, err := n.targets.Put(ctx, root, in); err != nil {
+			t.Fatalf("Put %s: %v", in.Name, err)
+		}
+		target, err := n.meta.GetTarget(ctx, in.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		publisher, err := n.publishers.Publisher(ctx, target)
+		if err != nil {
+			t.Fatalf("the publisher of %s: %v", in.Name, err)
+		}
+		if _, ok := publisher.(telemetry.Instrumented); !ok {
+			t.Errorf("the publisher of %s is a %T, without a decorator of the telemetry adapter", in.Name, publisher)
+		}
+		if err := publisher.Publish(ctx, testMessage()); delivery.ClassOf(err) != delivery.ClassEgressRefused {
+			t.Errorf("a message to %s at loopback = %v, want a failure of class %s", in.Name, err, delivery.ClassEgressRefused)
+		}
+	}
+	if got := samples(t, tel)["cactusfs_egress_refusals_total{class=egress_refused}"]; got != 2 {
+		t.Errorf("cactusfs_egress_refusals_total{class=egress_refused} = %v, want 2: the egress client or its dial function is not decorated", got)
+	}
+	spans := map[string]int{}
+	for _, span := range recorder.Ended() {
+		spans[span.Name()]++
+	}
+	if spans["egress.Do"] != 1 || spans["egress.Dial"] != 1 || spans["events.Publish"] < 2 {
+		t.Errorf("spans of the egress boundary and of the publishers: %v", spans)
+	}
+	w := walkWiring(n)
+	for _, violation := range w.violations {
+		t.Error(violation)
+	}
+	// The bus, and the two publishers of targets.
+	if w.decorated["ports.EventPublisher"] < 3 {
+		t.Errorf("the walk found %d decorated publishers, want the bus and the two of the targets", w.decorated["ports.EventPublisher"])
 	}
 }
 

@@ -27,9 +27,11 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/raftmeta"
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
+	"github.com/albievan/cactusfs/internal/buildinfo"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/cluster"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/erasure"
 	"github.com/albievan/cactusfs/internal/ports"
 )
@@ -94,6 +96,12 @@ type node struct {
 	// delivery sends to them, while this node leads (ADR-0023).
 	targets  *app.TargetService
 	delivery *app.DeliveryWorker
+	// notifications holds the notification rules of buckets, which name
+	// targets (ADR-0025).
+	notifications *app.NotificationService
+	// publishers makes the publisher of a target for the notifier, and
+	// closes those of targets that are gone.
+	publishers *publishers
 	// delivering is delivery as node RPC sees it: node RPC serves before
 	// the worker exists, and from other goroutines.
 	delivering atomic.Pointer[app.DeliveryWorker]
@@ -362,20 +370,32 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	targetStore := n.telemetry.InstrumentTargets(n.meta)
 	// Delivery to targets (ADR-0023): the node that leads the metadata
 	// group reads the outbox after each target's cursor and hands every row
-	// to what delivers its kind of consumer - none in this release: the
-	// notifier and the replicator are registered here by PLAN 8.2.5 and
-	// 8.1.4, and until a bucket's documents can name a target no row is
-	// appended. Any node answers how a target stands by asking the leader.
+	// to what delivers its kind of consumer: the notifier for bucket
+	// notifications (ADR-0025), which publishes through a publisher made
+	// for a target the first time it has something for it, through an
+	// egress client of the target's own; the replicator is registered here
+	// by PLAN 8.1.4. Any node answers how a target stands by asking the
+	// leader.
+	n.publishers = newPublishers(publishersConfig{
+		KMS: kms, Targets: targetStore, Telemetry: n.telemetry, Allow: cfg.EgressAllow, Timeout: cfg.DeliveryTimeout,
+		Version: userAgentVersion(ctx, logger, buildinfo.Get().Version), Clock: n.clock, Active: n.meta.IsLeader, Logger: logger,
+	})
 	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
 		Targets: targetStore, Outbox: n.telemetry.InstrumentOutbox(n.meta), Active: n.meta.IsLeader, Clock: n.clock,
 		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
 		OnAttempt: n.telemetry.ObserveDeliveryAttempt,
+		Deliverers: map[delivery.ConsumerKind]app.Deliverer{
+			delivery.ConsumerNotification: app.NewNotifier(app.NotifierConfig{Publishers: n.publishers, Logger: logger}),
+		},
 	})
 	n.delivering.Store(n.delivery)
 	n.telemetry.ObserveDelivery(deliveryGauges{worker: n.delivery})
 	n.targets = app.NewTargetService(app.TargetServiceConfig{
 		Store: targetStore, Authz: n.authorizer, Auditor: n.auditor, KMS: kms,
 		Clock: n.clock, Entropy: rand.Reader, Delivery: n.telemetry.InstrumentDeliveryStatus(leaderDelivery{node: n}),
+	})
+	n.notifications = app.NewNotificationService(app.NotificationServiceConfig{
+		Buckets: meta, Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
 	})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
@@ -795,6 +815,9 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.counter.Run(ctx) })
 	// Delivers the outbox to its targets, while this node leads.
 	n.background.Go(func() { n.delivery.Run(ctx) })
+	// Closes the publishers of targets that are gone, and all of them
+	// where the node does not lead or stops.
+	n.background.Go(func() { n.publishers.Run(ctx) })
 }
 
 // Close stops the background tasks, then the metadata store, and releases
@@ -804,6 +827,11 @@ func (n *node) Close() error {
 		n.stopBackground()
 		n.background.Wait()
 		n.stopBackground = nil
+	}
+	// No publisher of a target is made or kept once the delivery worker
+	// has stopped.
+	if n.publishers != nil {
+		n.publishers.close()
 	}
 	// The gauges stop describing what is about to be closed.
 	n.telemetry.ObserveRaft(nil)

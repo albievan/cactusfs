@@ -207,7 +207,8 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		admin.Handle(adminapi.BasePath+"/", tel.TraceAdmin(adminapi.NewHandler(adminapi.Config{
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
 			Settings: n.settings, SubBuckets: n.subBuckets, Targets: n.targets, TagDefinitions: n.tagDefinitions, Updates: n.updates,
-			Quotas: n.quotas, Counter: n.counter, Idempotency: n.idempotency, Identities: n.identities, Clock: n.clock, Logger: logger,
+			Quotas: n.quotas, Counter: n.counter, Notifications: n.notifications, Idempotency: n.idempotency, Identities: n.identities,
+			Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,
 			Build: build,
 		})))
@@ -217,7 +218,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 		admin.Handle("/", console.NewHandler(web.Dist()))
 	}
 	s3Handler.set(tel.TraceS3(s3api.NewHandler(s3api.Config{
-		Buckets: n.buckets, Objects: n.objects, Identities: n.identities,
+		Buckets: n.buckets, Objects: n.objects, Identities: n.identities, Notifications: n.notifications,
 		Clock: n.clock, Logger: logger, Region: cfg.Region, Domain: cfg.S3Domain,
 		Observe: tel.ObserveS3,
 	})))

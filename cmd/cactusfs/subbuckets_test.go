@@ -80,6 +80,14 @@ func TestTheNodeAuthorizerReadsSubBucketPolicies(t *testing.T) {
 // that ends the node and fails the test if it did not end well.
 func servedAdmin(t *testing.T) (call func(method, path, bearer, body string) (int, string), root string, stop func()) {
 	t.Helper()
+	call, _, root, stop = servedNode(t)
+	return call, root, stop
+}
+
+// servedNode is servedAdmin that also returns where the S3 API listens, in
+// plaintext on loopback.
+func servedNode(t *testing.T) (call func(method, path, bearer, body string) (int, string), s3Addr, root string, stop func()) {
+	t.Helper()
 	cfg := nodeConfig(t.TempDir())
 	cfg.AdminAddr, cfg.S3Addr = freeAddr(t), freeAddr(t)
 	cfg.DevPlaintext = true
@@ -143,7 +151,7 @@ func servedAdmin(t *testing.T) (call func(method, path, bearer, body string) (in
 	notice.mu.Lock()
 	creds := shownCredentials(t, notice.buf.String())
 	notice.mu.Unlock()
-	return call, creds.AccessKeyID + ":" + creds.SecretKey, stop
+	return call, cfg.S3Addr, creds.AccessKeyID + ":" + creds.SecretKey, stop
 }
 
 // TestTheServedAdminAPICreatesSubBuckets holds server.go to the wiring of
