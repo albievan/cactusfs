@@ -13,8 +13,8 @@ replicated store, the contracts, outbound connections, targets and the delivery 
 it needs exist, and so do the destination - replica mode, replica requests and the
 questions a source asks, PLAN 8.1.1 and 8.1.1a, "Replica requests" in section 6 - and
 the client of another site, PLAN 8.1.2, and the replicator with the later changes of a version, PLAN
-8.1.4 and 8.1.5, written and not yet through their gate; the resync (8.1.6) and the status and telemetry of a
-bucket's replication (8.1.7) do not). Bucket notifications (ADR-0025) are
+8.1.4 and 8.1.5, written and not yet through their gate; the resync, PLAN 8.1.6, written and not yet
+through its gate; the status and telemetry of a bucket's replication (8.1.7) do not). Bucket notifications (ADR-0025) are
 implemented end to end - the webhook and NATS publishers, the notifier that hands them
 the outbox, the export of the audit trail through them, S3's notification configuration,
 the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
@@ -612,7 +612,7 @@ The entry schema is at 6 (`MetadataVersion`, `internal/adapters/raftmeta/entry.g
 | 2 | the leader's time on every entry; object versions, delete markers, Object Lock, bucket configuration, multipart uploads | 0008 (with 0009, 0011, 0012) |
 | 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules, tags of an upload and tag definitions | 0016 (with 0017, 0018) |
 | 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
-| 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets (made and promoted through `app.ReplicationService`) and the record of a resync (which no use case writes yet) | 0023 (with 0024, 0025, 0026) |
+| 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets (made and promoted through `app.ReplicationService`) and the record of a resync (started by `ReplicationService.Resync`, walked by `app.ResyncWorker`) | 0023 (with 0024, 0025, 0026) |
 | 6 | the revocation of a node that leaves (`node.revoke`, the bucket `revokednodes`); nothing old changes | 0030 |
 
 Upgrades from schema 2, 3 and 4 are tested against fixtures written by the binaries of
@@ -864,7 +864,46 @@ four at a time.
   (`object.RetentionMargin`, the rule of a copy) is passed. A row of a version that is gone, of a bucket the target no
   longer admits or whose configuration no longer names it, is passed with no status.
   The bytes of every version being sent are held together to `--replication-rate-mib`,
-  with no burst above it.
+  with no burst above it. **One send to an object there at a time**, whoever sends, by
+  the name `ObjectOf` gives the object (the target, the bucket there, the key): a row of
+  the outbox waits for another row, and ends a resync's send to the object rather than
+  wait for it - but waits, within its attempt's deadline, for a version whose send it has
+  ended `app.ResyncPreemptions` (3) times, so a hot key cannot starve an old version; a
+  resync waits for nobody (below).
+- **The resync** (`app.ResyncWorker`; ADR-0026, "Resync, as built"; PLAN 8.1.6 and its
+  review). `ReplicationService.Resync` (`admin:ResyncReplication`, audited) stores the
+  start of the walk through Raft (`replication.resync.put`: running, no cursor); the
+  worker, on the node that leads and nowhere else - a lead lost ends what is in flight
+  at once - gives every running resync one pass a round: 500 versions from its cursor in
+  the order of the version index (keys in order, the versions of a key from the newest),
+  each sent through **the same replicator** (`Replicator.Resend`: its reads, classes,
+  probe, locks, uploads that go on, rate and deadlines), which asks the other deployment
+  first - a delete marker too - and sends only what is not there. A version is sent when
+  a rule matches it; a marker only when the deciding rule copies markers and the state
+  gave it a status when it was made; a replica never; **a `FAILED` version never** - a
+  resync neither sends it nor lifts its status. After each pass the statuses, each read
+  again just before (one that became `FAILED` meanwhile is left out), are acknowledged by
+  version (`outbox.ack`, `{b, k, vid, status}`), then the cursor is stored - not
+  proposed again when unchanged; a new leader goes on from it and what it walks again it
+  finds there. A failure that holds the target holds the walk at the version (stored up
+  to it, tried again after the pauses of delivery); one of the version passes it; an
+  object the outbox is sending (`ErrResyncObjectBusy`) or a configuration that stops
+  sending the bucket to the target (`ErrResyncConfiguration`) stops the pass at the
+  version with no failure counted, and the walk comes back to it. A pass with fewer than
+  500 versions ends the walk; at the end of the round, once for each target, the cursor is
+  read, and **a walk whose target lost rows since it began begins again** - with no bound:
+  a resync never ends while its target keeps losing rows. Otherwise it is `done`, unless the target
+  needs a resync (`resync_needed`, which one `done` clears for every bucket sent there):
+  then the worker starts the resync of every other bucket the target admits whose
+  configuration names it (audited as the deployment's own), and stores `done` for them
+  all only once every one has been through and no row was lost since the earliest began.
+  A round reads the record of every bucket a replicating target admits every 10 s
+  (`ResyncScanEvery`) and only the running ones between, none while no bucket has a
+  replication configuration (`Target.Refs`), and what it costs grows with the buckets of
+  a target, not their square; a round that moved nothing proposes nothing and is followed by a
+  pause. How a walk stands beyond its record - the state and class of its own sending,
+  or why it waits (`configuration`, `target`, `object`, `others`) - is the leader's
+  memory (`ResyncWorker.Progress`), for the status of PLAN 8.1.7.
 - **The audit trail through a target** (ADR-0025; PLAN 8.2.8). A webhook or NATS
   target defined with `audit: true` is sent every record of the audit trail from the
   one after its cursor's `audit_acked` on - from the first record of the trail for a
@@ -950,7 +989,7 @@ four at a time.
   written before the node closes. What was dropped before a node came to lead was the
   former leader's to tell, and the count is in every record.
 
-## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C - replica requests, the replication configuration, the replicator and later changes are there, the resync and the status of a bucket's replication are not yet)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C - replica requests, the replication configuration, the replicator, later changes and the resync are there, the status of a bucket's replication is not yet)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -1082,9 +1121,13 @@ four at a time.
   rule that leaves out `id`, `enabled`, `priority` or `delete_markers`, 409
   `InvalidBucketState` for a replica, 404 `NoSuchEntity` for a bucket without one);
   `/targets/{name}/status` (PLAN 8.0.14) is answered by any node, which asks
-  the node that leads ("Delivery to targets", section 5); the rest have no use case yet,
-  so each answers 501 `NotImplemented` to a caller that has authenticated:
-  `/buckets/{bucket}/replication/status` and `/buckets/{bucket}/replication/resync`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  the node that leads ("Delivery to targets", section 5); `POST
+  /buckets/{bucket}/replication/resync` (PLAN 8.1.6) stores the start of a resync through
+  Raft on any node and answers 202 with the record (`ReplicationService.Resync`,
+  `admin:ResyncReplication`, audited; 404 `NoSuchEntity` for a bucket without a
+  configuration), and the leader walks it; the rest have no use case yet, so each
+  answers 501 `NotImplemented` to a caller that has authenticated:
+  `/buckets/{bucket}/replication/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and

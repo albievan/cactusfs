@@ -15,7 +15,8 @@
   destination as PLAN 8.1.1 built it ("The destination, as built"), to the
   configuration as PLAN 8.1.3 built it and its review amended it ("Configuration", "As
   built"), and to the replicator as PLAN 8.1.4 wrote it and its review amended it, with
-  the later changes of PLAN 8.1.5 ("The replicator, as built")
+  the later changes of PLAN 8.1.5 ("The replicator, as built"); and to the resync as
+  PLAN 8.1.6 wrote it and its review and verification amended it ("Resync, as built"; open 10 to 14)
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -856,6 +857,132 @@ would be a field more in the state, and a schema 6 (ADR-0023, "Open", 6).
 It is the way versions from before the configuration get across, and the way a target
 that lost rows at the bound of the outbox is made whole.
 
+### Resync, as built (PLAN 8.1.6)
+
+No entry, state, on-disk format, port or contract changed: the record, its entry and
+its clearing of `resync_needed` are schema 5's (PLAN 8.0.9), the result by version is
+`outbox.ack`'s, and the endpoint was in `admin.yaml` since PLAN 8.0.3.
+
+- **Who starts it.** `ReplicationService.Resync` needs `admin:ResyncReplication` on the
+  bucket (the table of "Who": `cluster-admin` only - a bucket's administrator, who holds
+  `s3:*`, cannot put this load on the link and on the other deployment), refuses a
+  bucket without a configuration (404 `NoSuchEntity`) or whose target is no longer
+  another deployment open to it, stores `{bucket, target the configuration names,
+  running}` with no cursor and no counts - over whatever was stored, so asking again
+  starts again - and is audited (`admin:ResyncReplication`, details `target` and
+  `resync: started`). Any node takes the request; the walk is the leader's.
+- **Who walks it.** `app.ResyncWorker`, on the node that leads and nowhere else; as the
+  delivery worker, it looks every second, and a lead that is lost ends what is in flight
+  at once and forgets what it kept in memory. Each round gives every running resync one
+  pass.
+- **The order.** "Oldest key first" is read as **the order of the version index**: keys
+  in order, the versions of a key from the newest - the order the cursor (`key`,
+  `version`) can name, and what `ObjectIndex.ScanVersions` walks. The order of sending
+  changes nothing at the destination, which orders by the source's sequence ("Order").
+  A cursor whose version is gone begins again at its key.
+- **What is sent.** A version a rule of the configuration matches (`Match`); a delete
+  marker **only when the deciding rule copies markers and the state gave it a status
+  when it was made**: a marker without one was made before the configuration or by the
+  lifecycle service, which a stored marker cannot tell apart (it keeps no `by`), and a
+  marker that crosses can hide a version there - the stricter reading (open, 14); a
+  version that arrived as a replica never.
+- **`FAILED` is final** (review of PLAN 8.1.6). A version that is `FAILED` is neither
+  sent nor asked for nor given another status by a resync, whatever the other deployment
+  holds: a change never lifts `FAILED`, and neither does a resync. And as statuses are
+  acknowledged at the end of a pass, each version is read again just before: one that
+  became `FAILED` meanwhile (the outbox gave up on a change of it), is gone, or is a
+  replica, is left out of the acknowledgement, so that a resync never puts a status over
+  a newer `FAILED`. The description of `failed` in `admin.yaml` (`BucketReplicationStatus`:
+  "falls only when such a version is removed or a resync replicates it") says otherwise;
+  it is corrected with the contract change of PLAN 8.1.7.
+- **One sender.** Each version goes through the `Replicator` the outbox goes through
+  (`Replicator.Resend`): the same reads as the replication service, classes, probe, Object
+  Lock hold, uploads that go on, rate and attempt deadlines. It asks first, **a delete
+  marker too** (`HeadVersion`; a marker there is there with no entity tag - a row of
+  `SiteClientContract`, and of the client's test against the real handler), and sends
+  only what is not there; with another entity tag it is `FAILED`. What it counts as
+  `sent` is what the other deployment lacked.
+- **Never one object twice at once; the outbox does not wait for a resync, but for one
+  that it has ended three times.** The replicator lets one send to an object there - the
+  name `ObjectOf` gives it: the target, the bucket there and the key - run at a time,
+  whoever sends. **A resync waits for nobody**: an object being sent is
+  `app.ErrResyncObjectBusy` at once, and the walk stops at that version (no failure
+  counted, what came before stored) and comes back to it a second later - the walks pause
+  no longer than until the next walk is due. **The outbox waits for another row**, and a
+  resync's send to the object runs under a context the outbox ends (`errPreempted`) when
+  it comes to send that object; the resync's answer is then `app.ErrResyncPreempted` (an
+  `ErrResyncObjectBusy`), what it had sent is found there when it comes back, and
+  `ResyncWorker.Progress` counts it (`Preempted`). **After `app.ResyncPreemptions` (3)
+  such ends of the send of one version** (verification of PLAN 8.1.6), the outbox waits
+  for the next send of that version instead of ending it: a key the outbox writes to again
+  and again would otherwise keep a large old version of it from ever crossing. The count
+  is the replicator's, in memory, by object and version; it goes when that version's send
+  ends by itself, and all counts go beyond 1 024 versions. A row that waits for another
+  send beyond its own attempt's deadline fails as a `timeout`, which holds the target and
+  is never `FAILED`. Uploads of parts go on from the parts that arrived, so a resync's
+  upload that is ended loses no part.
+- **A configuration that stops sending the bucket stops the walk.** When the bucket's
+  configuration no longer names the target, or the target no longer admits the bucket,
+  while a pass walks (review of PLAN 8.1.6), the resync's answer is
+  `app.ErrResyncConfiguration` - where a row of the outbox is passed with no status - and
+  the pass stops at that version, storing only what came before it; the walk then waits
+  (`configuration`, or `target`) and goes on from there when the configuration names the
+  target again: no version is passed over.
+- **Statuses, then the cursor.** After each pass the statuses of the versions it dealt
+  with are acknowledged by version (`{b, k, vid, status}`, with an `upto` behind every
+  cursor, which moves nothing), and then the record is stored with the last version dealt
+  with and the counts - unless it is what is stored already, which is neither read again
+  nor proposed again. A cursor that is stored is therefore a pass whose statuses were
+  taken; a pass cut off by the loss of the lead stores nothing, and the next leader walks
+  it again and finds there what arrived (`sent` does not count those twice - nor at all:
+  it is the count of the leader that sent them, lost with its pass). Before storing, the
+  record is read again: one stored otherwise meanwhile - a resync asked again - is not
+  overwritten (a narrow race remains between that read and the proposal: a store with a
+  compare would be a schema change).
+- **Failures.** A failure whose class passes (`rejected`, `sse_c`) is the version's:
+  `FAILED`, counted, and the walk goes on. Any other holds the walk at the version, as it
+  holds the target: what the pass dealt with before is stored, and the version is tried
+  again after the pauses of delivery (`delivery.Backoff`). While held, or waiting for a
+  configuration, a target, an object or the other buckets, the record says `running` - as
+  the contract says - and what the leader keeps of the walk says why:
+  `ResyncWorker.Progress` gives the state of its own sending (`ok`, `retrying`, `stalled`,
+  judged as a target's), the class of its last failure, `waiting` (`configuration`,
+  `target`, `object`, `others`), and how often it began again (`Restarts`) and had a send
+  ended by the outbox (`Preempted`), for the status of PLAN 8.1.7.
+- **The end, rows lost meanwhile, and the mark.** A pass of fewer than 500 versions ends
+  the walk; what follows is decided at the end of the round, once for each target, with
+  the targets' cursors read then - after every pass of the round. **When the target lost
+  rows since the walk began** (`Cursor.Lost` higher than when this node began the walk or
+  took it over) the walk begins again from the first version: a row lost behind its
+  cursor would never be sent (review of PLAN 8.1.6; what a change of leader leaves out is
+  open, 13). **There is no bound on how often: a resync never ends while its target keeps
+  losing rows** - from its second restart each is logged as a warning, and `Restarts`
+  counts them (verification of PLAN 8.1.6). Otherwise, when the target does not need a
+  resync, the record is stored `done`. When it does, the worker starts the resync of every
+  other bucket **that the target admits** and whose configuration names it, and that has
+  no running resync of it (audited as the deployment's own: actor `system`, details
+  `reason: resync_needed`); it stores `done` for all of them only once every one has been
+  through in this leader's time and the target lost no row since the earliest of them
+  began, and otherwise begins every one of them again; meanwhile where each that waits
+  came to is stored, once. A configuration that cannot be read could name the target:
+  nothing is concluded then, the walks wait, and that is logged once until it clears.
+- **What it costs.** A round reads the targets, and - every `app.ResyncScanEvery` (10 s)
+  - the record of every bucket that a target named by a replication configuration admits,
+  a consistent read each; the rounds between read only the records of the resyncs that
+  are running. While no bucket has a replication configuration - no target of kind `s3` is
+  named by one (`Target.Refs`) - no bucket is read at all, and a bucket no such target
+  admits never is (its resync could only wait). The end of the round reads the cursors
+  once, and for each target that needs a resync finds the buckets sent to it once, reading
+  the configuration of no bucket the target does not admit and stopping once `Refs` of
+  them were found; the records it needs of them are those the round read already, and of
+  a bucket whose resync is not running one read, once (verification of PLAN 8.1.6: a round
+  costs what the target's buckets are, not their square). A round that moved nothing - no
+  version looked at, nothing done, started or begun again - proposes nothing and is
+  followed by a pause of 10 s at most.
+- **What a resync does not carry.** A later change of a version that is already there
+  (its tags, retention or legal hold) whose row was lost at the bound: the question asked
+  is whether the version is there, not what it carries. Open below, 10.
+
 ### Limits
 
 `replication-workers` versions are sent at once (4; 1 to 32). `replication-rate-mib`
@@ -1002,6 +1129,41 @@ Defaults are applied until answered.
    both be committed. Judging it in apply would change what every member applies - a
    schema change. Default: the use case's check; an operator who finds two buckets
    sent to one there removes one configuration.
+10. **A later change lost at the bound is not resynced** (found at PLAN 8.1.6). A
+    resync asks whether a version is there and sends it when not; a version that is
+    there already keeps the tags, retention and legal hold it had when it crossed, and
+    a later change of it whose row was dropped is not carried. Carrying them would mean
+    a `PutTags`, `PutRetention` and `PutLegalHold` for every version walked - three
+    requests more where there is one now, and a retention there that Object Lock
+    refuses to shorten. Default: not carried; the next change of the version carries
+    all of it, as a change carries the version as it is now.
+11. **The walk is one version at a time** (PLAN 8.1.6). The outbox sends
+    `replication-workers` at once; a resync sends one version after another, each after
+    its question - a round trip a version, so a bucket of millions of small versions
+    over a link of 10 ms takes hours. Default: one at a time, which keeps the cursor
+    simple (a pass is stored up to the version it is held at); waves as the outbox has
+    them would be a change of the worker only.
+12. **What a pass sent before a change of leader is not counted** (PLAN 8.1.6). `sent`
+    of the record is the count of the passes that were stored; the versions a pass sent
+    before its lead was lost are found there by the next leader, which does not send or
+    count them. Default: `sent` is a lower bound, as the contract's "versions the other
+    deployment did not have and was sent" reads most strictly.
+13. **Rows lost before a change of leader are not seen by the next** (review of PLAN
+    8.1.6). A walk begins again when its target lost rows since it began, as the node
+    that walks it saw `Cursor.Lost` when it began - or when it took the walk over. Rows
+    lost while an earlier leader walked, behind the cursor it stored, are counted in
+    `Lost` before the new leader first reads it, and the walk is `done` without them.
+    `resync_needed` was set by them all the same; the next resync asked for sends them.
+    Closing the gap means keeping `Lost` at the beginning of the walk in its record - a
+    field more in `replication.resync.put`, so a schema change. Default: the gap, and
+    `resync_needed` cleared by a walk that did not see the loss.
+14. **A user's delete marker made before the configuration is never resynced** (review
+    of PLAN 8.1.6; for Albie). A resync sends a marker only when the state gave it a
+    status when it was made, because a stored marker does not say who made it and a
+    lifecycle marker must not cross. So a marker a user made before the bucket had a
+    configuration stays here only; S3 Batch Replication copies such a marker. Keeping
+    who made a marker would be a field more of a version - a schema change. Default:
+    not sent - a marker that crosses can hide a version at the destination.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode
