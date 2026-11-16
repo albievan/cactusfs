@@ -12,6 +12,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/ports"
 )
 
@@ -102,6 +103,31 @@ func (g deliveryGauges) DeliveryState() (telemetry.DeliveryState, bool) {
 		out.OldestPending[string(kind)] = waited
 	}
 	return out, true
+}
+
+// replicationGauges is the delivery worker and the resync worker as the
+// gauges of replication read them (PLAN 8.1.7): the rows that wait for the
+// targets of kind s3 - other deployments - all together, and the resyncs by
+// state; no bucket or target named. It says something on the node that
+// leads only, once the outbox was read; both workers answer from memory.
+type replicationGauges struct {
+	delivery *app.DeliveryWorker
+	resync   *app.ResyncWorker
+}
+
+// ReplicationState implements telemetry.ReplicationSource.
+func (g replicationGauges) ReplicationState() (telemetry.ReplicationState, bool) {
+	s, ok := g.delivery.Summary()
+	if !ok {
+		return telemetry.ReplicationState{}, false
+	}
+	resyncs, ok := g.resync.Summary()
+	if !ok {
+		return telemetry.ReplicationState{}, false
+	}
+	return telemetry.ReplicationState{
+		Pending: s.Pending[delivery.KindS3], OldestPending: s.OldestPending[delivery.KindS3], Resyncs: resyncs,
+	}, true
 }
 
 // quotaGauges is the use case of quotas as the gauges of quotas read it:

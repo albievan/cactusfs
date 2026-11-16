@@ -2024,9 +2024,39 @@ func (o *operations) DeleteBucketReplication(ctx context.Context, request api.De
 	return api.DeleteBucketReplication204Response{}, nil
 }
 
-// GetBucketReplicationStatus implements api.StrictServerInterface (PLAN 8.1.7).
-func (o *operations) GetBucketReplicationStatus(context.Context, api.GetBucketReplicationStatusRequestObject) (api.GetBucketReplicationStatusResponseObject, error) {
-	return nil, notYet("replication status")
+// GetBucketReplicationStatus implements api.StrictServerInterface (PLAN
+// 8.1.7): who may read it, and where each part is read, is the use case's
+// (ReplicationService.Status, admin:GetReplicationStatus); this carries the
+// answer to the contract.
+func (o *operations) GetBucketReplicationStatus(ctx context.Context, request api.GetBucketReplicationStatusRequestObject) (api.GetBucketReplicationStatusResponseObject, error) {
+	replication, err := o.replicationConfigs()
+	if err != nil {
+		return nil, err
+	}
+	status, err := replication.Status(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketReplicationStatus200JSONResponse(bucketReplicationStatusOf(status)), nil
+}
+
+// bucketReplicationStatusOf maps the status of a bucket's replication to the
+// contract: a time and a class that are none, and a resync never asked for,
+// are left out.
+func bucketReplicationStatusOf(s app.ReplicationStatus) api.BucketReplicationStatus {
+	out := api.BucketReplicationStatus{
+		Target: s.Target, TargetState: s.TargetState, LastErrorClass: stringOrNil(string(s.LastErrorClass)),
+		Pending: max(s.Pending, 0), Failed: max(s.Failed, 0), Lost: int64(min(s.Lost, math.MaxInt64)), ResyncNeeded: s.ResyncNeeded,
+	}
+	if !s.OldestPendingAt.IsZero() {
+		at := s.OldestPendingAt.UTC()
+		out.OldestPendingAt = &at
+	}
+	if s.Resync != nil {
+		resync := replicationResyncOf(*s.Resync)
+		out.Resync = &resync
+	}
+	return out
 }
 
 // ResyncBucketReplication implements api.StrictServerInterface (PLAN 8.1.6):

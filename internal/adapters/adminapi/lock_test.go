@@ -270,90 +270,38 @@ func (f *fixture) lockDenials(user, requestID string) (accounted int, action str
 	return accounted, action
 }
 
-// TestALockedSessionOnlyUploads walks the contract with a locked session
-// (ADR-0027): a well-formed call of every operation that needs a credential
-// answers 423 SessionLocked - never a 2xx, never the 401 by which a console
-// takes its session for gone - and leaves a record in the audit trail. The
-// exceptions are the four a locked session is for: storing an object,
-// reading its own state, unlocking and signing out. An operation that is
-// added to the contract is asked for here the day it is added.
-func TestALockedSessionOnlyUploads(t *testing.T) {
-	t.Parallel()
-	f := newFixture(t)
-	keepLeases(t, f)
-	document := map[string]any{"Version": "2012-10-17", "Statement": []any{map[string]any{
+// prepareOperations makes what the calls of wellFormedCalls name, so that no
+// call is refused for naming what is not: the bucket some-bucket with the
+// object k, the policy some-policy, the role some-role, the group
+// some-group and the user somebody with a key. It returns the policy
+// document and that key, as a bearer credential.
+func prepareOperations(t *testing.T, f *fixture) (document map[string]any, somebody string) {
+	t.Helper()
+	document = map[string]any{"Version": "2012-10-17", "Statement": []any{map[string]any{
 		"Effect": "Allow", "Action": []string{"s3:GetObject"}, "Resource": []string{"arn:aws:s3:::some-bucket/*"},
 	}}}
-	// What the calls name is there, so that no call is refused for naming
-	// what is not.
 	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
 	f.must(http.StatusOK, call{method: "PUT", path: "/buckets/some-bucket/object?key=k", raw: []byte("content")})
 	f.must(http.StatusCreated, call{method: "POST", path: "/policies", body: map[string]any{"name": "some-policy", "document": document}})
 	f.must(http.StatusCreated, call{method: "POST", path: "/roles", body: map[string]any{"name": "some-role", "policies": []string{"some-policy"}}})
 	f.must(http.StatusCreated, call{method: "POST", path: "/groups", body: map[string]any{"name": "some-group", "roles": []string{"some-role"}}})
-	somebody := f.userKey("somebody", iam.RoleReadOnly)
-	keyID, _, _ := strings.Cut(somebody, ":")
+	return document, f.userKey("somebody", iam.RoleReadOnly)
+}
 
-	// The user has every permission there is: nothing below is refused for
-	// want of one.
-	admin := consoleOf(t, f, "locksmith", iam.RoleClusterAdmin)
-	if who := admin.identity(t); who.Locked == nil || *who.Locked || who.ExpiresAt == nil || !who.ExpiresAt.Equal(testNow.Add(app.DefaultSessionLifetime)) ||
-		who.LockEndsAt == nil || !who.LockEndsAt.Equal(testNow.Add(app.DefaultSessionLifetime+app.DefaultSessionLockMax)) {
-		t.Fatalf("GET /session of a session that is not locked = %+v", who)
-	}
-	f.must(http.StatusOK, call{method: "GET", path: "/buckets", client: admin.client})
-	// What the console did while the session was not locked, each with the
-	// key that makes it safe to repeat: the answers are kept for a day, and
-	// one of them holds the secret of an API key.
-	type made struct {
-		call call
-		want int
-	}
-	before := []made{
-		{call{method: "POST", path: "/users/locksmith/keys", body: map[string]any{"description": "made before the lock"}}, http.StatusCreated},
-		{call{method: "POST", path: "/buckets", body: map[string]any{"name": "made-before"}}, http.StatusCreated},
-		{call{method: "POST", path: "/users", body: map[string]any{"name": "made-before", "roles": []string{iam.RoleReadOnly}}}, http.StatusCreated},
-		{call{method: "PUT", path: "/users/made-before", body: map[string]any{"roles": []string{iam.RoleReadWrite}, "groups": []string{}, "disabled": false}}, http.StatusOK},
-		{call{method: "POST", path: "/policies", body: map[string]any{"name": "made-before", "document": document}}, http.StatusCreated},
-		{call{method: "DELETE", path: "/policies/made-before"}, http.StatusNoContent},
-		{call{method: "GET", path: "/users/locksmith/keys"}, http.StatusOK},
-	}
-	var secret struct {
-		SecretKey string `json:"secret_key"`
-	}
-	for n := range before {
-		c := &before[n].call
-		c.client, c.headers = admin.client, admin.changing(fmt.Sprintf("before-%d", n))
-		first := f.must(before[n].want, *c)
-		if n == 0 {
-			first.decode(t, &secret)
-		}
-		// Not locked, the repeat is given the answer the first was given.
-		if c.method != http.MethodGet {
-			if again := f.must(before[n].want, *c); again.header.Get("Idempotent-Replayed") != "true" || !bytes.Equal(again.body, first.body) {
-				t.Fatalf("the repeat of %s %s by a session that is not locked was not answered from the record", c.method, c.path)
-			}
-		}
-	}
-	if len(secret.SecretKey) < 20 {
-		t.Fatalf("no secret key was made: %q", secret.SecretKey)
-	}
-	uploaded := call{
-		method: "PUT", path: "/buckets/some-bucket/object?key=before", client: admin.client, raw: []byte("before the lock"), headers: admin.changing("upload-before"),
-	}
-	f.must(http.StatusOK, uploaded)
-
-	slow := admin.lock(t, "some-bucket")
-	who := admin.identity(t)
-	if who.Kind != "user" || who.Via != "session" || who.User != "locksmith" || who.Locked == nil || !*who.Locked ||
-		who.ExpiresAt == nil || !who.ExpiresAt.Equal(testNow.Add(app.DefaultSessionLifetime)) ||
-		who.LockEndsAt == nil || !who.LockEndsAt.Equal(testNow.Add(app.DefaultSessionLifetime+app.DefaultSessionLockMax)) {
-		t.Fatalf("GET /session of a locked session = %+v", who)
-	}
-
+// wellFormedCalls is a well-formed call of every operation of the contract,
+// by its name there, over what prepareOperations makes: keyID is the access
+// key ID of the user somebody, document a policy document. Only the path,
+// the body and the headers are said; the method is the contract's.
+func wellFormedCalls(keyID string, document map[string]any) map[string]call {
 	media := map[string]string{"Content-Type": "application/json"}
-	// A well-formed call of every operation, by its name in the contract.
-	calls := map[string]call{
+	return map[string]call{
+		"getOpenAPIJSON":             {path: "/openapi.json"},
+		"getOpenAPIYAML":             {path: "/openapi.yaml"},
+		"signIn":                     {path: "/session", body: map[string]any{"username": "nobody", "password": "not-a-password-that-is-kept"}},
+		"getSession":                 {path: "/session"},
+		"signOut":                    {path: "/session"},
+		"unlockSession":              {path: "/session/unlock", body: map[string]any{"password": "not-a-password-that-is-kept"}},
+		"putObject":                  {path: "/buckets/some-bucket/object?key=k", raw: []byte("content")},
 		"listBuckets":                {path: "/buckets"},
 		"createBucket":               {path: "/buckets", body: map[string]any{"name": "new-bucket"}},
 		"getBucket":                  {path: "/buckets/some-bucket"},
@@ -438,6 +386,81 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getUpgrade":                 {path: "/upgrade"},
 		"startUpgrade":               {path: "/upgrade", body: map[string]any{"version": "0.7.1", "password": "not-a-password-that-is-kept"}},
 	}
+}
+
+// TestALockedSessionOnlyUploads walks the contract with a locked session
+// (ADR-0027): a well-formed call of every operation that needs a credential
+// answers 423 SessionLocked - never a 2xx, never the 401 by which a console
+// takes its session for gone - and leaves a record in the audit trail. The
+// exceptions are the four a locked session is for: storing an object,
+// reading its own state, unlocking and signing out. An operation that is
+// added to the contract is asked for here the day it is added.
+func TestALockedSessionOnlyUploads(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	keepLeases(t, f)
+	document, somebody := prepareOperations(t, f)
+	keyID, _, _ := strings.Cut(somebody, ":")
+
+	// The user has every permission there is: nothing below is refused for
+	// want of one.
+	admin := consoleOf(t, f, "locksmith", iam.RoleClusterAdmin)
+	if who := admin.identity(t); who.Locked == nil || *who.Locked || who.ExpiresAt == nil || !who.ExpiresAt.Equal(testNow.Add(app.DefaultSessionLifetime)) ||
+		who.LockEndsAt == nil || !who.LockEndsAt.Equal(testNow.Add(app.DefaultSessionLifetime+app.DefaultSessionLockMax)) {
+		t.Fatalf("GET /session of a session that is not locked = %+v", who)
+	}
+	f.must(http.StatusOK, call{method: "GET", path: "/buckets", client: admin.client})
+	// What the console did while the session was not locked, each with the
+	// key that makes it safe to repeat: the answers are kept for a day, and
+	// one of them holds the secret of an API key.
+	type made struct {
+		call call
+		want int
+	}
+	before := []made{
+		{call{method: "POST", path: "/users/locksmith/keys", body: map[string]any{"description": "made before the lock"}}, http.StatusCreated},
+		{call{method: "POST", path: "/buckets", body: map[string]any{"name": "made-before"}}, http.StatusCreated},
+		{call{method: "POST", path: "/users", body: map[string]any{"name": "made-before", "roles": []string{iam.RoleReadOnly}}}, http.StatusCreated},
+		{call{method: "PUT", path: "/users/made-before", body: map[string]any{"roles": []string{iam.RoleReadWrite}, "groups": []string{}, "disabled": false}}, http.StatusOK},
+		{call{method: "POST", path: "/policies", body: map[string]any{"name": "made-before", "document": document}}, http.StatusCreated},
+		{call{method: "DELETE", path: "/policies/made-before"}, http.StatusNoContent},
+		{call{method: "GET", path: "/users/locksmith/keys"}, http.StatusOK},
+	}
+	var secret struct {
+		SecretKey string `json:"secret_key"`
+	}
+	for n := range before {
+		c := &before[n].call
+		c.client, c.headers = admin.client, admin.changing(fmt.Sprintf("before-%d", n))
+		first := f.must(before[n].want, *c)
+		if n == 0 {
+			first.decode(t, &secret)
+		}
+		// Not locked, the repeat is given the answer the first was given.
+		if c.method != http.MethodGet {
+			if again := f.must(before[n].want, *c); again.header.Get("Idempotent-Replayed") != "true" || !bytes.Equal(again.body, first.body) {
+				t.Fatalf("the repeat of %s %s by a session that is not locked was not answered from the record", c.method, c.path)
+			}
+		}
+	}
+	if len(secret.SecretKey) < 20 {
+		t.Fatalf("no secret key was made: %q", secret.SecretKey)
+	}
+	uploaded := call{
+		method: "PUT", path: "/buckets/some-bucket/object?key=before", client: admin.client, raw: []byte("before the lock"), headers: admin.changing("upload-before"),
+	}
+	f.must(http.StatusOK, uploaded)
+
+	slow := admin.lock(t, "some-bucket")
+	who := admin.identity(t)
+	if who.Kind != "user" || who.Via != "session" || who.User != "locksmith" || who.Locked == nil || !*who.Locked ||
+		who.ExpiresAt == nil || !who.ExpiresAt.Equal(testNow.Add(app.DefaultSessionLifetime)) ||
+		who.LockEndsAt == nil || !who.LockEndsAt.Equal(testNow.Add(app.DefaultSessionLifetime+app.DefaultSessionLockMax)) {
+		t.Fatalf("GET /session of a locked session = %+v", who)
+	}
+
+	// A well-formed call of every operation, by its name in the contract.
+	calls := wellFormedCalls(keyID, document)
 	// The same operations asked in the other ways they can be: a list that
 	// is filtered must not answer "nothing" to a locked session.
 	variants := map[string][]string{
@@ -451,12 +474,6 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"getBucket": {"/buckets/no-such-bucket"},
 		"getUser":   {"/users/nobody"},
 		"listAudit": {"/audit?limit=1"},
-	}
-	// The operations that are not written yet (TestOperationsThatAreNotWrittenYet)
-	// say so before anybody is asked what the caller may do. One that is
-	// written is taken from this list, and must then answer 423.
-	notWritten := []string{
-		"getBucketReplicationStatus",
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
 	// unlocking does: with a key they are asked as without one.
@@ -484,7 +501,7 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	if err := json.Unmarshal(openapi.AdminJSON(), &doc); err != nil {
 		t.Fatal(err)
 	}
-	refused, unwritten, accounted := 0, 0, 0
+	refused, accounted := 0, 0
 	records := f.watched.idempotent.Load()
 
 	// First of all: what was done before the lock is not answered again.
@@ -558,16 +575,9 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 				if a.keyed {
 					c.headers["Idempotency-Key"] = fmt.Sprintf("locked-%s-%d", id, n)
 				}
+				// Every operation is written (TestEveryOperationIsWritten),
+				// so every one meets the lock.
 				r := f.do(c)
-				if slices.Contains(notWritten, id) && (!a.keyed || slices.Contains(keyIgnored, id)) {
-					if !a.keyed {
-						unwritten++
-					}
-					if r.status != http.StatusNotImplemented {
-						t.Errorf("%s %s, not written yet, by a locked session = %d, want 501: %s", c.method, concrete, r.status, r.body)
-					}
-					continue
-				}
 				if r.status != http.StatusLocked {
 					t.Errorf("%s %s (keyed: %v) by a locked session = %d, want 423: %s", c.method, concrete, a.keyed, r.status, r.body)
 					continue
@@ -605,13 +615,8 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	if n := f.watched.idempotent.Load(); n != records {
 		t.Errorf("the requests of a locked session reserved %d idempotency keys", n-records)
 	}
-	if refused < 70 || unwritten != len(notWritten) {
-		t.Errorf("%d calls were refused and %d were of operations not written yet", refused, unwritten)
-	}
-	for _, id := range notWritten {
-		if _, ok := calls[id]; !ok {
-			t.Errorf("%s is listed as not written and is not asked for", id)
-		}
+	if refused < 70 {
+		t.Errorf("%d calls were refused", refused)
 	}
 
 	// Nothing was changed, and nothing was told.

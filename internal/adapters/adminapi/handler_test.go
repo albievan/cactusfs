@@ -277,8 +277,11 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 		// The notification rules of buckets name the targets above.
 		Notifications: app.NewNotificationService(app.NotificationServiceConfig{Buckets: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
 		// Replica mode carries its audit record to the trail, as targets do.
-		Replication: app.NewReplicationService(app.ReplicationServiceConfig{Buckets: meta, Store: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
-		SubBuckets:  app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
+		// Its status asks the same leader as the status of a target.
+		Replication: app.NewReplicationService(app.ReplicationServiceConfig{
+			Buckets: meta, Store: meta, Targets: meta, Authz: authz, Auditor: f.auditor, Usage: meta, Delivery: f.leader, Outbox: meta,
+		}),
+		SubBuckets: app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
 		// The catalogue of tags carries its audit record to the trail, as
 		// targets do.
 		TagDefinitions: app.NewTagDefinitionService(app.TagDefinitionServiceConfig{Store: meta, Authz: authz, Auditor: f.auditor, Clock: f.clock}),
@@ -1671,45 +1674,77 @@ func TestTargetStatus(t *testing.T) {
 	}
 }
 
-// TestOperationsThatAreNotWrittenYet: the operations of replication are in
-// the contract before their use cases
-// (PLAN 8.0.3). Until each is written it answers 501 as a problem, to a
-// caller it has authenticated - to any such caller: the authorizer is not
-// asked, because there is nothing yet that it could let through - and says
-// nothing else. To a caller without a credential, or with one that is none,
-// each answers 401 like every operation. A step that writes one puts the
-// authorizer in front of it and takes its row out of this table.
-func TestOperationsThatAreNotWrittenYet(t *testing.T) {
+// TestEveryOperationIsWritten: every operation of the contract is written.
+// The operations of replication were in the contract before their use cases
+// (PLAN 8.0.3) and answered 501 NotImplemented until each was written; PLAN
+// 8.1.7 wrote the last of them. This walks every operation of the embedded
+// contract with a well-formed call as root and fails on any that answers
+// 501 NotImplemented, but for those listed in notHere, each with the reason
+// this fixture cannot have it written - and each must still answer 501, so
+// that the list does not outlive its reason. An operation put in the
+// contract before its use case is listed in notHere until it is written.
+// Every operation that asks for a credential answers 401 without one, and
+// with one that is none, before anything is said of what it does.
+func TestEveryOperationIsWritten(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
-	// The request without a body says the media type all the same: the
-	// adapter takes no POST that does not, and the contract says so.
-	for _, c := range []call{
-		{method: "GET", path: "/buckets/some-bucket/replication/status"},
-	} {
-		// Without a credential, and with one nobody has: 401, before
-		// anything is said of what the operation does or does not do.
-		for name, bearer := range map[string]string{"no credential": "", "a credential that is none": "AKIDNOBODY:not-a-secret"} {
-			c.bearer = bearer
-			r := f.do(c)
-			if r.status != http.StatusUnauthorized {
-				t.Errorf("%s %s with %s = %d, want 401: %s", c.method, c.path, name, r.status, r.body)
+	document, somebody := prepareOperations(t, f)
+	keyID, _, _ := strings.Cut(somebody, ":")
+	calls := wellFormedCalls(keyID, document)
+	// notHere are the operations that answer 501 in this fixture, by their
+	// name in the contract, with why. None does: the fixture gives the
+	// handler every use case (TestResyncOnANodeWithoutTheUseCase and the
+	// like hold a node that was not given one to 501), and the operations
+	// that are a node's own - its settings, the cluster, updates and
+	// upgrades - are answered by this node's use cases here.
+	notHere := map[string]string{}
+
+	var doc struct {
+		Paths map[string]map[string]struct {
+			OperationID string            `json:"operationId"`
+			Security    *[]map[string]any `json:"security"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(openapi.AdminJSON(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	walked := 0
+	for _, operations := range doc.Paths {
+		for method, operation := range operations {
+			id := operation.OperationID
+			c, known := calls[id]
+			if !known {
+				t.Errorf("%s has no well-formed call in wellFormedCalls: add one", id)
 				continue
 			}
-			if p := r.problem(t); p["code"] != "Unauthenticated" {
-				t.Errorf("%s %s with %s: problem = %s", c.method, c.path, name, r.body)
+			walked++
+			c.method = strings.ToUpper(method)
+			if operation.Security == nil || len(*operation.Security) > 0 {
+				for name, bearer := range map[string]string{"no credential": "", "a credential that is none": "AKIDNOBODY:not-a-secret"} {
+					c.bearer = bearer
+					r := f.do(c)
+					if r.status != http.StatusUnauthorized {
+						t.Errorf("%s %s with %s = %d, want 401: %s", c.method, c.path, name, r.status, r.body)
+						continue
+					}
+					if p := r.problem(t); p["code"] != "Unauthenticated" {
+						t.Errorf("%s %s with %s: problem = %s", c.method, c.path, name, r.body)
+					}
+				}
+			}
+			c.bearer = f.root
+			r := f.do(c)
+			unwritten := r.status == http.StatusNotImplemented && strings.Contains(string(r.body), `"NotImplemented"`)
+			switch reason, listed := notHere[id]; {
+			case unwritten && !listed:
+				t.Errorf("%s (%s %s) answers 501 NotImplemented: %s", id, c.method, c.path, r.body)
+			case !unwritten && listed:
+				t.Errorf("%s is listed as not here (%s) and answers %d: take it off the list", id, reason, r.status)
 			}
 		}
-		c.bearer = f.root
-		r := f.do(c)
-		if r.status != http.StatusNotImplemented {
-			t.Errorf("%s %s = %d, want 501: %s", c.method, c.path, r.status, r.body)
-			continue
-		}
-		if p := r.problem(t); p["code"] != "NotImplemented" || p["detail"] != nil {
-			t.Errorf("%s %s: problem = %s", c.method, c.path, r.body)
-		}
+	}
+	if walked < 90 {
+		t.Errorf("%d operations were walked; the contract has more", walked)
 	}
 }
 

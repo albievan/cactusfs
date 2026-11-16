@@ -404,14 +404,27 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	replicator := app.NewReplicator(app.ReplicatorConfig{
 		Objects: n.objects, Buckets: meta, Sites: n.publishers, Source: topology.DeploymentID,
 		RateBytes: app.ReplicationRateBytes(cfg.ReplicationRateMiB), Clock: n.clock, Logger: logger,
+		OnVersion: n.telemetry.ObserveReplicatedVersion,
 	})
 	replicationTimeout := app.ReplicationAttemptTimeout(deliveryAttemptTimeout(cfg.DeliveryTimeout),
 		app.ReplicationRateBytes(cfg.ReplicationRateMiB), cfg.ReplicationWorkers)
 	outbox := n.telemetry.InstrumentOutbox(n.meta)
+	replicationStore := n.telemetry.InstrumentReplication(n.meta)
+	// The resync of a bucket (PLAN 8.1.6): the leader walks every version
+	// of the buckets a resync was asked for, 500 a pass, and sends through
+	// the replicator what the other deployment lacks; the cursor is stored
+	// through Raft after every pass. A resync held by a failure to its
+	// target shows in that target's status, which the delivery worker
+	// answers (PLAN 8.1.7 review).
+	n.resync = app.NewResyncWorker(app.ResyncWorkerConfig{
+		Buckets: meta, Index: meta, Store: replicationStore, Targets: targetStore, Outbox: outbox, Sender: replicator,
+		AttemptTimeout: replicationTimeout, Active: n.meta.IsLeader, Clock: n.clock, Logger: logger, Entropy: rand.Reader,
+		Auditor: n.auditor, OnEvent: n.telemetry.ObserveResyncEvent,
+	})
 	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
 		Targets: targetStore, Outbox: outbox, Active: n.meta.IsLeader, Clock: n.clock,
 		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
-		OnAttempt: n.telemetry.ObserveDeliveryAttempt, Auditor: n.auditor,
+		OnAttempt: n.telemetry.ObserveDeliveryAttempt, Auditor: n.auditor, Resyncs: n.resync,
 		AttemptTimeouts: map[delivery.ConsumerKind]func(delivery.Item) time.Duration{
 			delivery.ConsumerReplication: replicationTimeout,
 		},
@@ -428,9 +441,12 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	})
 	n.delivering.Store(n.delivery)
 	n.telemetry.ObserveDelivery(deliveryGauges{worker: n.delivery})
+	// How delivery stands is the leader's to say: the status of a target
+	// and that of a bucket's replication both ask it.
+	deliveryStatus := n.telemetry.InstrumentDeliveryStatus(leaderDelivery{node: n})
 	n.targets = app.NewTargetService(app.TargetServiceConfig{
 		Store: targetStore, Authz: n.authorizer, Auditor: n.auditor, KMS: kms,
-		Clock: n.clock, Entropy: rand.Reader, Delivery: n.telemetry.InstrumentDeliveryStatus(leaderDelivery{node: n}),
+		Clock: n.clock, Entropy: rand.Reader, Delivery: deliveryStatus,
 	})
 	n.notifications = app.NewNotificationService(app.NotificationServiceConfig{
 		Buckets: meta, Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
@@ -439,20 +455,17 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// (ADR-0026): a change of the mode carries its audit record in the
 	// entry that makes it; a configuration names a target, judged against
 	// the targets here and again when it is committed. Below level 5 the
-	// store answers unavailable.
-	replicationStore := n.telemetry.InstrumentReplication(n.meta)
+	// store answers unavailable. The status of a bucket's replication
+	// (PLAN 8.1.7) reads its usage record and its target's cursor, and
+	// asks the leader.
 	n.replication = app.NewReplicationService(app.ReplicationServiceConfig{
 		Buckets: meta, Store: replicationStore, Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
+		Usage: usage, Delivery: deliveryStatus, Outbox: outbox,
 	})
-	// The resync of a bucket (PLAN 8.1.6): the leader walks every version
-	// of the buckets a resync was asked for, 500 a pass, and sends through
-	// the replicator what the other deployment lacks; the cursor is stored
-	// through Raft after every pass.
-	n.resync = app.NewResyncWorker(app.ResyncWorkerConfig{
-		Buckets: meta, Index: meta, Store: replicationStore, Targets: targetStore, Outbox: outbox, Sender: replicator,
-		AttemptTimeout: replicationTimeout, Active: n.meta.IsLeader, Clock: n.clock, Logger: logger, Entropy: rand.Reader,
-		Auditor: n.auditor,
-	})
+	// The gauges of replication: the outbox's rows for other deployments,
+	// from the delivery worker, and the walks of the resync worker; on the
+	// node that leads only.
+	n.telemetry.ObserveReplication(replicationGauges{delivery: n.delivery, resync: n.resync})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
 		Probe: func(ctx context.Context, slot cluster.Slot) bool { return driveAnswers(ctx, drives, slot) },
@@ -904,6 +917,7 @@ func (n *node) Close() error {
 	n.telemetry.ObserveDrives(nil)
 	n.telemetry.ObserveQuotas(nil)
 	n.telemetry.ObserveDelivery(nil)
+	n.telemetry.ObserveReplication(nil)
 	n.delivering.Store(nil)
 	n.telemetry.ObserveNodeCertificate(nil)
 	n.telemetry.ObserveTLS(telemetry.TLSUseNode, nil)

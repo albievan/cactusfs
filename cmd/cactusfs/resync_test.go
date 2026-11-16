@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // TestANodeResyncsWhatWasThereBefore holds the composition root to the
@@ -132,6 +134,41 @@ func TestANodeResyncsWhatWasThereBefore(t *testing.T) {
 		_ = out.Body.Close()
 		if err != nil || !bytes.Equal(data, written[v.Key]) || out.Version.Replication != object.ReplicationReplica {
 			t.Errorf("the copy of %s at B: %q, %q (%v)", v.Key, data, out.Version.Replication, err)
+		}
+	}
+
+	// The status of the bucket's replication (PLAN 8.1.7), as any node
+	// answers it: nothing pending or failed, the target ok, the resync done.
+	status, err := a.node.replication.Status(ctx, rootA, "photos")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.Target != "site-b" || status.TargetState != ports.DeliveryOK || status.Pending != 0 || status.Failed != 0 ||
+		status.Resync == nil || status.Resync.State != bucket.ResyncDone || status.Resync.Sent != 4 {
+		t.Errorf("Status = %+v (resync %+v)", status, status.Resync)
+	}
+	// And its metrics: the bytes of the four versions read into requests to
+	// B, four versions completed, and the gauges of the leader - nothing
+	// waits, no resync walks. No sample names the bucket or the target.
+	sent := 0
+	for _, data := range written {
+		sent += len(data)
+	}
+	got := samples(t, a.node.telemetry)
+	if got["cactusfs_replication_bytes_total{}"] < float64(sent) || got["cactusfs_replication_versions_total{result=completed}"] < 4 {
+		t.Errorf("bytes %v (want at least %d), versions completed %v (want at least 4)",
+			got["cactusfs_replication_bytes_total{}"], sent, got["cactusfs_replication_versions_total{result=completed}"])
+	}
+	for name, want := range map[string]float64{
+		"cactusfs_replication_lag_entries{}": 0, "cactusfs_replication_lag_seconds{}": 0, "cactusfs_replication_resyncs{state=walking}": 0,
+	} {
+		if value, ok := got[name]; !ok || value != want {
+			t.Errorf("%s = %v (exposed %v), want %v", name, value, ok, want)
+		}
+	}
+	for name := range got {
+		if strings.Contains(name, "photos") || strings.Contains(name, "site-b") {
+			t.Errorf("%s names the bucket or the target", name)
 		}
 	}
 }
