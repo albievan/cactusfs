@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -267,5 +268,21 @@ func TestRedirectsRefused(t *testing.T) {
 	}
 	if clear.Load() != 0 || elsewhere.Load() != 0 {
 		t.Errorf("a refused redirect was followed: %d in the clear, %d elsewhere", clear.Load(), elsewhere.Load())
+	}
+}
+
+// TestRedirectsOfAClient: a client tells how many redirects its policy
+// follows, and an observed client tells the same.
+func TestRedirectsOfAClient(t *testing.T) {
+	t.Parallel()
+	for _, redirects := range []int{0, 1, MaxRedirects} {
+		client, _, err := NewClient(Policy{Redirects: redirects})
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed := client.Observe(func(ctx context.Context) (context.Context, func(error)) { return ctx, func(error) {} })
+		if client.Redirects() != redirects || observed.Redirects() != redirects {
+			t.Errorf("Redirects = %d and %d, want %d", client.Redirects(), observed.Redirects(), redirects)
+		}
 	}
 }

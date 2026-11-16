@@ -161,6 +161,8 @@ type Client struct {
 	http *http.Client
 	// observe, when not nil, is told of every request Do sends.
 	observe Observer
+	// redirects is how many redirects the policy follows (Policy.Redirects).
+	redirects int
 }
 
 // Observer is told of a request as it is sent: it returns the context the
@@ -172,11 +174,18 @@ type Client struct {
 // could send with, and nothing of the answer.
 type Observer func(ctx context.Context) (context.Context, func(err error))
 
+// Redirects returns how many redirects the client follows: its policy's
+// Policy.Redirects. A client that sends a body that cannot be sent twice,
+// or that must reach the host it names and no other, asks for none.
+func (c *Client) Redirects() int {
+	return c.redirects
+}
+
 // Observe returns a client that sends as c does, through the same
 // transport and its connections, and tells observe of every request. The
 // observer of c, if it has one, is replaced; c itself is unchanged.
 func (c *Client) Observe(observe Observer) *Client {
-	return &Client{http: c.http, observe: observe}
+	return &Client{http: c.http, observe: observe, redirects: c.redirects}
 }
 
 // Do sends r and returns the response, as http.Client.Do does - but for
@@ -384,7 +393,7 @@ func NewClient(policy Policy) (*Client, DialFunc, error) {
 			return checkRedirect(next, via, redirects)
 		},
 	}
-	return &Client{http: client}, d.dial, nil
+	return &Client{http: client, redirects: redirects}, d.dial, nil
 }
 
 // checkRedirect is the CheckRedirect of a client that follows up to
