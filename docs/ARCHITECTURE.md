@@ -10,8 +10,8 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
 events to NATS and webhooks and replication between sites (milestone 8, of which entry
 schema 5, the domain, the ports, the replicated store, the contracts, outbound
-connections, targets and the delivery worker exist - which, with no notifier or
-replicator registered yet, delivers nothing - and no delivery adapter). Quotas on buckets
+connections, targets, the delivery worker, the webhook and NATS publishers and the
+notifier that hands bucket notifications to them exist; the replicator does not). Quotas on buckets
 (ADR-0024) are implemented end to end - the usage of every bucket counted, the quota
 enforced where entries are applied and checked before a write, the management API, the
 metrics and alerts, and the console (PLAN 8A; "Usage and quotas", section 5); no
@@ -120,6 +120,8 @@ Conventions that follow from it:
 | `internal/adapters/releases/sigstore` | out: the verifier of the release workflow's Sigstore bundles, offline, against the embedded `trusted_root.json` (ADR-0029); `sigstoretest` signs with a Sigstore of its own for tests (a depguard rule keeps it out of the binary) |
 | `internal/adapters/upgrade/binary`, `upgrade/kubernetes`, `upgrade/off` | out: the three upgrade modes - replace the binary of a node on its own; move the chart's StatefulSets one node at a time through the Kubernetes API; install nothing and show the commands (ADR-0029) |
 | `internal/adapters/events/inproc` | out: in-process event bus |
+| `internal/adapters/events/webhook`, `events/nats` | out: the publishers of a target - a signed POST through the egress client; a message to NATS JetStream through the egress dial function, acknowledged (ADR-0025) |
+| `internal/adapters/sealed` | the opener of a target's sealed fields through the KMS, shared by the publishers (ADR-0023) |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
 | `internal/adapters/passwords` | out: Argon2id password hashes |
@@ -495,7 +497,7 @@ Prometheus client and are not listed.
 | `cactusfs_delivery_oldest_pending_seconds` | gauge | `kind` | how long the oldest item of the outbox that waits for a target of the kind has waited, 0 when none waits; the leader's, absent elsewhere (aggregate with `max`) |
 | `cactusfs_outbox_rows` | gauge | - | rows the outbox holds, as the leader read them last (at most every 5 s); absent on every other node (aggregate with `max`) |
 | `cactusfs_outbox_dropped_total` | counter | - | rows pushed out of the outbox at its bound since the deployment began, a count the metadata keeps (`outboxdropped`) and the leader exposes: it does not begin again with a new leader, so aggregate with `max`, never `sum` |
-| `cactusfs_egress_refusals_total` | counter | `class` | requests to a place outside the deployment that got no answer, by class: `egress_refused` (an address the policy refuses), `redirect`, `tls`, `timeout`, `connect`, `internal`; every class a series from the start; no target and no URL is named; counted by the node that sent the request (sum over the nodes) |
+| `cactusfs_egress_refusals_total` | counter | `class` | requests to a place outside the deployment that got no answer, and connections to one (a NATS server) that could not be made, by class: `egress_refused` (an address the policy refuses), `redirect`, `tls`, `timeout`, `connect`, `internal`; every class a series from the start; no target and no URL is named; counted by the node that sent the request (sum over the nodes) |
 | `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
 | `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
 | `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
@@ -754,7 +756,7 @@ four at a time.
   against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
   whoever may read it; the server decides every change.
 
-### Delivery to targets **(implemented: the worker and its status, ADR-0023; PLAN 8.0.14 - no notifier or replicator is registered until 8B and 8C)**
+### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5 - the replicator is 8C)**
 
 - **One node delivers.** `app.DeliveryWorker` runs on every node and works on the one that
   leads the metadata group (it asks every second); when the node stops leading it stops
@@ -777,6 +779,25 @@ four at a time.
   `sse_c`) gives the item up, counted. Results of replication (`COMPLETED`, `FAILED`)
   go with the acknowledgement, for a target of kind `s3` only. An item of a kind that
   nothing delivers fails as `internal` and holds its target.
+- **Publishers.** The notifier (`app.Notifier`, the `Deliverer` of `n:`) publishes
+  through the publisher of the target, which the composition root makes the first time
+  there is something for it (`cmd/cactusfs/publishers.go`, an `app.PublisherSource`):
+  a webhook (`internal/adapters/events/webhook`) or a NATS server
+  (`internal/adapters/events/nats`), each with an egress client of its own - the
+  target's certificates are its roots - observed by `telemetry.ObserveEgress` through
+  `egress.Client.Observe` (an observer is told of each request and its outcome and cannot
+  stand in for the transport), the dial function behind
+  `telemetry.InstrumentEgressDial`, and the publisher behind
+  `telemetry.InstrumentEventPublisher`. Making one connects to nothing and opens
+  nothing: the sealed fields are opened through the node's KMS (`sealed.KMS`, shared by
+  both adapters) at each attempt of a webhook and at each connection to a NATS server,
+  and cleared once used. A target whose endpoint, subject, certificates, way of proving
+  itself or sealed fields changed gets a new publisher and the old one is closed; once a
+  minute those of targets that are gone (and made before the targets were read) are
+  closed, and all of them on a node that does not lead; once the node closes none is made.
+  A request on behalf of a target older (`CreatedAt`) than the one held under its name is
+  refused as `internal`, so a deleted target's loop cannot close the publisher of the one
+  made again.
 - **Deadlines.** Every call to the metadata carries 30 s; every attempt at an item
   carries 10 s + 2 x `--delivery-timeout` (the connect and the handshake, the answer's
   headers, and as long again for the rest).
@@ -802,8 +823,10 @@ four at a time.
   `cactusfs_delivery_targets{kind,state}`, `cactusfs_delivery_oldest_pending_seconds{kind}`,
   `cactusfs_outbox_rows` and `cactusfs_outbox_dropped_total` (the leader's, absent
   elsewhere: aggregate with `max`), and at the egress boundary
-  `cactusfs_egress_refusals_total{class}` (`telemetry.InstrumentEgress`, which the
-  delivery adapters of 8B and 8C are wired through). No metric names a target.
+  `cactusfs_egress_refusals_total{class}` (`telemetry.ObserveEgress` for requests and
+  `telemetry.InstrumentEgressDial` for the connections of a NATS publisher, which the
+  publishers of 8B are wired through and the replicator of 8C will be). No metric names
+  a target.
 
 ## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
 
@@ -1128,10 +1151,10 @@ four at a time.
   target defined or deleted, which the state machine tells of: a quota set or removed
   through `app.QuotaService`, a target through `app.TargetService`, and the replica
   mode by no use case yet), and two messages that are for targets outside the deployment only,
-  `cactusfs.notification.object.v1` and `cactusfs.audit.exported.v1`, which nothing
-  sends yet; and the in-process publisher (at most once per node; counted in
-  `cactusfs_events_total`). NATS JetStream and webhooks are milestone 8 and do not
-  exist. Consumers dedupe by event ID.
+  `cactusfs.notification.object.v1`, which the notifier sends through the webhook and
+  NATS JetStream publishers of targets (PLAN 8.2.5), and `cactusfs.audit.exported.v1`,
+  which nothing sends yet (8.2.8); and the in-process publisher (at most once per node;
+  counted in `cactusfs_events_total`). Consumers dedupe by event ID.
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
   with `buf lint` and `buf breaking`. **Implemented**, three services: `NodeService`
   (`Info`, `InFlight`, `Settings`), `MetaService` for what only the metadata leader
