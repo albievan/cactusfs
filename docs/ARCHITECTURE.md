@@ -826,7 +826,23 @@ four at a time.
   `cactusfs_egress_refusals_total{class}` (`telemetry.ObserveEgress` for requests and
   `telemetry.InstrumentEgressDial` for the connections of a NATS publisher, which the
   publishers of 8B are wired through and the replicator of 8C will be). No metric names
-  a target.
+  a target. Alerts `CactusFSDeliveryStalled` (the oldest row waiting for a kind of
+  target over 15 min) and `CactusFSOutboxDropping` are in `deploy/observability`.
+- **Overflow** (ADR-0025; PLAN 8.2.7). A target that takes nothing never refuses or
+  holds up a write: at the bound the outbox drops its oldest row, counted in
+  `outboxdropped` and in the `lost` of each target that had not passed it. The worker
+  compares the counts it reads every 5 s with those it last told of and - at most once a
+  minute on a node (`app.OutboxReportEvery`), plus one when its lead ends - writes
+  through the auditor an audit record: actor `system`, action `system:OutboxDropped`,
+  resource `system/outbox`, outcome `failed`, with what was dropped since (`dropped`),
+  the count (`dropped_total`), the rows held, `since`, `targets` (`name=n`, those that
+  lost most first, within 512 bytes) and `targets_more` (how many were left out); it
+  logs the same; no endpoint. What is dropped within the minute is told, added up, when
+  it has passed, or when the node stops leading or stops - then at once: the next
+  leader begins its counting with its first read, and would not tell it. The node's
+  auditor runs until its other background tasks have returned, so that last record is
+  written before the node closes. What was dropped before a node came to lead was the
+  former leader's to tell, and the count is in every record.
 
 ## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
 

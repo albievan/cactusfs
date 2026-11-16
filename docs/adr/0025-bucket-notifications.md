@@ -295,8 +295,9 @@ be the words of an error, or an address.
 
 **Overflow.** A target that takes nothing keeps its rows until the outbox is at its
 bound; then its oldest are dropped and counted (`lost`, ADR-0023), an audit record
-`system/outbox` says so at most once a minute, `cactusfs_outbox_dropped_total` rises
-and `CactusFSOutboxDropping` fires. Writes never fail and never wait for a target.
+`system/outbox` says so at most once a minute, plus one when a lead ends (what the
+node that led had counted and not told yet; PLAN 8.2.7), `cactusfs_outbox_dropped_total`
+rises and `CactusFSOutboxDropping` fires. Writes never fail and never wait for a target.
 
 **Start.** Connections are made by the worker, when it first has something to send. A
 target that cannot be reached holds up neither the start of a node, nor its readiness,
