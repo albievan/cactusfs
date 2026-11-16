@@ -1182,7 +1182,7 @@ tests:
         alertname: CactusFSBucketUsageDrift
         exp_alerts: []
 
-  # --- CactusFSDeliveryStalled: max by (job, kind) (oldest pending) > 900 ----
+  # --- CactusFSDeliveryStalled: max by (job, kind) (oldest pending, not s3) > 900
   # a leads; its gauge of webhooks is 0 at 0m-4m, then the age of a row that
   # is not taken: 60 at 5m, rising 60 a minute, 60 + 60 * (t - 5) at t.
   # That is 900 at 19m (not above) and 960 at 20m: true from 20m, fires at
@@ -1369,6 +1369,185 @@ tests:
             exp_annotations:
               summary: "The outbox is dropping rows"
               description: "The outbox of the job cactusfs is at its bound and has dropped rows in the last fifteen minutes: they are lost to the targets that had not delivered them. The status of each target says what it lost and whether a replication target needs a resync; the audit trail has a record system/outbox. Put right or delete the target that does not take its rows."
+
+  # --- CactusFSReplicationLag: max by (job) (lag seconds) > 900 ------------
+  # a leads; the oldest row for another deployment is 0 at 0m-4m, then the
+  # age of a row that is not taken: 60 at 5m, rising 60 a minute, 60 + 60 *
+  # (t - 5) at t. That is 900 at 19m (not above) and 960 at 20m: true from
+  # 20m, fires at once, by job - not by instance. The gauge of delivery for
+  # the kind s3 says the same, and CactusFSDeliveryStalled stays silent: the
+  # kind s3 is this alert's. b does not lead and exposes nothing.
+  - name: a version that has waited fifteen minutes for another deployment
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_replication_lag_seconds{job="cactusfs", instance="a:9001"}'
+        values: '0x4 60+60x40'
+      - series: 'cactusfs_replication_lag_entries{job="cactusfs", instance="a:9001"}'
+        values: '0x4 3+1x40'
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="s3"}'
+        values: '0x4 60+60x40'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: CactusFSReplicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "Replication to another deployment is late"
+              description: "A version written to the job cactusfs has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+      - eval_time: 21m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+
+  # a: a link that falls behind for ten minutes and catches up: the age
+  #    rises to 600 at 14m and is 0 from 15m. Never above 900.
+  # a leads until about 20m (its series stale after) and b from about 20m:
+  # b shows a row that has waited 300 s, which waits up to 840 s and is then
+  # taken. Never above 900: a change of leader is no lag.
+  - name: a link that catches up, and a change of leader
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_replication_lag_seconds{job="cactusfs", instance="a:9001"}'
+        values: '0x4 60+60x9 0x5 stale'
+      - series: 'cactusfs_replication_lag_seconds{job="cactusfs", instance="b:9001"}'
+        values: '_x19 300+60x9 0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+
+  # A link that keeps just up: the oldest row is 840 s and 960 s old, in
+  # turn, at 0m-19m (960 at the odd minutes), and nothing waits from 20m.
+  # True at 1m, fires at once; at the even minutes the expression is false,
+  # and keep_firing_for (15m) keeps the alert firing: no flapping. The last
+  # true sample is at 19m: still firing at 30m, resolved by 40m.
+  - name: a link that keeps just up, around fifteen minutes behind
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_replication_lag_seconds{job="cactusfs", instance="a:9001"}'
+        values: '840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 0x30'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: CactusFSReplicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "Replication to another deployment is late"
+              description: "A version written to the job cactusfs has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+      - eval_time: 18m
+        alertname: CactusFSReplicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "Replication to another deployment is late"
+              description: "A version written to the job cactusfs has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+      - eval_time: 30m
+        alertname: CactusFSReplicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "Replication to another deployment is late"
+              description: "A version written to the job cactusfs has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+      - eval_time: 40m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+
+  # A rolling upgrade: a leads and is of a release before PLAN 8.1.7, so it
+  # exposes the age of the oldest row for the kind s3 and not
+  # cactusfs_replication_lag_seconds - the same number: 0 at 0m-4m, then 60
+  # + 60 * (t - 5) at t, above 900 from 20m. Fires at once from 20m. b, of
+  # the new release, takes over at 30m with the new series at 1500 and
+  # catching up to 0 at 40m: the alert reads it from then (the old series
+  # is stale), and stops firing 15 minutes after the age fell below 900.
+  - name: replication lag shown by a leader of an older release
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="s3"}'
+        values: '0x4 60+60x24 stale'
+      - series: 'cactusfs_replication_lag_seconds{job="cactusfs", instance="b:9001"}'
+        values: '_x29 1500-150x10 0x30'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: CactusFSReplicationLag
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "Replication to another deployment is late"
+              description: "A version written to the job cactusfs has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+      - eval_time: 65m
+        alertname: CactusFSReplicationLag
+        exp_alerts: []
+
+  # --- CactusFSReplicationResyncHeld: max by (job) (resyncs held) > 0, 15m ---
+  # a leads; one resync is held from 5m on: true from 5m, fires at 20m. b
+  # does not lead and exposes nothing.
+  - name: a resync held for fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_replication_resyncs{job="cactusfs", instance="a:9001", state="held"}'
+        values: '0x4 1x40'
+      - series: 'cactusfs_replication_resyncs{job="cactusfs", instance="a:9001", state="walking"}'
+        values: '1x4 0x40'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: CactusFSReplicationResyncHeld
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: CactusFSReplicationResyncHeld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+            exp_annotations:
+              summary: "A resync is held"
+              description: "A resync of the job cactusfs has been held at a version for fifteen minutes by a failure to send to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status) says which target, its state and the class of the failure; the walk goes on from the version once the failure ends."
+
+  # A resync held for ten minutes at a time, twice, walking between: never
+  # held for fifteen minutes in a row, never fires. Resyncs that walk or
+  # wait never fire it.
+  - name: a resync held for a while, and resyncs that walk or wait
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_replication_resyncs{job="cactusfs", instance="a:9001", state="held"}'
+        values: '0x4 1x9 0x4 1x9 0x20'
+      - series: 'cactusfs_replication_resyncs{job="cactusfs", instance="a:9001", state="waiting"}'
+        values: '3x50'
+      - series: 'cactusfs_replication_resyncs{job="cactusfs", instance="a:9001", state="walking"}'
+        values: '2x50'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CactusFSReplicationResyncHeld
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: CactusFSReplicationResyncHeld
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSReplicationResyncHeld
+        exp_alerts: []
 
   # --- The node certificate: ends within 14 days (1h), within 3 days (10m) ---
   # The clock of a test starts at 0, so time() at t minutes is 60*t seconds.

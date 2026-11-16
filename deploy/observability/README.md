@@ -67,7 +67,8 @@ Prometheus data source (`DS_PROMETHEUS`) and one for the nodes shown.
 | `cactusfs.metadata` | no leader of the metadata group, elections that do not stop, a node behind, an upgrade of the schema that is not finished |
 | `cactusfs.drives` | a drive that is offline, a drive that is nearly full |
 | `cactusfs.quotas` | a bucket at its quota, quotas that no node can say anything of, a recount that found the usage of a bucket counted wrong |
-| `cactusfs.delivery` | a row of the outbox that has waited more than 15 minutes for a target (`CactusFSDeliveryStalled`, by kind of target), an outbox at its bound that drops rows (`CactusFSOutboxDropping`) |
+| `cactusfs.delivery` | a row of the outbox that has waited more than 15 minutes for a webhook or a NATS server (`CactusFSDeliveryStalled`, by kind of target), an outbox at its bound that drops rows (`CactusFSOutboxDropping`) |
+| `cactusfs.replication` | a version that has waited more than 15 minutes to be sent to another deployment (`CactusFSReplicationLag`), a resync held at a version for 15 minutes (`CactusFSReplicationResyncHeld`) |
 | `cactusfs.nodes` | a node certificate that ends within 14 and within 3 days, a certificate on disk that was refused, refused handshakes, failing calls between nodes, a node that is not ready |
 | `cactusfs.audit` | an audit trail that cannot be written |
 
@@ -97,12 +98,36 @@ the last 15 minutes rather than taking `increase()`, so a count that falls (a st
 restored from an older snapshot) is not read as rows dropped.
 Which target is in each target's status (`GET /api/v1/targets/{name}/status`).
 
+Replication to another deployment (a target of kind `s3`) is `CactusFSReplicationLag`'s,
+not `CactusFSDeliveryStalled`'s: one cause, one alert. It reads
+`cactusfs_replication_lag_seconds`, the age of the oldest row that waits for any other
+deployment - the leader's, taken with `max` - and fires above 15 minutes, held as
+`CactusFSDeliveryStalled` is; `cactusfs_replication_lag_entries` says how many rows wait.
+While a leader of a release before PLAN 8.1.7 leads - a rolling upgrade - it reads
+`cactusfs_delivery_oldest_pending_seconds{kind="s3"}` instead, the same number.
+A stalled target (a key refused, a bucket there gone, without versions, no replica of
+this deployment, without Object Lock for a locked version, or full) fires it, and so does
+a link that carries less than is written, or one version that takes longer than 15
+minutes to cross. No metric of replication names a bucket or a target: how one bucket
+stands - pending and failed versions, the target's state and the class of its last
+failure, its resync - is `GET /api/v1/buckets/{bucket}/replication/status`. The traffic
+is `cactusfs_replication_bytes_total`, the versions sent or given up on
+`cactusfs_replication_versions_total{result}`, and the resyncs the leader walks
+`cactusfs_replication_resyncs{state}` (walking, held, waiting) and
+`cactusfs_replication_resync_events_total{event}` (held, preempted, restarted). A resync
+held at a version by a failure fires `CactusFSReplicationResyncHeld` once it has been held
+for 15 minutes - the hold of `CactusFSDeliveryStalled` - whether or not the outbox has
+anything for its target; the target's status, and the status of the bucket's
+replication, show it as the target's state and class meanwhile. A resync that keeps
+beginning again is a target that keeps losing rows, which `CactusFSOutboxDropping`
+shows; the events have no alert of their own.
+
 ## What is not here yet
 
 There is no alert on a scrubber that has stopped (the count of passes cannot tell a long
 pass from a stuck one; it needs a gauge of the last finished pass) and none on requests
-refused while a node starts (there is no count of them). The end of the rules file says
-so. An alert is not written before its metric exists - a rule on a metric that does not
+refused while a node starts (there is no count of them). The comment at the end of the
+rules file lists both. An alert is not written before its metric exists - a rule on a metric that does not
 exist never fires.
 
 The end of the certificate clients are shown (`cactusfs_tls_certificate_not_after_seconds{use="s3"}`)

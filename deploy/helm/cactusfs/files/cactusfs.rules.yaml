@@ -417,9 +417,11 @@ groups:
       # target that keeps just up - its oldest row about fifteen minutes old,
       # now above, now below - would make the alert come and go at every
       # evaluation: once it fires it keeps firing until the age has stayed
-      # below fifteen minutes for fifteen minutes.
+      # below fifteen minutes for fifteen minutes. Another deployment (kind
+      # s3) is CactusFSReplicationLag's, below, and not this alert's: one
+      # cause, one alert.
       - alert: CactusFSDeliveryStalled
-        expr: max by (job, kind) (cactusfs_delivery_oldest_pending_seconds) > 900
+        expr: max by (job, kind) (cactusfs_delivery_oldest_pending_seconds{kind!="s3"}) > 900
         for: 0m
         keep_firing_for: 15m
         labels:
@@ -452,6 +454,60 @@ groups:
         annotations:
           summary: "The outbox is dropping rows"
           description: "The outbox of the job {{ $labels.job }} is at its bound and has dropped rows in the last fifteen minutes: they are lost to the targets that had not delivered them. The status of each target says what it lost and whether a replication target needs a resync; the audit trail has a record system/outbox. Put right or delete the target that does not take its rows."
+
+  # Replication to other deployments (ADR-0026). The gauges are the
+  # leader's, as those of delivery are: taken with max across the job. No
+  # metric names a bucket or a target: GET /api/v1/buckets/{bucket}/replication/status
+  # says how one bucket stands, and GET /api/v1/targets/{name}/status how one
+  # target does.
+  - name: cactusfs.replication
+    rules:
+      # A version, or a change of one, has waited fifteen minutes to be sent
+      # to another deployment: that deployment refuses the key, the bucket
+      # there is gone, keeps no versions, is no replica of this one, has no
+      # Object Lock for a locked version or is full (the target is stalled),
+      # it cannot be reached, or the link carries less than is written.
+      # Nothing is lost yet: the outbox keeps the rows, until its bound. The
+      # threshold and the hold are those of CactusFSDeliveryStalled, whose
+      # place this alert takes for the kind s3: the gauge is the age of the
+      # oldest row itself, and once it fires it keeps firing until the age
+      # has stayed below fifteen minutes for fifteen minutes. A version that
+      # takes longer than that to cross a slow link fires it too: it is
+      # late, which is what it says. A leader of a release before PLAN 8.1.7
+      # (a rolling upgrade) does not expose cactusfs_replication_lag_seconds;
+      # the age of the oldest row for the kind s3 is the same number, and is
+      # read where no node of the job exposes the first.
+      - alert: CactusFSReplicationLag
+        expr: |-
+          max by (job) (
+            cactusfs_replication_lag_seconds
+              or on (job)
+            cactusfs_delivery_oldest_pending_seconds{kind="s3"}
+          ) > 900
+        for: 0m
+        keep_firing_for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replication to another deployment is late"
+          description: "A version written to the job {{ $labels.job }} has waited more than fifteen minutes to be sent to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status, or the target's status) says which target, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped, and the bucket needs a resync."
+
+      # A resync has been held at a version for fifteen minutes - the hold
+      # of CactusFSDeliveryStalled: the other deployment refuses what it is
+      # sent (its key, its bucket, its versioning, its replica mode, its
+      # quota, a lock it cannot keep), or cannot be reached. The walk goes on
+      # from the version when the failure ends; nothing is lost. While the
+      # outbox has nothing for the target only this alert says so; the
+      # status of the bucket's replication shows the target's state and the
+      # class of the failure. The gauge is the leader's, taken with max.
+      - alert: CactusFSReplicationResyncHeld
+        expr: max by (job) (cactusfs_replication_resyncs{state="held"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A resync is held"
+          description: "A resync of the job {{ $labels.job }} has been held at a version for fifteen minutes by a failure to send to another deployment. The status of each bucket's replication (GET /api/v1/buckets/{bucket}/replication/status) says which target, its state and the class of the failure; the walk goes on from the version once the failure ends."
 
   - name: cactusfs.nodes
     rules:
