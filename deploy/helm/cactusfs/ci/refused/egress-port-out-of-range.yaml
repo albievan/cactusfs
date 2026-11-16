@@ -1,0 +1,8 @@
+# expect: "70000" is not a port, 1 to 65535
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+      ports: [70000]

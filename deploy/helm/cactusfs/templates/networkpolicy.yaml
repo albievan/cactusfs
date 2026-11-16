@@ -3,7 +3,7 @@
 # Nothing reaches the pods and the pods reach nothing, except what is listed
 # here: each other on the node ports; whoever the operator names for S3, and
 # whoever for the admin port, each apart; DNS; the addresses the operator names (Vault, a
-# collector of traces); and the API server, when the console may upgrade. Probes come from the kubelet on the pod's own
+# collector of traces, the webhooks and NATS servers of notification targets); and the API server, when the console may upgrade. Probes come from the kubelet on the pod's own
 # machine, which a NetworkPolicy does not govern.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

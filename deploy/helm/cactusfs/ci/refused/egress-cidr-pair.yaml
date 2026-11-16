@@ -1,0 +1,8 @@
+# expect: "cidr" is not a field of a rule
+# Laid over ci/cluster-values.yaml; the chart must refuse to render: a CIDR
+# written beside the ports, not as a peer of `to`, would be no peer at all.
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - {cidr: 203.0.113.10/32, ports: [443]}

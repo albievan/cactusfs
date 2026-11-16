@@ -1,0 +1,9 @@
+# expect: "hooks.example.com" is not an address range
+# Laid over ci/cluster-values.yaml; the chart must refuse to render: a
+# NetworkPolicy names addresses, not hosts.
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - to: [{ipBlock: {cidr: hooks.example.com}}]
+      ports: [443]

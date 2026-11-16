@@ -172,7 +172,7 @@ default nobody does:
 | `networkPolicy.clientsFrom` | Port 9000 (S3) to the peers listed: `podSelector`, `namespaceSelector`, `ipBlock`. Empty: nobody |
 | `networkPolicy.adminFrom` | Port 9001 (admin API, console) to the peers listed, apart from S3. Empty: nobody |
 | `networkPolicy.dns` | Where the pods may ask for names (port 53) |
-| `networkPolicy.egressTo` | What else the pods may reach, as peers and ports: Vault, a collector of traces (`otlpEndpoint`) |
+| `networkPolicy.egressTo` | What else the pods may reach, as rules of peers and TCP ports, each rendered as one egress rule: Vault, a collector of traces (`otlpEndpoint`), the release source, and the webhooks and NATS servers of notification targets (below). A rule adds to the default deny and takes nothing from it; the chart refuses a rule without peers or without ports - either would open every address or every port - a port outside 1 to 65535 or given by name, an `ipBlock` that is not an address range, and any field but `to` and `ports` |
 
 Ports 9002 and 9003 are open between the chart's own pods and to nobody else. Three
 things to know:
@@ -184,6 +184,33 @@ things to know:
   hosts past the host's own firewall. The admin port has a Service of its own so that
   S3 can be published without it.
 - A NetworkPolicy binds only where the cluster's network plugin enforces it.
+
+**Notification targets** ([ADR-0025](../../../docs/adr/0025-bucket-notifications.md)).
+The node that leads connects to every webhook and NATS server that is defined as a
+target (`/api/v1/targets`, the console's Targets screen), and the default deny stops it
+until `networkPolicy.egressTo` names the target's address and port. A NetworkPolicy
+names addresses, not hosts: give the address range of the endpoint and its port - 443
+for an `https://` endpoint without one, the port of `tls://host:port` for NATS. Every
+node may come to lead, so the rule is for every pod, and that is how the chart renders
+it. The nodes judge each address again when they connect, whatever the policy allows: no
+loopback or link-local address unless `--egress-allow` admits it, and never a cloud's
+metadata address.
+
+```yaml
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    # a webhook target, https://hooks.example.com/cactusfs/... at 203.0.113.10
+    - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+      ports: [443]
+    # a NATS target, tls://nats.example.com:4222, somewhere in 198.51.100.0/24
+    - to: [{ipBlock: {cidr: 198.51.100.0/24}}]
+      ports: [4222]
+```
+
+A target the policy does not let the nodes reach is shown `retrying` with the class
+`connect` or `timeout` on the Targets screen, and its messages wait in the outbox.
 
 ## Monitoring
 
@@ -419,7 +446,9 @@ runs, in the builder image: `helm lint --strict`; a render of every value set of
 image carries - it is given no other place to look, so it reads nothing from the
 network, and a kind without a schema fails; `scripts/helm-assert.sh` on each render, which
 asserts what this document promises (the Services, the claims, the security context,
-the probes, the placement, every rule of the NetworkPolicy, the drain delay, the image
+the probes, the placement, every rule of the NetworkPolicy - none of them open to
+every address or every port, and a rule for each CIDR and port pair of
+`networkPolicy.egressTo` - the drain delay, the image
 and the version label, and the identity of upgrades from the console: exactly its
 rules and the token on the cactusfs container with it, nothing of it without); and a
 render of every file of `ci/refused/`, which must fail with the words its first line

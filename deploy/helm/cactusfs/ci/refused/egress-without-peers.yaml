@@ -1,0 +1,8 @@
+# expect: networkPolicy.egressTo[1].to: name the peers
+# Laid over ci/cluster-values.yaml; the chart must refuse to render: a rule
+# without peers would let the pods reach every address on its ports.
+networkPolicy:
+  egressTo:
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
+      ports: [8200]
+    - ports: [443]

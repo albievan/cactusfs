@@ -7,3 +7,9 @@ networkPolicy:
   egressTo:
     - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
       ports: [8200]
+    # Notification targets (ADR-0025): a webhook at one address, and NATS
+    # servers in two ranges - CIDR and port pairs, each rule one egress rule.
+    - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+      ports: [443]
+    - to: [{ipBlock: {cidr: 198.51.100.0/24}}, {ipBlock: {cidr: "2001:db8::/64"}}]
+      ports: [4222, 8443]

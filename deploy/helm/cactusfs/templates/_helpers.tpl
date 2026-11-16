@@ -89,6 +89,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}
 {{- if or (not .Values.kms.local.keyFileSecret) (not .Values.kms.local.passphraseSecret) -}}{{- fail "kms.local: keyFileSecret and passphraseSecret are required" -}}{{- end -}}
 {{- end -}}
+{{- /* networkPolicy.egressTo: each rule names peers and ports, nothing else. A
+     rule without either would render `to: null` or `ports: null`, which a
+     NetworkPolicy reads as every address or every port: the default deny
+     would be gone by a typo (`port:` for `ports:`, a bare `cidr:`). */ -}}
+{{- range $i, $rule := .Values.networkPolicy.egressTo -}}
+{{- if not (kindIs "map" $rule) -}}{{- fail (printf "networkPolicy.egressTo[%d]: a rule is {to: [peers], ports: [numbers]}" $i) -}}{{- end -}}
+{{- range $k, $_ := $rule -}}
+{{- if not (has $k (list "to" "ports")) -}}{{- fail (printf "networkPolicy.egressTo[%d]: %q is not a field of a rule; a rule is {to: [peers], ports: [numbers]}, as {to: [{ipBlock: {cidr: 203.0.113.10/32}}], ports: [443]}" $i $k) -}}{{- end -}}
+{{- end -}}
+{{- $to := index $rule "to" -}}
+{{- if or (not (kindIs "slice" $to)) (not $to) -}}{{- fail (printf "networkPolicy.egressTo[%d].to: name the peers - without them the rule would let the pods reach every address" $i) -}}{{- end -}}
+{{- range $to -}}
+{{- if not (kindIs "map" .) -}}{{- fail (printf "networkPolicy.egressTo[%d].to: a peer is an ipBlock, a podSelector or a namespaceSelector" $i) -}}{{- end -}}
+{{- with index . "ipBlock" -}}
+{{- if not (regexMatch "^[0-9a-fA-F.:]+/[0-9]{1,3}$" (toString (index . "cidr"))) -}}{{- fail (printf "networkPolicy.egressTo[%d].to: %q is not an address range (203.0.113.10/32)" $i (toString (index . "cidr"))) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $ports := index $rule "ports" -}}
+{{- if or (not (kindIs "slice" $ports)) (not $ports) -}}{{- fail (printf "networkPolicy.egressTo[%d].ports: name the ports - without them the rule would let the pods reach every port" $i) -}}{{- end -}}
+{{- range $ports -}}
+{{- if not (regexMatch "^[0-9]{1,5}$" (toString .)) -}}{{- fail (printf "networkPolicy.egressTo[%d].ports: %q is not a port, 1 to 65535" $i (toString .)) -}}{{- end -}}
+{{- if or (lt (atoi (toString .)) 1) (gt (atoi (toString .)) 65535) -}}{{- fail (printf "networkPolicy.egressTo[%d].ports: %q is not a port, 1 to 65535" $i (toString .)) -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.localVolumes.enabled (or (not .Values.localVolumes.basePath) (not .Values.localVolumes.nodeName)) -}}{{- fail "localVolumes: basePath and nodeName are required" -}}{{- end -}}
 {{- if lt (int .Values.drives.count) 1 -}}{{- fail "drives.count is at least 1" -}}{{- end -}}
 {{- if include "cactusfs.upgradeFromConsole" . -}}

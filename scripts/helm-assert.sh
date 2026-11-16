@@ -668,6 +668,27 @@ EOF
 	rules "$D" '.spec.egress' to >"$TMP/egress.actual"
 	same_rules "$R" egress "$TMP/egress.expected" "$TMP/egress.actual"
 
+	# The default deny holds: a rule without peers is to every address, and
+	# one without ports to every port - none is rendered, in or out (8.2.9).
+	want "$R" "no egress rule without peers or without ports" "$D" \
+		'[(.spec.egress // [])[] | select(((.to // []) | length) == 0 or ((.ports // []) | length) == 0)] | length' "0"
+	want "$R" "no ingress rule without peers or without ports" "$D" \
+		'[(.spec.ingress // [])[] | select(((.from // []) | length) == 0 or ((.ports // []) | length) == 0)] | length' "0"
+
+	# Every CIDR and port pair egressTo names - a notification target's
+	# address and port (ADR-0025), Vault's, a collector's - is reached by an
+	# egress rule that holds both.
+	i=0
+	while [ "$i" -lt "$n" ]; do
+		for cidr in $(q "$V" ".networkPolicy.egressTo[$i].to[] | select(has(\"ipBlock\")) | .ipBlock.cidr"); do
+			for port in $(q "$V" ".networkPolicy.egressTo[$i].ports[]"); do
+				want "$R" "egress: a rule to $cidr on TCP $port (networkPolicy.egressTo[$i])" "$D" \
+					"[(.spec.egress // [])[] | select((.to // []) | any_c(.ipBlock.cidr == \"$cidr\")) | select((.ports // []) | any_c(.protocol == \"TCP\" and .port == $port))] | length > 0" "true"
+			done
+		done
+		i=$((i + 1))
+	done
+
 	# The addresses the nodes are configured to reach have a rule among those
 	# that are named: Vault's port, and the trace collector's.
 	if [ "$kms" = vault ]; then

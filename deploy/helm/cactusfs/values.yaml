@@ -213,13 +213,27 @@ networkPolicy:
         matchLabels: {kubernetes.io/metadata.name: kube-system}
       podSelector:
         matchLabels: {k8s-app: kube-dns}
-  # What else the pods may reach - Vault, a collector of traces: peers in
-  # the same form, and ports. With kms.type=vault this must say where Vault
-  # is, or the nodes could not open their keys.
+  # What else the pods may reach - Vault, a collector of traces, the
+  # notification targets (ADR-0025: each webhook and NATS server the
+  # deployment sends to): peers in the same form, and TCP ports. Each rule is
+  # rendered as one egress rule, and adds to the default deny; it takes away
+  # nothing. With kms.type=vault this must say where Vault is, or the nodes
+  # could not open their keys. A target is reached by its address, not its
+  # name: give the address range (a CIDR) and the port of its endpoint -
+  # 443 for https:// without a port, 4222 for a NATS server's usual port.
+  # The chart refuses a rule without peers or without ports (either would
+  # open every address or every port), a port outside 1 to 65535 or given by
+  # name, an ipBlock that is not a range, and any field but `to` and `ports`.
   #   - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: vault}}}]
   #     ports: [8200]
   #   - to: [{ipBlock: {cidr: 10.0.0.5/32}}]
   #     ports: [8200]
+  #   # a webhook target, https://hooks.example.com/... at 203.0.113.10
+  #   - to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+  #     ports: [443]
+  #   # a NATS target, tls://nats.example.com:4222, in 198.51.100.0/24
+  #   - to: [{ipBlock: {cidr: 198.51.100.0/24}}]
+  #     ports: [4222]
   egressTo: []
 
 # --- checking for releases (ADR-0029) --------------------------------------
