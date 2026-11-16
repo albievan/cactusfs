@@ -660,8 +660,9 @@ func TestMetricsCarryNoTenantData(t *testing.T) {
 	// each a set that the binary fixes, none a name a tenant chose; so is
 	// outcome, of a check for releases and of an upgrade, and so are the
 	// kind of a target, the state of delivery to it and the class of a
-	// failure (ADR-0023: no label names a target).
-	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile|reason|side|drive|outcome|kind|state|class)$`)
+	// failure (ADR-0023: no label names a target), and the event of a
+	// resync (ADR-0026: no label names a bucket).
+	allowed := regexp.MustCompile(`^(port|method|result|operation|code|direction|version|goversion|le|quantile|reason|side|drive|outcome|kind|state|class|event)$`)
 	for _, family := range families {
 		if !strings.HasPrefix(family.GetName(), "cactusfs_") {
 			continue

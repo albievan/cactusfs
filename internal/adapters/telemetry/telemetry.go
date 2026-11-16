@@ -114,6 +114,9 @@ type Telemetry struct {
 	deliveryAttempts *prometheus.CounterVec
 	egressRefusals   *prometheus.CounterVec
 	delivery         *deliveryGauges
+	// Replication between sites (ADR-0026): bytes and versions sent, the
+	// events of resyncs, and the gauges of the node that leads.
+	replication *replicationMetrics
 	// Node RPC, on the calling and on the answering side.
 	rpcRequests       *prometheus.CounterVec
 	rpcSeconds        *prometheus.HistogramVec
@@ -228,14 +231,17 @@ func New(ctx context.Context, cfg Config) (*Telemetry, error) {
 
 	t.deliveryAttempts, t.egressRefusals, t.delivery = newDeliveryAttempts(), newEgressRefusals(), newDeliveryGauges(cfg.StateTimeout)
 
+	t.replication = newReplicationMetrics(cfg.StateTimeout)
+
 	t.updates = newUpdateMetrics()
+	collected := append(t.updates.collectors(), t.replication.collectors()...)
 	for _, collector := range append([]prometheus.Collector{
 		buildInfo, t.requests, t.requestSeconds, t.requestBytes, t.adminRequests, t.adminSeconds, t.portCalls, t.portSeconds,
 		t.healObjects, t.healShards, t.scrubPasses, t.scrubObjects, t.scrubBytes, t.gcPasses, t.gcRemoved, t.lifecycle, t.accessDropped, t.events,
 		t.quotaRefusals, t.usageDrift, t.deliveryAttempts, t.egressRefusals, t.delivery, t.rpcRequests, t.rpcSeconds, t.handshakes, t.state,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{Namespace: "cactusfs"}),
-	}, t.updates.collectors()...) {
+	}, collected...) {
 		if err := t.registry.Register(collector); err != nil {
 			return nil, fmt.Errorf("telemetry.New: %w", err)
 		}

@@ -13,7 +13,8 @@ import (
 // Neither a bucket, a key nor the target is a label or an attribute: a
 // bucket's name and a key are a tenant's, and a target names a site. What
 // each request does on the wire is seen by the egress client the site
-// client is given (ObserveEgress).
+// client is given (ObserveEgress). The bytes of every version and part sent
+// are counted as the client reads them (cactusfs_replication_bytes_total).
 func (t *Telemetry) InstrumentSiteClient(next ports.SiteClient) ports.SiteClient {
 	return &siteClient{t: t, next: next}
 }
@@ -38,7 +39,7 @@ func (s *siteClient) Check(ctx context.Context, bucketName string) (ports.SiteBu
 // PutReplica implements ports.SiteClient.
 func (s *siteClient) PutReplica(ctx context.Context, v object.Version, body io.Reader) error {
 	ctx, done := s.t.call(ctx, portSite, "PutReplica")
-	err := s.next.PutReplica(ctx, v, body)
+	err := s.next.PutReplica(ctx, v, s.t.countedBody(body))
 	done(err)
 	return err
 }
@@ -54,7 +55,7 @@ func (s *siteClient) CreateUpload(ctx context.Context, v object.Version) (string
 // PutPart implements ports.SiteClient.
 func (s *siteClient) PutPart(ctx context.Context, bucketName, key, uploadID string, number int, size int64, body io.Reader) (string, error) {
 	ctx, done := s.t.call(ctx, portSite, "PutPart")
-	etag, err := s.next.PutPart(ctx, bucketName, key, uploadID, number, size, body)
+	etag, err := s.next.PutPart(ctx, bucketName, key, uploadID, number, size, s.t.countedBody(body))
 	done(err)
 	return etag, err
 }

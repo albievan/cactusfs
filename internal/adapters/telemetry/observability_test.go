@@ -19,6 +19,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
+	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
 	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
@@ -109,6 +110,9 @@ func observedTelemetry(t *testing.T) *telemetry.Telemetry {
 	tel.ObserveQuotas(fixedQuotas{known: true})
 	tel.ObserveDeliveryAttempt(delivery.KindWebhook, delivery.ClassNone)
 	tel.ObserveDelivery(fixedDelivery{known: true})
+	tel.ObserveReplicatedVersion(object.ReplicationCompleted)
+	tel.ObserveResyncEvent(app.ResyncEventHeld)
+	tel.ObserveReplication(fixedReplication{known: true})
 	return tel
 }
 

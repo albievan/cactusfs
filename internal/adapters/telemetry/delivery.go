@@ -41,7 +41,7 @@ func deliveryClasses() []string {
 		string(delivery.ClassRejected), string(delivery.ClassSSEC), string(delivery.ClassTimeout), string(delivery.ClassConnect),
 		string(delivery.ClassTLS), string(delivery.ClassServer), string(delivery.ClassRedirect), string(delivery.ClassEgressRefused),
 		string(delivery.ClassAuth), string(delivery.ClassNoStream), string(delivery.ClassNoSuchBucket), string(delivery.ClassVersioning),
-		string(delivery.ClassNotReplica), string(delivery.ClassQuota), string(delivery.ClassInternal),
+		string(delivery.ClassNotReplica), string(delivery.ClassQuota), string(delivery.ClassObjectLock), string(delivery.ClassInternal),
 	}
 }
 
