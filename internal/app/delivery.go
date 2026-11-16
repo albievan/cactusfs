@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -118,7 +119,7 @@ func stalls(class delivery.Class) bool {
 	switch class {
 	case delivery.ClassAuth, delivery.ClassTLS, delivery.ClassRedirect, delivery.ClassEgressRefused,
 		delivery.ClassNoStream, delivery.ClassNoSuchBucket, delivery.ClassVersioning, delivery.ClassNotReplica,
-		delivery.ClassQuota:
+		delivery.ClassQuota, delivery.ClassObjectLock:
 		return true
 	}
 	return false
@@ -140,6 +141,21 @@ type DeliveryWorkerConfig struct {
 	// AttemptTimeout is the deadline of one attempt at one item; zero is
 	// DefaultDeliveryAttemptTimeout.
 	AttemptTimeout time.Duration
+	// AttemptTimeouts gives, by kind of consumer, the deadline of one
+	// attempt at an item of that kind, where it is not AttemptTimeout: a
+	// version sent to another deployment may be far larger than a
+	// notification, and its deadline grows with its size (Item.Size). A
+	// deadline of zero or less is AttemptTimeout.
+	AttemptTimeouts map[delivery.ConsumerKind]func(delivery.Item) time.Duration
+	// Parallel is, by kind of consumer, how many items of a target are
+	// handed to the Deliverer at once; a kind not named, and 1, hand them
+	// over one by one. Items are handed over in waves: a wave is the next
+	// items of the outbox, at most that many, and never two of one object
+	// (bucket and key) - the items of one object go one after another, in
+	// the order of the outbox. The next wave begins when every item of the
+	// one before was taken or passed, so the cursor never passes an item
+	// that was not.
+	Parallel map[delivery.ConsumerKind]int
 	// Entropy, a cryptographically secure source, draws the jitter of the
 	// pauses between attempts (delivery.Backoff). Nil draws none.
 	Entropy io.Reader
@@ -184,6 +200,8 @@ type DeliveryWorker struct {
 	clock          ports.Clock
 	logger         *slog.Logger
 	attemptTimeout time.Duration
+	timeouts       map[delivery.ConsumerKind]func(delivery.Item) time.Duration
+	parallel       map[delivery.ConsumerKind]int
 	onAttempt      func(delivery.Kind, delivery.Class)
 	auditor        *Auditor
 	auditExport    *AuditExporter
@@ -208,6 +226,17 @@ func NewDeliveryWorker(cfg DeliveryWorkerConfig) *DeliveryWorker {
 		targets: cfg.Targets, outbox: cfg.Outbox, deliverers: map[delivery.ConsumerKind]Deliverer{}, active: cfg.Active,
 		clock: cfg.Clock, logger: cfg.Logger, attemptTimeout: cfg.AttemptTimeout, onAttempt: cfg.OnAttempt, entropy: cfg.Entropy,
 		auditor: cfg.Auditor, auditExport: cfg.AuditExport,
+		timeouts: map[delivery.ConsumerKind]func(delivery.Item) time.Duration{}, parallel: map[delivery.ConsumerKind]int{},
+	}
+	for kind, timeout := range cfg.AttemptTimeouts {
+		if timeout != nil {
+			w.timeouts[kind] = timeout
+		}
+	}
+	for kind, n := range cfg.Parallel {
+		if n > 1 {
+			w.parallel[kind] = n
+		}
 	}
 	for kind, deliverer := range cfg.Deliverers {
 		if deliverer != nil {
@@ -415,6 +444,15 @@ func (w *DeliveryWorker) refresh(ctx context.Context, s *deliverySession) {
 		}
 		return
 	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Name)
+	}
+	for _, deliverer := range w.deliverers {
+		if keeper, ok := deliverer.(TargetKeeper); ok {
+			keeper.KeepTargets(names)
+		}
+	}
 	stateCtx, cancel := metaContext(ctx)
 	state, stateErr := w.outbox.OutboxCursors(stateCtx)
 	cancel()
@@ -608,9 +646,18 @@ type targetRun struct {
 
 	mu     sync.Mutex
 	target delivery.Target
-	// failures counts the failures in a row; lastClass is the class of
-	// the last attempt's failure, or none.
-	failures    int
+	// conn ends when the target's connection changes - its endpoint, its
+	// certificates, its credentials (delivery.Target.SameConnection) - or
+	// a bucket it admitted is no longer admitted (narrowed): an attempt in
+	// flight is made under it, so that it ends then and is made again to
+	// the target as it now is.
+	// connCancel ends it; both are made when an attempt first asks.
+	conn       context.Context
+	connCancel context.CancelFunc
+	// failing counts, by item, the failures in a row of the items that are
+	// being tried again; the state is that of the item that failed most.
+	// lastClass is the class of the last attempt's failure, or none.
+	failing     map[delivery.Seq]int
 	lastClass   delivery.Class
 	lastSuccess time.Time
 	rejected    uint64
@@ -643,16 +690,52 @@ func newTargetRun(target delivery.Target, cursor delivery.Cursor) *targetRun {
 func (r *targetRun) update(target delivery.Target, cursor delivery.Cursor, known bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.target.SameConnection(target) || narrowed(r.target.Buckets, target.Buckets) {
+		// What is in flight was sent to the target as it was: it ends
+		// now, and is sent again to the target as it is.
+		if r.connCancel != nil {
+			r.connCancel()
+		}
+		r.conn, r.connCancel = nil, nil
+	}
 	r.target = target.Clone()
 	if known {
 		r.lost, r.resync = cursor.Lost, cursor.ResyncNeeded
 	}
 }
 
+// narrowed reports whether a name or pattern of buckets that was admitted
+// is no longer: the lists are compared as sets, so a list that was widened
+// or put in another order narrows nothing.
+func narrowed(was, is []string) bool {
+	for _, name := range was {
+		if !slices.Contains(is, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *targetRun) current() delivery.Target {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.target
+}
+
+// connection returns the target as it is and the context an attempt at it
+// is made under (conn): a child of ctx, ended by update when the target's
+// connection or the buckets it admits change.
+func (r *targetRun) connection(ctx context.Context) (delivery.Target, context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conn == nil {
+		parent := r.ctx
+		if parent == nil {
+			parent = ctx
+		}
+		r.conn, r.connCancel = context.WithCancel(parent)
+	}
+	return r.target, r.conn
 }
 
 // took records a batch that was read.
@@ -695,12 +778,16 @@ func (r *targetRun) looked(count uint64, upto delivery.Seq, first time.Time) {
 	r.ahead, r.aheadUpto, r.aheadAt = count, upto, first
 }
 
-// succeeded records an attempt that the target took, or that gave the item
-// up with a class that passes.
-func (r *targetRun) succeeded(class delivery.Class, at time.Time, status object.ReplicationStatus) {
+// succeeded records an attempt at the item at seq that the target took, or
+// that gave the item up with a class that passes. While another item of its
+// wave is still being tried again, the target's state stays that item's.
+func (r *targetRun) succeeded(seq delivery.Seq, class delivery.Class, at time.Time, status object.ReplicationStatus) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.failures, r.lastClass = 0, class
+	delete(r.failing, seq)
+	if len(r.failing) == 0 {
+		r.lastClass = class
+	}
 	if class == delivery.ClassNone {
 		r.lastSuccess = at
 	}
@@ -712,19 +799,33 @@ func (r *targetRun) succeeded(class delivery.Class, at time.Time, status object.
 	}
 }
 
-// failedWith records an attempt that failed and is tried again; it returns
-// the number of failures in a row.
-func (r *targetRun) failedWith(class delivery.Class) int {
+// failedWith records an attempt at the item at seq that failed and is tried
+// again; it returns that item's failures in a row, which its pause is
+// reckoned from.
+func (r *targetRun) failedWith(seq delivery.Seq, class delivery.Class) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.failures++
+	if r.failing == nil {
+		r.failing = map[delivery.Seq]int{}
+	}
+	r.failing[seq]++
 	r.lastClass = class
-	return r.failures
+	return r.failing[seq]
+}
+
+// failuresLocked returns the failures in a row of the item that failed
+// most, of those being tried again; r.mu is held.
+func (r *targetRun) failuresLocked() int {
+	most := 0
+	for _, n := range r.failing {
+		most = max(most, n)
+	}
+	return most
 }
 
 // stateLocked returns the word of the target's state; r.mu is held.
 func (r *targetRun) stateLocked() string {
-	return deliveryState(r.failures, r.lastClass)
+	return deliveryState(r.failuresLocked(), r.lastClass)
 }
 
 // deliveryState returns the word of the state of a delivery that has failed
@@ -776,8 +877,13 @@ type targetLoop struct {
 	// began; lookedAt when what waits was last counted.
 	ackedAt  time.Time
 	lookedAt time.Time
+	// ackMu orders the acknowledgements: the items of a wave that wait
+	// between attempts acknowledge what came before the wave, each from its
+	// own goroutine. Everything else of the loop is changed between waves
+	// only.
+	ackMu sync.Mutex
 	// gone says that the target is no more.
-	gone bool
+	gone atomic.Bool
 }
 
 // deliverTo is the loop of one target, from the place its cursor is at. It
@@ -790,7 +896,7 @@ type targetLoop struct {
 func (w *DeliveryWorker) deliverTo(ctx context.Context, run *targetRun, from delivery.Seq) bool {
 	l := &targetLoop{w: w, run: run, name: run.current().Name, read: from, acked: from, position: from, ackedAt: w.clock.Now()}
 	defer l.finish(ctx)
-	for ctx.Err() == nil && !l.gone {
+	for ctx.Err() == nil && !l.gone.Load() {
 		if !w.isActive() {
 			if !pause(ctx, deliveryLook) {
 				break
@@ -803,7 +909,7 @@ func (w *DeliveryWorker) deliverTo(ctx context.Context, run *targetRun, from del
 		switch {
 		case errors.Is(err, domain.ErrEntityNotFound):
 			// The target was deleted: its cursor went with it.
-			l.gone = true
+			l.gone.Store(true)
 			continue
 		case err != nil:
 			if ctx.Err() == nil {
@@ -839,18 +945,27 @@ func (w *DeliveryWorker) deliverTo(ctx context.Context, run *targetRun, from del
 			run.caughtUp()
 		}
 	}
-	return l.gone
+	return l.gone.Load()
 }
 
-// deliverAll delivers a batch in order, acknowledging as it goes; it reports
-// false when the loop is to stop before the end of the batch.
+// deliverAll delivers a batch in order, wave after wave (wave),
+// acknowledging as it goes; it reports false when the loop is to stop before
+// the end of the batch.
 func (l *targetLoop) deliverAll(ctx context.Context, items []delivery.Item) bool {
-	for _, item := range items {
-		if !l.deliver(ctx, item) {
+	for len(items) > 0 {
+		wave := l.wave(ctx, items)
+		statuses, ok := l.deliverWave(ctx, wave)
+		if !ok {
 			return false
 		}
-		l.position = item.Seq
-		l.unacked++
+		for i, item := range wave {
+			if statuses[i] != "" {
+				l.results = append(l.results, delivery.Result{Seq: item.Seq, Status: statuses[i]})
+			}
+		}
+		l.position = wave[len(wave)-1].Seq
+		l.unacked += len(wave)
+		items = items[len(wave):]
 		if !l.ackIfDue(ctx) {
 			return false
 		}
@@ -858,29 +973,114 @@ func (l *targetLoop) deliverAll(ctx context.Context, items []delivery.Item) bool
 	return true
 }
 
+// TargetKeeper is a Deliverer that keeps something of each target it
+// delivers to: at every refresh the worker tells it the names of the targets
+// there are, so that it forgets those that are gone.
+type TargetKeeper interface {
+	KeepTargets(names []string)
+}
+
+// ObjectNamer is a Deliverer that says which object at the target an item
+// is about, where that is not the item's bucket and key: the replicator
+// names the object of the other deployment, whose bucket is the one the
+// replication configuration names. Two items of one object are never in one
+// wave. An item whose object it cannot name (false) goes in a wave of its
+// own.
+type ObjectNamer interface {
+	ObjectOf(ctx context.Context, target delivery.Target, item delivery.Item) (string, bool)
+}
+
+// wave returns the items of the next wave: the first item, and those after
+// it as long as they are of its kind of consumer, fewer than that kind is
+// handed over at once, and of no object an item of the wave is of - the
+// object at the target, when the Deliverer names it (ObjectNamer).
+func (l *targetLoop) wave(ctx context.Context, items []delivery.Item) []delivery.Item {
+	kind, _ := items[0].For(l.name)
+	width := max(l.w.parallel[kind], 1)
+	if width == 1 {
+		return items[:1]
+	}
+	target := l.run.current()
+	namer, _ := l.w.deliverers[kind].(ObjectNamer)
+	objectOf := func(item delivery.Item) (string, bool) {
+		if namer == nil {
+			return item.Bucket + "\x00" + item.Key, true
+		}
+		nameCtx, cancel := metaContext(ctx)
+		defer cancel()
+		return namer.ObjectOf(nameCtx, target, item)
+	}
+	first, ok := objectOf(items[0])
+	if !ok {
+		return items[:1]
+	}
+	objects := map[string]bool{first: true}
+	n := 1
+	for n < len(items) && n < width {
+		next := items[n]
+		if k, _ := next.For(l.name); k != kind {
+			break
+		}
+		name, ok := objectOf(next)
+		if !ok || objects[name] {
+			break
+		}
+		objects[name] = true
+		n++
+	}
+	return items[:n]
+}
+
+// deliverWave hands the items of a wave to the target at once, each until
+// the target takes it or its failure passes, and returns the status each
+// gave. It reports false when the loop is to stop: then nothing of the wave
+// is counted as delivered, and whoever delivers next sends it again.
+func (l *targetLoop) deliverWave(ctx context.Context, wave []delivery.Item) ([]object.ReplicationStatus, bool) {
+	statuses := make([]object.ReplicationStatus, len(wave))
+	if len(wave) == 1 {
+		status, ok := l.deliver(ctx, wave[0])
+		statuses[0] = status
+		return statuses, ok
+	}
+	ok := make([]bool, len(wave))
+	var running sync.WaitGroup
+	for i, item := range wave {
+		running.Go(func() { statuses[i], ok[i] = l.deliver(ctx, item) })
+	}
+	running.Wait()
+	return statuses, !slices.Contains(ok, false)
+}
+
 // deliver hands one item to its target until the target takes it or its
-// failure passes. It reports false when the loop is to stop: ctx ended, or
-// the target is gone. While the node does not lead, nothing is sent: the
-// item waits, and the lead is looked at again every deliveryLook.
-func (l *targetLoop) deliver(ctx context.Context, item delivery.Item) bool {
+// failure passes, and returns the status of replication it gave. It reports
+// false when the loop is to stop: ctx ended, or the target is gone. While
+// the node does not lead, nothing is sent: the item waits, and the lead is
+// looked at again every deliveryLook.
+func (l *targetLoop) deliver(ctx context.Context, item delivery.Item) (object.ReplicationStatus, bool) {
 	kind, _ := item.For(l.name)
 	deliverer := l.w.deliverers[kind]
 	for {
 		if ctx.Err() != nil {
-			return false
+			return "", false
 		}
 		if !l.w.isActive() {
 			if !pause(ctx, deliveryLook) {
-				return false
+				return "", false
 			}
 			continue
 		}
-		target := l.run.current()
-		status, err := l.attempt(ctx, deliverer, target, item)
+		target, conn := l.run.connection(ctx)
+		status, err := l.attempt(conn, deliverer, target, item)
 		if ctx.Err() != nil {
 			// The loop was stopped while the item was out: not a failure
 			// of the target. It is sent again by whoever delivers next.
-			return false
+			return "", false
+		}
+		if conn.Err() != nil {
+			// The target changed while the item was out: what was sent
+			// went to the target as it was. It is sent again, at once, to
+			// the target as it is; not a failure of either.
+			continue
 		}
 		class := delivery.ClassOf(err)
 		if l.w.onAttempt != nil {
@@ -890,17 +1090,14 @@ func (l *targetLoop) deliver(ctx context.Context, item delivery.Item) bool {
 			if target.Kind != delivery.KindS3 {
 				status = ""
 			}
-			if status != "" {
-				l.results = append(l.results, delivery.Result{Seq: item.Seq, Status: status})
-			}
-			l.run.succeeded(class, l.w.clock.Now(), status)
+			l.run.succeeded(item.Seq, class, l.w.clock.Now(), status)
 			if err != nil {
 				l.w.logger.InfoContext(ctx, "a target refused one item, which is passed and not sent again",
 					slog.String("target", target.Name), slog.String("kind", string(target.Kind)), slog.String("class", string(class)))
 			}
-			return true
+			return status, true
 		}
-		failures := l.run.failedWith(class)
+		failures := l.run.failedWith(item.Seq, class)
 		wait := delivery.Backoff(failures, l.w.jitter())
 		l.w.logger.WarnContext(ctx, "delivery to a target failed; the item is tried again",
 			slog.String("target", target.Name), slog.String("kind", string(target.Kind)), slog.String("class", string(class)),
@@ -911,8 +1108,12 @@ func (l *targetLoop) deliver(ctx context.Context, item delivery.Item) bool {
 		if l.w.isActive() {
 			l.ack(ctx)
 		}
-		if l.gone || !pause(ctx, wait) {
-			return false
+		if l.gone.Load() {
+			return "", false
+		}
+		// A target that changes meanwhile is tried again at once.
+		if !pause(conn, wait) && ctx.Err() != nil {
+			return "", false
 		}
 	}
 }
@@ -922,7 +1123,13 @@ func (l *targetLoop) attempt(ctx context.Context, deliverer Deliverer, target de
 	if deliverer == nil {
 		return "", delivery.Failed(delivery.ClassInternal, errNoDeliverer)
 	}
-	ctx, cancel := context.WithTimeout(ctx, l.w.attemptTimeout)
+	timeout := l.w.attemptTimeout
+	if kind, _ := item.For(l.name); l.w.timeouts[kind] != nil {
+		if of := l.w.timeouts[kind](item); of > 0 {
+			timeout = of
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return deliverer.Deliver(ctx, target, item.Clone())
 }
@@ -940,8 +1147,10 @@ func (l *targetLoop) ackIfDue(ctx context.Context) bool {
 // settle acknowledges, and holds the loop while that fails as a failed
 // attempt holds it: the acknowledgement is tried again after
 // delivery.Backoff, and nothing more is delivered meanwhile. So what a new
-// leader sends again stays within one batch, and the results of one
-// acknowledgement within DeliveryBatch. While the node does not lead it
+// leader sends again stays within one batch and one wave, and the results
+// of one acknowledgement within DeliveryBatch and one wave - a wave is of
+// one batch, so fewer than twice DeliveryBatch, far below
+// delivery.MaxAckResults. While the node does not lead it
 // waits, sending nothing, and looks again every deliveryLook. It reports
 // false when the loop is to stop: ctx ended, or the target is gone.
 func (l *targetLoop) settle(ctx context.Context) bool {
@@ -952,7 +1161,7 @@ func (l *targetLoop) settle(ctx context.Context) bool {
 			if l.ack(ctx) {
 				return true
 			}
-			if l.gone {
+			if l.gone.Load() {
 				return false
 			}
 			failures++
@@ -968,6 +1177,8 @@ func (l *targetLoop) settle(ctx context.Context) bool {
 // ack acknowledges everything up to the position, through Raft, and reports
 // whether it did, or had nothing to acknowledge.
 func (l *targetLoop) ack(ctx context.Context) bool {
+	l.ackMu.Lock()
+	defer l.ackMu.Unlock()
 	if !l.position.After(l.acked) && len(l.results) == 0 {
 		return true
 	}
@@ -976,7 +1187,7 @@ func (l *targetLoop) ack(ctx context.Context) bool {
 	cancel()
 	switch {
 	case errors.Is(err, domain.ErrEntityNotFound):
-		l.gone = true
+		l.gone.Store(true)
 		return false
 	case err != nil:
 		if ctx.Err() == nil {
@@ -1029,7 +1240,7 @@ func (l *targetLoop) countAhead(ctx context.Context, from delivery.Seq) {
 // finish acknowledges what was delivered when the loop ends while this node
 // still leads - it is stopping - so that the next leader sends it not again.
 func (l *targetLoop) finish(ctx context.Context) {
-	if l.gone || !l.w.isActive() {
+	if l.gone.Load() || !l.w.isActive() {
 		return
 	}
 	l.ack(context.WithoutCancel(ctx))

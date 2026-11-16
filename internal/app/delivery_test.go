@@ -559,6 +559,20 @@ func TestDeliveryWorker(t *testing.T) {
 				}
 			},
 		},
+		"a destination without Object Lock stalls the target": {
+			rows: 2, kind: delivery.KindS3, run: 5 * time.Second,
+			answer: func(delivery.Item, int) (object.ReplicationStatus, error) {
+				return "", failing(delivery.ClassObjectLock)
+			},
+			check: func(t *testing.T, w *deliveryWorld, _ []delivery.Item, st ports.TargetStatus) {
+				if st.State != ports.DeliveryStalled || st.LastErrorClass != delivery.ClassObjectLock || st.Pending != 2 {
+					t.Errorf("status = %+v", st)
+				}
+				if !w.outbox.cursor("hook").Acked.IsZero() {
+					t.Errorf("cursor moved past an item the destination could not lock")
+				}
+			},
+		},
 		"a target that does not answer is retried, then stalled": {
 			rows: 2, kind: delivery.KindNATS, run: 20 * time.Second,
 			answer: func(delivery.Item, int) (object.ReplicationStatus, error) {
