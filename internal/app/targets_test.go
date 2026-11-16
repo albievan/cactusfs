@@ -194,6 +194,136 @@ func TestTargetsAreAuthorized(t *testing.T) {
 	}
 }
 
+// TestATargetOfTheAuditTrailNeedsTheTrail: whoever may define targets and
+// may not read the audit trail (admin:GetAuditLog) cannot have the trail
+// sent anywhere - not by defining a target that is sent it, not by changing
+// one that is, its endpoint or anything else, turning the trail off
+// included - and the refusal is audited; a target that is not sent the trail
+// needs no more than it did. cluster-admin may do all of it.
+func TestATargetOfTheAuditTrailNeedsTheTrail(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newTargetFixture(t)
+	policies := map[string]string{
+		// Targets, explicitly not the trail.
+		"targets-not-trail": `{"Version":"2012-10-17","Statement":[` +
+			`{"Effect":"Allow","Action":["admin:PutTarget","admin:GetTarget"],"Resource":"*"},` +
+			`{"Effect":"Deny","Action":"admin:GetAuditLog","Resource":"*"}]}`,
+		// Targets, and nothing said of the trail: denied by default.
+		"targets-only": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:PutTarget","admin:GetTarget"],"Resource":"*"}]}`,
+		// Targets and the trail.
+		"targets-and-trail": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:PutTarget","admin:GetTarget","admin:GetAuditLog"],"Resource":"*"}]}`,
+	}
+	principals := map[string]iam.Principal{}
+	for name, document := range policies {
+		if err := f.iam.PutPolicy(ctx, f.root, name, []byte(document), true); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.iam.PutRole(ctx, f.root, iam.Role{Name: name, Policies: []string{name}}, true); err != nil {
+			t.Fatal(err)
+		}
+		principals[name] = f.as(t, f.user(t, "u-"+name, name))
+	}
+	principals[iam.RoleClusterAdmin] = f.as(t, f.user(t, "u-admin", iam.RoleClusterAdmin))
+
+	audited := func(name string) app.TargetInput {
+		in := webhook(name)
+		in.Audit = true
+		return in
+	}
+	// denied counts the refusals by who was refused.
+	denied := map[string]int{}
+	elsewhere := func(in app.TargetInput) app.TargetInput {
+		in.Endpoint = "https://theirs.example.net" + concealedPath
+		return in
+	}
+	for name, tt := range map[string]struct {
+		// before is what root defines first, if anything.
+		before *app.TargetInput
+		put    app.TargetInput
+		// allowed are the policies whose holder may.
+		allowed []string
+	}{
+		"a new target sent the trail": {
+			put: audited("new"), allowed: []string{"targets-and-trail", iam.RoleClusterAdmin},
+		},
+		"a target sent the trail, sent elsewhere": {
+			before: ptr(audited("moved")), put: elsewhere(audited("moved")), allowed: []string{"targets-and-trail", iam.RoleClusterAdmin},
+		},
+		"a target sent the trail, no longer sent it": {
+			before: ptr(audited("off")), put: webhook("off"), allowed: []string{"targets-and-trail", iam.RoleClusterAdmin},
+		},
+		"a target not sent the trail, sent it": {
+			before: ptr(webhook("on")), put: audited("on"), allowed: []string{"targets-and-trail", iam.RoleClusterAdmin},
+		},
+		"a target not sent the trail": {
+			put: webhook("plain"), allowed: []string{"targets-not-trail", "targets-only", "targets-and-trail", iam.RoleClusterAdmin},
+		},
+		"a target not sent the trail, sent elsewhere": {
+			before: ptr(webhook("away")), put: elsewhere(webhook("away")),
+			allowed: []string{"targets-not-trail", "targets-only", "targets-and-trail", iam.RoleClusterAdmin},
+		},
+	} {
+		for who, p := range principals {
+			// Every case on a target of its own name.
+			put := tt.put
+			put.Name = put.Name + "-" + strings.ReplaceAll(who, "-", "")
+			if tt.before != nil {
+				before := *tt.before
+				before.Name = put.Name
+				if _, err := f.targets.Put(ctx, f.root, before); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := f.targets.Put(ctx, p, put)
+			allowed := false
+			for _, a := range tt.allowed {
+				allowed = allowed || a == who
+			}
+			if allowed {
+				if err != nil {
+					t.Errorf("%s: Put by %s: %v", name, who, err)
+				}
+				continue
+			}
+			if !errors.Is(err, domain.ErrAccessDenied) {
+				t.Errorf("%s: Put by %s = %v, want ErrAccessDenied", name, who, err)
+				continue
+			}
+			denied[who]++
+			// Nothing changed.
+			shown, getErr := f.targets.Get(ctx, f.root, put.Name)
+			switch {
+			case tt.before == nil && !errors.Is(getErr, domain.ErrEntityNotFound):
+				t.Errorf("%s: a refused definition by %s left %+v, %v", name, who, shown, getErr)
+			case tt.before != nil && (getErr != nil || shown.Audit != tt.before.Audit || shown.Origin != "https://hooks.example.com:8443"):
+				t.Errorf("%s: a refused change by %s left %+v, %v", name, who, shown, getErr)
+			}
+		}
+	}
+	// Every refusal is in the trail: a denial of admin:GetAuditLog on the
+	// trail, by whoever was refused.
+	inTrail := map[string]int{}
+	for _, r := range f.trail(t) {
+		if r.Outcome == audit.Denied && r.Action == string(iam.ActionGetAuditLog) && r.Resource == "arn:cactusfs:admin:::audit" {
+			inTrail[strings.TrimPrefix(r.Actor, "user/u-")]++
+		}
+	}
+	if len(denied) == 0 {
+		t.Fatal("nothing was refused")
+	}
+	for who, n := range denied {
+		// Repeats of one refusal within the auditor's window may be
+		// counted into one record: at least one is there.
+		if inTrail[who] < 1 || inTrail[who] > n {
+			t.Errorf("%d refusals of %s, %d denials of admin:GetAuditLog by it in the trail", n, who, inTrail[who])
+		}
+	}
+}
+
+// ptr returns a pointer to a copy of v.
+func ptr[T any](v T) *T { return &v }
+
 // userOf names the user of a role in TestTargetsAreAuthorized.
 func userOf(role string) string {
 	return map[string]string{

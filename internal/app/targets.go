@@ -21,6 +21,10 @@ import (
 // deployment.
 const MaxTargetSecretLength = 4096
 
+// auditResource is the audit trail, to the authorizer: what GET /audit reads
+// (IAMService.AuditLog). A target that is sent the trail reads it too.
+const auditResource = "audit"
+
 // targetsResource is what the list of targets is, to the authorizer:
 // arn:cactusfs:admin:::targets.
 const targetsResource = "targets"
@@ -255,6 +259,13 @@ func (s *TargetService) Delete(ctx context.Context, p iam.Principal, name string
 // A call whose outcome is not known (domain.ErrOutcomeUnknown) may have
 // made a signing key that nobody was shown: it is replaced by asking for a
 // new one.
+//
+// A target that is sent the audit trail sends it wherever its endpoint
+// says (ADR-0025): defining one, or changing one that is - its endpoint,
+// its credentials or anything else, and turning the trail off - needs
+// admin:GetAuditLog on the trail as well as admin:PutTarget, so that whoever
+// may not read the trail cannot have it sent to an address of theirs. A
+// refusal is audited as every refusal is, and nothing is changed.
 func (s *TargetService) Put(ctx context.Context, p iam.Principal, in TargetInput) (TargetPutResult, error) {
 	record, err := s.allow(ctx, p, iam.ActionPutTarget, "target/"+in.Name)
 	if err != nil {
@@ -265,7 +276,7 @@ func (s *TargetService) Put(ctx context.Context, p iam.Principal, in TargetInput
 		return TargetPutResult{}, fmt.Errorf("targets.Put: %w", err)
 	}
 	defer unlock()
-	out, err := s.put(ctx, in, record)
+	out, err := s.put(ctx, p, in, record)
 	if err != nil {
 		return TargetPutResult{}, fmt.Errorf("targets.Put: %w", err)
 	}
@@ -280,7 +291,7 @@ func presence() iam.SealedSecret {
 	return iam.SealedSecret{Ciphertext: []byte{0}}
 }
 
-func (s *TargetService) put(ctx context.Context, in TargetInput, record audit.Record) (TargetPutResult, error) {
+func (s *TargetService) put(ctx context.Context, p iam.Principal, in TargetInput, record audit.Record) (TargetPutResult, error) {
 	if err := delivery.ValidateTargetName(in.Name); err != nil {
 		return TargetPutResult{}, err
 	}
@@ -291,6 +302,13 @@ func (s *TargetService) put(ctx context.Context, in TargetInput, record audit.Re
 	exists := err == nil
 	if err != nil && !errors.Is(err, domain.ErrEntityNotFound) {
 		return TargetPutResult{}, err
+	}
+	if in.Audit || (exists && existing.Audit) {
+		// Decided before the kind is judged, so that whoever may not read
+		// the trail learns nothing of a target that is sent it.
+		if _, err := s.allow(ctx, p, iam.ActionGetAuditLog, auditResource); err != nil {
+			return TargetPutResult{}, err
+		}
 	}
 	if exists && existing.Kind != in.Kind {
 		return TargetPutResult{}, fmt.Errorf("%w: target %s is a %s target; the kind of a target cannot be changed - delete it and define it again",
