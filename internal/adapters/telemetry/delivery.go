@@ -2,9 +2,7 @@ package telemetry
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"sync"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -76,7 +74,7 @@ func newDeliveryAttempts() *prometheus.CounterVec {
 func newEgressRefusals() *prometheus.CounterVec {
 	refusals := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cactusfs_egress_refusals_total",
-		Help: "Requests to a place outside the deployment that got no answer, by class: egress_refused (an address the policy refuses), redirect, tls, timeout, connect, internal.",
+		Help: "Requests to a place outside the deployment that got no answer, and connections to one that could not be made, by class: egress_refused (an address the policy refuses), redirect, tls, timeout, connect, internal.",
 	}, []string{"class"})
 	// The first refusal is the one that matters: every class is a series
 	// from the start.
@@ -286,67 +284,49 @@ func (d *deliveryStatus) DeliveryStatus(ctx context.Context, targets []string) (
 	return statuses, err
 }
 
-// EgressClient is what sends requests to places outside the deployment: the
-// client of the egress adapter, whose errors name an origin and never a
-// path, and carry the class of the failure.
-type EgressClient interface {
-	Do(r *http.Request) (*http.Response, error)
-	CloseIdleConnections()
-}
-
-// InstrumentEgress returns next wrapped so that every request is a span and
-// every request that gets no answer is counted by its class
+// ObserveEgress is the observer of the egress client (egress.Observer,
+// given with egress.Client.Observe): every request is a span "egress.Do",
+// from when it is sent to when the body of its answer is closed, and every
+// request that gets no answer is counted by its class
 // (cactusfs_egress_refusals_total). Nothing of the request - its URL, its
 // host, the target it is for - is a label or an attribute: a path may hold
 // a token, and a target's name is chosen by somebody.
-func (t *Telemetry) InstrumentEgress(next EgressClient) EgressClient {
-	return &egressClient{t: t, next: next}
-}
-
-type egressClient struct {
-	t    *Telemetry
-	next EgressClient
-}
-
-func (*egressClient) instrumented() {}
-
-// Do implements EgressClient. The span covers the whole exchange: it ends
-// when the body of the answer is closed, as every caller of Do must, or when
-// the request gets no answer.
-func (e *egressClient) Do(r *http.Request) (*http.Response, error) {
-	ctx, span := e.t.tracer.Start(r.Context(), "egress.Do", trace.WithSpanKind(trace.SpanKindClient))
-	resp, err := e.next.Do(r.WithContext(ctx))
-	if err != nil {
-		class := word(string(delivery.ClassOf(err)), egressClasses())
-		e.t.egressRefusals.WithLabelValues(class).Inc()
-		span.SetStatus(codes.Error, class)
+func (t *Telemetry) ObserveEgress(ctx context.Context) (context.Context, func(error)) {
+	ctx, span := t.tracer.Start(ctx, "egress.Do", trace.WithSpanKind(trace.SpanKindClient))
+	return ctx, func(err error) {
+		if err != nil {
+			class := word(string(delivery.ClassOf(err)), egressClasses())
+			t.egressRefusals.WithLabelValues(class).Inc()
+			span.SetStatus(codes.Error, class)
+		}
 		span.End()
-		return nil, err
 	}
-	if resp.Body == nil {
-		span.End()
-		return resp, nil
+}
+
+// InstrumentEgressDial returns next wrapped so that every connection it
+// makes is a span and every one it cannot make is counted by its class
+// (cactusfs_egress_refusals_total), as ObserveEgress does for requests:
+// next is the dial function of the egress client, which a client of another
+// protocol than HTTP - NATS - connects with. The span covers the dial
+// alone; what the connection carries afterwards is the client's. Nothing
+// of the address is a label or an attribute. A nil next is returned as it
+// is.
+func (t *Telemetry) InstrumentEgressDial(
+	next func(ctx context.Context, network, address string) (net.Conn, error),
+) func(ctx context.Context, network, address string) (net.Conn, error) {
+	if next == nil {
+		return nil
 	}
-	resp.Body = &spanBody{ReadCloser: resp.Body, span: span}
-	return resp, nil
-}
-
-// spanBody is the body of an answer whose closing ends the span of its
-// request.
-type spanBody struct {
-	io.ReadCloser
-	span trace.Span
-	once sync.Once
-}
-
-// Close implements io.Closer: it closes the body and ends the span, once.
-func (b *spanBody) Close() error {
-	err := b.ReadCloser.Close()
-	b.once.Do(func() { b.span.End() })
-	return err
-}
-
-// CloseIdleConnections implements EgressClient.
-func (e *egressClient) CloseIdleConnections() {
-	e.next.CloseIdleConnections()
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		ctx, span := t.tracer.Start(ctx, "egress.Dial", trace.WithSpanKind(trace.SpanKindClient))
+		defer span.End()
+		conn, err := next(ctx, network, address)
+		if err != nil {
+			class := word(string(delivery.ClassOf(err)), egressClasses())
+			t.egressRefusals.WithLabelValues(class).Inc()
+			span.SetStatus(codes.Error, class)
+			return nil, err
+		}
+		return conn, nil
+	}
 }

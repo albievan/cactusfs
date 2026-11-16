@@ -23,6 +23,7 @@ import (
 
 	"github.com/albievan/cactusfs/internal/adapters/egress"
 	"github.com/albievan/cactusfs/internal/adapters/events/webhook"
+	"github.com/albievan/cactusfs/internal/adapters/sealed"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -192,7 +193,7 @@ func target(t *testing.T, kms ports.KMS, endpoint string) delivery.Target {
 
 func newPublisher(t *testing.T, tgt delivery.Target, kms ports.KMS, client *egress.Client) *webhook.Publisher {
 	t.Helper()
-	p, err := webhook.New(tgt, kms, client, webhook.Options{Version: testVersion, Clock: porttest.NewClock(testTime)})
+	p, err := webhook.New(tgt, sealed.KMS{KMS: kms}, client, webhook.Options{Version: testVersion, Clock: porttest.NewClock(testTime)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +646,7 @@ func TestPublishCredentials(t *testing.T) {
 			kms := newKMS(t)
 			tgt := target(t, kms, rcv.endpoint(t))
 			tt.change(t, kms, &tgt)
-			p, err := webhook.New(tgt, kms, client, webhook.Options{Version: testVersion})
+			p, err := webhook.New(tgt, sealed.KMS{KMS: kms}, client, webhook.Options{Version: testVersion})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -673,39 +674,39 @@ func TestNew(t *testing.T) {
 	valid := target(t, kms, "https://hooks.example.com")
 	tests := []struct {
 		name    string
-		change  func(tgt *delivery.Target, kms *ports.KMS, client **egress.Client, opts *webhook.Options)
+		change  func(tgt *delivery.Target, secrets *sealed.Opener, client **egress.Client, opts *webhook.Options)
 		invalid bool
 	}{
-		{name: "a valid target", change: func(*delivery.Target, *ports.KMS, **egress.Client, *webhook.Options) {}},
-		{name: "a NATS target", invalid: true, change: func(tgt *delivery.Target, _ *ports.KMS, _ **egress.Client, _ *webhook.Options) {
+		{name: "a valid target", change: func(*delivery.Target, *sealed.Opener, **egress.Client, *webhook.Options) {}},
+		{name: "a NATS target", invalid: true, change: func(tgt *delivery.Target, _ *sealed.Opener, _ **egress.Client, _ *webhook.Options) {
 			tgt.Kind = delivery.KindNATS
 		}},
-		{name: "no signing key", invalid: true, change: func(tgt *delivery.Target, _ *ports.KMS, _ **egress.Client, _ *webhook.Options) {
+		{name: "no signing key", invalid: true, change: func(tgt *delivery.Target, _ *sealed.Opener, _ **egress.Client, _ *webhook.Options) {
 			tgt.SignKey = iam.SealedSecret{}
 		}},
-		{name: "an endpoint with its path", invalid: true, change: func(tgt *delivery.Target, _ *ports.KMS, _ **egress.Client, _ *webhook.Options) {
+		{name: "an endpoint with its path", invalid: true, change: func(tgt *delivery.Target, _ *sealed.Opener, _ **egress.Client, _ *webhook.Options) {
 			tgt.Endpoint += markPath
 		}},
-		{name: "an endpoint of http", invalid: true, change: func(tgt *delivery.Target, _ *ports.KMS, _ **egress.Client, _ *webhook.Options) {
+		{name: "an endpoint of http", invalid: true, change: func(tgt *delivery.Target, _ *sealed.Opener, _ **egress.Client, _ *webhook.Options) {
 			tgt.Endpoint = "http://hooks.example.com"
 		}},
-		{name: "no KMS", invalid: true, change: func(_ *delivery.Target, kms *ports.KMS, _ **egress.Client, _ *webhook.Options) {
-			*kms = nil
+		{name: "no opener of secrets", invalid: true, change: func(_ *delivery.Target, secrets *sealed.Opener, _ **egress.Client, _ *webhook.Options) {
+			*secrets = nil
 		}},
-		{name: "no client", invalid: true, change: func(_ *delivery.Target, _ *ports.KMS, client **egress.Client, _ *webhook.Options) {
+		{name: "no client", invalid: true, change: func(_ *delivery.Target, _ *sealed.Opener, client **egress.Client, _ *webhook.Options) {
 			*client = nil
 		}},
-		{name: "no version", invalid: true, change: func(_ *delivery.Target, _ *ports.KMS, _ **egress.Client, opts *webhook.Options) {
+		{name: "no version", invalid: true, change: func(_ *delivery.Target, _ *sealed.Opener, _ **egress.Client, opts *webhook.Options) {
 			opts.Version = ""
 		}},
-		{name: "a version with a space", invalid: true, change: func(_ *delivery.Target, _ *ports.KMS, _ **egress.Client, opts *webhook.Options) {
+		{name: "a version with a space", invalid: true, change: func(_ *delivery.Target, _ *sealed.Opener, _ **egress.Client, opts *webhook.Options) {
 			opts.Version = "1.0 (evil)"
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			tgt, secrets, c, opts := valid.Clone(), ports.KMS(kms), client, webhook.Options{Version: testVersion}
+			tgt, secrets, c, opts := valid.Clone(), sealed.Opener(sealed.KMS{KMS: kms}), client, webhook.Options{Version: testVersion}
 			tt.change(&tgt, &secrets, &c, &opts)
 			p, err := webhook.New(tgt, secrets, c, opts)
 			if !tt.invalid {

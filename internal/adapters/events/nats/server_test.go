@@ -152,6 +152,11 @@ func (s *fakeServer) handle(ctx context.Context, raw net.Conn) {
 	} else {
 		secured := tls.Server(raw, s.tls)
 		if err := secured.HandshakeContext(ctx); err != nil {
+			// The alert is sent; what the client writes meanwhile is
+			// read, until it closes, so that it reads the alert - a
+			// close now would reset its write first on Windows.
+			_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
+			_, _ = io.Copy(io.Discard, raw)
 			return
 		}
 		conn = secured

@@ -47,6 +47,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/albievan/cactusfs/internal/adapters/egress"
+	"github.com/albievan/cactusfs/internal/adapters/sealed"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -74,42 +75,6 @@ var (
 	// not deduplicate it, nor a consumer tell what it is.
 	ErrNoEventID = errors.New("nats: a message needs an ID and a type")
 )
-
-// Secrets opens what a target holds sealed.
-type Secrets interface {
-	// Open returns the plaintext of sealed, which was sealed with aad.
-	// The caller clears it when it is done with it.
-	Open(ctx context.Context, sealed iam.SealedSecret, aad []byte) ([]byte, error)
-}
-
-// KMSSecrets opens a sealed field of a target through the KMS that sealed
-// it, as the secrets of API keys are opened: the data key is unwrapped with
-// the field's additional data, which binds it to the target and the field.
-type KMSSecrets struct {
-	// KMS is the node's KMS.
-	KMS ports.KMS
-}
-
-// Open implements Secrets. A secret sealed under another KMS key than the
-// node's wraps domain.ErrKeyUnavailable.
-func (s KMSSecrets) Open(ctx context.Context, sealed iam.SealedSecret, aad []byte) ([]byte, error) {
-	if s.KMS == nil {
-		return nil, fmt.Errorf("nats.KMSSecrets: %w: no KMS", domain.ErrKeyUnavailable)
-	}
-	if sealed.KMSKeyID != s.KMS.KeyID() {
-		return nil, fmt.Errorf("nats.KMSSecrets: %w: sealed under another KMS key", domain.ErrKeyUnavailable)
-	}
-	key, err := s.KMS.UnwrapDataKey(ctx, sealed.WrappedKey, aad)
-	if err != nil {
-		return nil, fmt.Errorf("nats.KMSSecrets: %w", err)
-	}
-	defer clear(key)
-	plain, err := sealed.Open(key, aad)
-	if err != nil {
-		return nil, fmt.Errorf("nats.KMSSecrets: %w", err)
-	}
-	return plain, nil
-}
 
 // session is what a publisher needs of a connection to a server with
 // JetStream. The tests stand a fake in for it.
@@ -149,14 +114,15 @@ type Publisher struct {
 
 // New returns the publisher of a target of kind nats. It connects to
 // nothing: the connection is made by the first Publish, through dial, with
-// the secret secrets opens. dial is the dial function of the egress client
+// the secret secrets opens (sealed.KMS over the node's KMS) when the
+// connection is made. dial is the dial function of the egress client
 // (egress.NewClient).
 //
 // A target that is not of kind nats, has no subject, has an endpoint that
 // is not one or certificates that cannot be read, or proves itself in a way
 // a NATS server is not proved to, is refused with an error that wraps
 // domain.ErrInvalidArgument, of class delivery.ClassInternal.
-func New(target delivery.Target, secrets Secrets, dial egress.DialFunc) (*Publisher, error) {
+func New(target delivery.Target, secrets sealed.Opener, dial egress.DialFunc) (*Publisher, error) {
 	if dial == nil || secrets == nil {
 		return nil, delivery.Failed(delivery.ClassInternal, fmt.Errorf("nats.New: %w: no dial function or no secrets", domain.ErrInvalidArgument))
 	}
@@ -348,7 +314,8 @@ func classOf(ctx context.Context, err error) delivery.Class {
 	case errors.Is(err, natsgo.ErrNoServers) || errors.Is(err, natsgo.ErrConnectionClosed) ||
 		errors.Is(err, natsgo.ErrDisconnected) || errors.Is(err, natsgo.ErrStaleConnection) ||
 		errors.Is(err, natsgo.ErrConnectionReconnecting) || errors.Is(err, natsgo.ErrNoInfoReceived) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed):
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		socketFailed(err):
 		return delivery.ClassConnect
 	case errors.Is(err, natsgo.ErrMaxPayload) || errors.Is(err, jetstream.ErrStreamMessageExceedsMaximum):
 		// A message larger than the server or the stream takes. The
@@ -361,6 +328,17 @@ func classOf(ctx context.Context, err error) delivery.Class {
 		return delivery.ClassServer
 	}
 	return delivery.ClassInternal
+}
+
+// socketFailed reports a read or write of the connection that failed - a
+// reset, an abort - that no case before it named: a connection that ended,
+// whatever the system calls it. A timeout and an alert of the server are
+// classed before it is asked. On Windows a server that closes at once
+// after its alert resets the connection before the alert can be read, so
+// the alert itself may never be seen.
+func socketFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && (op.Op == "read" || op.Op == "write")
 }
 
 // remoteAlert reports whether err is a TLS alert the server sent after the
@@ -385,14 +363,14 @@ type connector struct {
 	auth    delivery.Auth
 	sealed  iam.SealedSecret
 	aad     []byte
-	secrets Secrets
+	secrets sealed.Opener
 	dial    egress.DialFunc
 	// async is told the errors the server sends outside an answer.
 	async func(error)
 }
 
 // newConnector checks target and returns what connects to it.
-func newConnector(target delivery.Target, secrets Secrets, dial egress.DialFunc) (*connector, error) {
+func newConnector(target delivery.Target, secrets sealed.Opener, dial egress.DialFunc) (*connector, error) {
 	if target.Kind != delivery.KindNATS {
 		return nil, fmt.Errorf("%w: %s is not of kind nats", domain.ErrInvalidArgument, target)
 	}

@@ -151,8 +151,32 @@ type DialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 
 // Client sends HTTP requests under a policy. It is an *http.Client whose
 // errors name the origin of a request and never its path or query.
+//
+// Only NewClient makes one, so that whoever takes a *Client - an adapter
+// that delivers - takes the hardened client and nothing else. Observe gives
+// the client an observer - the telemetry of the egress boundary - that is
+// told of every request; it sees requests and answers, and has no way to
+// send one itself or to stand in for the transport.
 type Client struct {
 	http *http.Client
+	// observe, when not nil, is told of every request Do sends.
+	observe Observer
+}
+
+// Observer is told of a request as it is sent: it returns the context the
+// request is sent with - one that carries a span, say - and a function it
+// is told the outcome with, once: nil when the body of the answer is
+// closed, as every caller of Do must close it, or the error of a request
+// that got no answer. The error has its class (delivery.ClassOf) and names
+// nothing of the request but its origin. The observer is given nothing it
+// could send with, and nothing of the answer.
+type Observer func(ctx context.Context) (context.Context, func(err error))
+
+// Observe returns a client that sends as c does, through the same
+// transport and its connections, and tells observe of every request. The
+// observer of c, if it has one, is replaced; c itself is unchanged.
+func (c *Client) Observe(observe Observer) *Client {
+	return &Client{http: c.http, observe: observe}
 }
 
 // Do sends r and returns the response, as http.Client.Do does - but for
@@ -168,6 +192,39 @@ type Client struct {
 // writing: a request body that the caller's reader hands over more slowly
 // than that is no progress either, and fails as a timeout.
 func (c *Client) Do(r *http.Request) (*http.Response, error) {
+	if c.observe == nil {
+		return c.do(r)
+	}
+	ctx, done := c.observe(r.Context())
+	resp, err := c.do(r.WithContext(ctx))
+	switch {
+	case err != nil:
+		done(err)
+	case resp.Body == nil:
+		done(nil)
+	default:
+		resp.Body = &observedBody{ReadCloser: resp.Body, done: done}
+	}
+	return resp, err
+}
+
+// observedBody is the body of a response whose closing tells the observer
+// of its request, once.
+type observedBody struct {
+	io.ReadCloser
+	done func(error)
+	once sync.Once
+}
+
+// Close implements io.Closer: it closes the body and tells the observer.
+func (b *observedBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { b.done(nil) })
+	return err
+}
+
+// do sends r through the transport of NewClient.
+func (c *Client) do(r *http.Request) (*http.Response, error) {
 	resp, err := c.http.Do(r)
 	if err == nil {
 		if resp.StatusCode >= 300 && resp.StatusCode <= 399 {

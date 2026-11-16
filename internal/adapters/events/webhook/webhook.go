@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/albievan/cactusfs/internal/adapters/egress"
+	"github.com/albievan/cactusfs/internal/adapters/sealed"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
@@ -112,7 +113,7 @@ func (systemClock) Now() time.Time { return time.Now() }
 // the name and the kind of its target.
 type Publisher struct {
 	target    delivery.Target
-	secrets   ports.KMS
+	secrets   sealed.Opener
 	client    *egress.Client
 	clock     ports.Clock
 	userAgent string
@@ -120,9 +121,9 @@ type Publisher struct {
 
 var _ ports.EventPublisher = (*Publisher)(nil)
 
-// New returns the publisher of a target of kind webhook. secrets is the KMS
-// the target's sealed fields were sealed through: they are opened with it at
-// every attempt, and never kept open. client is the egress client made for
+// New returns the publisher of a target of kind webhook. secrets opens the
+// target's sealed fields - sealed.KMS over the KMS they were sealed through:
+// they are opened with it at every attempt, and never kept open. client is the egress client made for
 // the target - with its CA as the roots, and the setting egress-allow - and
 // is the only way the publisher reaches the network.
 //
@@ -130,12 +131,12 @@ var _ ports.EventPublisher = (*Publisher)(nil)
 // with a signing key: nothing is sent unsigned. The error wraps
 // domain.ErrInvalidArgument and repeats nothing of the target but its name.
 // New connects to nothing.
-func New(target delivery.Target, secrets ports.KMS, client *egress.Client, opts Options) (*Publisher, error) {
+func New(target delivery.Target, secrets sealed.Opener, client *egress.Client, opts Options) (*Publisher, error) {
 	switch {
 	case target.Kind != delivery.KindWebhook:
 		return nil, fmt.Errorf("webhook.New: %w: %s is not a webhook", domain.ErrInvalidArgument, target)
 	case secrets == nil || client == nil:
-		return nil, fmt.Errorf("webhook.New: %w: no KMS or no client", domain.ErrInvalidArgument)
+		return nil, fmt.Errorf("webhook.New: %w: no opener of secrets or no client", domain.ErrInvalidArgument)
 	case !versionText(opts.Version):
 		return nil, fmt.Errorf("webhook.New: %w: the version is not one a User-Agent can name", domain.ErrInvalidArgument)
 	case !target.SignKeySet():
@@ -324,16 +325,8 @@ func (p *Publisher) endpointURL(endpoint string) (*url.URL, error) {
 
 // open opens a sealed field of the target, bound to it by aad. The caller
 // clears what it returns.
-func (p *Publisher) open(ctx context.Context, sealed iam.SealedSecret, aad []byte) ([]byte, error) {
-	if sealed.KMSKeyID != p.secrets.KeyID() {
-		return nil, fmt.Errorf("%w: %w: sealed under another KMS key", ErrCredential, domain.ErrKeyUnavailable)
-	}
-	key, err := p.secrets.UnwrapDataKey(ctx, sealed.WrappedKey, aad)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCredential, err)
-	}
-	defer clear(key)
-	plain, err := sealed.Open(key, aad)
+func (p *Publisher) open(ctx context.Context, field iam.SealedSecret, aad []byte) ([]byte, error) {
+	plain, err := p.secrets.Open(ctx, field, aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrCredential, err)
 	}
@@ -401,6 +394,13 @@ func headerText(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// ValidVersion reports whether v is a version a Publisher can name in its
+// User-Agent (Options.Version): 1 to 64 letters, digits, '.', '-', '+' and
+// '_'. New refuses any other.
+func ValidVersion(v string) bool {
+	return versionText(v)
 }
 
 // versionText reports whether v can be named in a User-Agent: 1 to 64

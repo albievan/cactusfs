@@ -3,7 +3,6 @@ package nats
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -19,11 +18,11 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/albievan/cactusfs/internal/adapters/sealed"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 	"github.com/albievan/cactusfs/internal/ports"
-	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
 // Marked values: what must never be in an error's text.
@@ -228,6 +227,7 @@ func TestPublishClasses(t *testing.T) {
 		"no server could be reached":    {connectErr: natsgo.ErrNoServers, want: delivery.ClassConnect},
 		"the connection was closed":     {publishErr: natsgo.ErrConnectionClosed, want: delivery.ClassConnect},
 		"the connection ended":          {publishErr: io.EOF, want: delivery.ClassConnect},
+		"the connection was reset":      {connectErr: fmt.Errorf("connect: %w", &net.OpError{Op: "write", Net: "tcp", Err: errors.New("reset by peer")}), want: delivery.ClassConnect},
 		"the stream refused":            {publishErr: fmt.Errorf("nats: %w", apiErr), want: delivery.ClassServer, kept: true},
 		"no acknowledgement to be read": {publishErr: jetstream.ErrInvalidJSAck, want: delivery.ClassServer, kept: true},
 		"the server is full":            {connectErr: natsgo.ErrMaxConnectionsExceeded, want: delivery.ClassServer},
@@ -415,7 +415,7 @@ func TestNewRefuses(t *testing.T) {
 	}
 	tests := map[string]struct {
 		target  delivery.Target
-		secrets Secrets
+		secrets sealed.Opener
 		dial    func(context.Context, string, string) (net.Conn, error)
 	}{
 		"a webhook":                  {target: change(func(x *delivery.Target) { x.Kind = delivery.KindWebhook })},
@@ -551,49 +551,6 @@ func TestConnectFailsWhenTheSecretDoesNotOpen(t *testing.T) {
 	}
 	if dialled {
 		t.Error("dialled without a credential")
-	}
-}
-
-func TestKMSSecrets(t *testing.T) {
-	t.Parallel()
-	kms, err := porttest.NewKMS("kms-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	aad := delivery.SecretAAD("events")
-	key, err := kms.GenerateDataKey(ctx, aad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed, err := iam.Seal(key.Plaintext, rand.Reader, []byte(markedValue), aad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed.KMSKeyID, sealed.WrappedKey = kms.KeyID(), key.Wrapped
-
-	plain, err := KMSSecrets{KMS: kms}.Open(ctx, sealed, aad)
-	if err != nil || string(plain) != markedValue {
-		t.Fatalf("Open = %q, %v", plain, err)
-	}
-	other := sealed
-	other.KMSKeyID = "kms-2"
-	tests := map[string]struct {
-		s      KMSSecrets
-		sealed iam.SealedSecret
-		aad    []byte
-	}{
-		"no KMS":                      {s: KMSSecrets{}, sealed: sealed, aad: aad},
-		"another KMS key":             {s: KMSSecrets{KMS: kms}, sealed: other, aad: aad},
-		"the field of another target": {s: KMSSecrets{KMS: kms}, sealed: sealed, aad: delivery.SecretAAD("other")},
-		"the signing key's field":     {s: KMSSecrets{KMS: kms}, sealed: sealed, aad: delivery.SignKeyAAD("events")},
-	}
-	for name, tc := range tests {
-		if plain, err := tc.s.Open(ctx, tc.sealed, tc.aad); err == nil || plain != nil {
-			t.Errorf("%s: Open = %q, %v", name, plain, err)
-		} else if strings.Contains(chainText(err), markedValue) {
-			t.Errorf("%s: the error tells the secret", name)
-		}
 	}
 }
 

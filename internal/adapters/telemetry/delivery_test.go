@@ -3,13 +3,13 @@ package telemetry_test
 import (
 	"context"
 	"errors"
-	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/albievan/cactusfs/internal/adapters/telemetry"
 	"github.com/albievan/cactusfs/internal/domain"
@@ -170,21 +170,6 @@ func TestOutboxAndDeliveryStatusAreCountedAndTraced(t *testing.T) {
 	wantNothingOf(t, tel, recorder, "secret", "site-b", "MARK-7c1e", "hooks.example")
 }
 
-// egressAnswer is an egress client that answers as it is told.
-type egressAnswer struct {
-	err    error
-	closed int
-}
-
-func (e *egressAnswer) Do(r *http.Request) (*http.Response, error) {
-	if e.err != nil {
-		return nil, e.err
-	}
-	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: r}, nil
-}
-
-func (e *egressAnswer) CloseIdleConnections() { e.closed++ }
-
 // TestEgressRefusalsAreCountedByClass: a request to a place outside the
 // deployment that gets no answer is counted by the class of the failure, one
 // that is answered is not, every class is a series from the start - and
@@ -194,8 +179,6 @@ func TestEgressRefusalsAreCountedByClass(t *testing.T) {
 	t.Parallel()
 	recorder := tracetest.NewSpanRecorder()
 	tel := newTelemetry(t, recorder)
-	const target = "https://MARK-egress.example/hooks/token-MARK-path"
-
 	before := gauges(t, tel)
 	for _, class := range []string{"egress_refused", "redirect", "tls", "timeout", "connect", "internal"} {
 		if value, ok := before["cactusfs_egress_refusals_total{class="+class+"}"]; !ok || value != 0 {
@@ -209,37 +192,19 @@ func TestEgressRefusalsAreCountedByClass(t *testing.T) {
 		errors.New("no class at all: MARK-egress"),
 		nil,
 	} {
-		client := &egressAnswer{err: failure}
-		instrumented := tel.InstrumentEgress(client)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, target, http.NoBody)
-		if err != nil {
-			t.Fatal(err)
+		ctx, done := tel.ObserveEgress(context.Background())
+		if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
+			t.Error("the request is not sent in the span of the egress boundary")
 		}
-		resp, err := instrumented.Do(req)
-		status := 0
-		if resp != nil {
-			status = resp.StatusCode
-			// The span covers the reading of the body: it ends when the
-			// body is closed, and not before.
-			ended := len(recorder.Ended())
-			if len(recorder.Started()) != ended+1 {
-				t.Error("the span of a request ended before the body of its answer was closed")
-			}
-			_ = resp.Body.Close()
-			_ = resp.Body.Close()
-			if len(recorder.Ended()) != ended+1 {
-				t.Errorf("%d spans ended when the body was closed twice, want 1", len(recorder.Ended())-ended)
-			}
+		// The span covers the exchange: it ends when the outcome is told
+		// - for an answer, when its body is closed - and not before.
+		ended := len(recorder.Ended())
+		if len(recorder.Started()) != ended+1 {
+			t.Error("the span of a request ended before its outcome was told")
 		}
-		switch {
-		case failure == nil && (err != nil || status != http.StatusNoContent):
-			t.Errorf("an answered request = %d, %v", status, err)
-		case failure != nil && (!errors.Is(err, failure) || status != 0):
-			t.Errorf("a failed request = %d, %v; want %v", status, err, failure)
-		}
-		instrumented.CloseIdleConnections()
-		if client.closed != 1 {
-			t.Error("CloseIdleConnections is not passed on")
+		done(failure)
+		if len(recorder.Ended()) != ended+1 {
+			t.Errorf("%d spans ended when the outcome was told, want 1", len(recorder.Ended())-ended)
 		}
 	}
 	got := gauges(t, tel)
@@ -250,9 +215,6 @@ func TestEgressRefusalsAreCountedByClass(t *testing.T) {
 	}
 	if !contains(spanNames(recorder), "egress.Do") {
 		t.Errorf("no span named egress.Do among %v", spanNames(recorder))
-	}
-	if _, ok := tel.InstrumentEgress(&egressAnswer{}).(telemetry.Instrumented); !ok {
-		t.Error("the decorator of the egress client is not telemetry.Instrumented")
 	}
 	wantNothingOf(t, tel, recorder, "MARK", "hooks", "token")
 }
