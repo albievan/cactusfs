@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<NotificationConfiguration><QueueConfiguration><Queue>arn:cactusfs:notify:::&#104;ook</Queue><Event>s3:ObjectCreated:Put</Event></QueueConfiguration></NotificationConfiguration>")

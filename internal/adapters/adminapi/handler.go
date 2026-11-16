@@ -185,6 +185,10 @@ type Config struct {
 	// may be nil on a node that was not given the use case: its operations
 	// then answer 501.
 	Quotas *app.QuotaService
+	// Notifications reads, sets and removes the notification rules of
+	// buckets (ADR-0025). It may be nil on a node that was not given the
+	// use case: its operations then answer 501.
+	Notifications *app.NotificationService
 	// Counter has the usage of a bucket counted again when asked
 	// (ADR-0023). It may be nil on a node that was not given the use case:
 	// the recount then answers 501.

@@ -18,7 +18,9 @@ import (
 )
 
 // Bucket policy, cross-origin rules and tags: the sub-resources ?policy,
-// ?cors and ?tagging of a bucket, and ?tagging of an object.
+// ?cors and ?tagging of a bucket, and ?tagging of an object. Lifecycle and
+// notification rules, routed here too, are in lifecycle.go and
+// notification.go.
 
 const headerTagging = "x-amz-tagging"
 
@@ -320,21 +322,28 @@ func (h *Handler) routeBucketConfig(ctx context.Context, req *request, query url
 		ops = operations{"tagging", h.getBucketTagging, h.putBucketTagging, h.deleteBucketTagging}
 	case query.Has("lifecycle"):
 		ops = operations{"lifecycle", h.getBucketLifecycle, h.putBucketLifecycle, h.deleteBucketLifecycle}
+	case query.Has("notification"):
+		ops = operations{"notification", h.getBucketNotification, h.putBucketNotification, nil}
 	default:
 		return false, nil
 	}
 	if err := allowQuery(query, ops.name); err != nil {
 		return true, err
 	}
-	title := map[string]string{"policy": "BucketPolicy", "cors": "BucketCors", "tagging": "BucketTagging", "lifecycle": "BucketLifecycle"}[ops.name]
-	switch req.Method {
-	case http.MethodGet:
+	title := map[string]string{
+		"policy": "BucketPolicy", "cors": "BucketCors", "tagging": "BucketTagging", "lifecycle": "BucketLifecycle",
+		"notification": "BucketNotificationConfiguration",
+	}[ops.name]
+	// S3 has no DELETE of every sub-resource: one without is refused as
+	// any other method is, and is no operation of the sub-resource.
+	switch {
+	case req.Method == http.MethodGet:
 		req.operation = "Get" + title
 		return true, ops.get(ctx, req)
-	case http.MethodPut:
+	case req.Method == http.MethodPut:
 		req.operation = "Put" + title
 		return true, ops.put(ctx, req)
-	case http.MethodDelete:
+	case req.Method == http.MethodDelete && ops.remove != nil:
 		req.operation = "Delete" + title
 		return true, ops.remove(ctx, req)
 	default:

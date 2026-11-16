@@ -1180,10 +1180,11 @@ func (o *operations) ListAudit(ctx context.Context, request api.ListAuditRequest
 // The operations below that answer notYet are in the contract and have no
 // use case yet: the contract comes first, and each is written with the step
 // of PLAN.md that names it (targets were, with PLAN 8.0.13, their status
-// comes with 8.0.14; quotas were, with PLAN 8.3.3). Until then a caller that has authenticated is told 501, as for
-// any operation this node was not given the use case for - which says
-// nothing of any bucket or target, so it is said before anybody is asked
-// what the caller may do.
+// comes with 8.0.14; quotas were, with PLAN 8.3.3; the notification rules
+// of buckets were, with PLAN 8.2.2). Until then a caller that has
+// authenticated is told 501, as for any operation this node was not given
+// the use case for - which says nothing of any bucket or target, so it is
+// said before anybody is asked what the caller may do.
 
 // notYet is the answer of an operation that is not written yet.
 func notYet(operation string) error {
@@ -1843,19 +1844,98 @@ func targetStatusOf(s ports.TargetStatus) api.TargetStatus {
 	}
 }
 
-// GetBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
-func (o *operations) GetBucketNotifications(context.Context, api.GetBucketNotificationsRequestObject) (api.GetBucketNotificationsResponseObject, error) {
-	return nil, notYet("notifications")
+// --- notification rules of buckets (ADR-0025) ---
+//
+// Who may read or change a bucket's rules, and which targets they may name,
+// is the use case's to decide (NotificationService): it asks the single
+// authorizer, judges every target named, and records each change. These
+// carry the rules between the contract and the use case.
+
+// notifications is the use case of notification rules, or the answer of a
+// node that was not given it.
+func (o *operations) notifications() (*app.NotificationService, error) {
+	if o.h.cfg.Notifications == nil {
+		return nil, notYet("notifications")
+	}
+	return o.h.cfg.Notifications, nil
 }
 
-// PutBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
-func (o *operations) PutBucketNotifications(context.Context, api.PutBucketNotificationsRequestObject) (api.PutBucketNotificationsResponseObject, error) {
-	return nil, notYet("notifications")
+// bucketNotificationsOf maps the rules of a bucket to the contract, in
+// their order; no rules is an empty list. A prefix or a suffix that is
+// none is left out.
+func bucketNotificationsOf(config bucket.NotificationConfig) api.BucketNotifications {
+	rules := make([]api.NotificationRule, len(config.Rules))
+	for i, r := range config.Rules {
+		events := make([]api.NotificationRuleEvents, len(r.On))
+		for n, event := range r.On {
+			events[n] = api.NotificationRuleEvents(event)
+		}
+		rules[i] = api.NotificationRule{
+			Id: r.ID, As: api.NotificationRuleAs(r.As), Target: r.Target, Events: events,
+			Prefix: stringOrNil(r.Prefix), Suffix: stringOrNil(r.Suffix),
+		}
+	}
+	return api.BucketNotifications{Rules: rules}
 }
 
-// DeleteBucketNotifications implements api.StrictServerInterface (PLAN 8.2.2).
-func (o *operations) DeleteBucketNotifications(context.Context, api.DeleteBucketNotificationsRequestObject) (api.DeleteBucketNotificationsResponseObject, error) {
-	return nil, notYet("notifications")
+// notificationRulesOf maps the rules of a request to the use case's. What
+// the caller leaves out - the ID, whether it is a queue or a topic - the use
+// case fills in; a kind of change or a kind of rule that is none is the use
+// case's to refuse.
+func notificationRulesOf(body api.BucketNotificationsPut) bucket.NotificationConfig {
+	var config bucket.NotificationConfig
+	for _, r := range body.Rules {
+		on := make([]delivery.Event, len(r.Events))
+		for n, event := range r.Events {
+			on[n] = delivery.Event(event)
+		}
+		config.Rules = append(config.Rules, bucket.NotificationRule{
+			ID: r.Id, As: string(optional(r.As)), Target: r.Target, On: on, Prefix: optional(r.Prefix), Suffix: optional(r.Suffix),
+		})
+	}
+	return config
+}
+
+// GetBucketNotifications implements api.StrictServerInterface.
+func (o *operations) GetBucketNotifications(ctx context.Context, request api.GetBucketNotificationsRequestObject) (api.GetBucketNotificationsResponseObject, error) {
+	notifications, err := o.notifications()
+	if err != nil {
+		return nil, err
+	}
+	config, err := notifications.Get(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketNotifications200JSONResponse(bucketNotificationsOf(config)), nil
+}
+
+// PutBucketNotifications implements api.StrictServerInterface. No rules
+// removes them.
+func (o *operations) PutBucketNotifications(ctx context.Context, request api.PutBucketNotificationsRequestObject) (api.PutBucketNotificationsResponseObject, error) {
+	notifications, err := o.notifications()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	kept, err := notifications.Set(ctx, who(ctx), request.Bucket, notificationRulesOf(*request.Body))
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketNotifications200JSONResponse(bucketNotificationsOf(kept)), nil
+}
+
+// DeleteBucketNotifications implements api.StrictServerInterface.
+func (o *operations) DeleteBucketNotifications(ctx context.Context, request api.DeleteBucketNotificationsRequestObject) (api.DeleteBucketNotificationsResponseObject, error) {
+	notifications, err := o.notifications()
+	if err != nil {
+		return nil, err
+	}
+	if err := notifications.Delete(ctx, who(ctx), request.Bucket); err != nil {
+		return nil, err
+	}
+	return api.DeleteBucketNotifications204Response{}, nil
 }
 
 // GetBucketReplication implements api.StrictServerInterface (PLAN 8.1.3).

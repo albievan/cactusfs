@@ -120,8 +120,12 @@ type Config struct {
 	Buckets    Buckets
 	Objects    Objects
 	Identities Identities
-	Clock      ports.Clock
-	Logger     *slog.Logger
+	// Notifications reads and sets the notification rules of buckets
+	// (ADR-0025). It may be nil on a node that was not given the use
+	// case: ?notification then answers 501.
+	Notifications Notifications
+	Clock         ports.Clock
+	Logger        *slog.Logger
 	// Region is the region name reported to clients; DefaultRegion when
 	// empty.
 	Region string

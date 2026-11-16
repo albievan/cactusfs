@@ -54,7 +54,9 @@ type xmlShape map[string][]string
 // element carries an attribute other than the namespace of the root. The
 // flat list of decodeStrictXML would accept a known element in the wrong
 // place, and the decoder would then drop it without a word - a rule read
-// without its prefix is a rule about every key.
+// without its prefix is a rule about every key. For the same reason text in
+// an element the shape gives children to is malformed, and so is an element
+// of a namespace other than the root's, whose own namespace is none or S3's.
 //
 // When the document has an element that notImplemented names, wherever it
 // is, the error is errNotImplemented.
@@ -78,6 +80,9 @@ func decodeShapedXML(body io.Reader, limit int64, into any, shape xmlShape, notI
 	decoder.Strict = true
 	var open []string
 	misplaced := false
+	// space is the namespace of the root: none, or S3's. An element of
+	// another is not one of the shape's, whatever its local name.
+	space, rooted := "", false
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
@@ -86,14 +91,23 @@ func decodeShapedXML(body io.Reader, limit int64, into any, shape xmlShape, notI
 		if err != nil {
 			return errMalformedXML
 		}
+		parent := ""
+		if len(open) > 0 {
+			parent = open[len(open)-1]
+		}
 		switch t := token.(type) {
 		case xml.StartElement:
 			if slices.Contains(notImplemented, t.Name.Local) {
 				return errNotImplemented()
 			}
-			parent := ""
-			if len(open) > 0 {
-				parent = open[len(open)-1]
+			if !rooted {
+				space, rooted = t.Name.Space, true
+				if space != "" && space != s3Namespace {
+					misplaced = true
+				}
+			}
+			if t.Name.Space != "" && t.Name.Space != space {
+				misplaced = true
 			}
 			for _, attr := range t.Attr {
 				namespace := attr.Name.Local == "xmlns" && attr.Name.Space == ""
@@ -107,6 +121,13 @@ func decodeShapedXML(body io.Reader, limit int64, into any, shape xmlShape, notI
 			open = append(open, t.Name.Local)
 		case xml.EndElement:
 			open = open[:len(open)-1]
+		case xml.CharData:
+			// Text in an element that holds elements would be dropped by
+			// the decoder: a filter written as text is no filter, and a
+			// rule written as text is no rule.
+			if _, container := shape[parent]; container && len(bytes.TrimSpace(t)) > 0 {
+				misplaced = true
+			}
 		}
 	}
 	if misplaced {

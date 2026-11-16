@@ -95,7 +95,9 @@ func newTLSTestServer(t *testing.T) *testServer {
 	return startTestServer(t, "", true)
 }
 
-func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
+// startTestServer starts the test server; tune, when given, completes the
+// handler's configuration before it is made.
+func startTestServer(t *testing.T, domainName string, secure bool, tune ...func(*Config)) *testServer {
 	t.Helper()
 	ctx := context.Background()
 
@@ -157,10 +159,19 @@ func startTestServer(t *testing.T, domainName string, secure bool) *testServer {
 	if err != nil {
 		t.Fatalf("NewObjectService: %v", err)
 	}
-	handler := NewHandler(Config{
+	config := Config{
 		Buckets: app.NewBucketService(s.meta, authz, clock), Objects: s.objects, Identities: identities,
+		// The rules of notifications name targets of the store, as on a
+		// node.
+		Notifications: app.NewNotificationService(app.NotificationServiceConfig{
+			Buckets: s.meta, Targets: s.meta, Authz: authz, Auditor: s.auditor,
+		}),
 		Clock: clock, Logger: logger, Domain: domainName, Observe: s.seen.add,
-	})
+	}
+	for _, change := range tune {
+		change(&config)
+	}
+	handler := NewHandler(config)
 	if secure {
 		s.Server = httptest.NewTLSServer(handler)
 	} else {

@@ -270,11 +270,13 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 	}
 	f.updates = updates(f)
 	config := adminapi.Config{
-		Updates:    f.updates,
-		Quotas:     f.quotas,
-		Counter:    f.counter,
-		Targets:    targets,
-		SubBuckets: app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
+		Updates: f.updates,
+		Quotas:  f.quotas,
+		Counter: f.counter,
+		Targets: targets,
+		// The notification rules of buckets name the targets above.
+		Notifications: app.NewNotificationService(app.NotificationServiceConfig{Buckets: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
+		SubBuckets:    app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
 		// The catalogue of tags carries its audit record to the trail, as
 		// targets do.
 		TagDefinitions: app.NewTagDefinitionService(app.TagDefinitionServiceConfig{Store: meta, Authz: authz, Auditor: f.auditor, Clock: f.clock}),
@@ -1667,8 +1669,8 @@ func TestTargetStatus(t *testing.T) {
 	}
 }
 
-// TestOperationsThatAreNotWrittenYet: the operations of notifications and
-// replication are in the contract before their use cases
+// TestOperationsThatAreNotWrittenYet: the operations of replication are in
+// the contract before their use cases
 // (PLAN 8.0.3). Until each is written it answers 501 as a problem, to a
 // caller it has authenticated - to any such caller: the authorizer is not
 // asked, because there is nothing yet that it could let through - and says
@@ -1682,9 +1684,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 	// The request without a body says the media type all the same: the
 	// adapter takes no POST that does not, and the contract says so.
 	for _, c := range []call{
-		{method: "GET", path: "/buckets/some-bucket/notifications"},
-		{method: "PUT", path: "/buckets/some-bucket/notifications", body: map[string]any{"rules": []any{}}},
-		{method: "DELETE", path: "/buckets/some-bucket/notifications"},
 		{method: "GET", path: "/buckets/some-bucket/replication"},
 		{method: "PUT", path: "/buckets/some-bucket/replication", body: map[string]any{"target": "site-b", "destination_bucket": "copy", "rules": []any{}}},
 		{method: "DELETE", path: "/buckets/some-bucket/replication"},
