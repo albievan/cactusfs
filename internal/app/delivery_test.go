@@ -41,6 +41,7 @@ func (bubbleClock) Now() time.Time { return time.Now() }
 type ackCall struct {
 	target  string
 	upto    delivery.Seq
+	audit   uint64
 	results []delivery.Result
 }
 
@@ -235,11 +236,18 @@ func (f *fakeOutbox) AckOutbox(ctx context.Context, target string, upto delivery
 	if len(results) > 0 && f.targets[target].Kind != delivery.KindS3 {
 		return 0, fmt.Errorf("%w: results for a target of kind %s", domain.ErrInvalidArgument, f.targets[target].Kind)
 	}
-	if last := f.items[len(f.items)-1].Seq; upto.After(last) {
-		upto = last
+	if len(f.items) > 0 {
+		if last := f.items[len(f.items)-1].Seq; upto.After(last) {
+			upto = last
+		}
+	}
+	// The cursor of the audit trail moves for a target that is sent it,
+	// and for no other.
+	if !f.targets[target].Audit {
+		auditUpto = 0
 	}
 	f.cursors[target] = cursor.Advanced(upto, auditUpto)
-	f.acks = append(f.acks, ackCall{target: target, upto: upto, results: slices.Clone(results)})
+	f.acks = append(f.acks, ackCall{target: target, upto: upto, audit: auditUpto, results: slices.Clone(results)})
 	return 0, nil
 }
 

@@ -152,6 +152,12 @@ type DeliveryWorkerConfig struct {
 	// OutboxReportEvery, and once more when the node's lead ends. Its Run
 	// must outlast the worker's for that last record to be written.
 	Auditor *Auditor
+	// AuditExport, when not nil, sends the audit trail to every target
+	// that is to be sent it (delivery.Target.Audit), from the record after
+	// its cursor's AuditAcked on, in sequence (ADR-0025; auditexport.go).
+	// Nil sends the trail to no target, and leaves their cursors where
+	// they are.
+	AuditExport *AuditExporter
 }
 
 // DeliveryWorker delivers the rows of the outbox to their targets, on the
@@ -180,6 +186,7 @@ type DeliveryWorker struct {
 	attemptTimeout time.Duration
 	onAttempt      func(delivery.Kind, delivery.Class)
 	auditor        *Auditor
+	auditExport    *AuditExporter
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
@@ -200,7 +207,7 @@ func NewDeliveryWorker(cfg DeliveryWorkerConfig) *DeliveryWorker {
 	w := &DeliveryWorker{
 		targets: cfg.Targets, outbox: cfg.Outbox, deliverers: map[delivery.ConsumerKind]Deliverer{}, active: cfg.Active,
 		clock: cfg.Clock, logger: cfg.Logger, attemptTimeout: cfg.AttemptTimeout, onAttempt: cfg.OnAttempt, entropy: cfg.Entropy,
-		auditor: cfg.Auditor,
+		auditor: cfg.Auditor, auditExport: cfg.AuditExport,
 	}
 	for kind, deliverer := range cfg.Deliverers {
 		if deliverer != nil {
@@ -333,7 +340,7 @@ const outboxTargetsBytes = 512
 // and ends with the session.
 func (s *deliverySession) start(ctx context.Context, run *targetRun, loop func(context.Context)) {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	run.cancel = cancel
+	run.ctx, run.cancel = runCtx, cancel
 	stop := s.whenEnded(cancel)
 	s.loops.Go(func() {
 		defer stop()
@@ -437,6 +444,7 @@ func (w *DeliveryWorker) refresh(ctx context.Context, s *deliverySession) {
 		cursor, known := cursors[target.Name]
 		if run, ok := s.runs[target.Name]; ok {
 			run.update(target, cursor, known)
+			w.exportAudit(ctx, s, run, target, cursor, known)
 			continue
 		}
 		if !known && stateErr != nil {
@@ -452,6 +460,7 @@ func (w *DeliveryWorker) refresh(ctx context.Context, s *deliverySession) {
 				s.forget(target.Name, run)
 			}
 		})
+		w.exportAudit(ctx, s, run, target, cursor, known)
 	}
 	for name, run := range s.runs {
 		if !present[name] {
@@ -592,6 +601,9 @@ func (s *deliverySession) forget(name string, run *targetRun) {
 
 // targetRun is one target, as its loop delivers to it and its status says.
 type targetRun struct {
+	// ctx is the run's: it ends when the run is cancelled, and with the
+	// session. The export of the audit trail to the target runs under it.
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	mu     sync.Mutex
@@ -614,6 +626,9 @@ type targetRun struct {
 	ahead     uint64
 	aheadUpto delivery.Seq
 	aheadAt   time.Time
+	// export is the export of the audit trail to the target, while it runs
+	// (auditexport.go).
+	export *auditExport
 }
 
 type handItem struct {
@@ -709,10 +724,16 @@ func (r *targetRun) failedWith(class delivery.Class) int {
 
 // stateLocked returns the word of the target's state; r.mu is held.
 func (r *targetRun) stateLocked() string {
+	return deliveryState(r.failures, r.lastClass)
+}
+
+// deliveryState returns the word of the state of a delivery that has failed
+// failures times in a row, the last time with class.
+func deliveryState(failures int, class delivery.Class) string {
 	switch {
-	case r.failures == 0:
+	case failures == 0:
 		return ports.DeliveryOK
-	case stalls(r.lastClass) || r.failures >= DeliveryStallAfter:
+	case stalls(class) || failures >= DeliveryStallAfter:
 		return ports.DeliveryStalled
 	}
 	return ports.DeliveryRetrying
@@ -733,6 +754,7 @@ func (r *targetRun) status() ports.TargetStatus {
 	case r.ahead > 0:
 		st.OldestPendingAt = r.aheadAt
 	}
+	r.exportStatusLocked(&st)
 	return st
 }
 

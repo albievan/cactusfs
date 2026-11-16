@@ -394,6 +394,11 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		Deliverers: map[delivery.ConsumerKind]app.Deliverer{
 			delivery.ConsumerNotification: app.NewNotifier(app.NotifierConfig{Publishers: n.publishers, Logger: logger}),
 		},
+		// The audit trail to the targets defined with audit: true, from
+		// their cursors, through the same publishers (ADR-0025). The
+		// exporter to the node's output below is another consumer, and
+		// unchanged.
+		AuditExport: app.NewAuditExporter(app.AuditExporterConfig{Trail: trail, Publishers: n.publishers}),
 	})
 	n.delivering.Store(n.delivery)
 	n.telemetry.ObserveDelivery(deliveryGauges{worker: n.delivery})
