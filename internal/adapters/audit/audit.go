@@ -11,7 +11,6 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"sync"
@@ -20,23 +19,6 @@ import (
 	domainaudit "github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/ports"
 )
-
-// line is one exported record.
-type line struct {
-	Stream       string            `json:"stream"`
-	Sequence     uint64            `json:"sequence"`
-	Time         time.Time         `json:"time"`
-	Actor        string            `json:"actor"`
-	AccessKeyID  string            `json:"access_key_id,omitempty"`
-	Action       string            `json:"action"`
-	Resource     string            `json:"resource,omitempty"`
-	Outcome      string            `json:"outcome"`
-	SourceIP     string            `json:"source_ip,omitempty"`
-	RequestID    string            `json:"request_id,omitempty"`
-	Details      map[string]string `json:"details,omitempty"`
-	PreviousHash string            `json:"previous_hash,omitempty"`
-	Hash         string            `json:"hash"`
-}
 
 // Exporter writes audit records to a stream.
 type Exporter struct {
@@ -93,12 +75,10 @@ func (e *Exporter) Handle(ctx context.Context, event ports.Event) {
 	}
 }
 
+// write writes one record as its line (domainaudit.Record.Line): the same
+// bytes a target that is sent the trail receives (ADR-0025).
 func (e *Exporter) write(r domainaudit.Record) error {
-	data, err := json.Marshal(line{
-		Stream: "audit", Sequence: r.Sequence, Time: r.Time, Actor: r.Actor, AccessKeyID: r.AccessKeyID, Action: r.Action,
-		Resource: r.Resource, Outcome: string(r.Outcome), SourceIP: r.SourceIP, RequestID: r.RequestID, Details: r.Details,
-		PreviousHash: r.PreviousHash, Hash: r.Hash,
-	})
+	data, err := r.Line()
 	if err != nil {
 		return err
 	}

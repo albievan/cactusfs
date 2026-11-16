@@ -110,3 +110,43 @@ func TestExporterWritesTheTrailAsItGrows(t *testing.T) {
 		t.Errorf("%d lines at the end, want 5", len(lines()))
 	}
 }
+
+// TestExporterWritesTheLinesATargetIsSent: what the exporter writes is
+// record.Line() and a line break, record for record - the bytes a target
+// that is sent the trail receives (ADR-0025) - and the lines read back
+// verify as a chain.
+func TestExporterWritesTheLinesATargetIsSent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := porttest.NewMemIAM()
+	var out bytes.Buffer
+	exporter := auditexport.NewExporter(store, &out, slog.New(slog.DiscardHandler))
+	appendRecords(t, store, 1)
+	exporter.Handle(ctx, event(1))
+	appendRecords(t, store, 4)
+	exporter.Handle(ctx, event(5))
+	records, err := store.ListAudit(ctx, 0, 10)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("the trail holds %d records, %v", len(records), err)
+	}
+	var want bytes.Buffer
+	var read []audit.Record
+	for _, record := range records {
+		line, err := record.Line()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want.Write(append(line, '\n'))
+		back, err := audit.ParseLine(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read = append(read, back)
+	}
+	if out.String() != want.String() {
+		t.Fatalf("exported:\n%s\nwant:\n%s", out.String(), want.String())
+	}
+	if err := audit.Verify(audit.Record{}, read); err != nil {
+		t.Fatalf("the lines do not verify: %v", err)
+	}
+}

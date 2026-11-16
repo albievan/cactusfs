@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"streAm\":\"audit\",\"sequenCe\":1,\"time\":\"0000-10-01T0:00:00Z\",\"ACtor\":\"000000\",\"ACCess_keY_id\":\"0000\",\"ACtion\":\"0000000000000\",\"resourCe\":\"00000000000000000000000000000\",\"outCome\":\"success\",\"sourCe_ip\":\"00000000\",\"request_id\":\"00\",\"detAils\":{},\"hAsh\":\"0\"}")
