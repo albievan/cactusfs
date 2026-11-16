@@ -511,7 +511,12 @@ func (c *Cluster) Logs(id string) string {
 
 // address returns where a published port of a node is reached from the test.
 func (c *Cluster) address(ctx context.Context, id, port string) (string, error) {
-	ctr := c.container(id)
+	return publishedAddress(ctx, c.docker, c.container(id), "node "+id, port)
+}
+
+// publishedAddress returns where a published port of a container is reached
+// from the test; name says which container in an error.
+func publishedAddress(ctx context.Context, docker *client.Client, ctr *testcontainers.DockerContainer, name, port string) (string, error) {
 	host, err := ctr.Host(ctx)
 	if err != nil {
 		return "", err
@@ -519,7 +524,7 @@ func (c *Cluster) address(ctx context.Context, id, port string) (string, error) 
 	// Asked of the engine every time, not of a cached inspection: the
 	// engine publishes a port anew, at another number, when a container is
 	// restarted and also when its network is taken away and given back.
-	inspected, err := c.docker.ContainerInspect(ctx, ctr.GetContainerID(), client.ContainerInspectOptions{})
+	inspected, err := docker.ContainerInspect(ctx, ctr.GetContainerID(), client.ContainerInspectOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -535,23 +540,29 @@ func (c *Cluster) address(ctx context.Context, id, port string) (string, error) 
 			}
 		}
 	}
-	return "", fmt.Errorf("port %s of node %s is not published", port, id)
+	return "", fmt.Errorf("port %s of %s is not published", port, name)
 }
 
 // transport returns an HTTP transport that reaches a node at its published
 // port while speaking to it under its own name, which is the name in its
 // certificate and in the signature of every request.
 func (c *Cluster) transport(id, port string) *http.Transport {
+	return transportTo(c.roots, id, func(ctx context.Context) (string, error) { return c.address(ctx, id, port) })
+}
+
+// transportTo returns an HTTP transport that dials whatever address says -
+// asked at every dial - and speaks TLS to it as serverName, trusting roots.
+func transportTo(roots *x509.CertPool, serverName string, address func(context.Context) (string, error)) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			// The published port changes when a container is restarted.
-			address, err := c.address(ctx, id, port)
+			address, err := address(ctx)
 			if err != nil {
 				return nil, err
 			}
 			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
 		},
-		TLSClientConfig:       &tls.Config{RootCAs: c.roots, ServerName: id, MinVersion: tls.VersionTLS13},
+		TLSClientConfig:       &tls.Config{RootCAs: roots, ServerName: serverName, MinVersion: tls.VersionTLS13},
 		ResponseHeaderTimeout: 30 * time.Second,
 		// As the SDK's own transport does: a request that asks
 		// "Expect: 100-continue" waits for the node's answer before its
@@ -566,16 +577,22 @@ func (c *Cluster) transport(id, port string) *http.Transport {
 // S3 returns an S3 client that talks to one node. It does not retry: a test
 // sees exactly what the node answered.
 func (c *Cluster) S3(id string) *s3.Client {
+	return newS3(c.transport(id, s3Port), id, c.AccessKey, c.SecretKey)
+}
+
+// newS3 returns an S3 client, path-style and without retries, that sends
+// to https://<host>:9000 through transport, signing with the key.
+func newS3(transport http.RoundTripper, host, accessKey, secretKey string) *s3.Client {
 	cfg := aws.Config{
 		Region:                     "us-east-1",
-		Credentials:                credentials.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, ""),
-		HTTPClient:                 &http.Client{Transport: c.transport(id, s3Port), Timeout: 2 * time.Minute},
+		Credentials:                credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+		HTTPClient:                 &http.Client{Transport: transport, Timeout: 2 * time.Minute},
 		Retryer:                    func() aws.Retryer { return retry.AddWithMaxAttempts(retry.NewStandard(), 1) },
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
 		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenSupported,
 	}
 	return s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String("https://" + id + ":9000")
+		o.BaseEndpoint = aws.String("https://" + host + ":9000")
 		o.UsePathStyle = true
 	})
 }
