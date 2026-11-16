@@ -312,6 +312,50 @@ sequence, at least once, with the ID `audit-<sequence>`. The trail is a durable 
 already; all this needs is the cursor. A receiver that holds every sequence can verify
 the chain. The exporter to the node's output is unchanged.
 
+As built (PLAN 8.2.8): the line is defined once, `audit.Record.Line` in the domain, and
+both the node's exporter and the target are given it, so they are the same bytes;
+`audit.ParseLine` reads one back for a receiver that verifies. A target defined with
+`audit: true` is sent the trail from its first record, as `audit_acked` begins at 0.
+The worker sends it by a loop of its own beside the target's loop of the outbox,
+through the same publisher, acknowledging `audit_acked` through Raft every 100 records
+or once one has waited a second (at most one batch sent again by a new leader).
+Stricter than a notification: **no record is passed**. A failure of any class, a
+receiver's 4xx included, holds the export at that record and is tried again after the
+pause, and the target is shown retrying and then stalled - a receiver must never hold
+a trail with a gap it was not told of. No change of the entry schema or of the
+contracts: the cursor, the acknowledgement that moves it and the message were there
+since schema 5.
+
+Settled at the review of 8.2.8:
+
+- **Who may have the trail sent.** A target that is sent the trail reads it, to an
+  address of the definer's choosing. Defining one, or changing one that is - its
+  endpoint, its credentials, anything, turning the trail off included - needs
+  `admin:GetAuditLog` on the trail (`arn:cactusfs:admin:::audit`, what `GET /audit`
+  asks) as well as `admin:PutTarget`; a refusal is audited as every refusal is.
+  `cluster-admin` has both; `auditor` has the first and not the second, so it defines
+  no target. Deleting a target that is sent the trail needs `admin:DeleteTarget` alone:
+  it sends nothing anywhere, it is audited, and the trail itself is never touched.
+- **A change takes effect at the next refresh**, within 5 s: a target that is turned to
+  or from the trail, or whose endpoint, credentials or certificates change, is sent
+  under its old definition until the worker reads the targets again. A target deleted
+  and defined again under its name in that time is another target: the loop of the old
+  one sees that the time of definition differs - from what the worker read, and from the
+  store before each acknowledgement, so it never moves the new target's `audit_acked`
+  (a count, which the new target begins at 0) - and ends; the next refresh starts the
+  new one from its first record. What is left is the moment between that read and the
+  commit of the acknowledgement.
+- **One publisher for both loops of a target.** The export and the notifications of one
+  target share its publisher. A webhook's requests are independent; a NATS publisher
+  holds one connection behind one lock for each publish, its acknowledgement included,
+  so the two loops of a NATS target take turns, and a stream that is slow to
+  acknowledge slows both. Each loop still holds and retries only its own message.
+- **What waits is timed from when it was read.** The oldest pending record of the
+  export is dated when the worker read it for the target, not when it was written, so
+  sending an old trail from its start does not show as a stall
+  (`CactusFSDeliveryStalled`); a target that fails on a record shows its wait from
+  then.
+
 ### What leaves the cluster
 
 To a place the administrator named, and to no other: object keys, sizes, entity tags,
@@ -348,7 +392,8 @@ tags, a secret, a key, a token.
   two; one record a message makes "taken" mean one thing.
 - **At most once, from the bus** - a restart loses what a program was promised.
 - **Retrying a rejected message for ever** - one message a receiver will never take
-  stops every one behind it.
+  stops every one behind it. (Rejected for notifications; the audit trail is held at a
+  refused record, as said above, because a trail with a gap cannot be verified.)
 - **401 and 403 as `rejected`** - a webhook whose secret is wrong would be passed every
   message and delivered none.
 - **The address of the client in the record** - see above.

@@ -10,8 +10,9 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
 events to NATS and webhooks and replication between sites (milestone 8, of which entry
 schema 5, the domain, the ports, the replicated store, the contracts, outbound
-connections, targets, the delivery worker, the webhook and NATS publishers and the
-notifier that hands bucket notifications to them exist; the replicator does not). Quotas on buckets
+connections, targets, the delivery worker, the webhook and NATS publishers, the
+notifier that hands bucket notifications to them and the export of the audit trail
+through them exist; the replicator does not). Quotas on buckets
 (ADR-0024) are implemented end to end - the usage of every bucket counted, the quota
 enforced where entries are applied and checked before a write, the management API, the
 metrics and alerts, and the console (PLAN 8A; "Usage and quotas", section 5); no
@@ -90,7 +91,7 @@ Conventions that follow from it:
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, conditions, tags, Object Lock, multipart, SSE, the record of who read an object (ADR-0016), the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals (a locked console session among them, ADR-0027), actions, the policy language and the decision, bucket policies, users, groups, roles, API keys, built-in roles, sealed secrets |
 | `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure and the pause between attempts (ADR-0023, 0025: used by the metadata store, the use case of targets and the delivery worker) |
-| `internal/domain/audit` | audit records and their hash chain |
+| `internal/domain/audit` | audit records, their hash chain and their exported line (`Record.Line`, `ParseLine`) |
 | `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement; a node's settings and their redaction (ADR-0022) |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
 | `internal/domain/search` | the language of the search field: text, wildcard, `rx:` regular expression |
@@ -125,7 +126,7 @@ Conventions that follow from it:
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
 | `internal/adapters/passwords` | out: Argon2id password hashes |
-| `internal/adapters/audit` | out: audit records as JSON lines |
+| `internal/adapters/audit` | out: audit records as JSON lines (`audit.Record.Line`) on the node's output |
 | `api/openapi`, `api/asyncapi`, `api/proto` | the contracts: the management API (and the Go package that embeds it for serving), the events, node RPC |
 | `web` | the console (React + TypeScript + Vite), and the Go package that embeds its build with the tag `console` |
 | `cmd/cactusfs` | composition root: the settings, node wiring, listeners, shutdown |
@@ -756,7 +757,7 @@ four at a time.
   against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
   whoever may read it; the server decides every change.
 
-### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5 - the replicator is 8C)**
+### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5; the audit trail through a target, PLAN 8.2.8 - the replicator is 8C)**
 
 - **One node delivers.** `app.DeliveryWorker` runs on every node and works on the one that
   leads the metadata group (it asks every second); when the node stops leading it stops
@@ -798,6 +799,36 @@ four at a time.
   A request on behalf of a target older (`CreatedAt`) than the one held under its name is
   refused as `internal`, so a deleted target's loop cannot close the publisher of the one
   made again.
+- **The audit trail through a target** (ADR-0025; PLAN 8.2.8). A webhook or NATS
+  target defined with `audit: true` is sent every record of the audit trail from the
+  one after its cursor's `audit_acked` on - from the first record of the trail for a
+  target defined so - by a second loop of the worker beside the target's loop of the
+  outbox, through the same publisher (`app.AuditExporter`, wired in
+  `cmd/cactusfs/node.go` with the node's decorated `ports.AuditLog`). Each record is the
+  message `cactusfs.audit.exported.v1` with the ID `audit-<sequence>`, whose body is the
+  record's line (`audit.Record.Line` in `internal/domain/audit`) - the bytes the
+  exporter to the node's own output writes, `previous_hash` and `hash` included, so a
+  receiver that holds every sequence verifies the chain (`audit.ParseLine`,
+  `audit.Verify`). In sequence, at least once: the loop reads 100 records at a time,
+  sends them in order and moves `audit_acked` through Raft (`outbox.ack` with no
+  place in the outbox) after 100 or once one has waited 1 s, so a new leader sends again
+  at most one batch; a receiver deduplicates by the ID. **No record is passed:** a
+  failure of any class - a webhook's 4xx, which a notification passes, included - holds
+  the export at the record, tried again after `delivery.Backoff`, so that no receiver
+  holds a trail with a gap it was not told of; the target is shown retrying, then
+  stalled. The export is part of the target's status: what it has read and not
+  acknowledged is pending, dated when it was read (so sending an old trail from its
+  start is no stall), and the worse state of the two loops is shown with its class.
+  A change of a target takes effect at the next refresh (5 s): a target that stops
+  being sent the trail stops then and keeps its cursor, and sent it again goes on from
+  there; one deleted and defined again under its name is another, which the old loop
+  recognises by its time of definition - also read from the store before each
+  acknowledgement, so the new cursor is never moved by it. **Who may:** defining a
+  target sent the trail, or changing one that is, needs `admin:GetAuditLog` on the trail
+  (`arn:cactusfs:admin:::audit`) as well as `admin:PutTarget` (`app.TargetService.Put`),
+  so a holder of `admin:PutTarget` who may not read the trail cannot have it sent to an
+  address of theirs; deleting one needs `admin:DeleteTarget` alone. The exporter to the
+  node's output (`--audit-export`) is a consumer of its own and unchanged.
 - **Deadlines.** Every call to the metadata carries 30 s; every attempt at an item
   carries 10 s + 2 x `--delivery-timeout` (the connect and the handshake, the answer's
   headers, and as long again for the rest).
@@ -1169,7 +1200,8 @@ four at a time.
   mode by no use case yet), and two messages that are for targets outside the deployment only,
   `cactusfs.notification.object.v1`, which the notifier sends through the webhook and
   NATS JetStream publishers of targets (PLAN 8.2.5), and `cactusfs.audit.exported.v1`,
-  which nothing sends yet (8.2.8); and the in-process publisher (at most once per node;
+  the records of the audit trail, which the worker sends through the same publishers to
+  a target defined with `audit: true` (PLAN 8.2.8); and the in-process publisher (at most once per node;
   counted in `cactusfs_events_total`). Consumers dedupe by event ID.
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
   with `buf lint` and `buf breaking`. **Implemented**, three services: `NodeService`
@@ -1252,7 +1284,9 @@ The full analysis is in `docs/threat-model.md`. In brief:
   and are revoked for every node at once.
 - Hash-chained, append-only audit trail **(implemented)**: changes to identities are
   recorded in the same Raft entry as the change; refusals in the background.
-  `--audit-export` writes the records to the log stream as JSON lines.
+  `--audit-export` writes the records to the log stream as JSON lines; a target defined
+  with `audit: true` is sent the same lines, every record in sequence, at least once
+  (PLAN 8.2.8; section 5, "Delivery to targets").
 - Console accounts with Argon2id and replicated, short-lived sessions
   **(implemented, with the console that signs in through them)**. A session that times
   out while it uploads is locked - it may store objects and nothing else - until the
