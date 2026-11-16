@@ -24,9 +24,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -745,11 +747,78 @@ func (c *Cluster) Rejoin(id string) {
 	c.routes(id, "del")
 }
 
-// peerAddresses returns the addresses of the other nodes on the cluster
-// network.
-func (c *Cluster) peerAddresses(ctx context.Context, id string) []string {
+// CutOff cuts a standalone node - another site on the cluster's network -
+// off from every node of the cluster, as Isolate cuts off a node: inside the
+// standalone node's own network namespace, a route that leads nowhere for
+// each node's address on the cluster network - its IPv4 address and, on a
+// network with IPv6, its global IPv6 address. The cluster's connections to
+// it stall and new ones are never completed; the test still reaches it at
+// its published ports. Every node must be running, so that each has an
+// address to cut: a node started again while the cut holds may be given
+// another address, which the cut would not cover. Reconnect undoes it.
+func (c *Cluster) CutOff(s *Standalone) {
 	c.t.Helper()
-	var addresses []string
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	s.mu.Lock()
+	cut := s.cutFrom != nil
+	s.mu.Unlock()
+	if cut {
+		c.t.Fatalf("%s is cut off already", s.Name)
+	}
+	byNode := c.nodeAddresses(ctx, "")
+	var addresses []netip.Addr
+	for _, id := range Nodes {
+		if !slices.ContainsFunc(byNode[id], netip.Addr.Is4) {
+			c.t.Fatalf("cut %s off: node %s has no IPv4 address on the cluster network (is it running?)", s.Name, id)
+		}
+		addresses = append(addresses, byNode[id]...)
+	}
+	blackhole(ctx, c.t, s.ctr.GetContainerID(), s.Name, addresses, "add")
+	s.mu.Lock()
+	s.cutFrom = addresses
+	s.mu.Unlock()
+}
+
+// Reconnect undoes CutOff: the routes it added, to the addresses it cut,
+// are removed.
+func (c *Cluster) Reconnect(s *Standalone) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	s.mu.Lock()
+	addresses := s.cutFrom
+	s.mu.Unlock()
+	if addresses == nil {
+		c.t.Fatalf("%s is not cut off", s.Name)
+	}
+	blackhole(ctx, c.t, s.ctr.GetContainerID(), s.Name, addresses, "del")
+	s.mu.Lock()
+	s.cutFrom = nil
+	s.mu.Unlock()
+}
+
+// peerAddresses returns the addresses of the other nodes on the cluster
+// network: of every node that has one when id names none of them.
+func (c *Cluster) peerAddresses(ctx context.Context, id string) []netip.Addr {
+	c.t.Helper()
+	var addresses []netip.Addr
+	byNode := c.nodeAddresses(ctx, id)
+	for _, other := range Nodes {
+		addresses = append(addresses, byNode[other]...)
+	}
+	if len(addresses) == 0 {
+		c.t.Fatalf("no other node of %s has an address on the cluster network", id)
+	}
+	return addresses
+}
+
+// nodeAddresses returns, by node, the addresses on the cluster network of
+// the nodes other than id that have one: the IPv4 address, and the global
+// IPv6 address when the network has IPv6.
+func (c *Cluster) nodeAddresses(ctx context.Context, id string) map[string][]netip.Addr {
+	c.t.Helper()
+	addresses := map[string][]netip.Addr{}
 	for _, other := range Nodes {
 		if other == id {
 			continue
@@ -765,13 +834,15 @@ func (c *Cluster) peerAddresses(ctx context.Context, id string) []string {
 			c.t.Fatalf("inspect %s: %v", other, err)
 		}
 		for _, endpoint := range inspected.Container.NetworkSettings.Networks {
-			if endpoint != nil && endpoint.NetworkID == c.cluster.ID && endpoint.IPAddress.IsValid() {
-				addresses = append(addresses, endpoint.IPAddress.String())
+			if endpoint == nil || endpoint.NetworkID != c.cluster.ID {
+				continue
+			}
+			for _, address := range []netip.Addr{endpoint.IPAddress, endpoint.GlobalIPv6Address} {
+				if address.IsValid() && !address.IsUnspecified() {
+					addresses[other] = append(addresses[other], address.Unmap())
+				}
 			}
 		}
-	}
-	if len(addresses) == 0 {
-		c.t.Fatalf("no other node of %s has an address on the cluster network", id)
 	}
 	return addresses
 }
@@ -782,13 +853,30 @@ func (c *Cluster) routes(id, verb string) {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	blackhole(ctx, c.t, c.container(id).GetContainerID(), id, c.peerAddresses(ctx, id), verb)
+}
+
+// blackhole adds or removes (verb), in the network namespace of a container
+// - name says which in a message - a route to nowhere for each address, by
+// a helper container that shares the namespace: a /32 route for an IPv4
+// address, a /128 route of the inet6 family for an IPv6 one.
+func blackhole(ctx context.Context, t *testing.T, target, name string, addresses []netip.Addr, verb string) {
+	t.Helper()
 	var script strings.Builder
 	script.WriteString("set -e\n")
-	for _, address := range c.peerAddresses(ctx, id) {
-		fmt.Fprintf(&script, "ip route %s blackhole %s/32\n", verb, address)
+	six := false
+	for _, address := range addresses {
+		if address.Is4() {
+			fmt.Fprintf(&script, "ip route %s blackhole %s/32\n", verb, address)
+		} else {
+			six = true
+			fmt.Fprintf(&script, "ip -f inet6 route %s blackhole %s/128\n", verb, address)
+		}
 	}
 	script.WriteString("ip route\n")
-	target := c.container(id).GetContainerID()
+	if six {
+		script.WriteString("ip -f inet6 route\n")
+	}
 	helper, err := testcontainers.Run(ctx, helperImage,
 		testcontainers.WithCmd("sh", "-c", script.String()),
 		testcontainers.WithHostConfigModifier(func(host *container.HostConfig) {
@@ -801,10 +889,10 @@ func (c *Cluster) routes(id, verb string) {
 		defer func() { _ = helper.Terminate(context.WithoutCancel(ctx)) }()
 	}
 	if err != nil {
-		c.t.Fatalf("routes of %s: %v", id, err)
+		t.Fatalf("routes of %s: %v", name, err)
 	}
 	if state, err := helper.State(ctx); err != nil || state.ExitCode != 0 {
-		c.t.Fatalf("routes of %s: %v, %v\n%s", id, state, err, logsOf(ctx, helper))
+		t.Fatalf("routes of %s: %v, %v\n%s", name, state, err, logsOf(ctx, helper))
 	}
 }
 

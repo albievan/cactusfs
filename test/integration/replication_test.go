@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -84,326 +82,6 @@ const (
 const siteReplicatePolicy = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
 	`"Action":["s3:ReplicateObject","s3:ReplicateDelete","s3:PutObjectTagging","s3:DeleteObjectTagging","s3:PutObjectRetention","s3:PutObjectLegalHold"],` +
 	`"Resource":["arn:aws:s3:::` + siteReplica + `","arn:aws:s3:::` + siteReplica + `/*"]}]}`
-
-// errSiteNotYet says that what a site shows is not yet what it is waited
-// for, and errSiteUnreachable that it could not be read this time: both
-// are asked again until a deadline. Any other error of a judgement is final.
-var (
-	errSiteNotYet      = errors.New("not yet")
-	errSiteUnreachable = errors.New("could not be read")
-)
-
-// siteShown is a body of an answer as a message may show it: never one that
-// holds a secret key (the answer that creates an API key).
-func siteShown(body []byte) string {
-	if bytes.Contains(body, []byte("secret_key")) {
-		return "(a body that holds a secret key, not shown)"
-	}
-	return string(body)
-}
-
-// siteAdmin is the management API of one site: the hosts that take its
-// requests, tried in turn, the client of each, and who asks.
-type siteAdmin struct {
-	name   string
-	hosts  []string
-	client func(host string) *http.Client
-	auth   map[string]string
-}
-
-// call sends one request to one host. A PUT and a POST say they are JSON,
-// with a body or without one.
-func (a siteAdmin) call(ctx context.Context, host string, headers map[string]string, method, path string, body any) (int, []byte, error) {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://"+host+":9001/api/v1"+path, reader)
-	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
-	}
-	if method == http.MethodPut || method == http.MethodPost {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	for name, value := range a.auth {
-		req.Header.Set(name, value)
-	}
-	for name, value := range headers {
-		req.Header.Set(name, value)
-	}
-	resp, err := a.client(host).Do(req)
-	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s through %s: %w", method, path, host, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, nil, fmt.Errorf("%s %s through %s: %w", method, path, host, err)
-	}
-	return resp.StatusCode, data, nil
-}
-
-// change sends an administrative change through the hosts in turn until
-// one answers want, and returns the answer's body. The change has one
-// Idempotency-Key, drawn once and sent with every attempt: an attempt that
-// was taken and whose answer was lost is answered as it was when it is
-// sent again, so a creation - an API key above all - is never made twice.
-// A failure of the connection, a 5xx, a 429 (a request whose body may hold
-// a secret, recognised by a slow hash) and a 409 that says the state or the
-// key is not settled yet (Conflict: a usage record that is not exact;
-// RequestInProgress: the key is reserved by an attempt still in progress)
-// are tried again within siteSetup; EntityAlreadyExists after an attempt is
-// the change made by that attempt; any other answer fails the test. No
-// message shows a body that holds a secret key.
-func (a siteAdmin) change(ctx context.Context, t *testing.T, method, path string, body any, want int) []byte {
-	t.Helper()
-	deadline := time.Now().Add(siteSetup)
-	idempotency := map[string]string{"Idempotency-Key": "site-" + randomToken(t)}
-	var last string
-	for try := 0; ; try++ {
-		host := a.hosts[try%len(a.hosts)]
-		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
-		status, answer, err := a.call(attempt, host, idempotency, method, path, body)
-		cancel()
-		code := problemCode(answer)
-		switch {
-		case err == nil && status == want:
-			return answer
-		case err == nil && status == http.StatusConflict && code == "EntityAlreadyExists" && try > 0:
-			return nil
-		case err != nil:
-			last = err.Error()
-		case status >= 500, status == http.StatusTooManyRequests,
-			status == http.StatusConflict && (code == "Conflict" || code == "RequestInProgress"):
-			last = fmt.Sprintf("%d %s", status, siteShown(answer))
-		default:
-			t.Fatalf("%s %s at site %s through %s = %d %s; want %d", method, path, a.name, host, status, siteShown(answer), want)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s %s at site %s not answered %d within %s: %s", method, path, a.name, want, siteSetup, last)
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("%s %s at site %s: %v", method, path, a.name, ctx.Err())
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-
-// siteStatus is what GET /buckets/{bucket}/replication/status says.
-type siteStatus struct {
-	Target         string `json:"target"`
-	TargetState    string `json:"target_state"`
-	LastErrorClass string `json:"last_error_class"`
-	Pending        int64  `json:"pending"`
-	Failed         int64  `json:"failed"`
-	Lost           int64  `json:"lost"`
-	ResyncNeeded   bool   `json:"resync_needed"`
-	Resync         *struct {
-		State   string `json:"state"`
-		Scanned int64  `json:"scanned"`
-		Sent    int64  `json:"sent"`
-	} `json:"resync"`
-}
-
-// status asks a host of site A for the status of the source bucket's
-// replication.
-func (a siteAdmin) status(ctx context.Context, host string) (siteStatus, error) {
-	attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	code, body, err := a.call(attempt, host, nil, http.MethodGet, "/buckets/"+siteSource+"/replication/status", nil)
-	if err != nil {
-		return siteStatus{}, err
-	}
-	if code != http.StatusOK {
-		return siteStatus{}, fmt.Errorf("the replication status through %s = %d %s", host, code, body)
-	}
-	var shown siteStatus
-	if err := json.Unmarshal(body, &shown); err != nil {
-		return siteStatus{}, fmt.Errorf("the replication status through %s: %w: %s", host, err, body)
-	}
-	return shown, nil
-}
-
-// siteEntry is a version or a delete marker as ListObjectVersions lists it.
-type siteEntry struct {
-	Key, VersionID, ETag string
-	Size                 int64
-	Latest, Marker       bool
-	Modified             time.Time
-}
-
-func (e siteEntry) String() string {
-	kind := "version"
-	if e.Marker {
-		kind = "marker"
-	}
-	return fmt.Sprintf("%s %s of %q (latest %t, %d bytes, ETag %s, %s)", kind, e.VersionID, e.Key, e.Latest, e.Size, e.ETag, e.Modified.Format(time.RFC3339Nano))
-}
-
-// siteS3 is where a raw S3 request to a site goes, and the key that signs
-// it.
-type siteS3 struct {
-	host                 string
-	client               *http.Client
-	accessKey, secretKey string
-}
-
-// siteEmptySHA256 is the SHA-256 of an empty payload, in hexadecimal.
-const siteEmptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-
-// siteListingPages bounds the pages of one listing: far above the ~700
-// entries of the test's buckets at 1 000 a page.
-const siteListingPages = 50
-
-// siteListing lists every version and delete marker of a bucket in the
-// order of the answer's document - per key from the newest, versions and
-// markers interleaved as they are ordered - by reading the XML of
-// ListObjectVersions itself: the SDK gives versions and markers in two
-// lists, which loses their order among each other. A failure to read is
-// errSiteUnreachable.
-func siteListing(ctx context.Context, site siteS3, bucket, prefix string) ([]siteEntry, error) {
-	var entries []siteEntry
-	keyMarker, versionMarker := "", ""
-	for range siteListingPages {
-		query := url.Values{"versions": {""}, "prefix": {prefix}}
-		if keyMarker != "" {
-			query.Set("key-marker", keyMarker)
-			query.Set("version-id-marker", versionMarker)
-		}
-		page, err := siteListingPage(ctx, site, bucket, query)
-		if err != nil {
-			return nil, fmt.Errorf("ListObjectVersions %s through %s %w: %w", bucket, site.host, errSiteUnreachable, err)
-		}
-		entries = append(entries, page.entries...)
-		if !page.truncated {
-			return entries, nil
-		}
-		if page.nextKey == "" {
-			return nil, fmt.Errorf("ListObjectVersions %s through %s is truncated without a NextKeyMarker", bucket, site.host)
-		}
-		keyMarker, versionMarker = page.nextKey, page.nextVersion
-	}
-	return nil, fmt.Errorf("ListObjectVersions %s through %s did not end within %d pages", bucket, site.host, siteListingPages)
-}
-
-// siteListed is one page of ListObjectVersions.
-type siteListed struct {
-	entries              []siteEntry
-	truncated            bool
-	nextKey, nextVersion string
-}
-
-// siteListedEntry is a Version or a DeleteMarker element of the document.
-type siteListedEntry struct {
-	Key          string    `xml:"Key"`
-	VersionID    string    `xml:"VersionId"`
-	ETag         string    `xml:"ETag"`
-	Size         int64     `xml:"Size"`
-	IsLatest     bool      `xml:"IsLatest"`
-	LastModified time.Time `xml:"LastModified"`
-}
-
-// siteListingPage sends one signed ListObjectVersions and reads its
-// document token by token, in order.
-func siteListingPage(ctx context.Context, site siteS3, bucket string, query url.Values) (siteListed, error) {
-	attempt, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	req, err := http.NewRequestWithContext(attempt, http.MethodGet, "https://"+site.host+":9000/"+bucket+"?"+query.Encode(), nil)
-	if err != nil {
-		return siteListed{}, err
-	}
-	req.Header.Set("X-Amz-Content-Sha256", siteEmptySHA256)
-	credentials := aws.Credentials{AccessKeyID: site.accessKey, SecretAccessKey: site.secretKey}
-	if err := v4.NewSigner().SignHTTP(attempt, credentials, req, siteEmptySHA256, "s3", "us-east-1", time.Now()); err != nil {
-		return siteListed{}, err
-	}
-	resp, err := site.client.Do(req)
-	if err != nil {
-		return siteListed{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return siteListed{}, fmt.Errorf("%d %s", resp.StatusCode, body)
-	}
-	var page siteListed
-	decoder := xml.NewDecoder(resp.Body)
-	for {
-		token, err := decoder.Token()
-		if errors.Is(err, io.EOF) {
-			return page, nil
-		}
-		if err != nil {
-			return siteListed{}, err
-		}
-		start, ok := token.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		switch start.Name.Local {
-		case "Version", "DeleteMarker":
-			var e siteListedEntry
-			if err = decoder.DecodeElement(&e, &start); err == nil {
-				page.entries = append(page.entries, siteEntry{
-					Key: e.Key, VersionID: e.VersionID, ETag: e.ETag, Size: e.Size, Latest: e.IsLatest, Modified: e.LastModified,
-					Marker: start.Name.Local == "DeleteMarker",
-				})
-			}
-		case "IsTruncated":
-			err = decoder.DecodeElement(&page.truncated, &start)
-		case "NextKeyMarker":
-			err = decoder.DecodeElement(&page.nextKey, &start)
-		case "NextVersionIdMarker":
-			err = decoder.DecodeElement(&page.nextVersion, &start)
-		}
-		if err != nil {
-			return siteListed{}, err
-		}
-	}
-}
-
-// siteCompare says where the listing of site B differs from site A's: the
-// same entries, in the same order, equal in everything listed, apart from
-// those of onlyA, which B must not hold, and those of onlyB, which A no
-// longer holds and B must.
-func siteCompare(atA, atB []siteEntry, onlyA, onlyB map[string]bool) error {
-	var a, b []siteEntry
-	for _, e := range atA {
-		if !onlyA[e.VersionID] {
-			a = append(a, e)
-		}
-	}
-	held := map[string]bool{}
-	for _, e := range atB {
-		if onlyA[e.VersionID] {
-			return fmt.Errorf("site B holds %s, which it must not", e)
-		}
-		if onlyB[e.VersionID] {
-			held[e.VersionID] = true
-			continue
-		}
-		b = append(b, e)
-	}
-	for id := range onlyB {
-		if !held[id] {
-			return fmt.Errorf("site B no longer holds the version %s", id)
-		}
-	}
-	for i := range min(len(a), len(b)) {
-		if a[i] != b[i] {
-			return fmt.Errorf("%w: entry %d is %s at site A and %s at site B", errSiteNotYet, i, a[i], b[i])
-		}
-	}
-	if len(a) != len(b) {
-		return fmt.Errorf("%w: site A lists %d entries and site B %d", errSiteNotYet, len(a), len(b))
-	}
-	return nil
-}
 
 // siteObject is what the test wrote to a version.
 type siteObject struct {
@@ -536,35 +214,6 @@ func siteRead(ctx context.Context, client *s3.Client, bucket, key, id string) ([
 	return data, nil
 }
 
-// siteEach runs check for every item, siteWorkers at a time, and returns
-// what failed, at most ten failures told.
-func siteEach(items []string, check func(string) error) error {
-	work := make(chan string)
-	var mu sync.Mutex
-	var failures []error
-	var workers sync.WaitGroup
-	for range siteWorkers {
-		workers.Go(func() {
-			for item := range work {
-				if err := check(item); err != nil {
-					mu.Lock()
-					failures = append(failures, err)
-					mu.Unlock()
-				}
-			}
-		})
-	}
-	for _, item := range items {
-		work <- item
-	}
-	close(work)
-	workers.Wait()
-	if len(failures) > 10 {
-		failures = append(failures[:10], fmt.Errorf("and %d failures more", len(failures)-10))
-	}
-	return errors.Join(failures...)
-}
-
 // TestSiteReplication: replication between two sites (ADR-0026, PLAN
 // 8.1.8), in the product as it is deployed. Site A is the four-node
 // cluster; site B is one standalone node with four drives on the cluster's
@@ -625,19 +274,19 @@ func TestSiteReplication(t *testing.T) {
 	defer cancel()
 	begun := time.Now()
 	nodes := clustertest.Nodes
-	atA := siteAdmin{name: "A", hosts: nodes, client: c.Admin, auth: gridBearer(c.AccessKey, c.SecretKey)}
-	atB := siteAdmin{name: "B", hosts: []string{b.Name}, client: func(string) *http.Client { return b.Admin() }, auth: gridBearer(b.AccessKey, b.SecretKey)}
+	atA := clustertest.SiteAdmin{Name: "A", Hosts: nodes, Client: c.Admin, Auth: gridBearer(c.AccessKey, c.SecretKey)}
+	atB := clustertest.SiteAdmin{Name: "B", Hosts: []string{b.Name}, Client: func(string) *http.Client { return b.Admin() }, Auth: gridBearer(b.AccessKey, b.SecretKey)}
 	clients := make([]*s3.Client, len(nodes))
 	for i, id := range nodes {
 		clients[i] = c.S3(id)
 	}
 	rootB := b.S3()
 	// The raw listings: of site A through a node, of site B.
-	listingA := func(i int) siteS3 {
+	listingA := func(i int) clustertest.SignedS3 {
 		id := nodes[i%len(nodes)]
-		return siteS3{host: id, client: c.HTTP(id), accessKey: c.AccessKey, secretKey: c.SecretKey}
+		return clustertest.SignedS3{Host: id, Client: c.HTTP(id), AccessKey: c.AccessKey, SecretKey: c.SecretKey}
 	}
-	listingB := siteS3{host: b.Name, client: b.HTTP(), accessKey: b.AccessKey, secretKey: b.SecretKey}
+	listingB := clustertest.SignedS3{Host: b.Name, Client: b.HTTP(), AccessKey: b.AccessKey, SecretKey: b.SecretKey}
 
 	// Site A's deployment ID, which site B's bucket is the replica of.
 	var deployment string
@@ -645,7 +294,7 @@ func TestSiteReplication(t *testing.T) {
 		var shown struct {
 			DeploymentID string `json:"deployment_id"`
 		}
-		status, body, err := atA.call(ctx, nodes[0], nil, http.MethodGet, "/cluster", nil)
+		status, body, err := atA.Call(ctx, nodes[0], nil, http.MethodGet, "/cluster", nil)
 		if err != nil || status != http.StatusOK || json.Unmarshal(body, &shown) != nil {
 			return false
 		}
@@ -680,16 +329,16 @@ func TestSiteReplication(t *testing.T) {
 		Replica bool   `json:"replica"`
 		Source  string `json:"source"`
 	}
-	if err := json.Unmarshal(atB.change(ctx, t, http.MethodPut, "/buckets/"+siteReplica+"/replica", map[string]any{"source": deployment}, http.StatusOK), &mode); err != nil ||
+	if err := json.Unmarshal(atB.Change(ctx, t, http.MethodPut, "/buckets/"+siteReplica+"/replica", map[string]any{"source": deployment}, http.StatusOK), &mode); err != nil ||
 		!mode.Replica || mode.Source != deployment {
 		t.Fatalf("site B's bucket made the replica of %s: %+v, %v", deployment, mode, err)
 	}
 
 	// Site B: the key site A replicates with, and nothing more.
 	policy := json.RawMessage(siteReplicatePolicy)
-	atB.change(ctx, t, http.MethodPost, "/policies", map[string]any{"name": "replicate-from-a", "document": policy}, http.StatusCreated)
-	atB.change(ctx, t, http.MethodPost, "/roles", map[string]any{"name": "replicator", "policies": []string{"replicate-from-a"}}, http.StatusCreated)
-	atB.change(ctx, t, http.MethodPost, "/users", map[string]any{"name": "site-a", "roles": []string{"replicator"}}, http.StatusCreated)
+	atB.Change(ctx, t, http.MethodPost, "/policies", map[string]any{"name": "replicate-from-a", "document": policy}, http.StatusCreated)
+	atB.Change(ctx, t, http.MethodPost, "/roles", map[string]any{"name": "replicator", "policies": []string{"replicate-from-a"}}, http.StatusCreated)
+	atB.Change(ctx, t, http.MethodPost, "/users", map[string]any{"name": "site-a", "roles": []string{"replicator"}}, http.StatusCreated)
 	var replicateKey struct {
 		Key struct {
 			AccessKeyID string `json:"access_key_id"`
@@ -697,7 +346,7 @@ func TestSiteReplication(t *testing.T) {
 		SecretKey string `json:"secret_key"`
 	}
 	// The answer holds the secret: it is put into no message.
-	if err := json.Unmarshal(atB.change(ctx, t, http.MethodPost, "/users/site-a/keys",
+	if err := json.Unmarshal(atB.Change(ctx, t, http.MethodPost, "/users/site-a/keys",
 		map[string]any{"description": "site A replicates", "inline_policy": policy}, http.StatusCreated), &replicateKey); err != nil ||
 		replicateKey.Key.AccessKeyID == "" || replicateKey.SecretKey == "" {
 		t.Fatal("site B made a key of site-a without an access key ID or a secret")
@@ -721,11 +370,11 @@ func TestSiteReplication(t *testing.T) {
 		return id
 	}
 	before := write(clients[1], "before/one", 3000, nil)
-	atA.change(ctx, t, http.MethodPut, "/targets/"+siteTarget, map[string]any{
+	atA.Change(ctx, t, http.MethodPut, "/targets/"+siteTarget, map[string]any{
 		"kind": "s3", "endpoint": "https://" + b.Name + ":9000", "region": "us-east-1", "ca_pem": string(b.CAPEM),
 		"buckets": []string{siteSource}, "auth": map[string]any{"mode": "sigv4", "id": replicateKey.Key.AccessKeyID, "secret": replicateKey.SecretKey},
 	}, http.StatusOK)
-	atA.change(ctx, t, http.MethodPut, "/buckets/"+siteSource+"/replication", map[string]any{
+	atA.Change(ctx, t, http.MethodPut, "/buckets/"+siteSource+"/replication", map[string]any{
 		"target": siteTarget, "destination_bucket": siteReplica,
 		"rules": []map[string]any{{"id": "everything", "enabled": true, "priority": 1, "delete_markers": true}},
 	}, http.StatusOK)
@@ -841,7 +490,7 @@ func TestSiteReplication(t *testing.T) {
 	secretID := aws.ToString(secret.VersionId)
 	t.Logf("site A took 500 versions, 50 delete markers, the multipart, the retained and the SSE-C version in %s", time.Since(written).Round(time.Second))
 
-	listA, err := siteListing(ctx, listingA(0), siteSource, "v/")
+	listA, err := clustertest.ListVersions(ctx, listingA(0), siteSource, "v/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,19 +514,19 @@ func TestSiteReplication(t *testing.T) {
 		deadline := time.Now().Add(limit)
 		started := time.Now()
 		for asked := 0; ; asked++ {
-			status, err := atA.status(ctx, nodes[asked%len(nodes)])
+			status, err := atA.Status(ctx, nodes[asked%len(nodes)], siteSource)
 			switch {
 			case err != nil:
-				err = fmt.Errorf("the status %w: %w", errSiteUnreachable, err)
+				err = fmt.Errorf("the status %w: %w", clustertest.ErrUnreachable, err)
 			case status.Failed > 1:
 				t.Fatalf("%s: %d versions are FAILED; only the one under a customer's key may be: %+v", what, status.Failed, status)
 			case status.Pending != 0 || status.Failed != 1:
-				err = fmt.Errorf("%w: %d pending and %d failed, the target %s (%s)", errSiteNotYet, status.Pending, status.Failed, status.TargetState, status.LastErrorClass)
+				err = fmt.Errorf("%w: %d pending and %d failed, the target %s (%s)", clustertest.ErrNotYet, status.Pending, status.Failed, status.TargetState, status.LastErrorClass)
 			default:
-				var listing, atB []siteEntry
-				if listing, err = siteListing(ctx, listingA(asked), siteSource, ""); err == nil {
-					if atB, err = siteListing(ctx, listingB, siteReplica, ""); err == nil {
-						err = siteCompare(listing, atB, onlyA, onlyB)
+				var listing, atB []clustertest.Listed
+				if listing, err = clustertest.ListVersions(ctx, listingA(asked), siteSource, ""); err == nil {
+					if atB, err = clustertest.ListVersions(ctx, listingB, siteReplica, ""); err == nil {
+						err = clustertest.CompareListings(listing, atB, onlyA, onlyB)
 					}
 				}
 			}
@@ -885,7 +534,7 @@ func TestSiteReplication(t *testing.T) {
 			case err == nil:
 				t.Logf("%s: settled in %s", what, time.Since(started).Round(time.Second))
 				return
-			case !errors.Is(err, errSiteNotYet) && !errors.Is(err, errSiteUnreachable):
+			case !errors.Is(err, clustertest.ErrNotYet) && !errors.Is(err, clustertest.ErrUnreachable):
 				// What can never become right: B holds what it must not,
 				// or no longer holds what it must.
 				t.Fatalf("%s: %v", what, err)
@@ -998,14 +647,14 @@ func TestSiteReplication(t *testing.T) {
 	}
 	check := func(id string) error { return checkAt(id, "A", "B") }
 	ids := slices.DeleteFunc(ledger.versionIDs(), func(id string) bool { return id == before })
-	if err := siteEach(ids, check); err != nil {
+	if err := clustertest.Each(ids, siteWorkers, check); err != nil {
 		t.Fatalf("the versions at site B: %v", err)
 	}
 	t.Logf("%d versions read back from site B, byte for byte, their tags as at site A", len(ids))
 	// The others carry no lock to B: a sample of them has neither a
 	// retention nor a legal hold there.
 	sample := slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return id == retainedID })[:20]
-	if err := siteEach(sample, func(id string) error {
+	if err := clustertest.Each(sample, siteWorkers, func(id string) error {
 		o := ledger.object(id)
 		_, err := rootB.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{Bucket: aws.String(siteReplica), Key: aws.String(o.key), VersionId: aws.String(id)})
 		switch {
@@ -1045,9 +694,9 @@ func TestSiteReplication(t *testing.T) {
 	}
 	_, err = sitePut(ctx, replicator, "plain", "from/a", []byte("not a copy"), nil)
 	denied("puts into a bucket of site B that is no replica", err)
-	keyAdmin := siteAdmin{name: "B", hosts: []string{b.Name}, client: atB.client, auth: gridBearer(replicateKey.Key.AccessKeyID, replicateKey.SecretKey)}
-	if status, body, err := keyAdmin.call(ctx, b.Name, nil, http.MethodGet, "/users", nil); err != nil || status != http.StatusForbidden || problemCode(body) != "AccessDenied" {
-		t.Errorf("site A's key as a bearer of site B's management API, GET /users: %d %s, %v; want 403 AccessDenied", status, siteShown(body), err)
+	keyAdmin := clustertest.SiteAdmin{Name: "B", Hosts: []string{b.Name}, Client: atB.Client, Auth: gridBearer(replicateKey.Key.AccessKeyID, replicateKey.SecretKey)}
+	if status, body, err := keyAdmin.Call(ctx, b.Name, nil, http.MethodGet, "/users", nil); err != nil || status != http.StatusForbidden || problemCode(body) != "AccessDenied" {
+		t.Errorf("site A's key as a bearer of site B's management API, GET /users: %d %s, %v; want 403 AccessDenied", status, clustertest.Shown(body), err)
 	}
 
 	// A client's put into the replica bucket.
@@ -1063,7 +712,7 @@ func TestSiteReplication(t *testing.T) {
 	var states, whilePaused []string
 	for i := 0; time.Since(paused) < sitePause; i++ {
 		whilePaused = append(whilePaused, write(clients[i%len(clients)], fmt.Sprintf("paused/key-%02d", i), 1000+i, nil))
-		if status, err := atA.status(ctx, nodes[i%len(nodes)]); err != nil {
+		if status, err := atA.Status(ctx, nodes[i%len(nodes)], siteSource); err != nil {
 			states = append(states, err.Error())
 		} else {
 			timedOut = timedOut || (status.TargetState != "ok" && status.LastErrorClass == "timeout")
@@ -1077,10 +726,10 @@ func TestSiteReplication(t *testing.T) {
 	}
 	// The last status before B resumes: nothing written meanwhile can have
 	// been taken by a frozen site.
-	var last siteStatus
+	var last clustertest.ReplicationStatus
 	c.Eventually("the status of site A's replication while site B is paused", siteSetup, func() bool {
 		var err error
-		last, err = atA.status(ctx, nodes[0])
+		last, err = atA.Status(ctx, nodes[0], siteSource)
 		return err == nil
 	})
 	b.Unpause()
@@ -1092,7 +741,7 @@ func TestSiteReplication(t *testing.T) {
 	}
 	t.Logf("with site B paused, %d versions written, %d pending at the end; the target was %v", len(whilePaused), last.Pending, slices.Compact(states))
 	settled("what was written while site B was paused to arrive", siteArrival, map[string]bool{secretID: true, before: true}, nil)
-	if err := siteEach(whilePaused, check); err != nil {
+	if err := clustertest.Each(whilePaused, siteWorkers, check); err != nil {
 		t.Fatalf("the versions written while site B was paused, at site B: %v", err)
 	}
 
@@ -1106,10 +755,10 @@ func TestSiteReplication(t *testing.T) {
 	})); got != "" {
 		t.Errorf("the version put before the configuration, before a resync, at site A: replication status %q; want none", got)
 	}
-	atA.change(ctx, t, http.MethodPost, "/buckets/"+siteSource+"/replication/resync", nil, http.StatusAccepted)
+	atA.Change(ctx, t, http.MethodPost, "/buckets/"+siteSource+"/replication/resync", nil, http.StatusAccepted)
 	resynced := time.Now()
 	c.Eventually("the resync to be done, and the version put before the configuration at site B and COMPLETED at site A", siteResyncLimit, func() bool {
-		status, err := atA.status(ctx, nodes[0])
+		status, err := atA.Status(ctx, nodes[0], siteSource)
 		if err != nil || status.Resync == nil || status.Resync.State != "done" {
 			return false
 		}
@@ -1149,7 +798,7 @@ func TestSiteReplication(t *testing.T) {
 		Replica bool   `json:"replica"`
 		Source  string `json:"source"`
 	}
-	if err := json.Unmarshal(atB.change(ctx, t, http.MethodPut, "/buckets/"+siteReplica+"/replica", map[string]any{"source": ""}, http.StatusOK), &promotedMode); err != nil ||
+	if err := json.Unmarshal(atB.Change(ctx, t, http.MethodPut, "/buckets/"+siteReplica+"/replica", map[string]any{"source": ""}, http.StatusOK), &promotedMode); err != nil ||
 		promotedMode.Replica || promotedMode.Source != "" {
 		t.Fatalf("site B's bucket promoted: %+v, %v", promotedMode, err)
 	}
@@ -1161,7 +810,7 @@ func TestSiteReplication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("site B, a put after the promotion: %v", err)
 	}
-	after, err := siteListing(ctx, listingB, siteReplica, "v/key-001")
+	after, err := clustertest.ListVersions(ctx, listingB, siteReplica, "v/key-001")
 	if err != nil {
 		t.Fatal(err)
 	}

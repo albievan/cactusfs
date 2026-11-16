@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +54,9 @@ type Standalone struct {
 
 	mu     sync.Mutex
 	paused bool
+	// cutFrom holds the addresses Cluster.CutOff cut the node off from,
+	// while the cut holds.
+	cutFrom []netip.Addr
 }
 
 // StandaloneDriveDirs returns the directories of the drives of a standalone
