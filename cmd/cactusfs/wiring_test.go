@@ -238,10 +238,11 @@ func TestEveryPortIsWiredThroughItsDecorator(t *testing.T) {
 // its targets are decorated - which the walk sees once they are made - and
 // they reach the network through an egress client observed by the
 // telemetry and a dial function behind its decorator, which the walk cannot
-// see: a webhook and a NATS server
-// at an address the node may not connect to are each a failed connection
-// counted in cactusfs_egress_refusals_total and a span of the egress
-// boundary.
+// see: a webhook, a NATS server and another deployment (the client of
+// replication, PLAN 8.1.4) at an address the node may not connect to are
+// each a failed connection counted in cactusfs_egress_refusals_total and a
+// span of the egress boundary; the client of another deployment is
+// decorated too (span site.Check).
 func TestThePublishersOfTargetsAreDecorated(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -282,15 +283,37 @@ func TestThePublishersOfTargetsAreDecorated(t *testing.T) {
 			t.Errorf("a message to %s at loopback = %v, want a failure of class %s", in.Name, err, delivery.ClassEgressRefused)
 		}
 	}
-	if got := samples(t, tel)["cactusfs_egress_refusals_total{class=egress_refused}"]; got != 2 {
-		t.Errorf("cactusfs_egress_refusals_total{class=egress_refused} = %v, want 2: the egress client or its dial function is not decorated", got)
+	// And the client of another deployment (PLAN 8.1.4), through the same
+	// egress client: its probe of a bucket at loopback is refused.
+	if _, err := n.targets.Put(ctx, root, app.TargetInput{
+		Name: "site", Kind: delivery.KindS3, Endpoint: "https://127.0.0.1:" + port, Region: "eu-1", Buckets: []string{"photos"},
+		Auth: delivery.Auth{Mode: delivery.AuthSigV4, ID: "AKIDSITEBEXAMPLE0001"}, Secret: "not-a-secret-of-anybody",
+	}); err != nil {
+		t.Fatalf("Put site: %v", err)
+	}
+	target, err := n.meta.GetTarget(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := n.publishers.Site(ctx, target)
+	if err != nil {
+		t.Fatalf("the client of site: %v", err)
+	}
+	if _, ok := site.(telemetry.Instrumented); !ok {
+		t.Errorf("the client of site is a %T, without a decorator of the telemetry adapter", site)
+	}
+	if _, err := site.Check(ctx, "photos"); delivery.ClassOf(err) != delivery.ClassEgressRefused {
+		t.Errorf("a probe of site at loopback = %v, want a failure of class %s", err, delivery.ClassEgressRefused)
+	}
+	if got := samples(t, tel)["cactusfs_egress_refusals_total{class=egress_refused}"]; got != 3 {
+		t.Errorf("cactusfs_egress_refusals_total{class=egress_refused} = %v, want 3: the egress client or its dial function is not decorated", got)
 	}
 	spans := map[string]int{}
 	for _, span := range recorder.Ended() {
 		spans[span.Name()]++
 	}
-	if spans["egress.Do"] != 1 || spans["egress.Dial"] != 1 || spans["events.Publish"] < 2 {
-		t.Errorf("spans of the egress boundary and of the publishers: %v", spans)
+	if spans["egress.Do"] != 2 || spans["egress.Dial"] != 1 || spans["events.Publish"] < 2 || spans["site.Check"] != 1 {
+		t.Errorf("spans of the egress boundary, of the publishers and of the client of another deployment: %v", spans)
 	}
 	w := walkWiring(n)
 	for _, violation := range w.violations {

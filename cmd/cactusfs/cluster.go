@@ -331,6 +331,14 @@ func (d leaderDelivery) DeliveryStatus(ctx context.Context, targets []string) ([
 // delivery timeout for the headers of the answer, and as long again for
 // sending the request and reading the rest - every request a delivery sends
 // carries a deadline.
+//
+// An attempt at a version to send to another deployment has this and a day,
+// or the time its size takes at 64 KiB/s when that is longer - or at
+// replication-rate-mib shared by every version that may be sent at once, when
+// that is slower still (app.ReplicationAttemptTimeout).
+// What bounds a request that has stopped moving is the egress client, whose
+// connections may make no progress for longer than the delivery timeout; a
+// lead that is lost ends the attempt at once.
 func deliveryAttemptTimeout(deliveryTimeout time.Duration) time.Duration {
 	return 10*time.Second + 2*deliveryTimeout
 }

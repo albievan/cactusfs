@@ -14,7 +14,7 @@ Usage of cactusfs server:
   -data directory
     	drive directory; repeat the flag or separate directories with commas ($CACTUSFS_DATA)
   -delivery-timeout duration
-    	how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing; read by notification targets, and by replication once it exists (PLAN 8C) ($CACTUSFS_DELIVERY_TIMEOUT) (default 30s)
+    	how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing; read by notification targets and by replication ($CACTUSFS_DELIVERY_TIMEOUT) (default 30s)
   -dev-plaintext
     	DEVELOPMENT ONLY: serve HTTP without TLS, on a loopback IP address only ($CACTUSFS_DEV_PLAINTEXT)
   -drain-delay duration
@@ -58,9 +58,9 @@ Usage of cactusfs server:
   -region region
     	region name reported to S3 clients; default us-east-1 ($CACTUSFS_REGION)
   -replication-rate-mib int
-    	limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once replication exists (PLAN 8C) ($CACTUSFS_REPLICATION_RATE_MIB)
+    	limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit ($CACTUSFS_REPLICATION_RATE_MIB)
   -replication-workers int
-    	how many versions are replicated to other sites at once, 1 to 32; no effect yet: read once replication exists (PLAN 8C) ($CACTUSFS_REPLICATION_WORKERS) (default 4)
+    	how many versions are replicated to other sites at once, 1 to 32; never two versions of one object ($CACTUSFS_REPLICATION_WORKERS) (default 4)
   -roles roles
     	roles of this node: gateway, meta, storage, console; default all ($CACTUSFS_ROLES)
   -root-access-key-file path

@@ -384,19 +384,33 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// to what delivers its kind of consumer: the notifier for bucket
 	// notifications (ADR-0025), which publishes through a publisher made
 	// for a target the first time it has something for it, through an
-	// egress client of the target's own; the replicator is registered here
-	// by PLAN 8.1.4. Any node answers how a target stands by asking the
-	// leader.
+	// egress client of the target's own; and the replicator for
+	// replication between sites (ADR-0026), which reads each version as
+	// the replication service and sends it through the client of the other
+	// deployment, made, kept and closed as a publisher is.
+	// replication-workers versions are sent at once, never two of one
+	// object, and the bytes are held to replication-rate-mib. Any node
+	// answers how a target stands by asking the leader.
 	n.publishers = newPublishers(publishersConfig{
 		KMS: kms, Targets: targetStore, Telemetry: n.telemetry, Allow: cfg.EgressAllow, Timeout: cfg.DeliveryTimeout,
-		Version: userAgentVersion(ctx, logger, buildinfo.Get().Version), Clock: n.clock, Active: n.meta.IsLeader, Logger: logger,
+		Version: userAgentVersion(ctx, logger, buildinfo.Get().Version), Source: topology.DeploymentID, Clock: n.clock,
+		Active: n.meta.IsLeader, Logger: logger,
 	})
 	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
 		Targets: targetStore, Outbox: n.telemetry.InstrumentOutbox(n.meta), Active: n.meta.IsLeader, Clock: n.clock,
 		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
 		OnAttempt: n.telemetry.ObserveDeliveryAttempt, Auditor: n.auditor,
+		AttemptTimeouts: map[delivery.ConsumerKind]func(delivery.Item) time.Duration{
+			delivery.ConsumerReplication: app.ReplicationAttemptTimeout(deliveryAttemptTimeout(cfg.DeliveryTimeout),
+				app.ReplicationRateBytes(cfg.ReplicationRateMiB), cfg.ReplicationWorkers),
+		},
+		Parallel: map[delivery.ConsumerKind]int{delivery.ConsumerReplication: cfg.ReplicationWorkers},
 		Deliverers: map[delivery.ConsumerKind]app.Deliverer{
 			delivery.ConsumerNotification: app.NewNotifier(app.NotifierConfig{Publishers: n.publishers, Logger: logger}),
+			delivery.ConsumerReplication: app.NewReplicator(app.ReplicatorConfig{
+				Objects: n.objects, Buckets: meta, Sites: n.publishers, Source: topology.DeploymentID,
+				RateBytes: app.ReplicationRateBytes(cfg.ReplicationRateMiB), Clock: n.clock, Logger: logger,
+			}),
 		},
 		// The audit trail to the targets defined with audit: true, from
 		// their cursors, through the same publishers (ADR-0025). The

@@ -461,37 +461,44 @@ func serverSettings() []settingSpec {
 				"of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never " +
 				"connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one " +
 				"address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source " +
-				"(ADR-0029) and by notification targets, the export of the audit trail included (ADR-0025), and will be by " +
-				"replication when it comes with PLAN 8C",
+				"(ADR-0029), by notification targets, the export of the audit trail included (ADR-0025), and by " +
+				"replication to other sites (ADR-0026)",
 			bind: func(t *settingTargets) any { return &t.egressAllow },
 		},
 		{
 			Name: "delivery-timeout", Env: envDeliveryTimeout, Flag: true, Default: durationText(egress.DefaultResponseTimeout),
 			Group: groupDelivery, Kind: plain, Scope: all,
 			Usage: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
-				"progress reading or writing; read by notification targets, and by replication once it exists (PLAN 8C)",
+				"progress reading or writing; read by notification targets and by replication",
 			Doc: "how long a notification target or another site has to answer one request, once it is sent, and to make " +
 				"progress reading or writing (`" +
 				durationText(minDeliveryTimeout) + "` to `" + durationText(maxDeliveryTimeout) + "`); one that does not is tried " +
 				"again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the " +
-				"export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C",
+				"export of the audit trail included (ADR-0025), and by replication to other sites (ADR-0026), where it bounds " +
+				"each request of a version, not the whole version: a version may take as long as its size and replication-rate-mib need",
 			bind: func(t *settingTargets) any { return &t.cfg.DeliveryTimeout },
 		},
 		{
 			Name: "replication-workers", Env: envReplWorkers, Flag: true, Default: strconv.Itoa(defaultReplicationWorkers),
 			Group: groupDelivery, Kind: plain, Scope: all,
 			Usage: "how many versions are replicated to other sites at once, " + strconv.Itoa(minReplicationWorkers) + " to " +
-				strconv.Itoa(maxReplicationWorkers) + "; no effect yet: read once replication exists (PLAN 8C)",
+				strconv.Itoa(maxReplicationWorkers) + "; never two versions of one object",
 			Doc: "how many versions are replicated to other sites at once (`" + strconv.Itoa(minReplicationWorkers) + "` to `" +
-				strconv.Itoa(maxReplicationWorkers) + "`). It has no effect yet: it is read by replication, which comes with PLAN 8C",
+				strconv.Itoa(maxReplicationWorkers) + "`), by the node that leads the metadata group; two versions of one object, " +
+				"or a version and a later change of it, are never sent at once (ADR-0026)",
 			bind: func(t *settingTargets) any { return &t.cfg.ReplicationWorkers },
 		},
 		{
 			Name: "replication-rate-mib", Env: envReplRate, Flag: true, Default: "0",
 			Group: groupDelivery, Kind: plain, Scope: all,
-			Usage: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit; no effect yet: read once replication exists (PLAN 8C)",
+			Usage: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds; 0 is no limit",
 			Doc: "limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `" +
-				strconv.Itoa(maxReplicationRateMiB) + "`); `0` is no limit. It has no effect yet: it is read by replication, which comes with PLAN 8C",
+				strconv.Itoa(maxReplicationRateMiB) + "`); `0` is no limit. It is held to over every 10 seconds, with no burst above " +
+				"it: what all the versions being sent read together, by the node that leads (ADR-0026). An attempt at a version is given " +
+				"a day, or the time its size takes at 64 KiB/s when that is longer - or at this rate shared by `replication-workers` " +
+				"to each of the 256 targets a deployment can have, when that is slower still; a transfer that stops moving is ended by " +
+				"`delivery-timeout`. A version that cannot be sent is tried again - one of parts from the parts that arrived, one sent " +
+				"in one request from its start - and holds its target meanwhile",
 			bind: func(t *settingTargets) any { return &t.cfg.ReplicationRateMiB },
 		},
 
