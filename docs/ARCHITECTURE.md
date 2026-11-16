@@ -13,8 +13,8 @@ replicated store, the contracts, outbound connections, targets and the delivery 
 it needs exist, and so do the destination - replica mode, replica requests and the
 questions a source asks, PLAN 8.1.1 and 8.1.1a, "Replica requests" in section 6 - and
 the client of another site, PLAN 8.1.2, and the replicator with the later changes of a version, PLAN
-8.1.4 and 8.1.5, written and not yet through their gate; the resync, PLAN 8.1.6, written and not yet
-through its gate; the status and telemetry of a bucket's replication (8.1.7) do not). Bucket notifications (ADR-0025) are
+8.1.4 and 8.1.5, and the resync, PLAN 8.1.6, through their gate; the status and telemetry of a
+bucket's replication, PLAN 8.1.7, written and not yet through its gate). Bucket notifications (ADR-0025) are
 implemented end to end - the webhook and NATS publishers, the notifier that hands them
 the outbox, the export of the audit trail through them, S3's notification configuration,
 the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
@@ -508,6 +508,12 @@ Prometheus client and are not listed.
 | `cactusfs_outbox_rows` | gauge | - | rows the outbox holds, as the leader read them last (at most every 5 s); absent on every other node (aggregate with `max`) |
 | `cactusfs_outbox_dropped_total` | counter | - | rows pushed out of the outbox at its bound since the deployment began, a count the metadata keeps (`outboxdropped`) and the leader exposes: it does not begin again with a new leader, so aggregate with `max`, never `sum` |
 | `cactusfs_egress_refusals_total` | counter | `class` | requests to a place outside the deployment that got no answer, and connections to one (a NATS server) that could not be made, by class: `egress_refused` (an address the policy refuses), `redirect`, `tls`, `timeout`, `connect`, `internal`; every class a series from the start; no target and no URL is named; counted by the node that sent the request (sum over the nodes) |
+| `cactusfs_replication_bytes_total` | counter | - | bytes of versions and parts this node read into requests to other deployments (ADR-0026), whatever became of the request - the traffic `--replication-rate-mib` bounds; no bucket, key or target is named (sum over the nodes) |
+| `cactusfs_replication_versions_total` | counter | `result` | versions this node, while it led, found at or sent to another deployment (`completed`) or gave up on (`failed`: SSE-C, or refused there for itself), from the outbox and from resyncs; both results a series from the start (sum over the nodes) |
+| `cactusfs_replication_lag_entries` | gauge | - | rows of the outbox that wait for a target of kind `s3` (another deployment), all such targets together; the leader's, absent elsewhere (aggregate with `max`); one bucket's is `GET /api/v1/buckets/{bucket}/replication/status` |
+| `cactusfs_replication_lag_seconds` | gauge | - | how long the oldest of those rows has waited, 0 when none waits; the leader's, absent elsewhere (aggregate with `max`); `CactusFSReplicationLag` fires above 15 min |
+| `cactusfs_replication_resyncs` | gauge | `state` | resyncs the leader walks, by state: `walking`, `held` (by a failure, retrying or stalled), `waiting` (for a configuration, a target, an object the outbox sends, or the other buckets of the target); every state a series; the leader's, absent elsewhere (aggregate with `max`) |
+| `cactusfs_replication_resync_events_total` | counter | `event` | what befell the resyncs this node walked while it led: `held` (a pass held at a version), `preempted` (a send the outbox ended), `restarted` (a walk begun again because its target lost rows); every event a series from the start (sum over the nodes) |
 | `cactusfs_update_checks_total` | counter | `outcome` | askings of the update source, asked for or periodic: `ok`, or why it could not be read (`unreachable`, `rate-limited`, `refused`, `invalid-answer`, `timeout`) |
 | `cactusfs_update_available` | gauge | - | 1 when the releases the update source last listed hold one that may be installed, else 0 |
 | `cactusfs_upgrade_runs_total` | counter | `outcome` | upgrades started from this node: `refused` by the upgrader, or the state the run ended in (`done`, `failed`, `restart-required`) |
@@ -903,7 +909,32 @@ four at a time.
   a target, not their square; a round that moved nothing proposes nothing and is followed by a
   pause. How a walk stands beyond its record - the state and class of its own sending,
   or why it waits (`configuration`, `target`, `object`, `others`) - is the leader's
-  memory (`ResyncWorker.Progress`), for the status of PLAN 8.1.7.
+  memory (`ResyncWorker.Progress`); it is not part of a bucket's status, which is the
+  same on every node (below) - but for a walk held by a failure, which shows as its
+  target's state - and is shown by the metrics of replication instead:
+  `cactusfs_replication_resyncs{state}` (`ResyncWorker.Summary`) and
+  `cactusfs_replication_resync_events_total{event}` (`ResyncWorkerConfig.OnEvent`: held,
+  preempted, restarted).
+- **The status of a bucket's replication** (ADR-0026, "Status"; PLAN 8.1.7).
+  `GET /api/v1/buckets/{bucket}/replication/status` (`ReplicationService.Status`,
+  `admin:GetReplicationStatus` on the bucket, which `cluster-admin` and `auditor` hold
+  and a `bucket-admin` does not) is answered by any node, each part from where it is
+  true: the configuration, the record of the resync and the cursors of the targets
+  (`lost`, `resync_needed`), each a consistent read of the metadata; then `pending` and
+  `failed` from the bucket's usage record (`replication_pending`, `replication_failed`;
+  0 while it is first counted), read from the node's own copy after those consistent
+  reads, so never older than they are; then `target_state`, `last_error_class` and
+  `oldest_pending_at` of the target, from the node that leads
+  (`ports.DeliveryStatusReader`, the question `GET /targets/{name}/status` asks, within
+  5 s). The resync is the stored record only (`state`, `scanned`, `sent`): the leader's
+  memory of a walk would differ from one leader to the next and a follower cannot read
+  it, and the contract says the resync is the same whichever node answers. A resync held
+  by a failure shows as its target's state and class all the same: the delivery worker
+  shows a target no better than its worst held resync (`DeliveryWorkerConfig.Resyncs`,
+  `ResyncWorker.ResyncHeld`) until the resync's next attempt succeeds - in both status
+  endpoints and in `cactusfs_delivery_targets`. 404 `NoSuchEntity` without a configuration; 503
+  without a leader to ask, or one that did not answer in time or does not know the
+  target yet; a leader of a release that cannot be asked makes the state `unsupported`.
 - **The audit trail through a target** (ADR-0025; PLAN 8.2.8). A webhook or NATS
   target defined with `audit: true` is sent every record of the audit trail from the
   one after its cursor's `audit_acked` on - from the first record of the trail for a
@@ -971,8 +1002,15 @@ four at a time.
   `cactusfs_egress_refusals_total{class}` (`telemetry.ObserveEgress` for requests and
   `telemetry.InstrumentEgressDial` for the connections of a NATS publisher, which the
   publishers of 8B and the client of another deployment of 8C are wired through). No metric names
-  a target. Alerts `CactusFSDeliveryStalled` (the oldest row waiting for a kind of
-  target over 15 min) and `CactusFSOutboxDropping` are in `deploy/observability`.
+  a target. Alerts `CactusFSDeliveryStalled` (the oldest row waiting for a webhook or a
+  NATS target over 15 min), `CactusFSReplicationLag` (the same for another deployment,
+  from `cactusfs_replication_lag_seconds`, or the old series under a leader of an older
+  release; PLAN 8.1.7), `CactusFSReplicationResyncHeld` (a resync held for 15 min) and
+  `CactusFSOutboxDropping` are in `deploy/observability`. Replication adds `cactusfs_replication_bytes_total` (counted
+  by `telemetry.InstrumentSiteClient` as the client reads each body),
+  `cactusfs_replication_versions_total{result}` (`ReplicatorConfig.OnVersion`), the
+  gauges of lag and resyncs of the leader and the events of resyncs - none names a bucket,
+  a key or a target.
 - **Overflow** (ADR-0025; PLAN 8.2.7). A target that takes nothing never refuses or
   holds up a write: at the bound the outbox drops its oldest row, counted in
   `outboxdropped` and in the `lost` of each target that had not passed it. The worker
@@ -1125,9 +1163,11 @@ four at a time.
   /buckets/{bucket}/replication/resync` (PLAN 8.1.6) stores the start of a resync through
   Raft on any node and answers 202 with the record (`ReplicationService.Resync`,
   `admin:ResyncReplication`, audited; 404 `NoSuchEntity` for a bucket without a
-  configuration), and the leader walks it; the rest have no use case yet, so each
-  answers 501 `NotImplemented` to a caller that has authenticated:
-  `/buckets/{bucket}/replication/status`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  configuration), and the leader walks it; and `GET /buckets/{bucket}/replication/status`
+  (PLAN 8.1.7) is answered by any node (`ReplicationService.Status`,
+  `admin:GetReplicationStatus`; "The status of a bucket's replication", section 5). An
+  operation of the contract whose use case is not written answers 501 `NotImplemented`
+  to a caller that has authenticated; since PLAN 8.1.7 there is none. A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and

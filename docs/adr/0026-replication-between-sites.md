@@ -15,8 +15,10 @@
   destination as PLAN 8.1.1 built it ("The destination, as built"), to the
   configuration as PLAN 8.1.3 built it and its review amended it ("Configuration", "As
   built"), and to the replicator as PLAN 8.1.4 wrote it and its review amended it, with
-  the later changes of PLAN 8.1.5 ("The replicator, as built"); and to the resync as
-  PLAN 8.1.6 wrote it and its review and verification amended it ("Resync, as built"; open 10 to 14)
+  the later changes of PLAN 8.1.5 ("The replicator, as built"); to the resync as
+  PLAN 8.1.6 wrote it and its review and verification amended it ("Resync, as built"; open 10 to 14);
+  and to the status and the telemetry as PLAN 8.1.7 wrote them and its review amended them
+  ("Status and telemetry, as built"; open 15, and 16 closed)
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -893,8 +895,8 @@ its clearing of `resync_needed` are schema 5's (PLAN 8.0.9), the result by versi
   became `FAILED` meanwhile (the outbox gave up on a change of it), is gone, or is a
   replica, is left out of the acknowledgement, so that a resync never puts a status over
   a newer `FAILED`. The description of `failed` in `admin.yaml` (`BucketReplicationStatus`:
-  "falls only when such a version is removed or a resync replicates it") says otherwise;
-  it is corrected with the contract change of PLAN 8.1.7.
+  "falls only when such a version is removed or a resync replicates it") said otherwise;
+  PLAN 8.1.7 corrected it ("falls only when such a version is removed: `FAILED` is final").
 - **One sender.** Each version goes through the `Replicator` the outbox goes through
   (`Replicator.Resend`): the same reads as the replication service, classes, probe, Object
   Lock hold, uploads that go on, rate and attempt deadlines. It asks first, **a delete
@@ -948,7 +950,8 @@ its clearing of `resync_needed` are schema 5's (PLAN 8.0.9), the result by versi
   `ResyncWorker.Progress` gives the state of its own sending (`ok`, `retrying`, `stalled`,
   judged as a target's), the class of its last failure, `waiting` (`configuration`,
   `target`, `object`, `others`), and how often it began again (`Restarts`) and had a send
-  ended by the outbox (`Preempted`), for the status of PLAN 8.1.7.
+  ended by the outbox (`Preempted`). PLAN 8.1.7 shows it in the metrics, not in the
+  status of a bucket ("Status and telemetry, as built").
 - **The end, rows lost meanwhile, and the mark.** A pass of fewer than 500 versions ends
   the walk; what follows is decided at the end of the round, once for each target, with
   the targets' cursors read then - after every pass of the round. **When the target lost
@@ -982,6 +985,77 @@ its clearing of `resync_needed` are schema 5's (PLAN 8.0.9), the result by versi
 - **What a resync does not carry.** A later change of a version that is already there
   (its tags, retention or legal hold) whose row was lost at the bound: the question asked
   is whether the version is there, not what it carries. Open below, 10.
+
+### Status and telemetry, as built (PLAN 8.1.7)
+
+Written 2026-11-16 and amended by its review the same day (PLAN, Decisions "8.1.7
+review"), checked locally on darwin. No schema, entry, on-disk, port or Go contract
+change; the descriptions of `last_error_class` (both schemas) and of `failed` in
+`admin.yaml` were corrected, which regenerates the comments of the generated code and the
+web client - regenerated on the test host 2026-11-16 (description-only diff verified); the
+review corrected the description of `target_state` too, to be regenerated again.
+
+- **The status of a bucket** (`ReplicationService.Status`, behind
+  `GET /buckets/{bucket}/replication/status`; `admin:GetReplicationStatus` on the bucket,
+  which `cluster-admin` and `auditor` hold and a `bucket-admin` does not). Any node
+  answers, each part from where it is true there. The configuration, the record of the
+  resync and the cursors of the targets are consistent reads of the metadata - `lost` and
+  `resync_needed` are the target's cursor's (`delivery.Cursor`), whatever release leads
+  (review); `pending` and `failed` come from the bucket's usage record
+  (`replication_pending`, `replication_failed`), read from the node's own copy **after**
+  those reads, so never older than they are; the target's `target_state`,
+  `last_error_class` and `oldest_pending_at` come from the node that leads, through
+  `ports.DeliveryStatusReader` - the question
+  `GET /targets/{name}/status` asks, within 5 s, with the same rules: only words where a
+  word belongs, `unsupported` for a leader that cannot be asked, 503 with none to ask or
+  one that does not answer or does not know the target yet. 404 without a configuration.
+- **The resync in the status is the stored record**, `state`, `scanned`, `sent`, on
+  every node alike. What the leader keeps of a walk in memory
+  (`ResyncWorker.Progress`: the state and class of its own sending, why it waits, its
+  restarts and the sends the outbox ended) is not part of it: it differs from one
+  leader to the next, a follower could read it only through a new call of node RPC (a
+  change of `api/proto`), and the contract says the resync is the same whichever node
+  answers. A resync held, waiting or begun again still says `running`, as the contract
+  says. **A resync held is shown all the same, as its target's** (review): a resync sends
+  to the target as the outbox does, so the delivery worker shows each target no better
+  than its worst held resync (`DeliveryWorkerConfig.Resyncs`, read from
+  `ResyncWorker.ResyncHeld` when a status is asked): `retrying` or `stalled`, judged as a
+  target's are, with the class of the failure, until the resync's next attempt succeeds,
+  the walk ends, or it waits for its configuration or its target - a walk that waits for
+  either is held by no failure of a target, and its failures are forgotten (verification
+  of PLAN 8.1.7) - in `GET /targets/{name}/status`, in the status of every bucket sent
+  there and in `cactusfs_delivery_targets`, on every node, as the leader answers them;
+  without it a target that refuses a resync while its outbox is empty said `ok`. Whether
+  the contract should gain the rest - restarts and sends the outbox ended - is open, 15.
+- **Metrics**, none naming a bucket, a key or a target:
+  `cactusfs_replication_bytes_total` (bytes of versions and parts read into requests to
+  other deployments, counted by `telemetry.InstrumentSiteClient` as the client reads
+  each body, whatever became of the request - the traffic the rate bounds);
+  `cactusfs_replication_versions_total{result}` (`completed`, `failed`: every status the
+  replicator gives a version, from a row or a resync, `ReplicatorConfig.OnVersion`);
+  `cactusfs_replication_lag_entries` and `cactusfs_replication_lag_seconds` (the rows
+  that wait for targets of kind `s3`, together, and the age of the oldest - the
+  leader's, from the delivery worker's summary, absent elsewhere);
+  `cactusfs_replication_resyncs{state}` (`walking`, `held`, `waiting`;
+  `ResyncWorker.Summary`, the leader's) and
+  `cactusfs_replication_resync_events_total{event}` (`held`, `preempted`, `restarted`;
+  `ResyncWorkerConfig.OnEvent`). `object_lock` is now a class of
+  `cactusfs_delivery_attempts_total` rather than `other`.
+- **The alerts.** `CactusFSReplicationLag`: the age of the oldest row for another
+  deployment above 900 s - `cactusfs_replication_lag_seconds`, or, where no node of the
+  job exposes it (a leader of an older release, during a rolling upgrade),
+  `cactusfs_delivery_oldest_pending_seconds{kind="s3"}`, the same number (review) - at
+  once, kept firing for 15 minutes: the threshold and hold of `CactusFSDeliveryStalled`,
+  which no longer covers the kind `s3` (one cause, one alert). A stalled target fires it,
+  as "Status" above says, and so does a link slower than the writes, or one version that
+  takes longer than 15 minutes to cross. `CactusFSReplicationResyncHeld` (review):
+  `max by (job) (cactusfs_replication_resyncs{state="held"}) > 0` for 15 minutes - the
+  hold of `CactusFSDeliveryStalled` - fires on a resync held whether or not the outbox
+  has anything for its target. Tested with `promtool test rules`; the chart carries the
+  same file.
+- **Decorators.** Every port the status reads is decorated (`InstrumentBucketUsage`,
+  `InstrumentDeliveryStatus`, `InstrumentReplication`, `InstrumentMetadata` behind the
+  bucket store); the composition root's walk holds it to that.
 
 ### Limits
 
@@ -1164,6 +1238,19 @@ Defaults are applied until answered.
     configuration stays here only; S3 Batch Replication copies such a marker. Keeping
     who made a marker would be a field more of a version - a schema change. Default:
     not sent - a marker that crosses can hide a version at the destination.
+
+15. **A resync's restarts and preemptions are not in the status** (PLAN 8.1.7, narrowed
+    by its review). The contract's `ReplicationResync` has `state`, `scanned` and `sent`;
+    a resync held by a failure shows as its target's state and class (above), but its
+    restarts, the sends the outbox ended and why a walk waits (configuration, target,
+    object, others) are the leader's memory, shown in the metrics
+    (`cactusfs_replication_resyncs{state}`, `cactusfs_replication_resync_events_total{event}`)
+    and the log. Showing them per bucket means new fields in the contract and a call of
+    node RPC that asks the leader (a follower cannot read them otherwise). Default: not in
+    the status; the console of PLAN 8.1.10 is the natural place to decide it.
+16. *Closed by the review of PLAN 8.1.7:* a resync that stays held has an alert,
+    `CactusFSReplicationResyncHeld` (held for 15 minutes), and shows in its target's
+    status.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode
