@@ -25,9 +25,14 @@ type Authorizer interface {
 	// decision, from the same reading of the policies, but a refusal is
 	// neither written to the audit trail nor logged. It exists only to
 	// filter a set of results down to what the caller may see - a search
-	// over a hundred buckets must not write a hundred denials - and is
-	// never to be used as the gate of an operation: whatever a caller asks
-	// for by name goes through Authorize. The error is not nil only when
+	// over a hundred buckets must not write a hundred denials - and to
+	// choose which action Authorize is then asked for, never instead of
+	// it: the parts, the abort and the list of the parts of a multipart
+	// upload ask it whether the caller replicates, so as to ask Authorize
+	// for s3:ReplicateObject or the ordinary action before the upload is
+	// read (app.ObjectService's authorizeUpload, ADR-0026). It is never to
+	// be used as the gate of an operation: whatever a caller asks for by
+	// name goes through Authorize. The error is not nil only when
 	// the decision could not be made, and then nothing is allowed - and
 	// for a caller whose console session is locked, when it wraps
 	// domain.ErrSessionLocked: such a caller is never answered "no", which

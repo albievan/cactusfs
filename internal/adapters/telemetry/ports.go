@@ -774,3 +774,44 @@ func (s *bucketUsageStore) SetBucketQuota(ctx context.Context, name string, quot
 	done(err)
 	return err
 }
+
+// InstrumentReplication returns next wrapped so that every call is traced
+// and counted (ADR-0026). Neither a bucket nor a deployment is a label or an
+// attribute: a bucket's name is chosen by a tenant, and the ID of another
+// deployment names a site.
+func (t *Telemetry) InstrumentReplication(next ports.ReplicationStore) ports.ReplicationStore {
+	return &replicationStore{t: t, next: next}
+}
+
+type replicationStore struct {
+	t    *Telemetry
+	next ports.ReplicationStore
+}
+
+const portReplication = "replication"
+
+func (*replicationStore) instrumented() {}
+
+// SetBucketReplica implements ports.ReplicationStore.
+func (s *replicationStore) SetBucketReplica(ctx context.Context, name, source string, record audit.Record) error {
+	ctx, done := s.t.call(ctx, portReplication, "SetBucketReplica")
+	err := s.next.SetBucketReplica(ctx, name, source, record)
+	done(err)
+	return err
+}
+
+// PutResync implements ports.ReplicationStore.
+func (s *replicationStore) PutResync(ctx context.Context, r bucket.Resync) error {
+	ctx, done := s.t.call(ctx, portReplication, "PutResync")
+	err := s.next.PutResync(ctx, r)
+	done(err)
+	return err
+}
+
+// GetResync implements ports.ReplicationStore.
+func (s *replicationStore) GetResync(ctx context.Context, bucketName string) (bucket.Resync, error) {
+	ctx, done := s.t.call(ctx, portReplication, "GetResync")
+	r, err := s.next.GetResync(ctx, bucketName)
+	done(err)
+	return r, err
+}

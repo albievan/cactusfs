@@ -210,6 +210,7 @@ var wiredKinds = []string{
 	"ports.AuditLog", "ports.SessionStore", "ports.IdempotencyStore", "ports.PasswordHasher", "ports.IdentityProvider",
 	"ports.EventPublisher", "ports.ClusterView", "app.BucketPolicySource", "ports.TargetStore", "ports.SubBucketLister", "ports.SubBucketStore",
 	"ports.ReleaseVerifier", "ports.Upgrader", "ports.BucketUsageStore", "ports.Outbox", "ports.DeliveryStatusReader",
+	"ports.ReplicationStore",
 }
 
 // TestEveryPortIsWiredThroughItsDecorator: a node on its own, started as

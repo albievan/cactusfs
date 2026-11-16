@@ -457,7 +457,6 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 	// written is taken from this list, and must then answer 423.
 	notWritten := []string{
 		"getBucketReplication", "putBucketReplication", "deleteBucketReplication", "getBucketReplicationStatus", "resyncBucketReplication",
-		"getBucketReplicaMode", "putBucketReplicaMode",
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
 	// unlocking does: with a key they are asked as without one.

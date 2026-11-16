@@ -1963,14 +1963,61 @@ func (o *operations) ResyncBucketReplication(context.Context, api.ResyncBucketRe
 	return nil, notYet("replication resync")
 }
 
-// GetBucketReplicaMode implements api.StrictServerInterface (PLAN 8.1.1).
-func (o *operations) GetBucketReplicaMode(context.Context, api.GetBucketReplicaModeRequestObject) (api.GetBucketReplicaModeResponseObject, error) {
-	return nil, notYet("replica mode")
+// --- replica mode (ADR-0026) ---
+//
+// Who may read whether a bucket is a replica, make it one or promote it, is
+// the use case's to decide (ReplicationService): it asks the single
+// authorizer with an admin: action on the bucket. These carry the source
+// between the contract and the use case.
+
+// replication is the use case of replica mode, or the answer of a node that
+// was not given it.
+func (o *operations) replication() (*app.ReplicationService, error) {
+	if o.h.cfg.Replication == nil {
+		return nil, notYet("replica mode")
+	}
+	return o.h.cfg.Replication, nil
 }
 
-// PutBucketReplicaMode implements api.StrictServerInterface (PLAN 8.1.1).
-func (o *operations) PutBucketReplicaMode(context.Context, api.PutBucketReplicaModeRequestObject) (api.PutBucketReplicaModeResponseObject, error) {
-	return nil, notYet("replica mode")
+// replicaModeOf maps a mode to the contract: source absent when the bucket
+// is no replica.
+func replicaModeOf(m app.ReplicaMode) api.BucketReplicaMode {
+	out := api.BucketReplicaMode{Replica: m.Replica()}
+	if m.Replica() {
+		out.Source = &m.Source
+	}
+	return out
+}
+
+// GetBucketReplicaMode implements api.StrictServerInterface.
+func (o *operations) GetBucketReplicaMode(ctx context.Context, request api.GetBucketReplicaModeRequestObject) (api.GetBucketReplicaModeResponseObject, error) {
+	replication, err := o.replication()
+	if err != nil {
+		return nil, err
+	}
+	mode, err := replication.ReplicaMode(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetBucketReplicaMode200JSONResponse(replicaModeOf(mode)), nil
+}
+
+// PutBucketReplicaMode implements api.StrictServerInterface. What a source
+// may be is the use case's to judge: a body that is none is the decoder's
+// to refuse.
+func (o *operations) PutBucketReplicaMode(ctx context.Context, request api.PutBucketReplicaModeRequestObject) (api.PutBucketReplicaModeResponseObject, error) {
+	replication, err := o.replication()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	mode, err := replication.SetReplicaMode(ctx, who(ctx), request.Bucket, request.Body.Source)
+	if err != nil {
+		return nil, err
+	}
+	return api.PutBucketReplicaMode200JSONResponse(replicaModeOf(mode)), nil
 }
 
 // --- updates and upgrades (ADR-0029) ---

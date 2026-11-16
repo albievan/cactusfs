@@ -57,7 +57,7 @@ func TestEverySentinelHasAnAnswer(t *testing.T) {
 		domain.ErrCredentialNotFound:    {401, "Unauthenticated"},
 		domain.ErrVersionNotFound:       {404, "NoSuchVersion"},
 		domain.ErrMethodNotAllowed:      {405, "MethodNotAllowed"},
-		domain.ErrInvalidBucketState:    {500, "InternalError"},
+		domain.ErrInvalidBucketState:    {409, "InvalidBucketState"},
 		domain.ErrObjectLocked:          {500, "InternalError"},
 		domain.ErrEntityTooLarge:        {413, "EntityTooLarge"},
 		domain.ErrCustomerKeyRequired:   {400, "InvalidArgument"},

@@ -178,6 +178,16 @@ type PutInput struct {
 	// match a digest the client declared. The inbound adapter supplies it,
 	// because which digests a client may declare is protocol.
 	Verify func() (etag string, err error)
+
+	// Replica, when not nil, says that the object is the copy of a version
+	// of another deployment (ADR-0026). It needs s3:ReplicateObject on the
+	// object, not s3:PutObject; the bucket must be the replica of its
+	// source; and the version is committed with the ID, the time and the
+	// sequence it has there. The entity tag of the content must be the
+	// one the replica names (domain.ErrBadDigest otherwise). A copy is
+	// encrypted under this deployment's default key: it asks for no
+	// SSE-KMS or SSE-C.
+	Replica *ReplicaWrite
 }
 
 // Put stores an object and returns its committed version. The order is the
@@ -200,7 +210,16 @@ func (s *ObjectService) Put(ctx context.Context, principal iam.Principal, in Put
 // refused when they break them.
 func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in PutInput, tags map[string]string) (object.Version, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
+	if in.Replica != nil {
+		// A copy is the replicate action's, and s3:PutObject does not
+		// make one; nor does the replicate action make anything else.
+		if err := s.admitReplica(ctx, principal, resource, *in.Replica, false); err != nil {
+			return object.Version{}, err
+		}
+		if in.SSE.Mode != "" {
+			return object.Version{}, errReplicaSSE
+		}
+	} else if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
 		return object.Version{}, err
 	}
 	if in.Size > object.MaxSize {
@@ -234,10 +253,23 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 		return object.Version{}, err
 	}
 	defer keys.tag.forget()
-	err = s.write(ctx, version.DataID, keys.stream, in.Body, in.Size, keys.tag.verify(in.Verify), func(w written) (object.Extent, error) {
+	verify := keys.tag.verify(in.Verify)
+	if in.Replica != nil {
+		// The copy is the version it says it is: its ID, its time and its
+		// sequence are its source's, and its content has its entity tag.
+		if !in.Replica.Version.Null {
+			version.VersionID = in.Replica.Version.ID
+		}
+		version.Replica = in.Replica.replica()
+		verify = in.Replica.verify(verify)
+	}
+	err = s.write(ctx, version.DataID, keys.stream, in.Body, in.Size, verify, func(w written) (object.Extent, error) {
 		version.Size, version.ETag, version.Layout = w.size, w.etag, w.layout
 		// ... then visible, through Raft. Nothing was acknowledged before this.
 		version.ModifiedAt = s.clock.Now().UTC()
+		if in.Replica != nil {
+			version.ModifiedAt = in.Replica.ModifiedAt.UTC()
+		}
 		committed, err := s.index.PutVersion(ctx, version)
 		if err != nil {
 			s.quotaRefused(err)
@@ -255,6 +287,9 @@ func (s *ObjectService) put(ctx context.Context, principal iam.Principal, in Put
 	})
 	if err != nil {
 		return object.Version{}, err
+	}
+	if in.Replica != nil {
+		s.auditReplica(ctx, principal, resource, "PutObject", *in.Replica, false)
 	}
 	return version, nil
 }
@@ -857,6 +892,29 @@ type LockInput struct {
 	Key    string
 	// Version, when nil, means the current version.
 	Version *object.VersionRef
+	// ReplicaSource, when not empty, says that the change is a later
+	// change of a copy, sent by that source deployment (ADR-0026): it is
+	// taken only for a version named by its ID, in a bucket that is the
+	// replica of exactly that source (domain.ErrInvalidBucketState
+	// otherwise), and never bypasses a governance retention. The action
+	// asked is the ordinary one. Only a change sets it.
+	ReplicaSource string
+}
+
+// admitChange decides whether a later change sent by a source may be made:
+// none was sent by one, or it names its version and the bucket is the
+// replica of that source. The caller has authorized it.
+func (s *ObjectService) admitChange(ctx context.Context, in LockInput) error {
+	if in.ReplicaSource == "" {
+		return nil
+	}
+	if err := object.ValidateReplicaSource(in.ReplicaSource); err != nil {
+		return err
+	}
+	if in.Version == nil {
+		return fmt.Errorf("%w: a change sent by a source names the version it changes", domain.ErrInvalidArgument)
+	}
+	return s.admitSource(ctx, in.Bucket, in.ReplicaSource)
 }
 
 // lockTarget authorizes a lock operation and resolves which version it is
@@ -867,6 +925,9 @@ func (s *ObjectService) lockTarget(ctx context.Context, principal iam.Principal,
 		return object.Version{}, err
 	}
 	if err := object.ValidateKey(in.Key); err != nil {
+		return object.Version{}, err
+	}
+	if err := s.admitChange(ctx, in); err != nil {
 		return object.Version{}, err
 	}
 	target, err := s.buckets.GetBucket(ctx, in.Bucket)
@@ -913,6 +974,11 @@ func (s *ObjectService) SetRetention(
 	version, err := s.lockTarget(ctx, principal, iam.ActionPutObjectRetention, in)
 	if err != nil {
 		return object.Version{}, fmt.Errorf("object.SetRetention: %w", err)
+	}
+	if bypassGovernance && in.ReplicaSource != "" {
+		// A source carries what its version has, and never lifts a lock
+		// at the destination.
+		return object.Version{}, fmt.Errorf("object.SetRetention: %w: a change sent by a source bypasses no retention", domain.ErrInvalidArgument)
 	}
 	if bypassGovernance {
 		resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
@@ -1115,6 +1181,14 @@ type DeleteInput struct {
 	// the key. If another has taken its place, nothing is deleted and the
 	// error wraps domain.ErrConflict.
 	Expect object.ID
+	// Replica, when not nil, says that the delete is the copy of a delete
+	// marker of another deployment (ADR-0026): it needs
+	// s3:ReplicateDelete on the object, not s3:DeleteObject; it names no
+	// version and lifts no retention; the bucket must be the replica of
+	// its source; and the marker is made with the ID, the time and the
+	// sequence it has there. A marker that is the null version of its key
+	// there is given an ID of its own here, as every marker has one.
+	Replica *ReplicaWrite
 }
 
 // DeleteOutput says what a delete did.
@@ -1131,6 +1205,13 @@ type DeleteOutput struct {
 // naming a version removes that version for good, and needs the permission
 // to do so. Deleting what does not exist succeeds, as S3 clients expect.
 func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in DeleteInput) (DeleteOutput, error) {
+	if in.Replica != nil {
+		out, err := s.deleteReplica(ctx, principal, in)
+		if err != nil {
+			return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
+		}
+		return out, nil
+	}
 	action := iam.ActionDeleteObject
 	if in.Version != nil {
 		action = iam.ActionDeleteObjectVersion
@@ -1167,6 +1248,47 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 			"operation": "DeleteObjectVersion", "version": result.Removed.Ref().String(),
 		}))
 	}
+	return DeleteOutput{Marker: result.Marker, Removed: result.Removed}, nil
+}
+
+// deleteReplica commits the copy of a delete marker of another deployment.
+// Removing a version is never the copy of anything: a replica that names a
+// version, or asks to lift a retention, is refused before anything is
+// asked of the store.
+func (s *ObjectService) deleteReplica(ctx context.Context, principal iam.Principal, in DeleteInput) (DeleteOutput, error) {
+	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
+	w := *in.Replica
+	if err := s.admitReplica(ctx, principal, resource, w, true); err != nil {
+		return DeleteOutput{}, err
+	}
+	if in.Version != nil || in.BypassGovernance || !in.Expect.IsZero() {
+		return DeleteOutput{}, fmt.Errorf("%w: the copy of a delete marker removes no version", domain.ErrInvalidArgument)
+	}
+	if err := object.ValidateKey(in.Key); err != nil {
+		return DeleteOutput{}, err
+	}
+	markerID := w.Version.ID
+	if w.Version.Null {
+		// The null version of its key at the source, which is named
+		// without an ID; here, as everywhere, a marker has one.
+		s.entropyMu.Lock()
+		id, err := object.NewID(s.entropy)
+		s.entropyMu.Unlock()
+		if err != nil {
+			return DeleteOutput{}, err
+		}
+		markerID = id
+	}
+	result, err := s.index.DeleteObject(ctx, in.Bucket, in.Key, ports.DeleteOptions{
+		MarkerID: markerID, At: w.ModifiedAt.UTC(), Replica: w.replica(),
+	})
+	if err != nil {
+		return DeleteOutput{}, err
+	}
+	// A marker removes nothing; should the store say otherwise, what it
+	// removed has no reader any more.
+	s.discard(ctx, result.Removed, result.RemovedParts)
+	s.auditReplica(ctx, principal, resource, "DeleteObject", w, true)
 	return DeleteOutput{Marker: result.Marker, Removed: result.Removed}, nil
 }
 
@@ -1430,6 +1552,9 @@ func (s *ObjectService) tagTarget(ctx context.Context, principal iam.Principal, 
 	if err := object.ValidateKey(in.Key); err != nil {
 		return object.Version{}, err
 	}
+	if err := s.admitChange(ctx, in); err != nil {
+		return object.Version{}, err
+	}
 	if in.Version == nil {
 		return s.index.GetObject(ctx, in.Bucket, in.Key)
 	}
@@ -1568,6 +1693,8 @@ func (s *ObjectService) CopyPart(ctx context.Context, principal iam.Principal, i
 	part := in.Part
 	part.Body, part.Verify = in.Digest(out.Body)
 	part.Size, part.Checksums = out.Range.Length, nil
+	// A copy is no part a replica upload takes (admitPart).
+	part.copied = true
 	stored, err := s.uploadPart(ctx, principal, part)
 	if err != nil {
 		return object.Part{}, fmt.Errorf("object.CopyPart: %w", err)

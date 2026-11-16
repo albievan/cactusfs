@@ -276,7 +276,9 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 		Targets: targets,
 		// The notification rules of buckets name the targets above.
 		Notifications: app.NewNotificationService(app.NotificationServiceConfig{Buckets: meta, Targets: meta, Authz: authz, Auditor: f.auditor}),
-		SubBuckets:    app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
+		// Replica mode carries its audit record to the trail, as targets do.
+		Replication: app.NewReplicationService(app.ReplicationServiceConfig{Buckets: meta, Store: meta, Authz: authz, Auditor: f.auditor}),
+		SubBuckets:  app.NewSubBucketService(meta, authz, f.auditor, f.clock, logger),
 		// The catalogue of tags carries its audit record to the trail, as
 		// targets do.
 		TagDefinitions: app.NewTagDefinitionService(app.TagDefinitionServiceConfig{Store: meta, Authz: authz, Auditor: f.auditor, Clock: f.clock}),
@@ -1689,8 +1691,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 		{method: "DELETE", path: "/buckets/some-bucket/replication"},
 		{method: "GET", path: "/buckets/some-bucket/replication/status"},
 		{method: "POST", path: "/buckets/some-bucket/replication/resync", headers: map[string]string{"Content-Type": "application/json"}},
-		{method: "GET", path: "/buckets/some-bucket/replica"},
-		{method: "PUT", path: "/buckets/some-bucket/replica", body: map[string]any{"source": ""}},
 	} {
 		// Without a credential, and with one nobody has: 401, before
 		// anything is said of what the operation does or does not do.

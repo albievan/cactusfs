@@ -189,6 +189,10 @@ type Config struct {
 	// buckets (ADR-0025). It may be nil on a node that was not given the
 	// use case: its operations then answer 501.
 	Notifications *app.NotificationService
+	// Replication reads and sets whether buckets are replicas of another
+	// deployment's (ADR-0026). It may be nil on a node that was not given
+	// the use case: its operations then answer 501.
+	Replication *app.ReplicationService
 	// Counter has the usage of a bucket counted again when asked
 	// (ADR-0023). It may be nil on a node that was not given the use case:
 	// the recount then answers 501.
@@ -781,6 +785,10 @@ func problemOf(err error) problem {
 		return problem{status: http.StatusConflict, code: "BucketAlreadyExists", title: "Bucket already exists"}
 	case is(domain.ErrBucketNotEmpty):
 		return problem{status: http.StatusConflict, code: "BucketNotEmpty", title: "Bucket is not empty"}
+	case is(domain.ErrInvalidBucketState):
+		// What the bucket is decides against the change: it keeps no
+		// versions, it is replicated, or it is a replica (ADR-0026).
+		return problem{status: http.StatusConflict, code: "InvalidBucketState", title: "Not possible in the bucket's state"}
 	case is(domain.ErrTooManySubBuckets):
 		return problem{status: http.StatusConflict, code: "TooManySubBuckets", title: "The bucket has as many sub-buckets as it can have"}
 	case is(domain.ErrSubBucketNotEmpty):

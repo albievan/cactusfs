@@ -85,6 +85,14 @@ type CreateUploadInput struct {
 	// decide how they are kept; they are checked against the rules now
 	// and again when the upload is completed.
 	Tags []object.Tag
+	// ReplicaFrom, when not empty, begins the upload as the copy of a
+	// version of the deployment it names (ADR-0026): it needs
+	// s3:ReplicateObject on the object, not s3:PutObject; the bucket must
+	// be the replica of that deployment; its parts are sent with the same
+	// action, and it is completed only as the copy of a version of that
+	// deployment. It asks for no SSE-KMS or SSE-C: a copy is encrypted under
+	// this deployment's default key.
+	ReplicaFrom string
 }
 
 // CreateUpload begins a multipart upload.
@@ -98,7 +106,14 @@ func (s *ObjectService) CreateUpload(ctx context.Context, principal iam.Principa
 
 func (s *ObjectService) createUpload(ctx context.Context, principal iam.Principal, in CreateUploadInput) (object.Upload, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
+	if in.ReplicaFrom != "" {
+		if err := s.admitReplicaUpload(ctx, principal, resource, in.ReplicaFrom); err != nil {
+			return object.Upload{}, err
+		}
+		if in.SSE.Mode != "" {
+			return object.Upload{}, errReplicaSSE
+		}
+	} else if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
 		return object.Upload{}, err
 	}
 	if err := s.admit(ctx, principal, resource, in.UserMetadata, in.Lock); err != nil {
@@ -120,6 +135,7 @@ func (s *ObjectService) createUpload(ctx context.Context, principal iam.Principa
 		Bucket: in.Bucket, Key: in.Key, ID: object.ID(random), InitiatedAt: s.clock.Now().UTC(), Initiator: principal.Name(),
 		ContentType: in.ContentType, ContentEncoding: in.ContentEncoding, ContentDisposition: in.ContentDisposition,
 		ContentLanguage: in.ContentLanguage, CacheControl: in.CacheControl, UserMetadata: in.UserMetadata, Lock: in.Lock,
+		ReplicaFrom: in.ReplicaFrom,
 	}
 	// One data key for the upload, bound to its ID. It encrypts nothing:
 	// the key of every part is derived from it.
@@ -161,6 +177,14 @@ type UploadPartInput struct {
 	// returns the checksums the client declared for the part and that
 	// were found to hold, by the name of the header that carried each.
 	Checksums func() map[string]string
+	// PayloadSigned says that the request's signature covers Body - its
+	// SHA-256, or signed chunks, and no presigned URL - as the inbound
+	// adapter judges it. A part of a replica upload is refused without it
+	// (ADR-0026).
+	PayloadSigned bool
+	// copied says that the part is the copy of another object
+	// (CopyPart), which a replica upload never takes.
+	copied bool
 }
 
 // UploadPart stores one part of a multipart upload, in place of any part
@@ -176,7 +200,8 @@ func (s *ObjectService) UploadPart(ctx context.Context, principal iam.Principal,
 
 func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal, in UploadPartInput) (object.Part, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
+	replicates, err := s.authorizeUpload(ctx, principal, resource, iam.ActionPutObject)
+	if err != nil {
 		return object.Part{}, err
 	}
 	if err := object.ValidatePartNumber(in.Number); err != nil {
@@ -187,6 +212,12 @@ func (s *ObjectService) uploadPart(ctx context.Context, principal iam.Principal,
 	}
 	upload, err := s.uploads.GetUpload(ctx, in.Bucket, in.Key, in.UploadID)
 	if err != nil {
+		return object.Part{}, err
+	}
+	if err := s.authorizeUploadOf(ctx, principal, resource, upload, iam.ActionPutObject, replicates); err != nil {
+		return object.Part{}, err
+	}
+	if err := s.admitPart(ctx, principal, resource, upload, in); err != nil {
 		return object.Part{}, err
 	}
 	// Nothing is written that the quota cannot take.
@@ -326,6 +357,14 @@ type CompleteUploadInput struct {
 	// CustomerKey may be given for an upload under SSE-C, and is then
 	// checked. Completing does not need it.
 	CustomerKey []byte
+	// Replica, when not nil, completes the upload as the copy of a
+	// version of another deployment (ADR-0026): it needs
+	// s3:ReplicateObject on the object, not s3:PutObject; the upload must
+	// have been begun as a copy from the same deployment; ETag must be the
+	// entity tag the replica names (domain.ErrBadDigest otherwise); and
+	// the version is committed with the ID, the time and the sequence it
+	// has there.
+	Replica *ReplicaWrite
 }
 
 // completeAttempts bounds how often completing starts over because a part
@@ -347,10 +386,26 @@ func (s *ObjectService) CompleteUpload(ctx context.Context, principal iam.Princi
 
 func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Principal, in CompleteUploadInput) (object.Version, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
+	if in.Replica != nil {
+		if err := s.admitReplica(ctx, principal, resource, *in.Replica, false); err != nil {
+			return object.Version{}, err
+		}
+		// The entity tag of an object of parts is formed from the parts
+		// listed, and completing checks they are the stored ones: the
+		// copy is the version its source has when the two are the same.
+		if in.ETag != in.Replica.ETag {
+			return object.Version{}, fmt.Errorf("%w: the parts listed do not make the version its source has", domain.ErrBadDigest)
+		}
+	} else if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionPutObject, Resource: resource}); err != nil {
 		return object.Version{}, err
 	}
 	upload, err := s.uploads.GetUpload(ctx, in.Bucket, in.Key, in.UploadID)
+	if errors.Is(err, domain.ErrUploadNotFound) && in.Replica != nil {
+		// A source that did not hear the answer sends the completion
+		// again; the version it made is there, or another copy of it
+		// is, which the source reads as done.
+		return s.completedReplica(ctx, in)
+	}
 	if errors.Is(err, domain.ErrUploadNotFound) {
 		// A client that did not hear the answer asks again. If the
 		// object this upload made is the current one, that is the answer.
@@ -360,6 +415,11 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 	}
 	if err != nil {
 		return object.Version{}, err
+	}
+	if in.Replica != nil && upload.ReplicaFrom != in.Replica.Source {
+		// A copy completes the upload its source began, and no other;
+		// the store holds to it again when the entry is applied.
+		return object.Version{}, fmt.Errorf("%w: the upload was not begun as a copy from that deployment", domain.ErrInvalidBucketState)
 	}
 	if err := s.checkUploadKey(ctx, upload, in.CustomerKey); err != nil {
 		return object.Version{}, err
@@ -405,6 +465,14 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 			// Whoever completes the upload is who made the version.
 			CreatedBy: actorOf(principal),
 		}
+		if in.Replica != nil {
+			// The version its source has: its ID - or none, as the null
+			// version - its time and its sequence.
+			if !in.Replica.Version.Null {
+				completion.VersionID = in.Replica.Version.ID
+			}
+			completion.At, completion.Replica = in.Replica.ModifiedAt.UTC(), in.Replica.replica()
+		}
 		if completion.Parts, err = s.sealParts(ctx, in, manifest); err != nil {
 			return object.Version{}, err
 		}
@@ -412,15 +480,67 @@ func (s *ObjectService) completeUpload(ctx context.Context, principal iam.Princi
 		// the entry is applied. The check above is the same one, made
 		// early: it spares the entry, and it is what the seals are for.
 		result, err := s.uploads.CompleteUpload(ctx, completion)
-		if errors.Is(err, domain.ErrConflict) && attempt < completeAttempts {
+		if errors.Is(err, domain.ErrConflict) && in.Replica != nil {
+			// A conflict is either a part that changed meanwhile or the
+			// version being there already. Only the second is what the
+			// source reads as done, and it is told only that.
+			err = s.replicaConflict(ctx, in, err, attempt < completeAttempts)
+			if err == nil {
+				continue
+			}
+		}
+		if errors.Is(err, domain.ErrConflict) && attempt < completeAttempts && in.Replica == nil {
 			continue
 		}
 		if err != nil {
 			return object.Version{}, err
 		}
 		s.discard(ctx, result.Removed, result.RemovedParts)
+		if in.Replica != nil {
+			s.auditReplica(ctx, principal, resource, "CompleteMultipartUpload", *in.Replica, false)
+		}
 		return result.Stored, nil
 	}
+}
+
+// replicaConflict judges a conflict the store answered to the completion of
+// a copy: the conflict itself when the version is there - the source reads
+// it as done - nil when the completion may be tried again, and otherwise a
+// refusal that is no conflict, so that a source does not read parts that
+// changed underneath as a version that arrived.
+func (s *ObjectService) replicaConflict(ctx context.Context, in CompleteUploadInput, conflict error, again bool) error {
+	_, err := s.index.GetVersion(ctx, in.Bucket, in.Key, in.Replica.Version)
+	switch {
+	case err == nil:
+		return conflict
+	case !errors.Is(err, domain.ErrVersionNotFound) && !errors.Is(err, domain.ErrObjectNotFound):
+		return err
+	case again:
+		return nil
+	}
+	return fmt.Errorf("%w: the parts of the upload changed while it was completed", domain.ErrUnavailable)
+}
+
+// completedReplica answers a completion of a copy whose upload is gone: the
+// version it made, when that is there and is the version the completion
+// names - its entity tag, its sequence, its time; domain.ErrBadDigest when
+// what is there under that name has another entity tag; domain.ErrConflict
+// when another copy of the version is there - the source reads it as done -
+// and the absence of the upload otherwise.
+func (s *ObjectService) completedReplica(ctx context.Context, in CompleteUploadInput) (object.Version, error) {
+	version, err := s.index.GetVersion(ctx, in.Bucket, in.Key, in.Replica.Version)
+	switch {
+	case errors.Is(err, domain.ErrVersionNotFound), errors.Is(err, domain.ErrObjectNotFound):
+		return object.Version{}, fmt.Errorf("%w: %s", domain.ErrUploadNotFound, in.UploadID)
+	case err != nil:
+		return object.Version{}, err
+	case version.ETag != in.Replica.ETag:
+		return object.Version{}, fmt.Errorf("%w: version %s of %s/%s has another content", domain.ErrBadDigest, in.Replica.Version, in.Bucket, in.Key)
+	case version.Multipart() && version.DataID == in.UploadID && version.Seq == in.Replica.Seq &&
+		version.ModifiedAt.Equal(in.Replica.ModifiedAt) && !version.DeleteMarker:
+		return version, nil
+	}
+	return object.Version{}, fmt.Errorf("%w: version %s of %s/%s exists", domain.ErrConflict, in.Replica.Version, in.Bucket, in.Key)
 }
 
 // sealParts reads the stored parts of an upload, checks that the listed ones
@@ -473,7 +593,16 @@ type UploadRef struct {
 // are removed.
 func (s *ObjectService) AbortUpload(ctx context.Context, principal iam.Principal, in UploadRef) error {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionAbortMultipartUpload, Resource: resource}); err != nil {
+	// The upload of a copy is its source's to give up (ADR-0026).
+	replicates, err := s.authorizeUpload(ctx, principal, resource, iam.ActionAbortMultipartUpload)
+	if err != nil {
+		return fmt.Errorf("object.AbortUpload: %w", err)
+	}
+	upload, err := s.uploads.GetUpload(ctx, in.Bucket, in.Key, in.UploadID)
+	if err != nil {
+		return fmt.Errorf("object.AbortUpload: %w", err)
+	}
+	if err := s.authorizeUploadOf(ctx, principal, resource, upload, iam.ActionAbortMultipartUpload, replicates); err != nil {
 		return fmt.Errorf("object.AbortUpload: %w", err)
 	}
 	parts, err := s.uploads.AbortUpload(ctx, in.Bucket, in.Key, in.UploadID)
@@ -509,12 +638,17 @@ type ListPartsOutput struct {
 // ListParts lists the parts of a multipart upload in progress.
 func (s *ObjectService) ListParts(ctx context.Context, principal iam.Principal, in ListPartsInput) (ListPartsOutput, error) {
 	resource := iam.Resource{Bucket: in.Bucket, Key: in.Key}
-	if err := s.authz.Authorize(ctx, iam.Request{Principal: principal, Action: iam.ActionListMultipartUploadParts, Resource: resource}); err != nil {
+	// The parts of a copy are its source's to see (ADR-0026).
+	replicates, err := s.authorizeUpload(ctx, principal, resource, iam.ActionListMultipartUploadParts)
+	if err != nil {
 		return ListPartsOutput{}, fmt.Errorf("object.ListParts: %w", err)
 	}
 	limit := min(max(in.Max, 0), object.MaxListKeys)
 	upload, err := s.uploads.GetUpload(ctx, in.Bucket, in.Key, in.UploadID)
 	if err != nil {
+		return ListPartsOutput{}, fmt.Errorf("object.ListParts: %w", err)
+	}
+	if err := s.authorizeUploadOf(ctx, principal, resource, upload, iam.ActionListMultipartUploadParts, replicates); err != nil {
 		return ListPartsOutput{}, fmt.Errorf("object.ListParts: %w", err)
 	}
 	if err := s.checkUploadKey(ctx, upload, in.CustomerKey); err != nil {
