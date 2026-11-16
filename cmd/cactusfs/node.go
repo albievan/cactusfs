@@ -131,6 +131,13 @@ type node struct {
 	// they have returned.
 	stopBackground context.CancelFunc
 	background     sync.WaitGroup
+	// stopAuditing cancels the auditor's Run, after the background tasks
+	// have returned: what they record as they stop - the delivery worker's
+	// last record of rows dropped at the bound of the outbox - is queued
+	// before the auditor writes out what it holds. auditing is done when
+	// it has.
+	stopAuditing context.CancelFunc
+	auditing     sync.WaitGroup
 }
 
 // openNode opens the drives, the KMS and the metadata store, wires the use
@@ -383,7 +390,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
 		Targets: targetStore, Outbox: n.telemetry.InstrumentOutbox(n.meta), Active: n.meta.IsLeader, Clock: n.clock,
 		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
-		OnAttempt: n.telemetry.ObserveDeliveryAttempt,
+		OnAttempt: n.telemetry.ObserveDeliveryAttempt, Auditor: n.auditor,
 		Deliverers: map[delivery.ConsumerKind]app.Deliverer{
 			delivery.ConsumerNotification: app.NewNotifier(app.NotifierConfig{Publishers: n.publishers, Logger: logger}),
 		},
@@ -788,6 +795,9 @@ func readPassphrase(cfg serverConfig) ([]byte, error) {
 // startBackground starts healing, scrubbing, garbage collection and the
 // recording of reads. They run until Close.
 func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
+	auditCtx, stopAuditing := context.WithCancel(context.WithoutCancel(ctx))
+	n.stopAuditing = stopAuditing
+	n.auditing.Go(func() { n.auditor.Run(auditCtx) })
 	ctx, n.stopBackground = context.WithCancel(context.WithoutCancel(ctx))
 	n.background.Go(func() { n.objects.Healer().Run(ctx) })
 	if cfg.ScrubInterval > 0 {
@@ -802,7 +812,6 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	// Runs on every node that serves reads, and once more when it stops.
 	n.background.Go(func() { n.access.Run(ctx, cfg.AccessFlushInterval) })
 	n.background.Go(func() { n.events.Run(ctx) })
-	n.background.Go(func() { n.auditor.Run(ctx) })
 	n.background.Go(func() { n.identities.Run(ctx) })
 	n.background.Go(func() { n.sweepSessions(ctx) })
 	// The upload leases of the console sessions this node serves uploads
@@ -820,13 +829,19 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.publishers.Run(ctx) })
 }
 
-// Close stops the background tasks, then the metadata store, and releases
-// the drives.
+// Close stops the background tasks, then the auditor (which writes out what
+// they recorded as they stopped), then the metadata store, and releases the
+// drives.
 func (n *node) Close() error {
 	if n.stopBackground != nil {
 		n.stopBackground()
 		n.background.Wait()
 		n.stopBackground = nil
+	}
+	if n.stopAuditing != nil {
+		n.stopAuditing()
+		n.auditing.Wait()
+		n.stopAuditing = nil
 	}
 	// No publisher of a target is made or kept once the delivery worker
 	// has stopped.

@@ -6,13 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.etcd.io/bbolt"
 
+	"github.com/albievan/cactusfs/internal/app"
 	"github.com/albievan/cactusfs/internal/domain"
 	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
@@ -43,6 +47,108 @@ func TestStoreOutboxBoundContract(t *testing.T) {
 		setOutboxBound(store.fsm, outboxBoundForTest)
 		return store
 	})
+}
+
+// TestAnOutboxAtItsBoundLosesRowsAndSaysSo (ADR-0025, "Overflow"; PLAN
+// 8.2.7): a store whose outbox bound is lowered through the test hook of
+// 8.0.8, a target that never answers, and the delivery worker and auditor of
+// a node running over the store. Every write succeeds while the target holds
+// its first row; the outbox stays at its bound; what it dropped is what the
+// target lost - as the outbox counts it, as the summary the metrics read
+// shows it (cactusfs_outbox_rows, cactusfs_outbox_dropped_total), and as the
+// target's status says; and the audit trail holds one record system/outbox
+// that says so, within the minute.
+func TestAnOutboxAtItsBoundLosesRowsAndSaysSo(t *testing.T) {
+	t.Parallel()
+	const bound, writes = 8, 20
+	const dropped = writes - bound
+	ctx := t.Context()
+	store := openStore(t, t.TempDir())
+	SetOutboxBoundForTest(store, bound)
+	if err := store.PutTarget(ctx, porttest.SampleTarget("dead", delivery.KindWebhook), audit.Record{}); err != nil {
+		t.Fatalf("PutTarget: %v", err)
+	}
+	if err := store.CreateBucket(ctx, bucket.Bucket{Name: "photos"}); err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	document, err := bucket.NotificationConfig{Rules: []bucket.NotificationRule{
+		{ID: "all", As: bucket.NotifyAsQueue, Target: "dead", On: []delivery.Event{delivery.EventPut}},
+	}}.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBucketConfig(ctx, "photos", bucket.ConfigNotification, document); err != nil {
+		t.Fatalf("SetBucketConfig: %v", err)
+	}
+
+	logger := slog.New(slog.DiscardHandler)
+	auditor := app.NewAuditor(store, wallClock{}, logger)
+	never := app.DelivererFunc(func(ctx context.Context, _ delivery.Target, _ delivery.Item) (object.ReplicationStatus, error) {
+		<-ctx.Done()
+		return "", delivery.Failed(delivery.ClassTimeout, ctx.Err())
+	})
+	worker := app.NewDeliveryWorker(app.DeliveryWorkerConfig{
+		Targets: store, Outbox: store, Active: store.IsLeader, Clock: wallClock{}, Logger: logger, Auditor: auditor,
+		Deliverers: map[delivery.ConsumerKind]app.Deliverer{delivery.ConsumerNotification: never},
+	})
+	runCtx, cancel := context.WithCancel(ctx)
+	var running sync.WaitGroup
+	running.Go(func() { worker.Run(runCtx) })
+	running.Go(func() { auditor.Run(runCtx) })
+	// Before the store closes: cleanups run last registered first.
+	t.Cleanup(func() {
+		cancel()
+		running.Wait()
+	})
+	eventually(t, "the worker to read the outbox", func() bool { _, ok := worker.Summary(); return ok })
+
+	for i := range writes {
+		if _, err := store.PutVersion(ctx, porttest.SampleVersion("photos", fmt.Sprintf("k%02d", i), byte(i+1))); err != nil {
+			t.Fatalf("write %d, with the outbox at its bound and the target holding its first row: %v", i, err)
+		}
+	}
+	state, err := store.OutboxCursors(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Cursors) != 1 || state.Rows != bound || state.Dropped != dropped || state.Cursors[0].Lost != dropped {
+		t.Fatalf("the outbox after %d writes = %+v; want %d rows, %d dropped and as many lost", writes, state, bound, dropped)
+	}
+	eventually(t, "the summary to show the outbox at its bound", func() bool {
+		summary, ok := worker.Summary()
+		return ok && summary.Rows == bound && summary.Dropped == dropped
+	})
+	eventually(t, "the status of the target to say what it lost", func() bool {
+		statuses, err := worker.DeliveryStatus(ctx, []string{"dead"})
+		return err == nil && len(statuses) == 1 && statuses[0].Lost == dropped
+	})
+	told := func() []audit.Record {
+		records, err := store.ListAudit(ctx, 0, ports.MaxAuditPage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []audit.Record
+		for _, record := range records {
+			if record.Resource == app.OutboxResource {
+				out = append(out, record)
+			}
+		}
+		return out
+	}
+	eventually(t, "a record system/outbox in the audit trail", func() bool { return len(told()) > 0 })
+	// The writes may have come on both sides of a read of the outbox: then
+	// the record tells of those before it, and the rest wait for the
+	// minute. Never more than one record within it.
+	records := told()
+	if len(records) != 1 {
+		t.Fatalf("%d records system/outbox within a minute: %+v", len(records), records)
+	}
+	record := records[0]
+	n := record.Details["dropped"]
+	if record.Actor != "system" || record.Action != app.OutboxDroppedAction || record.Outcome != audit.Failed ||
+		n == "0" || n != record.Details["dropped_total"] || record.Details["targets"] != "dead="+n {
+		t.Errorf("the record system/outbox = %+v; want what was dropped, all of it lost to dead", record)
+	}
 }
 
 // TestWhatSchema5RefusesIsRefusedBeforeItIsProposed: the first entry of

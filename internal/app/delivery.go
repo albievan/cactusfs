@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -8,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/albievan/cactusfs/internal/domain"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
@@ -69,6 +72,20 @@ const (
 	// the batch in hand: a target further behind than PendingLookReads
 	// reads of delivery.MaxOutboxRead items shows that many as pending.
 	PendingLookReads = 10
+)
+
+// What is said of rows dropped at the bound of the outbox (ADR-0025,
+// "Overflow"; PLAN 8.2.7).
+const (
+	// OutboxReportEvery is the least time between two audit records of one
+	// node that say rows of the outbox were dropped at its bound, but for
+	// the one that tells, when the node's lead ends, what it had counted
+	// and not told yet.
+	OutboxReportEvery = time.Minute
+	// OutboxDroppedAction is the action of those records.
+	OutboxDroppedAction = "system:OutboxDropped"
+	// OutboxResource is their resource.
+	OutboxResource = "system/outbox"
 )
 
 // Intervals of the worker, unexported: nothing outside needs to wait for
@@ -130,6 +147,11 @@ type DeliveryWorkerConfig struct {
 	// kind of the target, and the class of the failure or
 	// delivery.ClassNone.
 	OnAttempt func(kind delivery.Kind, class delivery.Class)
+	// Auditor, when not nil, is given the audit record that says rows of
+	// the outbox were dropped at its bound (OutboxResource), at most every
+	// OutboxReportEvery, and once more when the node's lead ends. Its Run
+	// must outlast the worker's for that last record to be written.
+	Auditor *Auditor
 }
 
 // DeliveryWorker delivers the rows of the outbox to their targets, on the
@@ -157,9 +179,15 @@ type DeliveryWorker struct {
 	logger         *slog.Logger
 	attemptTimeout time.Duration
 	onAttempt      func(delivery.Kind, delivery.Class)
+	auditor        *Auditor
 
 	entropyMu sync.Mutex
 	entropy   io.Reader
+
+	// reportMu orders the reports of rows dropped at the bound; reportedAt
+	// is when this node last made one, whichever session it was in.
+	reportMu   sync.Mutex
+	reportedAt time.Time
 
 	mu sync.Mutex
 	// session is the delivery of this node's time as leader; nil when it
@@ -172,6 +200,7 @@ func NewDeliveryWorker(cfg DeliveryWorkerConfig) *DeliveryWorker {
 	w := &DeliveryWorker{
 		targets: cfg.Targets, outbox: cfg.Outbox, deliverers: map[delivery.ConsumerKind]Deliverer{}, active: cfg.Active,
 		clock: cfg.Clock, logger: cfg.Logger, attemptTimeout: cfg.AttemptTimeout, onAttempt: cfg.OnAttempt, entropy: cfg.Entropy,
+		auditor: cfg.Auditor,
 	}
 	for kind, deliverer := range cfg.Deliverers {
 		if deliverer != nil {
@@ -219,7 +248,7 @@ func (w *DeliveryWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(deliveryLook)
 	defer ticker.Stop()
 	looks := 0
-	defer w.end()
+	defer w.end(ctx)
 	for {
 		active := w.isActive()
 		w.mu.Lock()
@@ -231,7 +260,7 @@ func (w *DeliveryWorker) Run(ctx context.Context) {
 			w.refresh(ctx, s)
 			looks = 0
 		case !active && s != nil:
-			w.end()
+			w.end(ctx)
 		case active:
 			looks++
 			if looks%int(deliveryRefresh/deliveryLook) == 0 {
@@ -264,7 +293,39 @@ type deliverySession struct {
 	// whether they were read.
 	rows, dropped uint64
 	outboxKnown   bool
+	// told is how far the last report of rows dropped at the bound
+	// counted, or the first read of the outbox in this session; seen is
+	// the last read. toldKnown says whether there was one.
+	told, seen outboxTold
+	toldKnown  bool
 }
+
+// outboxTold is a count of rows dropped at the bound of the outbox: the
+// outbox's own, each target's lost, the rows it held, and when it was read.
+type outboxTold struct {
+	dropped, rows uint64
+	lost          map[string]uint64
+	at            time.Time
+}
+
+// outboxReport is what was dropped at the bound since it was last told.
+type outboxReport struct {
+	// dropped is the rise of the outbox's count, total the count, rows
+	// what the outbox holds.
+	dropped, total, rows uint64
+	// since is when what came before was told, or when this node's
+	// session first read the outbox.
+	since time.Time
+	// targets is "name=n" for each target whose lost rose, by n: those
+	// that lost most first, then by name, within outboxTargetsBytes;
+	// more counts those left out.
+	targets []string
+	more    int
+}
+
+// outboxTargetsBytes bounds the detail that names the targets that lost rows,
+// within what the auditor keeps of a detail whole (bound).
+const outboxTargetsBytes = 512
 
 // start runs the loop of a target for as long as the session lasts, or
 // until the target's run is cancelled. A loop belongs to the session, not to
@@ -299,7 +360,11 @@ func (w *DeliveryWorker) begin(ctx context.Context) *deliverySession {
 }
 
 // end stops the session, if one runs, and waits for its loops to return.
-func (w *DeliveryWorker) end() {
+// Rows dropped at the bound that the session counted and has not told of yet
+// are told now, whatever the pace: the next leader begins its counting where
+// it first reads, so nobody else would. That is done when the node stops
+// leading and when it stops: the caller's end does not end it.
+func (w *DeliveryWorker) end(ctx context.Context) {
 	w.mu.Lock()
 	s := w.session
 	w.session = nil
@@ -312,6 +377,9 @@ func (w *DeliveryWorker) end() {
 	s.mu.Unlock()
 	s.cancel()
 	s.loops.Wait()
+	if report, ok := w.owed(s); ok {
+		w.tell(context.WithoutCancel(ctx), report)
+	}
 }
 
 // refresh reads the targets and the cursors: a target that is new gets its
@@ -347,6 +415,9 @@ func (w *DeliveryWorker) refresh(ctx context.Context, s *deliverySession) {
 	if stateErr == nil {
 		for _, cursor := range state.Cursors {
 			cursors[cursor.Target] = cursor
+		}
+		if report, ok := w.overflow(s, state); ok {
+			w.tell(ctx, report)
 		}
 	} else if ctx.Err() == nil {
 		w.logger.WarnContext(ctx, "the cursors of the outbox could not be read; read again in a while", slog.Any("error", stateErr))
@@ -388,6 +459,125 @@ func (w *DeliveryWorker) refresh(ctx context.Context, s *deliverySession) {
 			delete(s.runs, name)
 		}
 	}
+}
+
+// overflow compares the state of the outbox with what was last told of rows
+// dropped at its bound, and returns what is to be told now: rows were
+// dropped since, and this node has told nothing for OutboxReportEvery. What
+// is not told yet is told later, added up, once the minute has passed - or
+// when the session ends (owed): at most once a minute, and once more when a
+// lead ends.
+//
+// The first read of a session is where its counting begins: what was dropped
+// before this node came to lead was the node before's to tell, and the total
+// is in every record. A count lower than the one told before (a state
+// restored from a snapshot older than it) begins the counting again.
+func (w *DeliveryWorker) overflow(s *deliverySession, state ports.OutboxState) (outboxReport, bool) {
+	w.reportMu.Lock()
+	defer w.reportMu.Unlock()
+	now := w.clock.Now()
+	lost := make(map[string]uint64, len(state.Cursors))
+	for _, cursor := range state.Cursors {
+		lost[cursor.Target] = cursor.Lost
+	}
+	read := outboxTold{dropped: state.Dropped, rows: state.Rows, lost: lost, at: now}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return outboxReport{}, false
+	}
+	s.seen = read
+	switch {
+	case !s.toldKnown || read.dropped < s.told.dropped:
+		s.told, s.toldKnown = read, true
+		return outboxReport{}, false
+	case read.dropped == s.told.dropped:
+		return outboxReport{}, false
+	case !w.reportedAt.IsZero() && now.Sub(w.reportedAt) < OutboxReportEvery:
+		return outboxReport{}, false
+	}
+	w.reportedAt = now
+	return s.reportLocked(), true
+}
+
+// owed returns what a session that ended had counted of rows dropped at the
+// bound and not told yet, whatever the pace.
+func (w *DeliveryWorker) owed(s *deliverySession) (outboxReport, bool) {
+	w.reportMu.Lock()
+	defer w.reportMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.toldKnown || s.seen.dropped <= s.told.dropped {
+		return outboxReport{}, false
+	}
+	w.reportedAt = w.clock.Now()
+	return s.reportLocked(), true
+}
+
+// reportLocked returns what was dropped from what was told to what was last
+// read, and makes that what was told; s.mu is held.
+func (s *deliverySession) reportLocked() outboxReport {
+	told, seen := s.told, s.seen
+	report := outboxReport{dropped: seen.dropped - told.dropped, total: seen.dropped, rows: seen.rows, since: told.at}
+	type loss struct {
+		name string
+		n    uint64
+	}
+	var losses []loss
+	for name, n := range seen.lost {
+		if before := told.lost[name]; n > before {
+			losses = append(losses, loss{name: name, n: n - before})
+		}
+	}
+	// Those that lost most first: a detail that cannot name them all
+	// names those.
+	slices.SortFunc(losses, func(a, b loss) int {
+		return cmp.Or(cmp.Compare(b.n, a.n), strings.Compare(a.name, b.name))
+	})
+	size := 0
+	for i, l := range losses {
+		entry := l.name + "=" + strconv.FormatUint(l.n, 10)
+		if size+len(entry)+1 > outboxTargetsBytes {
+			report.more = len(losses) - i
+			break
+		}
+		size += len(entry) + 1
+		report.targets = append(report.targets, entry)
+	}
+	s.told = seen
+	return report
+}
+
+// tell says that rows were dropped at the bound of the outbox: in the log of
+// the node, and in the audit trail. The record is written in the background,
+// as every record of something the node did by itself is: nothing waits for
+// it, a write least of all. It names the targets that lost rows and how
+// many, never an endpoint.
+func (w *DeliveryWorker) tell(ctx context.Context, report outboxReport) {
+	targets := strings.Join(report.targets, ",")
+	w.logger.WarnContext(ctx, "the outbox is at its bound: its oldest rows were dropped, lost to the targets that had not passed them",
+		slog.Uint64("dropped", report.dropped), slog.Uint64("dropped_total", report.total), slog.Uint64("rows", report.rows),
+		slog.String("targets", targets), slog.Int("targets_more", report.more))
+	if w.auditor == nil {
+		return
+	}
+	details := map[string]string{
+		"dropped":       strconv.FormatUint(report.dropped, 10),
+		"dropped_total": strconv.FormatUint(report.total, 10),
+		"rows":          strconv.FormatUint(report.rows, 10),
+		"since":         report.since.UTC().Format(time.RFC3339),
+	}
+	if targets != "" {
+		details["targets"] = targets
+	}
+	if report.more > 0 {
+		details["targets_more"] = strconv.Itoa(report.more)
+	}
+	record := w.auditor.System(OutboxDroppedAction, OutboxResource, details)
+	// Rows the targets were owed were not delivered: a failure, not a
+	// change somebody made.
+	record.Outcome = audit.Failed
+	w.auditor.Succeeded(ctx, record)
 }
 
 // forget removes the run of a target whose loop found it gone, unless the

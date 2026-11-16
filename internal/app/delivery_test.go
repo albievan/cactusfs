@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/albievan/cactusfs/internal/domain/delivery"
 	"github.com/albievan/cactusfs/internal/domain/object"
 	"github.com/albievan/cactusfs/internal/ports"
+	"github.com/albievan/cactusfs/internal/ports/porttest"
 )
 
 // deliveryMark is in the words of every failure a deliverer of these tests
@@ -58,6 +60,10 @@ type fakeOutbox struct {
 	// acknowledgement.
 	readFails error
 	ackFails  error
+	// bound, when not zero, is the most rows the outbox holds: past it the
+	// oldest goes, counted in dropped and lost to the targets that had
+	// not passed it, as the store does (delivery.Cursor.Dropped).
+	bound int
 }
 
 func newFakeOutbox() *fakeOutbox {
@@ -98,8 +104,35 @@ func (f *fakeOutbox) append(n int, to ...delivery.Consumer) []delivery.Item {
 		}
 		f.items = append(f.items, item)
 		made[i] = item
+		for f.bound > 0 && len(f.items) > f.bound {
+			oldest := f.items[0]
+			f.items = slices.Delete(f.items, 0, 1)
+			f.dropped++
+			for name, cursor := range f.cursors {
+				f.cursors[name] = cursor.Dropped(oldest)
+			}
+		}
 	}
 	return made
+}
+
+// restore sets the count of rows dropped, as a state restored from an
+// older snapshot has it.
+func (f *fakeOutbox) restore(dropped uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropped = dropped
+}
+
+// lose counts n rows dropped and lost to a target, as rows of it alone that
+// were dropped at the bound would be.
+func (f *fakeOutbox) lose(target string, n uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cursor := f.cursors[target]
+	cursor.Lost += n
+	f.cursors[target] = cursor
+	f.dropped += n
 }
 
 // PutTarget implements ports.TargetStore.
@@ -1122,4 +1155,310 @@ func ctxWithDeadline(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// neverAnswers is a target that takes a request and never answers it: each
+// attempt ends with its deadline.
+var neverAnswers = app.DelivererFunc(func(ctx context.Context, _ delivery.Target, _ delivery.Item) (object.ReplicationStatus, error) {
+	<-ctx.Done()
+	return "", delivery.Failed(delivery.ClassTimeout, ctx.Err())
+})
+
+// overflowWorld is a worker with an auditor, over a fake outbox and a target
+// that never answers, in a synctest bubble.
+type overflowWorld struct {
+	outbox  *fakeOutbox
+	worker  *app.DeliveryWorker
+	auditor *app.Auditor
+	trail   *porttest.MemIAM
+	active  *atomic.Bool
+	logs    *syncBuffer
+}
+
+func newOverflowWorld(outbox *fakeOutbox) *overflowWorld {
+	w := &overflowWorld{outbox: outbox, trail: porttest.NewMemIAM(), active: &atomic.Bool{}, logs: &syncBuffer{}}
+	w.active.Store(true)
+	logger := slog.New(slog.NewJSONHandler(w.logs, nil))
+	w.auditor = app.NewAuditor(w.trail, bubbleClock{}, logger)
+	w.worker = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
+		Targets: outbox, Outbox: outbox, Active: w.active.Load, Clock: bubbleClock{}, Logger: logger,
+		Deliverers: map[delivery.ConsumerKind]app.Deliverer{delivery.ConsumerNotification: neverAnswers},
+		Auditor:    w.auditor,
+	})
+	return w
+}
+
+// run runs the worker and its auditor until stop is called. stop stops the
+// worker first and then the auditor, as a node closes, and waits for what the
+// auditor holds to be written.
+func (w *overflowWorld) run(t *testing.T) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	auditCtx, stopAuditing := context.WithCancel(t.Context())
+	var working, auditing sync.WaitGroup
+	working.Go(func() { w.worker.Run(ctx) })
+	auditing.Go(func() { w.auditor.Run(auditCtx) })
+	return func() {
+		cancel()
+		working.Wait()
+		stopAuditing()
+		auditing.Wait()
+	}
+}
+
+// told returns the records that say rows of the outbox were dropped.
+func (w *overflowWorld) told(t *testing.T) []audit.Record {
+	t.Helper()
+	records, err := w.trail.ListAudit(t.Context(), 0, ports.MaxAuditPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []audit.Record
+	for _, record := range records {
+		if record.Resource == app.OutboxResource {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+// TestDeliveryTellsOfRowsDroppedAtTheBound: an outbox at its bound loses its
+// oldest rows to the targets that had not passed them (ADR-0025,
+// "Overflow"). The node that leads says so in its log and in an audit record
+// system/outbox, once a minute at most: what is dropped meanwhile is told,
+// added up, once the minute has passed - or when its lead ends, or it stops,
+// before the minute: what it counted is told then, since no other node will.
+// What was dropped before the node came to lead is not told again, and
+// nothing is told while nothing is dropped. No endpoint is named.
+func TestDeliveryTellsOfRowsDroppedAtTheBound(t *testing.T) {
+	t.Parallel()
+	// bound is the most rows the outbox holds.
+	const bound = 10
+	// A step is done at a time of the bubble, from its start.
+	type step struct {
+		at time.Duration
+		do func(w *overflowWorld)
+	}
+	appendRows := func(n int) func(w *overflowWorld) {
+		return func(w *overflowWorld) { w.outbox.append(n, hookConsumer) }
+	}
+	lead := func(leads bool) func(w *overflowWorld) {
+		return func(w *overflowWorld) { w.active.Store(leads) }
+	}
+	tests := map[string]struct {
+		// dropped is what the outbox had dropped, and the target lost,
+		// before the worker began.
+		dropped uint64
+		steps   []step
+		// lost is what the target has lost at the end.
+		lost uint64
+		// runFor is how long the worker runs after the last step; zero is
+		// five minutes. Then the node stops.
+		runFor time.Duration
+		// want are the details of the records, in order.
+		want []map[string]string
+		// ending are the records told when a lead ended: they do not wait
+		// for the minute.
+		ending map[int]bool
+	}{
+		"what was counted and not told is told when the lead ends": {
+			steps: []step{
+				{2 * time.Second, appendRows(15)},
+				{22 * time.Second, appendRows(3)},
+				{30 * time.Second, lead(false)},
+			},
+			lost: 8,
+			want: []map[string]string{
+				{"dropped": "5", "dropped_total": "5", "rows": "10", "targets": "hook=5"},
+				{"dropped": "3", "dropped_total": "8", "rows": "10", "targets": "hook=3"},
+			},
+			ending: map[int]bool{1: true},
+		},
+		"what was counted and not told is told when the node stops": {
+			steps: []step{
+				{2 * time.Second, appendRows(15)},
+				{22 * time.Second, appendRows(3)},
+			},
+			runFor: 10 * time.Second,
+			lost:   8,
+			want: []map[string]string{
+				{"dropped": "5", "dropped_total": "5", "rows": "10", "targets": "hook=5"},
+				{"dropped": "3", "dropped_total": "8", "rows": "10", "targets": "hook=3"},
+			},
+			ending: map[int]bool{1: true},
+		},
+		"nothing dropped, nothing told": {
+			steps: []step{{2 * time.Second, appendRows(10)}},
+		},
+		"told at once, then once a minute at most": {
+			steps: []step{
+				{2 * time.Second, appendRows(15)},
+				{10 * time.Second, appendRows(3)},
+				{20 * time.Second, appendRows(3)},
+				{30 * time.Second, appendRows(3)},
+				{40 * time.Second, appendRows(3)},
+				{50 * time.Second, appendRows(3)},
+			},
+			lost: 20,
+			want: []map[string]string{
+				{"dropped": "5", "dropped_total": "5", "rows": "10", "targets": "hook=5"},
+				{"dropped": "15", "dropped_total": "20", "rows": "10", "targets": "hook=15"},
+			},
+		},
+		"what was dropped before the node led is not told again": {
+			dropped: 7,
+			steps:   []step{{2 * time.Second, appendRows(10)}, {3 * time.Minute, appendRows(2)}},
+			lost:    9,
+			want:    []map[string]string{{"dropped": "2", "dropped_total": "9", "rows": "10", "targets": "hook=2"}},
+		},
+		"a lead lost and taken again tells no more than once a minute": {
+			steps: []step{
+				{2 * time.Second, appendRows(15)},
+				{10 * time.Second, lead(false)},
+				{12 * time.Second, appendRows(4)},
+				{15 * time.Second, lead(true)},
+				{20 * time.Second, appendRows(2)},
+			},
+			lost: 11,
+			want: []map[string]string{
+				{"dropped": "5", "dropped_total": "5", "rows": "10", "targets": "hook=5"},
+				// The four dropped while the node did not lead were the
+				// leader's to tell.
+				{"dropped": "2", "dropped_total": "11", "rows": "10", "targets": "hook=2"},
+			},
+		},
+		"a count that falls begins the counting again": {
+			steps: []step{
+				{2 * time.Second, appendRows(15)},
+				{20 * time.Second, func(w *overflowWorld) { w.outbox.restore(1) }},
+				{30 * time.Second, appendRows(3)},
+			},
+			lost: 8,
+			want: []map[string]string{
+				{"dropped": "5", "dropped_total": "5", "rows": "10", "targets": "hook=5"},
+				{"dropped": "3", "dropped_total": "4", "rows": "10", "targets": "hook=3"},
+			},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				outbox := newFakeOutbox()
+				outbox.define("hook", delivery.KindWebhook)
+				outbox.define("other", delivery.KindWebhook)
+				outbox.bound, outbox.dropped = bound, tt.dropped
+				outbox.cursors["hook"] = delivery.Cursor{Target: "hook", Lost: tt.dropped}
+				w := newOverflowWorld(outbox)
+				stop := w.run(t)
+				for _, s := range tt.steps {
+					time.Sleep(time.Until(start.Add(s.at)))
+					s.do(w)
+				}
+				time.Sleep(cmp.Or(tt.runFor, 5*time.Minute))
+				synctest.Wait()
+
+				// The outbox stays at its bound; the target lost what it
+				// dropped, the other target nothing.
+				state, err := outbox.OutboxCursors(ctxWithDeadline(t))
+				if err != nil || state.Rows > bound {
+					t.Errorf("the outbox holds %d rows, %v; at most %d", state.Rows, err, bound)
+				}
+				if hook, other := outbox.cursor("hook"), outbox.cursor("other"); hook.Lost != tt.lost || other.Lost != 0 {
+					t.Errorf("lost: hook %d, other %d; want %d and 0", hook.Lost, other.Lost, tt.lost)
+				}
+				stop()
+
+				records := w.told(t)
+				if len(records) != len(tt.want) {
+					t.Fatalf("%d records of rows dropped, want %d: %+v", len(records), len(tt.want), records)
+				}
+				for i, record := range records {
+					if record.Actor != "system" || record.Action != app.OutboxDroppedAction || record.Outcome != audit.Failed {
+						t.Errorf("record %d = %+v", i, record)
+					}
+					for key, want := range tt.want[i] {
+						if got := record.Details[key]; got != want {
+							t.Errorf("record %d: %s = %q, want %q", i, key, got, want)
+						}
+					}
+					if _, err := time.Parse(time.RFC3339, record.Details["since"]); err != nil {
+						t.Errorf("record %d: since = %q: %v", i, record.Details["since"], err)
+					}
+					if i == 0 || tt.ending[i] {
+						continue
+					}
+					if gap := record.Time.Sub(records[i-1].Time); gap < app.OutboxReportEvery {
+						t.Errorf("record %d came %s after the one before", i, gap)
+					}
+				}
+				logs := w.logs.String()
+				if got := strings.Count(logs, "the outbox is at its bound"); got != len(tt.want) {
+					t.Errorf("the log says %d times that rows were dropped, want %d", got, len(tt.want))
+				}
+				if strings.Contains(logs, deliveryMark) {
+					t.Errorf("the log names the endpoint of a target:\n%s", logs)
+				}
+			})
+		})
+	}
+}
+
+// TestDeliveryNamesTheTargetsThatLostMostFirst: the detail that names the
+// targets that lost rows is kept whole: it names those that lost most first,
+// as many as fit in 512 bytes, and says how many it left out.
+func TestDeliveryNamesTheTargetsThatLostMostFirst(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		// targets lost 1, 2, ... rows: target i lost i + 1.
+		targets  int
+		names    int
+		more     string
+		greatest string
+	}{
+		// Each "name=n" is 63 bytes and a comma: eight fit.
+		"more than fit":   {targets: 20, names: 8, more: "12", greatest: "=20"},
+		"all of them fit": {targets: 3, names: 3, greatest: "=3"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				outbox := newFakeOutbox()
+				long := func(i int) string { return fmt.Sprintf("target-%02d-%s", i, strings.Repeat("x", 50)) }
+				for i := range tt.targets {
+					outbox.define(long(i), delivery.KindWebhook)
+				}
+				w := newOverflowWorld(outbox)
+				stop := w.run(t)
+				time.Sleep(2 * time.Second)
+				for i := range tt.targets {
+					outbox.lose(long(i), uint64(i)+1)
+				}
+				time.Sleep(time.Minute)
+				synctest.Wait()
+				stop()
+
+				records := w.told(t)
+				if len(records) != 1 {
+					t.Fatalf("%d records, want one: %+v", len(records), records)
+				}
+				details := records[0].Details
+				named := strings.Split(details["targets"], ",")
+				if len(named) != tt.names || len(details["targets"]) > 512 || details["targets_more"] != tt.more {
+					t.Errorf("targets %q (%d bytes), targets_more %q; want %d named and %q more",
+						details["targets"], len(details["targets"]), details["targets_more"], tt.names, tt.more)
+				}
+				if !strings.HasPrefix(named[0], long(tt.targets-1)) || !strings.HasSuffix(named[0], tt.greatest) {
+					t.Errorf("the first named is %q, want the one that lost most", named[0])
+				}
+				for i := 1; i < len(named); i++ {
+					if !strings.HasPrefix(named[i], long(tt.targets-1-i)+"=") {
+						t.Errorf("named %d is %q, want %s: the most first", i, named[i], long(tt.targets-1-i))
+					}
+				}
+			})
+		})
+	}
 }
