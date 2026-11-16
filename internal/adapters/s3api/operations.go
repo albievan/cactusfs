@@ -79,7 +79,18 @@ func (h *Handler) deleteBucket(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) headBucket(ctx context.Context, req *request) error {
-	if _, err := h.cfg.Buckets.Get(ctx, req.principal, req.bucket); err != nil {
+	source, err := h.replicaSourceOf(ctx, req)
+	if err != nil {
+		return err
+	}
+	if source != "" {
+		// The bucket probe of a source: answered only for a bucket that
+		// is its replica, which the answer says.
+		if _, err := h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source); err != nil {
+			return err
+		}
+		req.w.Header().Set(headerReplicaSource, source)
+	} else if _, err := h.cfg.Buckets.Get(ctx, req.principal, req.bucket); err != nil {
 		return err
 	}
 	req.w.Header().Set("X-Amz-Bucket-Region", h.cfg.Region)
@@ -178,6 +189,12 @@ func quote(etag string) string {
 }
 
 func (h *Handler) putObject(ctx context.Context, req *request) error {
+	// Before a byte of the body is read: a copy whose headers or payload
+	// the signature does not cover is refused as it is.
+	replica, err := h.replicaOf(ctx, req, replicaPut)
+	if err != nil {
+		return err
+	}
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
@@ -211,6 +228,7 @@ func (h *Handler) putObject(ctx context.Context, req *request) error {
 		CacheControl:       req.Header.Get("Cache-Control"),
 		UserMetadata:       userMetadata(req.Header),
 		Verify:             body.verify,
+		Replica:            replica,
 	}
 	version, err := h.cfg.Objects.Put(ctx, req.principal, in)
 	if err != nil {
@@ -295,6 +313,13 @@ func (h *Handler) getObject(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) headObject(ctx context.Context, req *request) error {
+	source, err := h.replicaSourceOf(ctx, req)
+	if err != nil {
+		return err
+	}
+	if source != "" {
+		return h.headReplicaVersion(ctx, req, source)
+	}
 	customerKey, digest, err := customerKeyOf(req.Request)
 	if err != nil {
 		return err
@@ -322,13 +347,44 @@ func (h *Handler) headObject(ctx context.Context, req *request) error {
 	return nil
 }
 
+// headReplicaVersion answers HEAD of a version asked by a source: 200 with
+// the entity tag of the version and no other header of it - not its type,
+// size, time, metadata, encryption, tags or lock - a 404 for a version that
+// is not there and a 405 for a delete marker, which is there. The route
+// takes the source only with a versionId; a condition or a customer key,
+// which an ordinary HEAD acts on, is refused.
+func (h *Handler) headReplicaVersion(ctx context.Context, req *request, source string) error {
+	for name := range req.Header {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "if-") || strings.HasPrefix(lower, "x-amz-server-side-encryption") {
+			return errReplicaQuestion
+		}
+	}
+	if req.version == nil {
+		return errReplicaHeaders()
+	}
+	etag, err := h.cfg.Objects.ReplicaVersion(ctx, req.principal, app.ReplicaVersionInput{
+		Bucket: req.bucket, Key: req.key, Version: *req.version, Source: source,
+	})
+	if err != nil {
+		return err
+	}
+	req.w.Header().Set("ETag", quote(etag))
+	req.w.WriteHeader(http.StatusOK)
+	return nil
+}
+
 func (h *Handler) deleteObject(ctx context.Context, req *request) error {
+	replica, err := h.replicaOf(ctx, req, replicaMarker)
+	if err != nil {
+		return err
+	}
 	bypass, err := bypassOf(req.Header)
 	if err != nil {
 		return err
 	}
 	out, err := h.cfg.Objects.Delete(ctx, req.principal, app.DeleteInput{
-		Bucket: req.bucket, Key: req.key, Version: req.version, BypassGovernance: bypass,
+		Bucket: req.bucket, Key: req.key, Version: req.version, BypassGovernance: bypass, Replica: replica,
 	})
 	if err != nil {
 		return err
@@ -363,6 +419,11 @@ func setObjectHeaders(header http.Header, v object.Version, customerDigest strin
 		header.Set("X-Amz-Tagging-Count", strconv.Itoa(len(v.Tags)))
 	}
 	setLockHeaders(header, v.Lock)
+	// Where the version stands in replication between deployments, as the
+	// store keeps it (ADR-0026); nothing for a version no rule is about.
+	if v.Replication != "" {
+		header.Set(headerReplicationStatus, string(v.Replication))
+	}
 	for name, value := range map[string]string{
 		"Content-Encoding":    v.ContentEncoding,
 		"Content-Disposition": v.ContentDisposition,

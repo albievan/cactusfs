@@ -254,7 +254,9 @@ func (s *testServer) do(c call) reply {
 }
 
 // signRequest signs r as an S3 client would: the host and every x-amz-* and
-// content-md5 header are covered.
+// content-md5 header are covered - and every x-cactusfs-replica-* header, as
+// the replication client of another deployment signs them. A header added
+// in call.mutate is not covered.
 func signRequest(r *http.Request, keyID string, key []byte, signedAt time.Time, payloadHash string) {
 	signRequestIn(r, DefaultRegion, keyID, key, signedAt, payloadHash)
 }
@@ -267,7 +269,7 @@ func signRequestIn(r *http.Request, region, keyID string, key []byte, signedAt t
 	signed := []string{"host"}
 	for name := range r.Header {
 		lower := strings.ToLower(name)
-		if strings.HasPrefix(lower, "x-amz-") || lower == "content-md5" || lower == "range" {
+		if strings.HasPrefix(lower, "x-amz-") || strings.HasPrefix(lower, headerReplicaPrefix) || lower == "content-md5" || lower == "range" {
 			signed = append(signed, lower)
 		}
 	}

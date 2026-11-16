@@ -90,6 +90,11 @@ type Objects interface {
 	ListUploads(ctx context.Context, principal iam.Principal, in app.ListUploadsInput) (app.ListUploadsOutput, error)
 	Tags(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Version, error)
 	SetTags(ctx context.Context, principal iam.Principal, in app.LockInput, tags []object.Tag) (object.Version, error)
+	// The questions of a replica source (ADR-0026).
+	ReplicaBucket(ctx context.Context, principal iam.Principal, bucketName, source string) (bucket.Versioning, error)
+	ReplicaVersion(ctx context.Context, principal iam.Principal, in app.ReplicaVersionInput) (string, error)
+	ListReplicaUploads(ctx context.Context, principal iam.Principal, in app.ReplicaUploadsInput) (app.ReplicaUploadsOutput, error)
+	AbortReplicaUpload(ctx context.Context, principal iam.Principal, in app.UploadRef, source string) error
 }
 
 // Identities resolves an access key to its secret and principal.
@@ -169,6 +174,14 @@ type request struct {
 	payloadHash string
 	// chunks verifies the chunk signatures of a signed streaming body.
 	chunks *chunkSigner
+	// signedHeaders are the headers the verified signature covers, in
+	// lower case: a replica request is taken only when its own headers are
+	// among them.
+	signedHeaders []string
+	// replica says that the request carried replica headers that were
+	// taken (replicaOf): a request of a source, whose refusal by Object
+	// Lock has a code of its own.
+	replica bool
 	// version is the version the request names with versionId, if any.
 	version *object.VersionRef
 }
@@ -410,7 +423,7 @@ func (h *Handler) authenticate(ctx context.Context, req *request) error {
 	principal.Session = sessionOf(req)
 	principal.Session.Presigned = viaQuery
 	h.cfg.Identities.Authenticated(principal)
-	req.principal, req.payloadHash = principal, payloadHash
+	req.principal, req.payloadHash, req.signedHeaders = principal, payloadHash, sig.signedHeaders
 	return nil
 }
 
@@ -567,6 +580,12 @@ func (h *Handler) route(ctx context.Context, req *request) error {
 		(req.Method == http.MethodPost && selects == 1 && query.Has("uploads")))
 	if len(req.Header.Values(headerTagging)) > 0 && !creates {
 		return errNotImplemented()
+	}
+	// The headers of a replica come with the requests that make a version
+	// or a marker, and with no other: passed over, they would make a write
+	// of something it is not (ADR-0026).
+	if hasReplicaHeaders(req.Header) && !takesReplicaHeaders(req, query) {
+		return errReplicaHeaders()
 	}
 
 	switch {
@@ -826,6 +845,9 @@ func (h *Handler) routeObject(ctx context.Context, req *request, query url.Value
 // learn about are logged here and reported as InternalError.
 func (h *Handler) writeError(ctx context.Context, req *request, err error) {
 	api := toAPIError(err)
+	if req.replica && errors.Is(err, domain.ErrObjectLocked) {
+		api = errReplicaObjectLocked()
+	}
 	if api.nodeFault() {
 		h.cfg.Logger.ErrorContext(ctx, "s3 request failed",
 			slog.String("request_id", req.id), slog.String("operation", req.operation), slog.Any("error", err))

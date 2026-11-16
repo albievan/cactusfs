@@ -199,6 +199,21 @@ func (h *Handler) lockInput(req *request) app.LockInput {
 	return app.LockInput{Bucket: req.bucket, Key: req.key, Version: req.version}
 }
 
+// changeInput is lockInput for a change of a version - its retention, legal
+// hold or tags - which a replica source may send with its signed
+// x-cactusfs-replica-source (ADR-0026): the use case then takes it only in
+// that source's replica bucket, and a refusal by Object Lock is answered
+// with a code of its own. It is read before the body.
+func (h *Handler) changeInput(ctx context.Context, req *request) (app.LockInput, error) {
+	source, err := h.replicaSourceOf(ctx, req)
+	if err != nil {
+		return app.LockInput{}, err
+	}
+	in := h.lockInput(req)
+	in.ReplicaSource = source
+	return in, nil
+}
+
 func (h *Handler) getObjectRetention(ctx context.Context, req *request) error {
 	retention, err := h.cfg.Objects.Retention(ctx, req.principal, h.lockInput(req))
 	if errors.Is(err, domain.ErrLockNotConfigured) {
@@ -214,6 +229,10 @@ func (h *Handler) getObjectRetention(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) putObjectRetention(ctx context.Context, req *request) error {
+	in, err := h.changeInput(ctx, req)
+	if err != nil {
+		return err
+	}
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
@@ -242,7 +261,7 @@ func (h *Handler) putObjectRetention(ctx context.Context, req *request) error {
 		}
 		retention = &object.Retention{Mode: object.RetentionMode(doc.Mode), Until: until.UTC()}
 	}
-	stored, err := h.cfg.Objects.SetRetention(ctx, req.principal, h.lockInput(req), retention, bypass)
+	stored, err := h.cfg.Objects.SetRetention(ctx, req.principal, in, retention, bypass)
 	if err != nil {
 		return err
 	}
@@ -271,6 +290,10 @@ func (h *Handler) getObjectLegalHold(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) putObjectLegalHold(ctx context.Context, req *request) error {
+	in, err := h.changeInput(ctx, req)
+	if err != nil {
+		return err
+	}
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
 		return err
@@ -288,7 +311,7 @@ func (h *Handler) putObjectLegalHold(ctx context.Context, req *request) error {
 	if doc.Status != legalHoldOn && doc.Status != legalHoldOff {
 		return errMalformedXML
 	}
-	stored, err := h.cfg.Objects.SetLegalHold(ctx, req.principal, h.lockInput(req), doc.Status == legalHoldOn)
+	stored, err := h.cfg.Objects.SetLegalHold(ctx, req.principal, in, doc.Status == legalHoldOn)
 	if err != nil {
 		return err
 	}

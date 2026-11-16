@@ -264,8 +264,19 @@ func (h *Handler) putBucketVersioning(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) getBucketVersioning(ctx context.Context, req *request) error {
-	state, err := h.cfg.Buckets.Versioning(ctx, req.principal, req.bucket)
+	source, err := h.replicaSourceOf(ctx, req)
 	if err != nil {
+		return err
+	}
+	var state bucket.Versioning
+	if source != "" {
+		// The bucket probe of a source: answered only for a bucket that
+		// is its replica, which the answer says.
+		if state, err = h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source); err != nil {
+			return err
+		}
+		req.w.Header().Set(headerReplicaSource, source)
+	} else if state, err = h.cfg.Buckets.Versioning(ctx, req.principal, req.bucket); err != nil {
 		return err
 	}
 	// A bucket that never kept versions answers with the empty element.

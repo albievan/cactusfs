@@ -158,6 +158,14 @@ func (h *Handler) createMultipartUpload(ctx context.Context, req *request) error
 	if req.Header.Get(headerChecksumType) != "" {
 		return errNotImplemented()
 	}
+	replica, err := h.replicaOf(ctx, req, replicaCreate)
+	if err != nil {
+		return err
+	}
+	var replicaFrom string
+	if replica != nil {
+		replicaFrom = replica.Source
+	}
 	// The request has no body to speak of; one that has is not ours.
 	body, err := newPayload(req.Request, req.payloadHash, req.chunks)
 	if err != nil {
@@ -187,6 +195,7 @@ func (h *Handler) createMultipartUpload(ctx context.Context, req *request) error
 		ContentLanguage:    req.Header.Get("Content-Language"),
 		CacheControl:       req.Header.Get("Cache-Control"),
 		UserMetadata:       userMetadata(req.Header),
+		ReplicaFrom:        replicaFrom,
 	})
 	if err != nil {
 		return err
@@ -223,6 +232,9 @@ func (h *Handler) uploadPart(ctx context.Context, req *request, query url.Values
 		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Number: number, CustomerKey: customerKey,
 		Body: body.body, Size: body.size, Verify: body.verify,
 		Checksums: func() map[string]string { return body.checksums },
+		// A part of a replica upload is taken only when it is signed
+		// (ADR-0026); which upload it is, the use case knows.
+		PayloadSigned: payloadSigned(req),
 	})
 	if err != nil {
 		return err
@@ -262,6 +274,10 @@ func (h *Handler) completeMultipartUpload(ctx context.Context, req *request, que
 		return errNotImplemented()
 	}
 	if err := noLockHeaders(req.Header); err != nil {
+		return err
+	}
+	replica, err := h.replicaOf(ctx, req, replicaComplete)
+	if err != nil {
 		return err
 	}
 	ref, err := uploadOf(req, query)
@@ -315,6 +331,7 @@ func (h *Handler) completeMultipartUpload(ctx context.Context, req *request, que
 	defer clear(customerKey)
 	version, err := h.cfg.Objects.CompleteUpload(ctx, req.principal, app.CompleteUploadInput{
 		Bucket: ref.Bucket, Key: ref.Key, UploadID: ref.UploadID, Parts: parts, ETag: etag, CustomerKey: customerKey,
+		Replica: replica,
 	})
 	if err != nil {
 		return err
@@ -337,11 +354,21 @@ func completeShape() xmlShape {
 }
 
 func (h *Handler) abortMultipartUpload(ctx context.Context, req *request, query url.Values) error {
+	source, err := h.replicaSourceOf(ctx, req)
+	if err != nil {
+		return err
+	}
 	ref, err := uploadOf(req, query)
 	if err != nil {
 		return err
 	}
-	if err := h.cfg.Objects.AbortUpload(ctx, req.principal, ref); err != nil {
+	if source != "" {
+		// A source gives up one of its own replica uploads, and no other.
+		err = h.cfg.Objects.AbortReplicaUpload(ctx, req.principal, ref, source)
+	} else {
+		err = h.cfg.Objects.AbortUpload(ctx, req.principal, ref)
+	}
+	if err != nil {
 		return err
 	}
 	req.w.WriteHeader(http.StatusNoContent)
@@ -401,11 +428,62 @@ func (h *Handler) listParts(ctx context.Context, req *request, query url.Values)
 	return nil
 }
 
+// listReplicaUploads answers the listing a source asks of its replica
+// uploads of one key: the prefix is that key, and only the uploads of
+// exactly that key that the source began are listed - no other key, no
+// common prefix, no upload that is no copy or is another source's. A
+// delimiter, which would group keys, is refused.
+func (h *Handler) listReplicaUploads(
+	ctx context.Context, req *request, query url.Values, source string, maxUploads int, encode func(string) string,
+) error {
+	if query.Has("delimiter") {
+		return errReplicaQuestion
+	}
+	in := app.ReplicaUploadsInput{
+		Bucket: req.bucket, Key: query.Get("prefix"), Source: source, KeyMarker: query.Get("key-marker"), Max: maxUploads,
+	}
+	if raw := query.Get("upload-id-marker"); raw != "" && in.KeyMarker != "" {
+		var err error
+		if in.UploadIDMarker, err = object.ParseID(raw); err != nil {
+			return fmt.Errorf("%w: upload-id-marker", domain.ErrInvalidArgument)
+		}
+	}
+	out, err := h.cfg.Objects.ListReplicaUploads(ctx, req.principal, in)
+	if err != nil {
+		return err
+	}
+	result := listMultipartUploadsResult{
+		XMLNS: s3Namespace, Bucket: req.bucket, Prefix: encode(in.Key), KeyMarker: encode(in.KeyMarker),
+		UploadIDMarker: query.Get("upload-id-marker"), MaxUploads: maxUploads, IsTruncated: out.Truncated,
+		EncodingType: query.Get("encoding-type"),
+	}
+	if out.Truncated {
+		result.NextKeyMarker, result.NextUploadIDMarker = encode(in.Key), out.NextUploadIDMarker.String()
+	}
+	// The initiator is said to be the caller, as the owner is: the identity
+	// at this deployment that began an upload is not the source's to learn.
+	who := owner{ID: req.principal.AccessKeyID, DisplayName: req.principal.AccessKeyID}
+	for _, upload := range out.Uploads {
+		result.Uploads = append(result.Uploads, uploadEntry{
+			Key: encode(upload.Key), UploadID: upload.ID.String(), Owner: who, StorageClass: storageClass,
+			Initiator: who, Initiated: xmlTime(upload.InitiatedAt),
+		})
+	}
+	h.writeXML(ctx, req, http.StatusOK, result)
+	return nil
+}
+
 func listUploadsParameters() []string {
 	return []string{"uploads", "prefix", "delimiter", "key-marker", "upload-id-marker", "max-uploads", "encoding-type"}
 }
 
 func (h *Handler) listMultipartUploads(ctx context.Context, req *request, query url.Values) error {
+	// The replica header is judged first: one that is not signed is
+	// refused before anything else of the request is read.
+	source, err := h.replicaSourceOf(ctx, req)
+	if err != nil {
+		return err
+	}
 	encoding := query.Get("encoding-type")
 	if encoding != "" && encoding != encodingURL {
 		return fmt.Errorf("%w: encoding-type", domain.ErrInvalidArgument)
@@ -421,6 +499,9 @@ func (h *Handler) listMultipartUploads(ctx context.Context, req *request, query 
 		return err
 	}
 	maxUploads = min(maxUploads, object.MaxListKeys)
+	if source != "" {
+		return h.listReplicaUploads(ctx, req, query, source, maxUploads, encode)
+	}
 	in := app.ListUploadsInput{
 		Bucket: req.bucket, Prefix: query.Get("prefix"), Delimiter: query.Get("delimiter"),
 		KeyMarker: query.Get("key-marker"), Max: maxUploads,

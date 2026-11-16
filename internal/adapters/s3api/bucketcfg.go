@@ -252,11 +252,15 @@ func (h *Handler) deleteBucketTagging(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) putObjectTagging(ctx context.Context, req *request) error {
+	in, err := h.changeInput(ctx, req)
+	if err != nil {
+		return err
+	}
 	tags, err := h.readTags(req)
 	if err != nil {
 		return err
 	}
-	version, err := h.cfg.Objects.SetTags(ctx, req.principal, h.lockInput(req), tags)
+	version, err := h.cfg.Objects.SetTags(ctx, req.principal, in, tags)
 	if err != nil {
 		return err
 	}
@@ -276,7 +280,11 @@ func (h *Handler) getObjectTagging(ctx context.Context, req *request) error {
 }
 
 func (h *Handler) deleteObjectTagging(ctx context.Context, req *request) error {
-	version, err := h.cfg.Objects.SetTags(ctx, req.principal, h.lockInput(req), nil)
+	in, err := h.changeInput(ctx, req)
+	if err != nil {
+		return err
+	}
+	version, err := h.cfg.Objects.SetTags(ctx, req.principal, in, nil)
 	if err != nil {
 		return err
 	}
