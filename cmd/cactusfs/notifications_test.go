@@ -10,11 +10,13 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +74,47 @@ func (r *hookReceiver) caPEM() []byte {
 func unreachable(t *testing.T) string {
 	t.Helper()
 	return freeAddr(t)
+}
+
+// silent returns a loopback address that takes every connection and never
+// answers on it: a target there holds whatever waits for it for a whole
+// --delivery-timeout. The connections are closed when the test ends.
+func silent(t *testing.T) string {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		held  []net.Conn
+		ended bool
+	)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			if ended {
+				_ = conn.Close()
+			} else {
+				held = append(held, conn)
+			}
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		ended = true
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return listener.Addr().String()
 }
 
 // notifyConfig is the configuration of a standalone node of the binary
@@ -198,10 +241,13 @@ func newDeployment(t *testing.T, cfg serverConfig, define func(n *node, root iam
 // TestANodeNotifiesThroughItsTargets is the binary test of PLAN 8.2.5. Two
 // standalone nodes are started as the binary starts, one after the other:
 // one without targets, and one whose bucket notifies a webhook that
-// answers, a webhook that cannot be reached and a NATS server that cannot
-// be reached. The second becomes ready no later than the first plus half a
+// answers, a webhook that cannot be reached, a NATS server that cannot be
+// reached and a webhook that takes the connection and never answers. The
+// second becomes ready no later than the first plus half a
 // --delivery-timeout, and its puts answer no later than the first's plus
-// half a --delivery-timeout - nothing waits for a target. The webhook that
+// half a --delivery-timeout - nothing waits for a target: whatever waited
+// for the silent one would take the whole --delivery-timeout, so the half
+// of it left over is room for a loaded machine, not for a wait. The webhook that
 // answers receives a signed notification of each put, at its sealed path
 // and with its bearer secret; the two that cannot be reached are retried
 // after failures of class connect; no secret of a target is in the log.
@@ -227,8 +273,12 @@ func TestANodeNotifiesThroughItsTargets(t *testing.T) {
 		bearer         = "MARKED-bearer-1c9e"
 		deadStreamMark = "MARKED-stream-77a0"
 	)
+	// Long enough that a wait for the silent target is told apart from
+	// a slow start under -race on a loaded runner, well inside the 30 s
+	// serveUntilReady allows.
+	cfg.DeliveryTimeout = 20 * time.Second
 	var signingKey string
-	deadHook, deadStream := unreachable(t), unreachable(t)
+	deadHook, deadStream, stuckHook := unreachable(t), unreachable(t), silent(t)
 	credentials := newDeployment(t, cfg, func(n *node, root iam.Principal) {
 		made, err := n.targets.Put(ctx, root, app.TargetInput{
 			Name: "hook", Kind: delivery.KindWebhook, Endpoint: receiver.server.URL + "/hooks/in", CAPEM: receiver.caPEM(),
@@ -240,6 +290,7 @@ func TestANodeNotifiesThroughItsTargets(t *testing.T) {
 		signingKey = made.SigningKey
 		for _, in := range []app.TargetInput{
 			{Name: "dead-hook", Kind: delivery.KindWebhook, Endpoint: "https://" + deadHook + "/hooks/in", Buckets: []string{"photos"}},
+			{Name: "stuck-hook", Kind: delivery.KindWebhook, Endpoint: "https://" + stuckHook + "/hooks/in", Buckets: []string{"photos"}},
 			{
 				Name: "dead-stream", Kind: delivery.KindNATS, Endpoint: "tls://" + deadStream, Subject: "cactusfs.events", Buckets: []string{"photos"},
 				Auth: delivery.Auth{Mode: delivery.AuthToken}, Secret: deadStreamMark,
@@ -253,7 +304,7 @@ func TestANodeNotifiesThroughItsTargets(t *testing.T) {
 			Buckets: n.meta, Targets: n.meta, Authz: n.authorizer, Auditor: n.auditor,
 		})
 		var rules []bucket.NotificationRule
-		for _, name := range []string{"hook", "dead-hook", "dead-stream"} {
+		for _, name := range []string{"hook", "dead-hook", "dead-stream", "stuck-hook"} {
 			rules = append(rules, bucket.NotificationRule{Target: name, On: []delivery.Event{delivery.EventPut}})
 		}
 		if _, err := notifications.Set(ctx, root, "photos", bucket.NotificationConfig{Rules: rules}); err != nil {
@@ -261,8 +312,8 @@ func TestANodeNotifiesThroughItsTargets(t *testing.T) {
 		}
 	})
 	notifying := serveUntilReady(ctx, t, cfg)
-	// Well under one delivery timeout: nothing at the start waits for a
-	// target.
+	// Well under one delivery timeout: nothing at the start, and no put,
+	// waits for a target.
 	slack := cfg.DeliveryTimeout / 2
 	if notifying.ready > baseline.ready+slack {
 		t.Errorf("ready after %s with targets that cannot be reached, %s without targets: more than %s apart", notifying.ready, baseline.ready, slack)
