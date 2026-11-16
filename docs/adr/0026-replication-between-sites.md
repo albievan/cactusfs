@@ -11,7 +11,8 @@
   passed); and to the review of PLAN 8.0.8 and 8.0.9 (ruled by the owner, 2026-10-13):
   the copy of a marker has an ID, a result by version is of a bucket that is sent to
   the target, when a resync clears the mark of its target, what "the order is total"
-  holds for, and what a lifecycle delete of a late proposer loses
+  holds for, and what a lifecycle delete of a late proposer loses; 2026-11-16, to the
+  destination as PLAN 8.1.1 built it ("The destination, as built")
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -85,6 +86,46 @@ The client is a small one of our own (`internal/adapters/s3client`) on the reque
 signer the server already has, moved to `internal/adapters/sigv4`, and on the dialer of
 ADR-0023. It speaks path-style.
 
+As built (PLAN 8.1.2): `s3client.New(target, secrets, egress, options)`, the options
+carrying this deployment's ID (sent in `x-cactusfs-replica-source` with every probe),
+the build's version for the User-Agent and a clock. Every header a request carries is
+signed, the replica headers among them; a document is signed by its SHA-256, an object
+or a part is sent as signed chunks (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, 64 KiB a
+chunk). The target's secret is opened through the sealed opener for each request and
+cleared once it is signed; a body of chunks holds the signing key of the day and clears
+it when it ends. `-mtime` is written with nine digits of the second
+(`2006-01-02T15:04:05.000000000Z`). What the other site answers is classed by status and
+S3 code: `QuotaExceeded` is `quota`, `NoSuchBucket` `no_such_bucket`,
+`InvalidBucketState` and a 501 `not_replica`, any other 401 or 403 and a refused
+signature `auth`. **`rejected` - the version FAILED, never sent again - is kept for what
+is known to be of the version itself**: a 413, `EntityTooLarge`, `KeyTooLongError`,
+`InvalidTag`, `MetadataTooLarge`; `NoSuchKey` and `NoSuchVersion` of a later change of
+the version; and `InvalidArgument` of `PutRetention`, which the other site judges by its
+own clock. The other `InvalidArgument` cases this ADR names (a sequence out of range, a
+marker without an ID, a retention that has passed) are refused by the client before it
+sends, so an `InvalidArgument` of a copy is one of the request ("the headers ... can be
+read"), not of the version. Every other 4xx (`InvalidRequest`,
+`XAmzContentSHA256Mismatch`, `BadDigest`, 405, 412, ...), another 404 or 409, a 5xx, a
+408 and a 429 are `server`, which holds the target and loses nothing. **A 409
+`OperationAborted` of a replica put, completion or marker is "maybe there"**: the server
+gives that code to every `ErrConflict`, some of which commit nothing, so the client asks
+`HeadVersion` and counts the write done only when the version is there with the entity
+tag it sent (a marker: there, with none); otherwise `server`. The same holds for an
+`OperationAborted` in the body of a completion's 200, and a 200 whose body is no
+`CompleteMultipartUploadResult` is `server`. A 404 `NoSuchUpload` of an abort is
+success. A HEAD has no body, so a 404 of `HeadVersion` is "not there" and one of the
+bucket probe is `no_such_bucket`; a 405 of `HeadVersion` is a delete marker, which is
+there; a 2xx without an entity tag is `server`. A 409 of the bucket probe's HEAD or of
+`HeadVersion` is `not_replica` (PLAN 8.1.1a: a question is answered 409 only for a
+bucket that is no replica of the source). The later changes (`PutTags`, `PutRetention`,
+`PutLegalHold`) carry `x-cactusfs-replica-source` too, and a `403 ObjectLocked` of one
+is `rejected` - that change alone fails - while one of a copy is `server` ("Object Lock
+refusals of a source's request, as built"). A version of a customer's key is refused
+before anything is sent (`sse_c`), and a retention that ends within 15 minutes of the
+source's clock is left out of the copy ("Open", 7). The client refuses an egress client
+that follows redirects, and once a call has returned nothing reads the body it was
+given.
+
 ### The replica request
 
 The unit is **the object version**, with its **version ID, its modification time and
@@ -154,6 +195,105 @@ A replica header on a bucket that is no replica is refused (`409`), never passed
 the request is not quietly stored as an ordinary put. A site that does not know the
 headers at all would do exactly that, which is why the source asks first (below).
 
+### The destination, as built (PLAN 8.1.1)
+
+Where the text above leaves a choice, the destination takes the stricter reading:
+
+- **The conditions are judged in this order**, each refusal with nothing stored: the
+  replica headers are signed (403), the payload is signed (403) - both judged by the S3
+  adapter before a byte of the body is read, each audited as a failed authentication
+  (`ReplicaHeaderNotSigned`, `ReplicaPayloadNotSigned`) under the key that signed - the
+  headers can be read (400), then the use case asks the authorizer for the replicate
+  action (403) and checks the bucket is the replica of that source (409) before any
+  shard is written; the state checks it again in apply. A malformed header of a caller
+  that holds no replicate action is so told 400 rather than 403: it learns nothing but
+  that its own headers are malformed.
+- **"Signed payload" is the SHA-256 in `x-amz-content-sha256` or signed chunks**, and
+  nothing else: not `Content-MD5` or `x-amz-checksum-sha256` beside `UNSIGNED-PAYLOAD`,
+  which bind an ordinary body, and not `STREAMING-UNSIGNED-PAYLOAD-TRAILER`.
+- **The headers are read exactly**: each once; the kind of request takes exactly its
+  headers (a marker with an entity tag, or an upload begun with a sequence, is 400); a
+  sequence is decimal digits without a sign or a leading zero; a time is RFC 3339 that
+  ends in `Z`, with up to nine fractional digits; an entity tag is 32 lower-case
+  hexadecimal characters, then `-` and 1 to 10 000 for a version of parts, quoted or not;
+  an `x-cactusfs-replica-*` header that is none of the five is 400. On any request but
+  the four of the table, the questions and the later changes of the next sections -
+  UploadPart, the delete of a version, a copy, a read, a listing - a replica header is
+  refused, never passed over, with **`400 ReplicaHeaderNotTaken`** (since the review of
+  PLAN 8.1.1a; it was `400 InvalidArgument`). The code is its own, and not one AWS uses,
+  because `s3client` classes an `InvalidArgument` of a retention as `rejected` - the
+  other deployment judging the date by its clock - so a destination that refused the
+  source header on `?retention` with `InvalidArgument` would make a change FAILED for
+  good for what is only a disagreement of releases; `ReplicaHeaderNotTaken` is `server`
+  for every call, which holds the target and loses nothing. PLAN 8.1.1 and 8.1.1a land
+  in the same commit series and the same release, so no destination of a release
+  answers the source header on a later change with `InvalidArgument`.
+- **A copy asks for no encryption of its own**: SSE-KMS or SSE-C with replica headers is
+  400 (SSE-S3 is the default and asks for nothing).
+- **A replica upload is its source's**: a part of it, its abort and the listing of its
+  parts need `s3:ReplicateObject`, and `s3:PutObject`, `s3:AbortMultipartUpload` and
+  `s3:ListMultipartUploadParts` do not do; any other upload needs the ordinary action.
+  Which of the two a caller is asked for first is chosen, before the upload is read, by
+  whether it holds the replicate action (`Authorizer.Allowed`, not recorded - the port
+  says so); the gate is `Authorize` either way, and a caller that holds both is asked for
+  both where the upload needs it. A part of a replica upload must have a signed payload
+  (403, audited as a denial `ReplicaPayloadNotSigned`), and UploadPartCopy into one is
+  400: the source never sends one. A part of an ordinary upload begun before its bucket
+  became a replica is 409 `InvalidBucketState` (decided by the use case; the state would
+  refuse the completion anyway).
+- **A time** has at most nine fractional digits and a point, never a comma; a replica
+  header in another case than net/http gives it (one written by hand) is 400.
+- **The copy of a marker that is the null version of its key** carries
+  `x-cactusfs-replica-version-id: null`, and is given a random ID of its own here, as
+  every marker has one.
+- **A completion sent again** after its upload was completed answers the version it
+  made, when what is there under its ID has its entity tag, sequence and time and was
+  made by that upload - another entity tag is 400 `BadDigest`, anything else 409; a conflict at completion is answered 409 only when the version is there, and
+  503 when the parts changed underneath, so that a source never reads parts that changed
+  as a version that arrived.
+- **Every copy committed is in the audit trail** (`s3:ReplicateObject` or
+  `s3:ReplicateDelete`, with the operation, the source, the version and the sequence),
+  as a retention lifted is: it makes a version with an ID and a time of the caller's
+  choosing. That is what lets PLAN 8.1.9 count the puts a destination took.
+- `x-amz-replication-status` is answered on GET and HEAD from the stored status.
+
+The questions of the next section - the bucket probe, `HeadVersion`, the listing and
+the abort of replica uploads - are answered as that section says, with the choices
+written there under "As built (PLAN 8.1.1a)".
+
+### Object Lock refusals of a source's request, as built (PLAN 8.1.1a)
+
+Object Lock at the destination refuses a change of a version - a compliance retention
+shortened or removed, a governance one without the bypass - with `ErrObjectLocked`,
+which the S3 API answers `403 AccessDenied`, as AWS does. That is also the answer to a
+key that is refused, which `s3client` classes `auth` and which stalls the whole target.
+For a source the two must differ: a change that Object Lock forbids is never made
+however often it is sent, so it must fail alone (PLAN 8.1.5), while a refused key holds
+every version until an operator acts.
+
+- **A request that carried a replica header that was taken** - a copy, an upload begun
+  or completed, a marker, a question, or a later change with the source (below) - and
+  is refused by Object Lock is answered **`403 ObjectLocked`**: the status any refusal by
+  Object Lock has, and a code of its own. The status stays 403 so that nothing but the
+  code differs from what an ordinary client is told; the code is not one AWS uses, so no
+  client takes it for something else. Every other request, the source's own included
+  when it does not carry the header, is answered as before.
+- **The later changes carry the source.** `PutTags`, `PutRetention` and `PutLegalHold`
+  send a signed `x-cactusfs-replica-source`, and the destination takes the header on
+  `PUT ?tagging`, `DELETE ?tagging`, `PUT ?retention` and `PUT ?legal-hold` **with a
+  `versionId`** (a change of the current version, or without the version, is 400). With
+  it the header and the payload must be signed (403, audited as for a copy), the bucket
+  must be the replica of exactly that source (409 `InvalidBucketState`), and a bypass of
+  a governance retention is refused (400): a source carries what its version has and
+  lifts no lock. The action asked is the ordinary one (`s3:PutObjectTagging`,
+  `s3:DeleteObjectTagging`, `s3:PutObjectRetention`, `s3:PutObjectLegalHold`), as
+  "Credentials" says.
+- **`s3client` classes `ObjectLocked` of a later change `rejected`** - that change is
+  FAILED and the target goes on - and of a copy `server`: no copy is refused by Object
+  Lock today (a retention that has passed is left out, "Open" 7), and should one be, it
+  is held and asked again rather than passed or taken for the key. `AccessDenied` stays
+  `auth`.
+
 ### What the source asks before it sends, and what it is told
 
 The replication client asks four things of the destination that are no replica
@@ -176,6 +316,44 @@ replica bucket.
 
 The key therefore needs nothing beyond the replicate actions and those of later changes
 (below), and still cannot read, list or remove.
+
+As built (PLAN 8.1.1a), the stricter reading each time:
+
+- **Each question is refused unless the bucket is the replica of exactly that source**,
+  as a copy is, in the same order: the header signed (403), the payload signed (403),
+  both audited as failed authentications; the header readable and alone - a question
+  takes `x-cactusfs-replica-source` and no other replica header (400); then
+  `s3:ReplicateObject` (403, a denial in the trail like any other); then the bucket
+  (404 `NoSuchBucket`) and its source (409 `InvalidBucketState`). A bucket probe of a
+  bucket that is no replica of the source is therefore refused rather than answered
+  without the header; `s3client` reads a 409 of either probe, and of `HeadVersion`, as
+  `not_replica` (a HEAD has no body to name the code). The destination keeps that true:
+  `ReplicaBucket` and `ReplicaVersion` answer any other conflict on their way
+  (`ErrConflict`, which would be 409 `OperationAborted`) as `ErrUnavailable`, 503, which
+  the source asks again (since the review of 8.1.1a).
+- **The bucket probes** (HEAD of the bucket, `GET ?versioning`) are judged on the bucket
+  (`arn:aws:s3:::<bucket>`); the questions of a key on the object
+  (`arn:aws:s3:::<bucket>/<key>`). The policy of the replicate key names both, for each
+  replica bucket of the source: `arn:aws:s3:::<bucket>` and `arn:aws:s3:::<bucket>/*`.
+- **`HeadVersion`** is taken only with a `versionId` (a HEAD without one is 400, as are a
+  condition and a customer key beside the header). It answers 200 with `ETag` and no
+  other header of the version - no type, size, time, version ID, metadata, tag count,
+  encryption, lock or replication status - 404 for a version or key that is not there,
+  and 405 for a delete marker.
+- **The listing** takes the key as its `prefix` and lists the uploads of exactly that key
+  whose `replica_from` is the source - never another key, never a common prefix (a
+  `delimiter` is 400), never an upload that is no copy or is another source's. It pages
+  as `ListMultipartUploads` does, by `key-marker` (the key) and `upload-id-marker`; a
+  marker before the key lists from its first upload, the key without an upload marker
+  or a marker after it lists nothing. Each upload's `Initiator`, like its `Owner`, is
+  the caller: which identity of the destination began an upload is not the source's to
+  learn (since the review of 8.1.1a).
+- **The abort** removes an upload of the key whose `replica_from` is the source. Any
+  other upload is, to the source, not there (404 `NoSuchUpload`, which the client takes
+  as gone): the answer tells it nothing of uploads that are not its own, and the upload
+  stays.
+- **The same key without the header** is an ordinary caller: it holds no read, listing or
+  abort action, and is refused (403).
 
 **The source sends nothing until the destination's bucket probe has answered with the
 source's own deployment ID in `x-cactusfs-replica-source`.** A deployment of the release
@@ -438,10 +616,11 @@ time: replication is as late as the link and the other site make it, and
 
 The key the source uses is an API key **of the destination**, held by the source as the
 sealed secret of a target (ADR-0023). The destination's administrator makes it for a
-user whose policy names, for the replica buckets of this source: `s3:ReplicateObject`,
+user whose policy names, for the replica buckets of this source - each bucket and its
+objects, `arn:aws:s3:::<bucket>` and `arn:aws:s3:::<bucket>/*`: `s3:ReplicateObject`,
 `s3:ReplicateDelete`, and - for later changes - `s3:PutObjectTagging`,
-`s3:PutObjectRetention`, `s3:PutObjectLegalHold`. That is all it needs: the probes are
-judged as `s3:ReplicateObject`.
+`s3:DeleteObjectTagging`, `s3:PutObjectRetention`, `s3:PutObjectLegalHold`. That is all
+it needs: the probes are judged as `s3:ReplicateObject`.
 
 **What whoever holds that key can do:** add versions and delete markers to the replica
 buckets of one source - and so fill them, which is what a quota at the destination is
@@ -550,7 +729,13 @@ Defaults are applied until answered.
    destination refuses a retain-until date that is not in the future, by its own clock
    - so a version whose retention ended before it was sent is refused with
    `ErrInvalidArgument`, which the source reads as `rejected` and `FAILED`. Default
-   until ruled: the source leaves a retention out that has passed by its own clock.
+   until ruled: the source leaves a retention out that has passed by its own clock -
+   with a margin (PLAN 8.1.2 review): one that ends within 15 minutes of the source's
+   clock (`s3client.RetentionMargin`, the skew a SigV4 signature is taken within) is
+   left out too, so that clocks that differ and the time a copy takes to send do not
+   make the destination refuse it. The price: such a copy is unretained at the
+   destination for the at most 15 minutes its retention had left; its legal hold goes
+   with it all the same.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode

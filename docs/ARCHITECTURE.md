@@ -10,7 +10,9 @@ Sections marked **(implemented)** describe code that exists. What does not exist
 said where it belongs, with the milestone or goal of `PLAN.md` that holds it:
 replication between sites (milestone 8C; entry schema 5, the domain, the ports, the
 replicated store, the contracts, outbound connections, targets and the delivery worker
-it needs exist, the replicator does not). Bucket notifications (ADR-0025) are
+it needs exist, and so do the destination - replica mode, replica requests and the
+questions a source asks, PLAN 8.1.1 and 8.1.1a, "Replica requests" in section 6 - and
+the client of another site, PLAN 8.1.2; the replicator does not). Bucket notifications (ADR-0025) are
 implemented end to end - the webhook and NATS publishers, the notifier that hands them
 the outbox, the export of the audit trail through them, S3's notification configuration,
 the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
@@ -103,7 +105,7 @@ Conventions that follow from it:
 | `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
 | `internal/domain/release` | versions (semantic versioning 2.0), releases and their files, the channels, what may be installed (`Allowed`, `NextStep`), the signed lists `SHA256SUMS` and `digests.txt` read strictly, `Verified` - the one thing an upgrader takes - and the progress of an upgrade (ADR-0029) |
 | `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018), kept by `app.TagDefinitionService` |
-| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore` (kept by `app.UsageCounter`, read by `app.QuotaService` and the object use cases), `TargetStore` (of `app.TargetService`), `Outbox` and `ReplicationStore`, implemented by the metadata store, the last two called by no use case yet; `DeliveryStatusReader` and `SiteClient`, of milestone 8, implemented by nothing but the fakes of `porttest` yet |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore` (kept by `app.UsageCounter`, read by `app.QuotaService` and the object use cases), `TargetStore` (of `app.TargetService`), `Outbox` (read by `app.DeliveryWorker`) and `ReplicationStore` (of `app.ReplicationService`), implemented by the metadata store; `DeliveryStatusReader`, of milestone 8, implemented by nothing but the fakes of `porttest` yet; `SiteClient`, implemented by `internal/adapters/s3client` and called by no use case yet |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
 | `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; quotas and the usage of buckets (`QuotaService`, `UsageCounter`, ADR-0024); targets (`TargetService`); checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
 | `internal/buildinfo` | the version, build and commit of the binary, and whether it was built as the image's (section 8) |
@@ -127,6 +129,7 @@ Conventions that follow from it:
 | `internal/adapters/events/inproc` | out: in-process event bus |
 | `internal/adapters/events/webhook`, `events/nats` | out: the publishers of a target - a signed POST through the egress client; a message to NATS JetStream through the egress dial function, acknowledged (ADR-0025) |
 | `internal/adapters/sealed` | the opener of a target's sealed fields through the KMS, shared by the publishers (ADR-0023) |
+| `internal/adapters/s3client` | out: the client of another deployment that replication sends to (`ports.SiteClient`) - path-style S3 through the egress client, every request signed with SigV4, the replica headers among the signed ones, objects and parts sent as signed chunks; failures classed as the publishers' are (ADR-0026) |
 | `internal/adapters/kms/local` | out: sealed local key file |
 | `internal/adapters/kms/vault` | out: Vault Transit (ADR-0006) |
 | `internal/adapters/passwords` | out: Argon2id password hashes |
@@ -511,7 +514,7 @@ Prometheus client and are not listed.
 The values of `port`: `kms`, `shards`, `metadata`, `local_config`, `object_access`,
 `bucket_activity`, `iam`, `sessions`, `idempotency`, `audit`, `events`,
 `identity_provider`, `passwords`, `cluster_view`, `node_settings`, `targets`, `release_source`,
-`release_verifier`, `upgrader`, `bucket_usage`, `outbox`, `delivery_status`.
+`release_verifier`, `upgrader`, `bucket_usage`, `outbox`, `delivery_status`, `replication`.
 
 Default ports, all configurable: S3 `9000`; admin API, Swagger UI and console `9001`;
 node RPC `9002`; Raft `9003`.
@@ -607,7 +610,7 @@ The entry schema is at 6 (`MetadataVersion`, `internal/adapters/raftmeta/entry.g
 | 2 | the leader's time on every entry; object versions, delete markers, Object Lock, bucket configuration, multipart uploads | 0008 (with 0009, 0011, 0012) |
 | 3 | who committed a version and the counts of reads; the commands of sub-buckets, tag rules, tags of an upload and tag definitions | 0016 (with 0017, 0018) |
 | 4 | who created a bucket; the record of a bucket's latest uploads and downloads | 0019 |
-| 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets and the record of a resync - which the state machine applies and the store proposes, and no use case sends yet | 0023 (with 0024, 0025, 0026) |
+| 5 | what every bucket holds, counted by every member, and its quota; targets, the outbox of what is to be delivered and its cursors; replica buckets (made and promoted through `app.ReplicationService`) and the record of a resync (which no use case writes yet) | 0023 (with 0024, 0025, 0026) |
 | 6 | the revocation of a node that leaves (`node.revoke`, the bucket `revokednodes`); nothing old changes | 0030 |
 
 Upgrades from schema 2, 3 and 4 are tested against fixtures written by the binaries of
@@ -905,6 +908,46 @@ four at a time.
   authentication. The suite runs the AWS SDK for Go with its default options, the AWS
   CLI, and a selected list of the S3 tests of Ceph, over TLS against the built binary
   on four drives. The two tools are in the builder image, pinned by checksum.
+- **Replica requests (implemented at the destination, ADR-0026, PLAN 8.1.1).** A bucket
+  made a replica of another deployment (`PUT /api/v1/buckets/{bucket}/replica`,
+  `admin:PutBucketReplicaMode`, audited in the entry) takes new versions and delete
+  markers from that deployment and from nobody else - the state refuses everything else
+  with `409 InvalidBucketState`, the root identity's writes too. A copy is an ordinary
+  S3 request with `x-cactusfs-replica-{source,version-id,seq,mtime,etag}`: PutObject and
+  CompleteMultipartUpload carry all five, CreateMultipartUpload the source alone,
+  DeleteObject without `versionId` all but the entity tag; no other request but the
+  questions and later changes below takes them (`400 ReplicaHeaderNotTaken`, a code of
+  its own that the source holds on rather than fails a change for; never passed over). The adapter (`s3api/replica.go`) refuses,
+  before the body is read, a replica header the signature does not cover and a payload
+  it does not cover (its SHA-256, or signed chunks; never `UNSIGNED-PAYLOAD`, a presigned
+  URL or a digest beside an unsigned payload) with `403 AccessDenied`, each audited as a
+  failed authentication; a header missing, twice or unreadable is `400`. The use case
+  (`app.ReplicaWrite`) asks the authorizer for `s3:ReplicateObject` (`s3:ReplicateDelete`
+  for a marker) - granted by no wildcard - instead of the ordinary action, checks the
+  bucket is the replica of that source before a shard is written, commits the version
+  with its source's ID, time and sequence, refuses a content whose entity tag is not the
+  one named (`400 BadDigest`) and an SSE-KMS or SSE-C request, and writes each copy it
+  committed into the audit trail. A part of a replica upload, its abort and the listing
+  of its parts need `s3:ReplicateObject`, and the ordinary actions do not do; a part of
+  one needs a signed payload and is never an UploadPartCopy; an ordinary upload begun
+  before its bucket became a replica takes no more parts (`409`); a second copy of a
+  version is `409`. GET and HEAD answer `x-amz-replication-status` from the stored status.
+  The questions the source asks before it sends (ADR-0026, "What the source asks"; PLAN
+  8.1.1a) carry the signed source alone and are judged as `s3:ReplicateObject`, refused
+  as a copy is unless the bucket is the replica of exactly that source
+  (`ObjectService.ReplicaBucket`, `ReplicaVersion`, `ListReplicaUploads`,
+  `AbortReplicaUpload`): HEAD of the bucket and `GET ?versioning` answer the versioning
+  and the source in `x-cactusfs-replica-source`; HEAD of a version named by `versionId`
+  its `ETag` and no other header of it (404 not there, 405 a delete marker; a 409 of
+  these HEADs is only ever a bucket that is no replica, any other conflict 503); `GET
+  ?uploads&prefix=<key>` only the uploads of that key the source began, the caller as
+  their initiator and owner; `DELETE
+  ?uploadId` only such an upload (any other is `404 NoSuchUpload` to the source). The
+  later changes of a version (`?tagging`, `?retention`, `?legal-hold` with `versionId`)
+  may carry the source too: then they are taken only in that source's replica, never
+  with a bypass, and a refusal by Object Lock of any request that carried replica
+  headers is `403 ObjectLocked` instead of `AccessDenied`, so that the source fails that
+  change alone rather than stall the target.
 - **Admin API (implemented, ADR-0007).** REST/JSON under `/api/v1` on the admin listener
   of gateway nodes, designed first in `api/openapi/admin.yaml` (OpenAPI 3.0.3), with the
   strict server generated by `oapi-codegen`. An API key as a bearer credential, or a
@@ -924,11 +967,13 @@ four at a time.
   quotas" in section 5), of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) and
   of a bucket's notification rules (`/buckets/{bucket}/notifications`,
   `app.NotificationService`; PLAN 8.2.2) are implemented and answer 503 below metadata
-  level 5; `/targets/{name}/status` (PLAN 8.0.14) is answered by any node, which asks
+  level 5; so is a bucket's replica mode (`/buckets/{bucket}/replica`,
+  `app.ReplicationService`; PLAN 8.1.1; 409 `InvalidBucketState` for a bucket that keeps
+  no versions or is replicated itself, 409 `BucketNotEmpty` for one that holds a
+  version); `/targets/{name}/status` (PLAN 8.0.14) is answered by any node, which asks
   the node that leads ("Delivery to targets", section 5); the rest have no use case yet,
   so each answers 501 `NotImplemented` to a caller that has authenticated:
-  `/buckets/{bucket}/replication` (with `/status` and `/resync`) and
-  `/buckets/{bucket}/replica`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  `/buckets/{bucket}/replication` (with `/status` and `/resync`). A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
@@ -1217,7 +1262,7 @@ four at a time.
   | Since | Events |
   |---|---|
   | milestones 1 to 7 (sixteen) | `bucket.created`, `bucket.deleted`, `object.created`, `object.deleted`, `bucket.versioning-changed`, `object.delete-marker-created`, `object.retention-changed`, `object.legal-hold-changed`, `bucket.object-lock-changed`, `bucket.configuration-changed` (a policy, CORS, lifecycle rules, tags, tag rules or notification rules - the payload names the bucket, not the document), `object.tags-changed`, `iam.root-credential-set`, `cluster.topology-changed`, `cluster.node-registered`, `cluster.node-removed`, `audit.recorded` |
-  | entry schema 5 (four) | `bucket.quota-changed` (through `app.QuotaService`), `bucket.replica-mode-changed` (no use case yet; 8C), `cluster.target-changed` and `cluster.target-deleted` (through `app.TargetService`) - each told by the state machine as it applies the entry |
+  | entry schema 5 (four) | `bucket.quota-changed` (through `app.QuotaService`), `bucket.replica-mode-changed` (through `app.ReplicationService`), `cluster.target-changed` and `cluster.target-deleted` (through `app.TargetService`) - each told by the state machine as it applies the entry |
   | to targets only (two) | `cactusfs.notification.object.v1`: S3's event record of a put, a completed upload, a delete marker or a version removed for good, one record a message, sent by the notifier through the webhook and NATS publishers of the targets a bucket's rules name (PLAN 8.2.1 to 8.2.5); `cactusfs.audit.exported.v1`: the records of the audit trail, in sequence, sent by the worker through the same publishers to a target defined with `audit: true` (PLAN 8.2.8) |
 
   The two messages for targets are not events of the bus: they are rows of the outbox
