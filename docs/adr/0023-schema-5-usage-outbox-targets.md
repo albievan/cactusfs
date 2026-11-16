@@ -432,7 +432,10 @@ which of the two arrived first; and no row could name it. So:
 reads the rows after the target's cursor, in order, hands each to what delivers that
 kind of consumer, and acknowledges through Raft with `outbox.ack` every 100 rows or
 every second. Delivery is therefore **at least once**; what is sent twice is bounded by
-one batch for each change of leader.
+one batch for each change of leader - *amended 2026-11-16 (PLAN 8.1.4 review):* one
+batch and one wave, where a kind of consumer is handed several rows at once (the
+replicator, `replication-workers`): a wave is of one batch, and nothing of a wave that
+is cut off is acknowledged.
 
 **Reading** (`ports.Outbox.ReadOutbox(ctx, target, after, limit)`, a read and no entry)
 returns the rows after `after` that are for the target, in ascending order, at most

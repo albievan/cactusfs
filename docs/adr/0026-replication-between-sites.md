@@ -12,9 +12,10 @@
   the copy of a marker has an ID, a result by version is of a bucket that is sent to
   the target, when a resync clears the mark of its target, what "the order is total"
   holds for, and what a lifecycle delete of a late proposer loses; 2026-11-16, to the
-  destination as PLAN 8.1.1 built it ("The destination, as built"), and to the
+  destination as PLAN 8.1.1 built it ("The destination, as built"), to the
   configuration as PLAN 8.1.3 built it and its review amended it ("Configuration", "As
-  built")
+  built"), and to the replicator as PLAN 8.1.4 wrote it and its review amended it, with
+  the later changes of PLAN 8.1.5 ("The replicator, as built")
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -311,7 +312,7 @@ replica bucket.
 
 | Probe | Answers | Never |
 |---|---|---|
-| the bucket (`Check`) | its versioning, and in `x-cactusfs-replica-source` the deployment it is a replica of (`ports.SiteBucket{Versioning, ReplicaOf}`) | a listing |
+| the bucket (`Check`) | its versioning, in `x-cactusfs-replica-source` the deployment it is a replica of, and in `x-cactusfs-replica-object-lock` whether it has Object Lock (`ports.SiteBucket{Versioning, ReplicaOf, ObjectLock}`; the last since the re-review of PLAN 8.1.4) | a listing |
 | a version (`HeadVersion`) | whether it is there, and its entity tag | a GET; any other header of the version; a byte of the object |
 | the replica uploads of a key (`ListReplicaUploads`) | the IDs of the uploads in progress whose `replica_from` is that source | any other upload |
 | the abort of an upload (`AbortUpload`) | done, for an upload whose `replica_from` is that source | the abort of any other |
@@ -395,7 +396,9 @@ which of the two is the version: it keeps one and says nothing false of the othe
 status at the source becomes `COMPLETED` for contents the destination does not have.
 Accepted; a destination that compared the entity tag of the copy with the one it holds
 could answer `rejected` instead, and that is the client's to add (PLAN 8.1.4), not the
-state's.
+state's. As built, the replicator asks first (`HeadVersion`): a version that is there
+with another entity tag is `FAILED` (`rejected`) and not sent ("The replicator, as
+built").
 
 **What the state says of the bucket is decided before anything of the key is looked
 at**, and before anything is made: an ordinary write into a replica bucket, a copy from
@@ -433,7 +436,7 @@ purpose, and is accepted.
 | a new version a rule matches, with its content type, user metadata, tags, retention and legal hold | yes | |
 | a delete marker made by a caller | when the rule says so (`DeleteMarkerReplication`) | S3's own default is no |
 | a delete marker made by a lifecycle rule (`by` is `service/lifecycle`) | **no** - but see below for one written at the upgrade | each site expires by its own rules |
-| a later change of the tags, retention or legal hold of a version | yes (PLAN 8.1.5; the first thing to be cut) | |
+| a later change of the tags, retention or legal hold of a version | yes (PLAN 8.1.5, "Later changes, as built"): as the version has them when the row is sent; a refusal there is `FAILED` | |
 | **a version removed for good** | **never** | a source that was taken over must not be able to purge the destination |
 | a version encrypted with a key of the customer's (SSE-C) | **no**: status `FAILED`, class `sse_c` | the key is not ours to use |
 | a version that is itself a replica | **no** | no loops; one hop |
@@ -471,7 +474,7 @@ Stored on the version, shown as `x-amz-replication-status` on GET and HEAD:
 |---|---|
 | `PENDING` | at commit, when a rule matched and a row for `r:<target>` was appended |
 | `COMPLETED` | by a result of `outbox.ack`, when the other site took the version or said it had it |
-| `FAILED` | by a result of `outbox.ack`, for a version that cannot be replicated: SSE-C (class `sse_c`), or one the other site refuses for itself (400, 413; class `rejected`) |
+| `FAILED` | by a result of `outbox.ack`, for a version that cannot be replicated: SSE-C (class `sse_c`), or one the other site refuses for itself (400, 413; class `rejected`) - or a later change of it so refused (PLAN 8.1.5) |
 | `REPLICA` | at the destination, on arrival |
 | none | no rule matched |
 
@@ -499,13 +502,168 @@ shows of itself (`GET /targets/{name}/status`) is still the leader's memory, apa
 **A failure of the version is not a failure of the target.** `FAILED` passes the row.
 What stalls the target and passes nothing: `auth` (the key is refused),
 `no_such_bucket`, `versioning` (not `Enabled` there), `not_replica` (the bucket there
-is no replica of this source), `quota` (the destination is full) and every failure of
-the network. A stalled target is retried with the pauses of ADR-0025, is `stalled` in
+is no replica of this source), `quota` (the destination is full), `object_lock` (a lock
+to send to a bucket there without Object Lock; re-review of PLAN 8.1.4) and every
+failure of the network. A stalled target is retried with the pauses of ADR-0025, is `stalled` in
 its status, and fires `CactusFSReplicationLag`.
 
 Status is stored, not derived from the cursor: after a rule was edited, a target
 changed or rows were dropped, a status derived from "is the cursor past it" would call
 versions replicated that never were.
+
+### The replicator, as built (PLAN 8.1.4, its review, and PLAN 8.1.5)
+
+`app.Replicator` is the `Deliverer` of the consumers `r:<target>`; the delivery worker of
+ADR-0023 hands it the rows of the outbox. Where the text above leaves a choice it takes
+the stricter reading. No entry, state or on-disk format and no contract changed:
+statuses go through `outbox.ack` by row, as the worker's acknowledgements always did.
+One port changed: `ports.SiteClient` gained `ListParts`, and `ports.SitePart` a `Size`
+(review of 8.1.4).
+
+- **Who reads.** The version is read through the ObjectService as the replication
+  service (`iam.ServiceReplication`, actor `service/replication`), which may
+  `s3:GetObjectVersion` and nothing else - no read of a current version by its key, no
+  listing, no write; a bucket policy neither binds nor widens it, as for the lifecycle
+  service. Each read (`ReplicationVersion` - a delete marker too - `OpenReplicationSpan`
+  and `ReplicationParts`) names the version by its bucket, key and reference, reads it
+  again and is authorized on that object, decrypts and authenticates every byte as a GET
+  does, and is not counted as a download.
+- **What is judged, in this order.** A row not for the target as replication, or of a
+  target that is not another deployment, is held (`internal`), as a row nothing
+  delivers is. A removal for good is passed (never replicated). Then the bucket: one
+  the target no longer admits, or whose stored configuration was removed or names
+  another target now, is passed **with no status** - the version stays `PENDING`
+  (open, 8). The configuration names the bucket of the other deployment. Then the
+  version: one that is gone is passed with no status; one that arrived as a replica is
+  passed; a row and a version that disagree on being a marker are held. A marker is sent
+  only while the deciding rule copies markers and its row does not say
+  `by: service/lifecycle` (`ReplicationConfig.Replicates`, as the state decided when
+  the row was appended). A version of a customer's key is `FAILED` (`sse_c`) without a
+  byte read; one at a sequence above `object.MaxReplicaSeq` (a bucket promoted above a
+  replica at the bound) is `FAILED` (`rejected`). **A null version is sent at its own
+  sequence, and at 1 when that is 0** (`max(seq, 1)`): a null version made while its
+  bucket's versioning was suspended has a sequence of its own, which orders it among the
+  versions of its key there as here; only the null version of before versions, stored
+  at 0, takes the default of "Open" 6.
+- **The probe.** Nothing is sent to a bucket until `Check` says it keeps versions
+  (`versioning` otherwise) and is a replica of this deployment (`not_replica`). It also
+  says whether the bucket has Object Lock (re-review of 8.1.4: the destination answers
+  the probe with `x-cactusfs-replica-object-lock: Enabled`): a version that carries a
+  lock - a legal hold, or a retention beyond the margin of "Open" 7 - and a later change
+  that sets one are not sent to a bucket without it; the target holds with the class
+  **`object_lock`**, which stalls it and is shown in its status until an operator gives
+  the bucket there Object Lock or points the rule elsewhere. A change that lifts a lock
+  is nothing to carry there, and passed. The answer is taken for a minute, by the
+  target's name, the generation of its connection (below) and the bucket, and
+  forgotten after any failure there.
+- **There already?** Before the bytes of a version are sent, `HeadVersion` asks for it:
+  with the entity tag of the version it is `COMPLETED` and nothing is sent - which also
+  keeps a new leader from sending its last batch's bytes again; with another entity tag
+  it is `FAILED` (`rejected`): the other deployment holds other bytes under the
+  version's ID, and takes no others ("Order").
+- **Sending.** A version in one PUT; a delete marker with `PutMarker`; a version of
+  parts as an upload of the same parts, each with its number and size, read in order
+  from `ObjectParts` (a part missing or out of place is `internal` - this side's fault -
+  and held). **An upload goes on** (review of 8.1.4): the replicator remembers, within
+  its process, the upload begun for a version (by target, the generation of its
+  connection, the bucket there and the version), with the entity tag each part sent was
+  given; the next
+  attempt asks the other deployment for the parts of that upload (`ListParts`, which the
+  destination takes without a replica header and judges, for a replica upload, as
+  `s3:ReplicateObject`) and sends only those that are not there with the entity tag and
+  size they were sent with. The other uploads this deployment left of the key are
+  aborted first; that one is not. An upload the other deployment no longer has is
+  begun again. An upload is forgotten once completed, once refused for good (and then
+  aborted), and the oldest beyond 1 024 uploads or 100 000 parts remembered all together
+  - then aborted there, as a best effort, through the client it was begun through.
+  **Only an idle upload is forgotten for the bounds** (final verification of 8.1.4): an
+  upload an attempt is sending through is pinned, and is never forgotten or aborted;
+  when the uploads in flight alone are beyond the bounds, the bounds are exceeded for
+  as long as they last - at most `replication-workers` uploads a target - rather than
+  abort work in flight, which would only be begun again. A new
+  leader begins again from the first part:
+  "a part is resumed only within one leader's time". The result: no error `COMPLETED`;
+  a failure whose class passes (`rejected`, `sse_c`) `FAILED`; any other holds the
+  target and reports nothing. **A version that never finishes holds its target** -
+  sent in one request, over a link too slow for its deadline ("Deadlines"), or one that
+  fails every time.
+- **Later changes, as built (PLAN 8.1.5).** A row of `tags`, `retention` or
+  `legalhold` carries the version's tags, retention or legal hold **as the version has
+  them now** (`PutTags` - none removes them - `PutRetention`, `PutLegalHold`), so that
+  changes sent in the order of the outbox leave the version there as it is here. **The
+  version there is asked for first** (`HeadVersion`; re-review of 8.1.4): a change is
+  made only to the version this deployment sent, with its entity tag - one that is not
+  there, or holds other bytes under the version's ID, is `FAILED` and nothing is sent,
+  so a retention or a legal hold is never put on a version that is not this one's. The
+  question is asked rather than the version's status read, because statuses are
+  acknowledged in batches and may not yet say what became of the version. A
+  refusal the other deployment gives for itself - Object Lock's `403 ObjectLocked` (a
+  retention shortened or removed, which the source may do with a bypass and the
+  destination never takes from a source), a version that is not there, a date it does
+  not take - is `FAILED` for the version and the target goes on; a change it takes
+  reports **no status**: the version there is as it was when its own row was sent, and
+  a change never makes a version `COMPLETED` that its row did not. A retention that ends
+  within `object.RetentionMargin` (15 minutes) of the source's clock is nothing to
+  carry - the rule a copy follows ("Open", 7) - and is passed with no status; a change
+  of a version of a customer's key, which never crossed, is passed (`sse_c`); every
+  other failure holds the target.
+- **Order and parallelism.** The worker hands `replication-workers` rows over at once
+  in waves: never two rows of one object **at the destination** - the target, the
+  bucket there that the configuration names, and the key (`Replicator.ObjectOf`; a row
+  whose configuration cannot be read goes alone) - stricter than "of one version",
+  because the uploads of a key are aborted before a new one is begun, and two versions
+  of one key side by side would abort each other's. The rows of one object go in the
+  order of the outbox, so a later change never arrives before its version. A wave ends
+  before the next begins; the cursor never passes a row that was not taken or passed;
+  nothing of a wave that a stop or a lost lead cuts off is acknowledged, so a new leader
+  sends again at most one batch and one wave. Each row is paused by its own failures,
+  and the target is shown by the row that has failed most.
+- **A target that changes.** When a refresh finds the target's connection changed - its
+  endpoint, certificates, region or credentials (`delivery.Target.SameConnection`) - or
+  a bucket it admitted no longer admitted (the lists compared as sets: one widened or
+  put in another order changes nothing), what is in flight to it ends (each attempt runs
+  under a context of the run that the refresh cancels) and the row is sent again at once
+  to the target as it is; the client of the old one sends nothing more. The replicator
+  gives the target's connection a new **generation** then, and when the target was made
+  again under its name: what it probed and the uploads it remembered of the connection
+  before are forgotten, not resumed at the endpoint the target had (re-review of 8.1.4).
+  An attempt made with an older state of the target - by its time of definition, then
+  by when it was changed: one that began before the change, or the loop of a target
+  deleted since - gets a generation of its own and changes nothing of what is known of
+  the target as it is; and at every refresh the worker tells the replicator which
+  targets there are (`app.TargetKeeper`), so that it forgets those that are gone (final
+  verification of 8.1.4).
+- **Rate.** The bytes read to be sent, by every version being sent, are held together
+  to `replication-rate-mib`: each read is charged at the rate and waits its turn, with
+  no burst above it, so no 10 s see more than 10 s of it and one read (64 KiB) more for
+  each version in flight.
+- **Deadlines** (as the re-review of 8.1.4 amended them). An attempt at a version has
+  the deadline of any attempt (10 s + 2 x `delivery-timeout`) and a day, or the time its
+  size takes at 64 KiB/s when that is longer - or at `replication-rate-mib` shared by
+  every version that may be sent at once (`replication-workers` to each of the 256
+  targets a deployment can have) when that is slower still
+  (`app.ReplicationAttemptTimeout`). The bound is generous on purpose: a version sent
+  in **one** request cannot go on from where it was cut off, and a deadline that assumed
+  a pace would end it on every attempt over a slow link and hold its target for good.
+  What ends a transfer that has stopped moving is the egress client, whose connections
+  may make no progress for longer than `delivery-timeout`, and a lead that is lost ends
+  the attempt at once. **Only a version of parts gets further at each attempt**, going
+  on from the parts that arrived; a version in one request starts again from its first
+  byte.
+- **The client** is made by the composition root's source of publishers
+  (`cmd/cactusfs/publishers.go`, `Site`): `s3client.New` over the target's own egress
+  client (its certificates the roots, observed by `telemetry.ObserveEgress`), the
+  sealed opener of the KMS, this deployment's ID (the topology's) and the build's
+  version; kept while the target is the same connection, replaced when it changes, a
+  target made again under its name told apart by its time of definition, closed when it
+  is gone and when the node stops leading or closes - as a publisher. It is behind
+  `telemetry.InstrumentSiteClient` (port `site`), added here because the composition
+  root's test refuses an undecorated port; the metrics of replication are PLAN 8.1.7's.
+- **Lifecycle markers told apart.** Every delete now says who deleted
+  (`DeleteOptions.By`, the actor as the audit trail names it), as a put says who put; a
+  delete of the lifecycle worker says `service/lifecycle`, so the state appends no row
+  for its marker. A notification of a delete now names who deleted in
+  `userIdentity.principalId`, as ADR-0025 says it does.
 
 ### Configuration
 
@@ -540,6 +698,17 @@ under `/buckets/{bucket}/replication`.
   of the greatest priority decides.
 - **One target and one destination bucket a source bucket**: every rule names the same
   `<Bucket>`.
+- **One destination a source bucket** (review of PLAN 8.1.4): a bucket there takes the
+  versions of one bucket here. A configuration that names a target and a bucket there
+  that another bucket's configuration names already is refused (`400
+  InvalidArgument`) in the one sentence every refusal of a target has, which says
+  nothing of the other bucket, by the use case (`ReplicationService.refuseShared`, which
+  reads the other configurations only when the target counts a document besides the
+  bucket's own, and stops once it has read as many as the target counts; an index of
+  the named pairs would be a field more in the replicated state, a schema change).
+  Two source buckets in one replica bucket would interleave two unrelated sequences of
+  versions there. It is not judged in apply - the applied format is unchanged - so two
+  configurations put at the same moment through two nodes may both pass it (open, 9).
 
 **Refused:**
 
@@ -805,7 +974,9 @@ Defaults are applied until answered.
    exactly the versions it is about is 0, and refused. Default until ruled: the source
    sends such a version at sequence 1 - below every version its bucket made since it
    keeps versions, whose sequences are indexes of entries far above - and nothing of the
-   replicated format changes.
+   replicated format changes. As built (PLAN 8.1.4): `max(seq, 1)` - a null version
+   written while versioning was suspended has a sequence of its own, at which it is
+   sent, and only one stored at 0 takes the default.
 7. **A retention that has passed at the destination refuses the copy** (found at PLAN
    8.0.9, for PLAN 8.1.4). A copy travels with its retention, and Object Lock at the
    destination refuses a retain-until date that is not in the future, by its own clock
@@ -818,6 +989,19 @@ Defaults are applied until answered.
    make the destination refuse it. The price: such a copy is unretained at the
    destination for the at most 15 minutes its retention had left; its legal hold goes
    with it all the same.
+8. **A row whose bucket is no longer sent to its target** (found at PLAN 8.1.4). A
+   configuration removed, or pointed at another target, before its rows were sent
+   leaves their versions `PENDING`, counted in `replication_pending`, although nothing
+   will send them: the replicator passes such rows with no status. The stricter
+   reading for the counts would be `FAILED`, which this ADR keeps for a version that
+   cannot be replicated at all. Default: no status; a resync of the new configuration
+   settles them.
+9. **Two configurations naming one bucket there, put at the same moment** (found at
+   the review of PLAN 8.1.4). The rule "one destination a source bucket" is the use
+   case's: two puts that race through two nodes may each read the other's absence, and
+   both be committed. Judging it in apply would change what every member applies - a
+   schema change. Default: the use case's check; an operator who finds two buckets
+   sent to one there removes one configuration.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode

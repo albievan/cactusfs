@@ -12,7 +12,9 @@ replication between sites (milestone 8C; entry schema 5, the domain, the ports, 
 replicated store, the contracts, outbound connections, targets and the delivery worker
 it needs exist, and so do the destination - replica mode, replica requests and the
 questions a source asks, PLAN 8.1.1 and 8.1.1a, "Replica requests" in section 6 - and
-the client of another site, PLAN 8.1.2; the replicator does not). Bucket notifications (ADR-0025) are
+the client of another site, PLAN 8.1.2, and the replicator with the later changes of a version, PLAN
+8.1.4 and 8.1.5, written and not yet through their gate; the resync (8.1.6) and the status and telemetry of a
+bucket's replication (8.1.7) do not). Bucket notifications (ADR-0025) are
 implemented end to end - the webhook and NATS publishers, the notifier that hands them
 the outbox, the export of the audit trail through them, S3's notification configuration,
 the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
@@ -256,10 +258,10 @@ test. The binary reads no file of variables: what starts it hands it its environ
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source (ADR-0029) and by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
-| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
-| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
-| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
+| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source (ADR-0029), by notification targets, the export of the audit trail included (ADR-0025), and by replication to other sites (ADR-0026). The same on every node |
+| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the export of the audit trail included (ADR-0025), and by replication to other sites (ADR-0026), where it bounds each request of a version, not the whole version: a version may take as long as its size and replication-rate-mib need. The same on every node |
+| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`), by the node that leads the metadata group; two versions of one object, or a version and a later change of it, are never sent at once (ADR-0026). The same on every node |
+| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It is held to over every 10 seconds, with no burst above it: what all the versions being sent read together, by the node that leads (ADR-0026). An attempt at a version is given a day, or the time its size takes at 64 KiB/s when that is longer - or at this rate shared by `replication-workers` to each of the 256 targets a deployment can have, when that is slower still; a transfer that stops moving is ended by `delivery-timeout`. A version that cannot be sent is tried again - one of parts from the parts that arrived, one sent in one request from its start - and holds its target meanwhile. The same on every node |
 
 **Maintenance: background work**
 
@@ -764,7 +766,7 @@ four at a time.
   against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
   whoever may read it; the server decides every change.
 
-### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5; the audit trail through a target, PLAN 8.2.8 - the replicator is 8C)**
+### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5; the audit trail through a target, PLAN 8.2.8; the replicator, ADR-0026, PLAN 8.1.4)**
 
 - **One node delivers.** `app.DeliveryWorker` runs on every node and works on the one that
   leads the metadata group (it asks every second); when the node stops leading it stops
@@ -775,7 +777,9 @@ four at a time.
   (`app.DeliveryBatch`), hands each to the `app.Deliverer` registered for its kind of
   consumer (`n:` or `r:`), in order, and acknowledges through Raft (`outbox.ack`) after
   every 100 delivered items or once a delivered item has waited 1 s - so a new leader
-  sends again at most one batch. An acknowledgement that fails holds the target as a
+  sends again at most one batch and one wave (amended 2026-11-16 at the review of PLAN
+  8.1.4: a wave cut off by a stop or a lost lead has nothing of it acknowledged, and
+  is of one batch). An acknowledgement that fails holds the target as a
   failed attempt does: it is tried again after `delivery.Backoff` and nothing more is
   delivered until it is taken. While the node does not lead a loop sends nothing and
   looks again every second, so a lead lost for a moment stops nothing for good; a loop
@@ -786,7 +790,22 @@ four at a time.
   was delivered before acknowledged first; a failure whose class passes (`rejected`,
   `sse_c`) gives the item up, counted. Results of replication (`COMPLETED`, `FAILED`)
   go with the acknowledgement, for a target of kind `s3` only. An item of a kind that
-  nothing delivers fails as `internal` and holds its target.
+  nothing delivers fails as `internal` and holds its target. **Waves** (PLAN 8.1.4): a
+  kind may be handed over several items at once (`DeliveryWorkerConfig.Parallel`;
+  replication: `--replication-workers`). The next items of the outbox go together, at
+  most that many and never two of one object - the object at the target, when the
+  Deliverer names it (`app.ObjectNamer`; the replicator names the target, the bucket
+  there and the key, so two buckets here never reach one object there at once) - so
+  the items of one object go one after another in the order of the outbox; the next
+  wave begins when every item of this one was taken or passed, so the cursor never
+  passes an item that was not, and a failure holds what is behind its wave as a failure
+  of one item does. Each item is paused by its own failures, and the target is shown by
+  the item that has failed most. Notifications go one by one. **A target that changes**
+  - its connection (`delivery.Target.SameConnection`: endpoint, certificates, region,
+  credentials), or a bucket it admitted that it admits no longer (compared as sets: a
+  list widened or reordered changes nothing) - ends what is in flight to it at the next
+  refresh (each attempt runs under a context of the run's that the refresh cancels), and
+  the item is sent again at once to the target as it now is.
 - **Publishers.** The notifier (`app.Notifier`, the `Deliverer` of `n:`) publishes
   through the publisher of the target, which the composition root makes the first time
   there is something for it (`cmd/cactusfs/publishers.go`, an `app.PublisherSource`):
@@ -805,7 +824,47 @@ four at a time.
   closed, and all of them on a node that does not lead; once the node closes none is made.
   A request on behalf of a target older (`CreatedAt`) than the one held under its name is
   refused as `internal`, so a deleted target's loop cannot close the publisher of the one
-  made again.
+  made again. The same source (`publishers.Site`, an `app.SiteSource`) makes the client
+  of another deployment for a target of kind `s3` - `internal/adapters/s3client`, with
+  the egress client of the target, the same sealed opener, the ID of this deployment
+  and the build's version - behind `telemetry.InstrumentSiteClient` (port `site`), and
+  keeps, replaces and closes it as a publisher.
+- **The replicator** (`app.Replicator`, the `Deliverer` of `r:`; ADR-0026, PLAN 8.1.4).
+  For each row it reads the replication configuration of the row's bucket - sent only
+  while it names the target, which must admit the bucket, to the bucket it names - and
+  the version, through `ObjectService.ReplicationVersion`, `OpenReplicationSpan` and
+  `ReplicationParts` as the replication service (`iam.ServiceReplication`, which may
+  `s3:GetObjectVersion` and nothing else; not counted as a download). It sends nothing
+  to a bucket until its probe says it keeps versions and is a replica of this
+  deployment (asked again after a minute, after any failure there and once the target's
+  connection changes), and nothing that carries a lock to a bucket without Object Lock
+  (the probe says which; the target holds as `object_lock`), asks whether
+  the version is there already (with its entity tag: `COMPLETED`, nothing sent; with
+  another: `FAILED`), then sends it in one PUT, or a version of parts as an upload of
+  the same parts, or a delete marker - only while the deciding rule copies markers,
+  never one the lifecycle service made (its delete says `by: service/lifecycle`, as
+  every delete now says who deleted). **A version of parts goes on** from where an
+  attempt was cut off: the upload is remembered by target, generation of its
+  connection, bucket there and version (in this process; at most 1 024 uploads and
+  100 000 parts, the oldest idle ones beyond aborted as a best effort - one an attempt
+  is sending through is never aborted, and the bounds are exceeded instead while the
+  uploads in flight alone pass them), the next attempt asks for
+  its parts (`ListParts`) and sends those that did not arrive with the entity tag they
+  were given; the other uploads this deployment left of the key are aborted; an upload
+  refused for good is aborted. A version that never finishes holds its target - one
+  sent in one request starts again from its first byte at each attempt. `COMPLETED` once the other deployment
+  took it; `FAILED` for a version of a customer's key (`sse_c`, nothing read) and one
+  the other deployment refuses for itself (`rejected`, a 400 or 413); every other
+  failure holds the target and reports nothing. **Later changes** (`tags`,
+  `retention`, `legalhold`; PLAN 8.1.5) are carried as the version has them now, and
+  only to the version this deployment sent - the version there is asked for first, and
+  one not there or with other bytes is `FAILED` with nothing sent; one the other
+  deployment refuses - Object Lock's `403 ObjectLocked` - is `FAILED` and the target
+  goes on; one it takes reports no status; a retention that ends within 15 minutes
+  (`object.RetentionMargin`, the rule of a copy) is passed. A row of a version that is gone, of a bucket the target no
+  longer admits or whose configuration no longer names it, is passed with no status.
+  The bytes of every version being sent are held together to `--replication-rate-mib`,
+  with no burst above it.
 - **The audit trail through a target** (ADR-0025; PLAN 8.2.8). A webhook or NATS
   target defined with `audit: true` is sent every record of the audit trail from the
   one after its cursor's `audit_acked` on - from the first record of the trail for a
@@ -819,7 +878,8 @@ four at a time.
   `audit.Verify`). In sequence, at least once: the loop reads 100 records at a time,
   sends them in order and moves `audit_acked` through Raft (`outbox.ack` with no
   place in the outbox) after 100 or once one has waited 1 s, so a new leader sends again
-  at most one batch; a receiver deduplicates by the ID. **No record is passed:** a
+  at most one batch - the export sends one record at a time, in no wave (as amended
+  2026-11-16, at the review of PLAN 8.1.4, for the rows of the outbox); a receiver deduplicates by the ID. **No record is passed:** a
   failure of any class - a webhook's 4xx, which a notification passes, included - holds
   the export at the record, tried again after `delivery.Backoff`, so that no receiver
   holds a trail with a gap it was not told of; the target is shown retrying, then
@@ -838,13 +898,21 @@ four at a time.
   node's output (`--audit-export`) is a consumer of its own and unchanged.
 - **Deadlines.** Every call to the metadata carries 30 s; every attempt at an item
   carries 10 s + 2 x `--delivery-timeout` (the connect and the handshake, the answer's
-  headers, and as long again for the rest).
+  headers, and as long again for the rest), and an attempt at a version to send to
+  another deployment that and a day, or the time its size takes at 64 KiB/s when that
+  is longer - or at `--replication-rate-mib` shared by every version that may be sent
+  at once, when that is slower still (`app.ReplicationAttemptTimeout`, through
+  `DeliveryWorkerConfig.AttemptTimeouts`): generous, because a version sent in one
+  request cannot go on from where it was cut off. What ends a transfer that stops moving
+  is the egress client, whose connections may make no progress for longer than
+  `--delivery-timeout`; a lead that is lost ends the attempt at once.
 - **What is told.** Of a failure, its class and nothing else: the log line names the
   target, its kind, the class, the failures in a row and the pause - never the words of
   the error, which may name an endpoint, whose path may be a token. How a target stands
   is kept in memory since the node came to lead: `ok`, `retrying`, or `stalled` (a class
   somebody has to act on - `auth`, `tls`, `redirect`, `egress_refused`, `no_stream`,
-  `no_such_bucket`, `versioning`, `not_replica`, `quota` - or 10 failures in a row), pending,
+  `no_such_bucket`, `versioning`, `not_replica`, `quota`, `object_lock` - or 10 failures
+  in a row), pending,
   the oldest pending, the last success, the last class, rejected, failed; `lost` and
   `resync_needed` come from the cursor. **Pending** is the items in hand (read, not
   acknowledged) and those found after them by a count that reads at most 10 x 1 000
@@ -863,7 +931,7 @@ four at a time.
   elsewhere: aggregate with `max`), and at the egress boundary
   `cactusfs_egress_refusals_total{class}` (`telemetry.ObserveEgress` for requests and
   `telemetry.InstrumentEgressDial` for the connections of a NATS publisher, which the
-  publishers of 8B are wired through and the replicator of 8C will be). No metric names
+  publishers of 8B and the client of another deployment of 8C are wired through). No metric names
   a target. Alerts `CactusFSDeliveryStalled` (the oldest row waiting for a kind of
   target over 15 min) and `CactusFSOutboxDropping` are in `deploy/observability`.
 - **Overflow** (ADR-0025; PLAN 8.2.7). A target that takes nothing never refuses or
@@ -882,7 +950,7 @@ four at a time.
   written before the node closes. What was dropped before a node came to lead was the
   former leader's to tell, and the count is in every record.
 
-## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C - replica requests and the replication configuration are there, the replicator is not yet)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C - replica requests, the replication configuration, the replicator and later changes are there, the resync and the status of a bucket's replication are not yet)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -975,11 +1043,18 @@ four at a time.
   document `400 MalformedXML`. The store judges the bucket and the target again when
   the change is committed, and the applied entry is told as
   `bucket.configuration-changed`. GET writes every rule in the later form of the
-  schema, with its filter, priority and delete markers. Nothing is sent yet: the
-  replicator is PLAN 8.1.4, **released together with this** - a configuration makes
-  rows for `r:<target>` that only the replicator delivers, and without it the target's
-  cursor would hold, the outbox would stop being trimmed for every target, and the
-  matched versions would stay `PENDING`.
+  schema, with its filter, priority and delete markers. What a rule matches is sent by
+  the replicator (PLAN 8.1.4; "Delivery to targets" in section 5), **released together
+  with this** - a configuration makes rows for `r:<target>` that only the replicator
+  delivers, and without it the target's cursor would hold, the outbox would stop being
+  trimmed for every target, and the matched versions would stay `PENDING`. Later
+  changes of a version are carried by the same replicator (PLAN 8.1.5). **A bucket
+  there takes the versions of one bucket here:** a configuration that names a target
+  and a bucket there that another bucket's configuration names already is `400
+  InvalidArgument`, in the one sentence of every refusal of a target (the use case's
+  rule, `ReplicationService.refuseShared`; two put at the same moment may both pass it -
+  PLAN, Decisions "8.1.4 review"; no index of the named pairs, which would be a schema
+  change - "8.1.4 re-review").
 - **Admin API (implemented, ADR-0007).** REST/JSON under `/api/v1` on the admin listener
   of gateway nodes, designed first in `api/openapi/admin.yaml` (OpenAPI 3.0.3), with the
   strict server generated by `oapi-codegen`. An API key as a bearer credential, or a
