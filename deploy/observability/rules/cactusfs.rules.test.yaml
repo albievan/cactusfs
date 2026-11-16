@@ -1182,6 +1182,194 @@ tests:
         alertname: CactusFSBucketUsageDrift
         exp_alerts: []
 
+  # --- CactusFSDeliveryStalled: max by (job, kind) (oldest pending) > 900 ----
+  # a leads; its gauge of webhooks is 0 at 0m-4m, then the age of a row that
+  # is not taken: 60 at 5m, rising 60 a minute, 60 + 60 * (t - 5) at t.
+  # That is 900 at 19m (not above) and 960 at 20m: true from 20m, fires at
+  # once, by kind and job - not by instance. Its gauge of nats is 0
+  # throughout: not true. b does not lead and exposes nothing.
+  - name: a row that has waited fifteen minutes for a target
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="webhook"}'
+        values: '0x4 60+60x40'
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="nats"}'
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              kind: webhook
+            exp_annotations:
+              summary: "Delivery to a target has stalled"
+              description: "A row of the outbox has waited more than fifteen minutes for a target of kind webhook of the job cactusfs. The status of each target (GET /api/v1/targets/{name}/status, or the console's list of targets) says which, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped and lost to the target."
+
+  # a: a target that falls behind for ten minutes and catches up: the age
+  #    rises to 600 at 14m and is 0 from 15m. Never above 900.
+  # a leads until about 20m (its series stale after) and b from about 20m:
+  # b shows a row of a NATS target that has waited 300 s, which waits up to
+  # 840 s and is then taken. Never above 900.
+  - name: a target that catches up, and a change of leader
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="webhook"}'
+        values: '0x4 60+60x9 0x5 stale'
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="b:9001", kind="nats"}'
+        values: '_x19 300+60x9 0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+
+  # A target that keeps just up: its oldest row is 840 s and 960 s old, in
+  # turn, at 0m-19m (960 at the odd minutes), and nothing waits from 20m.
+  # True at 1m, fires at once; at the even minutes the expression is false,
+  # and keep_firing_for (15m) keeps the alert firing: no flapping. The last
+  # true sample is at 19m: still firing at 30m, resolved by 40m.
+  - name: a target that keeps just up, around fifteen minutes behind
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_delivery_oldest_pending_seconds{job="cactusfs", instance="a:9001", kind="webhook"}'
+        values: '840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 840 960 0x30'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              kind: webhook
+            exp_annotations:
+              summary: "Delivery to a target has stalled"
+              description: "A row of the outbox has waited more than fifteen minutes for a target of kind webhook of the job cactusfs. The status of each target (GET /api/v1/targets/{name}/status, or the console's list of targets) says which, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped and lost to the target."
+      - eval_time: 18m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              kind: webhook
+            exp_annotations:
+              summary: "Delivery to a target has stalled"
+              description: "A row of the outbox has waited more than fifteen minutes for a target of kind webhook of the job cactusfs. The status of each target (GET /api/v1/targets/{name}/status, or the console's list of targets) says which, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped and lost to the target."
+      - eval_time: 30m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cactusfs
+              kind: webhook
+            exp_annotations:
+              summary: "Delivery to a target has stalled"
+              description: "A row of the outbox has waited more than fifteen minutes for a target of kind webhook of the job cactusfs. The status of each target (GET /api/v1/targets/{name}/status, or the console's list of targets) says which, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped and lost to the target."
+      - eval_time: 40m
+        alertname: CactusFSDeliveryStalled
+        exp_alerts: []
+
+  # --- CactusFSOutboxDropping: max by (job) (dropped) > ----------------------
+  #       max by (job) (min_over_time(dropped[15m]))
+  # a leads; the outbox drops no row until 10m, then 5 a minute from 11m
+  # (5 at 11m, 55 at 21m), and none after. At 15m the count is 25 and the
+  # least of the window 0: fires at once, for the job. At 50m the window is
+  # (35m, 50m] and every sample is 55: not above, not true.
+  - name: an outbox that drops rows
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_outbox_dropped_total{job="cactusfs", instance="a:9001"}'
+        values: '0x10 5+5x10 55x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSOutboxDropping
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+            exp_annotations:
+              summary: "The outbox is dropping rows"
+              description: "The outbox of the job cactusfs is at its bound and has dropped rows in the last fifteen minutes: they are lost to the targets that had not delivered them. The status of each target says what it lost and whether a replication target needs a resync; the audit trail has a record system/outbox. Put right or delete the target that does not take its rows."
+      - eval_time: 50m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+
+  # The count is the metadata's, since the deployment began, and a new
+  # leader shows the count it found. a leads until 10m with 12 rows dropped
+  # long ago (its series stale from 10m); b leads from 10m and shows the
+  # same 12. b's least is what it shows, and nothing rises: never true.
+  - name: a new leader shows the count of rows dropped it found
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_outbox_dropped_total{job="cactusfs", instance="a:9001"}'
+        values: '12x9 stale'
+      - series: 'cactusfs_outbox_dropped_total{job="cactusfs", instance="b:9001"}'
+        values: '_x9 12x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+
+  # A count that falls: a state restored from an older snapshot. a shows
+  # 1000 at 0m-10m and 990 from 11m, and no row is dropped. increase() would
+  # read the fall as a reset and 990 as a rise; the count now is never above
+  # the least of its window: never true.
+  - name: a count of dropped rows that falls
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_outbox_dropped_total{job="cactusfs", instance="a:9001"}'
+        values: '1000x10 990x30'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+
+  # b: the same fall at 11m, then 5 rows dropped at 26m (995): above the
+  #    least of the window (990), so true from 26m, and fires at once - a
+  #    rise after a fall is a rise. At 20m the count is the least: not true.
+  - name: rows dropped after a count that fell
+    interval: 1m
+    input_series:
+      - series: 'cactusfs_outbox_dropped_total{job="cactusfs", instance="b:9001"}'
+        values: '1000x10 990x14 995x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CactusFSOutboxDropping
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: CactusFSOutboxDropping
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cactusfs
+            exp_annotations:
+              summary: "The outbox is dropping rows"
+              description: "The outbox of the job cactusfs is at its bound and has dropped rows in the last fifteen minutes: they are lost to the targets that had not delivered them. The status of each target says what it lost and whether a replication target needs a resync; the audit trail has a record system/outbox. Put right or delete the target that does not take its rows."
+
   # --- The node certificate: ends within 14 days (1h), within 3 days (10m) ---
   # The clock of a test starts at 0, so time() at t minutes is 60*t seconds.
   # Fourteen days are 1209600 seconds, three days 259200.

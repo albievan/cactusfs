@@ -399,6 +399,60 @@ groups:
           summary: "The usage of a bucket was found counted wrong"
           description: "{{ $labels.instance }} has ended a recount of a bucket's usage in the last hour that found other totals than were kept. The recount has put them right. It is a fault of CactusFS: the node's log names the bucket; please report it."
 
+  # Delivery to targets - bucket notifications to webhooks and NATS servers,
+  # and replication to other deployments (ADR-0023, ADR-0025). Only the node
+  # that leads the metadata group delivers, and only it exposes these
+  # series; during a change of leader two nodes may expose them for a
+  # scrape. So they are taken with max across the job, never summed. No
+  # metric names a target: GET /api/v1/targets/{name}/status, or the
+  # console's list of targets, says which.
+  - name: cactusfs.delivery
+    rules:
+      # A row of the outbox has waited fifteen minutes for a target of the
+      # kind: the target refuses the credential, its certificate or what it
+      # is sent (its state is stalled), it does not answer, or it takes
+      # rows more slowly than they come. Nothing is lost yet: delivery goes
+      # on from the same row once the target takes it. The gauge is the
+      # age of the oldest row itself, so the alert does not wait again. A
+      # target that keeps just up - its oldest row about fifteen minutes old,
+      # now above, now below - would make the alert come and go at every
+      # evaluation: once it fires it keeps firing until the age has stayed
+      # below fifteen minutes for fifteen minutes.
+      - alert: CactusFSDeliveryStalled
+        expr: max by (job, kind) (cactusfs_delivery_oldest_pending_seconds) > 900
+        for: 0m
+        keep_firing_for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Delivery to a target has stalled"
+          description: "A row of the outbox has waited more than fifteen minutes for a target of kind {{ $labels.kind }} of the job {{ $labels.job }}. The status of each target (GET /api/v1/targets/{name}/status, or the console's list of targets) says which, its state and the class of its last failure. When the outbox reaches its bound its oldest rows are dropped and lost to the target."
+
+      # The outbox is at its bound and pushes its oldest rows out: each is
+      # lost to the targets that had not passed it - a notification never
+      # sent, or a version the other deployment needs a resync for. Writes
+      # go on; the audit trail says so too (system/outbox, once a minute at
+      # most, and once more when a node's lead ends). The count is the
+      # metadata's own: it does not begin again with a new leader, which
+      # shows the count it found, and it can fall - a state restored from
+      # an older snapshot - which increase() would read as a reset and a
+      # rise. So the rule is not increase(): it fires while the count shown
+      # now is above the least that each node showed in the last fifteen
+      # minutes (the greatest of those leasts) - at once, and for the quarter
+      # of an hour that is so. A new leader's count is no rise (its least is
+      # what it shows); a count that fell is none either.
+      - alert: CactusFSOutboxDropping
+        expr: |-
+          max by (job) (cactusfs_outbox_dropped_total)
+            >
+          max by (job) (min_over_time(cactusfs_outbox_dropped_total[15m]))
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The outbox is dropping rows"
+          description: "The outbox of the job {{ $labels.job }} is at its bound and has dropped rows in the last fifteen minutes: they are lost to the targets that had not delivered them. The status of each target says what it lost and whether a replication target needs a resync; the audit trail has a record system/outbox. Put right or delete the target that does not take its rows."
+
   - name: cactusfs.nodes
     rules:
       - alert: CactusFSNodeCertificateExpiresSoon

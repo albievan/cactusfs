@@ -67,6 +67,7 @@ Prometheus data source (`DS_PROMETHEUS`) and one for the nodes shown.
 | `cactusfs.metadata` | no leader of the metadata group, elections that do not stop, a node behind, an upgrade of the schema that is not finished |
 | `cactusfs.drives` | a drive that is offline, a drive that is nearly full |
 | `cactusfs.quotas` | a bucket at its quota, quotas that no node can say anything of, a recount that found the usage of a bucket counted wrong |
+| `cactusfs.delivery` | a row of the outbox that has waited more than 15 minutes for a target (`CactusFSDeliveryStalled`, by kind of target), an outbox at its bound that drops rows (`CactusFSOutboxDropping`) |
 | `cactusfs.nodes` | a node certificate that ends within 14 and within 3 days, a certificate on disk that was refused, refused handshakes, failing calls between nodes, a node that is not ready |
 | `cactusfs.audit` | an audit trail that cannot be written |
 
@@ -81,6 +82,20 @@ a node ready. `cactusfs_bucket_usage_drift_total` is counted once, by the node t
 the recount, and its alert names that node, whose log names the bucket. Which bucket is
 full is in the console's grid of buckets and in each bucket's usage
 (`GET /api/v1/buckets/{bucket}/usage`).
+
+No alert names a target either. The series of delivery are exposed by the node that leads
+the metadata group only and are taken with `max` across the job. A target that holds its
+rows shows in `CactusFSDeliveryStalled` once its oldest row has waited 15 minutes; when
+the outbox reaches its bound its oldest rows are dropped and lost to the targets that had
+not passed them - `cactusfs_outbox_dropped_total` rises (a count the metadata keeps, which
+a new leader shows as it found it), `CactusFSOutboxDropping` fires, the target's status
+says what it lost, and the audit trail has a record `system/outbox`, at most one a minute
+plus one when a node's lead ends. `CactusFSDeliveryStalled` keeps firing until the oldest
+row has been younger than 15 minutes for 15 minutes, so a target that keeps just up does
+not make it come and go; `CactusFSOutboxDropping` compares the count with the least of
+the last 15 minutes rather than taking `increase()`, so a count that falls (a state
+restored from an older snapshot) is not read as rows dropped.
+Which target is in each target's status (`GET /api/v1/targets/{name}/status`).
 
 ## What is not here yet
 
