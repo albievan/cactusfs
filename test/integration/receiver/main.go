@@ -1,9 +1,9 @@
 //go:build integration
 
 // Command receiver is the webhook receiver of the notification test of
-// test/integration (PLAN 8.2.6): a static program that TestBucketNotifications
-// builds and runs in the distroless base image of the product, beside a
-// four-node cluster.
+// test/integration (PLAN 8.2.6, 8.2.8): a static program that
+// TestBucketNotifications builds and runs in the distroless base image of the
+// product, beside a four-node cluster.
 //
 // It serves HTTPS with a certificate the test made, takes a POST at one path
 // with one bearer secret, and keeps every request it took - the headers of
@@ -14,7 +14,10 @@
 //
 // The file is in the container's own file system, so it outlives a stop and
 // a start of the container: the test reads it with the engine's copy, and a
-// request the receiver answered is in it, whenever the test looks. A request
+// request the receiver answered is in it, whenever the test looks. With
+// -audit-records the records of the audit trail (X-Cactusfs-Event-Type
+// cactusfs.audit.exported.v1) are kept in a file of their own, the same way,
+// so that the lines of the first are the notifications alone. A request
 // at another path, with another method or with another bearer secret is
 // answered 404, 405 or 401, and kept nowhere.
 //
@@ -23,10 +26,11 @@
 // holdFor, and its connection is closed under it. A sender that is killed
 // while it waits has not seen it taken, and must send it again. Lines are
 // counted from the start of the file, so a receiver started again over its
-// file does not hold another. Only HTTP/1.1 is served, so that a held
-// request's connection can be taken and closed.
+// file does not hold another; the file of the audit trail is not counted.
+// Only HTTP/1.1 is served, so that a held request's connection can be taken
+// and closed.
 //
-//	receiver -addr :8443 -cert tls.pem -key tls.key -records /tmp/records.jsonl -hold-at 800
+//	receiver -addr :8443 -cert tls.pem -key tls.key -records /tmp/records.jsonl -audit-records /tmp/audit.jsonl -hold-at 800
 //
 // RECEIVER_PATH and RECEIVER_BEARER name the path and the secret. The secret
 // is made up for the run, and is printed nowhere.
@@ -55,6 +59,9 @@ import (
 
 // maxBody bounds the body of a request: a notification is one record.
 const maxBody = 1 << 20
+
+// auditType is the type of a record of the audit trail (ADR-0025).
+const auditType = "cactusfs.audit.exported.v1"
 
 // holdFor bounds how long the held request is held.
 const holdFor = 2 * time.Minute
@@ -86,6 +93,9 @@ type receiver struct {
 	out    *os.File
 	// lines is how many lines the file holds.
 	lines int
+	// audit, when not nil, is the file the records of the audit trail are
+	// appended to.
+	audit *os.File
 }
 
 // ServeHTTP implements http.Handler.
@@ -120,11 +130,16 @@ func (rc *receiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// One line at a time, written whole before the answer: what was
 	// answered 200 is in the file.
 	rc.mu.Lock()
-	_, err = rc.out.Write(append(line, '\n'))
-	if err == nil {
-		rc.lines++
+	held := false
+	if rc.audit != nil && r.Header.Get("X-Cactusfs-Event-Type") == auditType {
+		_, err = rc.audit.Write(append(line, '\n'))
+	} else {
+		_, err = rc.out.Write(append(line, '\n'))
+		if err == nil {
+			rc.lines++
+		}
+		held = err == nil && rc.lines == rc.holdAt
 	}
-	held := err == nil && rc.lines == rc.holdAt
 	rc.mu.Unlock()
 	if err != nil {
 		http.Error(w, "record", http.StatusInternalServerError)
@@ -180,6 +195,7 @@ func run(logger *slog.Logger, args []string) error {
 	certFile := flags.String("cert", "", "the certificate, in PEM")
 	keyFile := flags.String("key", "", "its key, in PEM")
 	records := flags.String("records", "/tmp/records.jsonl", "the file requests are appended to")
+	auditRecords := flags.String("audit-records", "", "the file records of the audit trail are appended to; empty for the file of -records")
 	holdAt := flags.Int("hold-at", 0, "the line of the file whose request is held unanswered; 0 for none")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("arguments: %w", err)
@@ -206,6 +222,16 @@ func run(logger *slog.Logger, args []string) error {
 	if err != nil {
 		return fmt.Errorf("records: %w", err)
 	}
+	var audit *os.File
+	if *auditRecords != "" {
+		if filepath.Dir(*auditRecords) != filepath.Dir(*records) {
+			return errors.New("audit-records: in the directory of records")
+		}
+		if audit, err = root.OpenFile(filepath.Base(*auditRecords), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600); err != nil {
+			return fmt.Errorf("audit-records: %w", err)
+		}
+		defer func() { _ = audit.Close() }()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -214,7 +240,7 @@ func run(logger *slog.Logger, args []string) error {
 		return fmt.Errorf("listen: %w", err)
 	}
 	server := &http.Server{
-		Handler: &receiver{path: path, bearer: []byte("Bearer " + bearer), holdAt: *holdAt, out: out, lines: lines},
+		Handler: &receiver{path: path, bearer: []byte("Bearer " + bearer), holdAt: *holdAt, out: out, lines: lines, audit: audit},
 		// HTTP/1.1 alone: a held request's connection is taken and closed.
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}, NextProtos: []string{"http/1.1"}},
 		TLSNextProto:      map[string]func(*http.Server, *tls.Conn, http.Handler){},

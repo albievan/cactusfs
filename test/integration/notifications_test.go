@@ -42,6 +42,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/albievan/cactusfs/internal/adapters/events/webhook"
+	"github.com/albievan/cactusfs/internal/domain/audit"
 	"github.com/albievan/cactusfs/test/clustertest"
 )
 
@@ -59,6 +60,10 @@ const (
 	// The two targets: a webhook to the receiver, and NATS.
 	notifyHook   = "receiver"
 	notifyStream = "stream"
+	// notifyTrail is the target the audit trail is sent to (PLAN 8.2.8): a
+	// webhook to the same receiver, at the same endpoint, with a signing
+	// key of its own; it admits no bucket.
+	notifyTrail = "trail"
 	// notifySubject is the subject the NATS target publishes to, and
 	// notifyStreamName the stream the test makes for it (the operator's,
 	// ADR-0025: CactusFS makes none).
@@ -70,8 +75,10 @@ const (
 	receiverHost = "receiver"
 	receiverPort = "8443"
 	// receiverRecords is the file in the receiver's container that holds
-	// every request it took.
-	receiverRecords = "/tmp/records.jsonl"
+	// every notification it took, and receiverAuditRecords every record of
+	// the audit trail.
+	receiverRecords      = "/tmp/records.jsonl"
+	receiverAuditRecords = "/tmp/audit.jsonl"
 
 	// notifyPuts objects are put, and every fourth deleted after it:
 	// notifyDeletes deletes.
@@ -102,6 +109,16 @@ const (
 	// notifySignatureAge is how far a timestamp may be from the receiver's
 	// clock (ADR-0025, "How a receiver verifies").
 	notifySignatureAge = 5 * time.Minute
+	// trailChanges administrative changes are made - a group created each
+	// - half of them begun while the receiver holds its request, across the
+	// kill of the leader, and half after them.
+	trailChanges = 50
+	// trailKillAfter of the changes before the kill are answered when the
+	// leader is killed; the rest are on their way, and the leader is
+	// sending the records of those answered, so the new leader may have to
+	// send some again. trailPace is the pause between two changes.
+	trailKillAfter = 3
+	trailPace      = 200 * time.Millisecond
 )
 
 // notifyCA is the certificate authority of the test: it issues the
@@ -275,7 +292,7 @@ func startReceiver(ctx context.Context, t *testing.T, network, bin string, ca *n
 	ctr, err := testcontainers.Run(ctx, runtimeImage(t),
 		testcontainers.WithEntrypoint("/receiver"),
 		testcontainers.WithCmd("-addr", ":"+receiverPort, "-cert", "/etc/receiver/tls.pem", "-key", "/etc/receiver/tls.key",
-			"-records", receiverRecords, "-hold-at", strconv.Itoa(notifyHoldAt)),
+			"-records", receiverRecords, "-audit-records", receiverAuditRecords, "-hold-at", strconv.Itoa(notifyHoldAt)),
 		testcontainers.WithEnv(map[string]string{"RECEIVER_PATH": path, "RECEIVER_BEARER": bearer}),
 		// The image's user is not root: what it reads is readable by all.
 		// The key is a test's, made for this run.
@@ -375,10 +392,17 @@ type receiverRecord struct {
 	Body        []byte    `json:"body"`
 }
 
-// receiverLines returns the lines of the receiver's file written whole, the
-// receiver running or stopped; errUnreachable when it cannot be copied out.
+// receiverLines returns the lines of the receiver's file of notifications
+// written whole, the receiver running or stopped; errUnreachable when it
+// cannot be copied out.
 func receiverLines(ctx context.Context, receiver *testcontainers.DockerContainer) ([][]byte, error) {
-	reader, err := receiver.CopyFileFromContainer(ctx, receiverRecords)
+	return receiverFile(ctx, receiver, receiverRecords)
+}
+
+// receiverFile returns the lines of a file of the receiver written whole;
+// errUnreachable when it cannot be copied out.
+func receiverFile(ctx context.Context, receiver *testcontainers.DockerContainer, file string) ([][]byte, error) {
+	reader, err := receiver.CopyFileFromContainer(ctx, file)
 	if err != nil {
 		return nil, fmt.Errorf("the receiver's records %w: %w", errUnreachable, err)
 	}
@@ -656,6 +680,184 @@ func notifyWrite(ctx context.Context, clients []*s3.Client, first int, change fu
 	}
 }
 
+// receiverTrail reads the records of the audit trail the receiver took, as
+// a receiver deduplicates them: by the ID X-Cactusfs-Event-Id, which is
+// audit-<the record's sequence>, a record kept at its first arrival - and a
+// record that arrives again must be the same bytes. Every request must be
+// signed under signingKey and carry the headers of ADR-0025, and its body be
+// a line of the trail (audit.ParseLine). It returns the records in the order
+// they first arrived, and how many IDs arrived more than once.
+func receiverTrail(ctx context.Context, receiver *testcontainers.DockerContainer, signingKey string) ([]audit.Record, int, error) {
+	lines, err := receiverFile(ctx, receiver, receiverAuditRecords)
+	if err != nil {
+		return nil, 0, err
+	}
+	first := map[string][]byte{}
+	again := map[string]bool{}
+	var records []audit.Record
+	for _, line := range lines {
+		var got receiverRecord
+		if err := json.Unmarshal(line, &got); err != nil {
+			return nil, 0, fmt.Errorf("a line of the receiver's audit records: %w", err)
+		}
+		if !webhook.Verify([]byte(signingKey), got.Timestamp, got.Body, got.Signature) {
+			return nil, 0, fmt.Errorf("record %s: the signature %q does not verify", got.ID, got.Signature)
+		}
+		if got.ContentType != "application/json" || !strings.HasPrefix(got.UserAgent, "cactusfs/") || got.Type != "cactusfs.audit.exported.v1" {
+			return nil, 0, fmt.Errorf("record %s: Content-Type %q, User-Agent %q, type %q", got.ID, got.ContentType, got.UserAgent, got.Type)
+		}
+		if before, ok := first[got.ID]; ok {
+			if !bytes.Equal(before, got.Body) {
+				return nil, 0, fmt.Errorf("record %s arrived again with another body", got.ID)
+			}
+			again[got.ID] = true
+			continue
+		}
+		record, err := audit.ParseLine(got.Body)
+		if err != nil {
+			return nil, 0, fmt.Errorf("record %s: %w", got.ID, err)
+		}
+		if got.ID != "audit-"+strconv.FormatUint(record.Sequence, 10) {
+			return nil, 0, fmt.Errorf("record %d arrived with the ID %q", record.Sequence, got.ID)
+		}
+		first[got.ID] = got.Body
+		records = append(records, record)
+	}
+	return records, len(again), nil
+}
+
+// trailRecord is a record of the audit trail, as GET /audit gives it.
+type trailRecord struct {
+	Sequence uint64 `json:"sequence"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Hash     string `json:"hash"`
+}
+
+// readTrail reads the whole audit trail through a node, a page after
+// another; errUnreachable when the node does not answer.
+func readTrail(ctx context.Context, c *clustertest.Cluster, id string, root map[string]string) ([]trailRecord, error) {
+	var all []trailRecord
+	after := uint64(0)
+	for {
+		status, _, body, err := gridCall(ctx, c, id, root, http.MethodGet, "/audit?limit=1000&after="+strconv.FormatUint(after, 10), nil)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("GET /audit through %s %w: %w", id, errUnreachable, err)
+		case status != http.StatusOK:
+			return nil, fmt.Errorf("GET /audit through %s %w: %d %s", id, errUnreachable, status, body)
+		}
+		var page struct {
+			Records []trailRecord `json:"records"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("GET /audit through %s: %w: %s", id, err, body)
+		}
+		if len(page.Records) == 0 {
+			return all, nil
+		}
+		all = append(all, page.Records...)
+		after = page.Records[len(page.Records)-1].Sequence
+	}
+}
+
+// judgeTrail says what is wrong with the records of the audit trail the
+// receiver holds (receiverTrail), against the trail as a node reads it: nil
+// when they are every record from the first, in sequence and without a gap,
+// their chain verifies, every record the node read is among them with its
+// hash, and so is the creation of every group the test made; errNotYet when
+// what is there is right and some is not there yet.
+func judgeTrail(held []audit.Record, trail []trailRecord, groups []string) error {
+	for i, record := range held {
+		if record.Sequence != uint64(i)+1 {
+			return fmt.Errorf("the receiver's record %d is %d: the trail arrived out of sequence or with a gap", i+1, record.Sequence)
+		}
+	}
+	if err := audit.Verify(audit.Record{}, held); err != nil {
+		return fmt.Errorf("the chain the receiver holds: %w", err)
+	}
+	for i, record := range trail {
+		if i >= len(held) {
+			return fmt.Errorf("%w: the receiver holds %d records of the %d of the trail", errNotYet, len(held), len(trail))
+		}
+		if record.Sequence != held[i].Sequence || record.Hash != held[i].Hash {
+			return fmt.Errorf("record %d is not the trail's: hash %s, the trail's %s", held[i].Sequence, held[i].Hash, record.Hash)
+		}
+	}
+	made := map[string]bool{}
+	for _, record := range held {
+		if record.Action == "admin:PutGroup" && record.Outcome == audit.Succeeded {
+			made[record.Resource[strings.LastIndex(record.Resource, "/")+1:]] = true
+		}
+	}
+	for _, group := range groups {
+		if !made[group] {
+			return fmt.Errorf("%w: the creation of the group %s is not among the %d records the receiver holds", errNotYet, group, len(held))
+		}
+	}
+	return nil
+}
+
+// trailChange creates the group of the i-th administrative change through
+// the nodes, beginning with the i-th, until one answers 201. Every attempt
+// carries the same Idempotency-Key, so an attempt made again after one that
+// was taken and not answered is answered as that one was.
+func trailChange(ctx context.Context, c *clustertest.Cluster, root map[string]string, i int) (string, error) {
+	name := fmt.Sprintf("trail-%02d", i)
+	headers := map[string]string{"Idempotency-Key": "trail-change-" + name}
+	for k, v := range root {
+		headers[k] = v
+	}
+	deadline := time.Now().Add(notifyWriteLimit)
+	for try := 0; ; try++ {
+		id := clustertest.Nodes[(i+try)%len(clustertest.Nodes)]
+		attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
+		status, _, body, err := gridCall(attempt, c, id, headers, http.MethodPost, "/groups", map[string]any{"name": name, "roles": []string{"read-only"}})
+		cancel()
+		switch {
+		case err == nil && status == http.StatusCreated:
+			return name, nil
+		case err == nil && status == http.StatusConflict && try > 0:
+			// An attempt before was committed and its answer lost with
+			// the node that gave it: the group is there, and so is its
+			// record, which judgeTrail looks for.
+			return name, nil
+		case err == nil && status >= 400 && status < 500:
+			return name, fmt.Errorf("POST /groups %s through %s = %d %s", name, id, status, body)
+		case time.Now().After(deadline) && err != nil:
+			return name, fmt.Errorf("POST /groups %s not answered within %s, last through %s: %w", name, notifyWriteLimit, id, err)
+		case time.Now().After(deadline):
+			return name, fmt.Errorf("POST /groups %s not answered within %s, last through %s: %d %s", name, notifyWriteLimit, id, status, body)
+		}
+		select {
+		case <-ctx.Done():
+			return name, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// trailChangesFrom makes the administrative changes from first up to, not
+// including, last, one after another and trailPace apart, counting in made
+// those that were answered, and returns the names of the groups.
+func trailChangesFrom(ctx context.Context, c *clustertest.Cluster, root map[string]string, first, last int, made *atomic.Int64) ([]string, error) {
+	var names []string
+	for i := first; i < last; i++ {
+		name, err := trailChange(ctx, c, root, i)
+		if err != nil {
+			return names, err
+		}
+		names = append(names, name)
+		made.Add(1)
+		select {
+		case <-ctx.Done():
+			return names, ctx.Err()
+		case <-time.After(trailPace):
+		}
+	}
+	return names, nil
+}
+
 // targetStatus is what the leader knows of the delivery to a target.
 type targetStatus struct {
 	State          string `json:"state"`
@@ -711,6 +913,20 @@ func targetState(ctx context.Context, c *clustertest.Cluster, id string, root ma
 // back, it shows ok, and the messages of that minute arrived. At the end
 // both targets are ok, nothing pending, lost or rejected, and a message
 // published again to the stream with its ID is taken as a duplicate.
+//
+// The audit trail goes to the receiver too (PLAN 8.2.8), through a third
+// target defined with audit: true, at the same endpoint and with a signing
+// key of its own; the receiver keeps those records in a file of their own.
+// 50 administrative changes are made - a group created each, through the
+// nodes in turn - 25 begun while the receiver holds its request, the leader
+// killed once three of them are answered and the rest on their way, and 25
+// after them. At the end the receiver,
+// deduplicating by X-Cactusfs-Event-Id (audit-<sequence>), holds every
+// record of the trail from the first, in sequence and without a gap, each
+// the trail's (its hash as GET /audit gives it) and the creation of every
+// group among them; their hash chain verifies; every request is signed
+// under the trail target's key; a record that arrived twice arrived the
+// same bytes; and the target is ok.
 //
 // No --egress-allow: the containers are in the engine's private range,
 // which a node connects to without it (ADR-0023).
@@ -790,6 +1006,14 @@ func TestBucketNotifications(t *testing.T) {
 		"kind": "nats", "endpoint": "tls://" + natsHost + ":4222", "subject": notifySubject, "ca_pem": string(ca.pem),
 		"buckets": []string{notifyBucket}, "auth": map[string]any{"mode": "token", "secret": token},
 	})
+	// The audit trail, to the same receiver: no bucket, a key of its own.
+	trailKey := define(notifyTrail, map[string]any{
+		"kind": "webhook", "endpoint": "https://" + receiverHost + ":" + receiverPort + path, "ca_pem": string(ca.pem),
+		"buckets": []string{}, "audit": true, "auth": map[string]any{"mode": "bearer", "secret": bearer},
+	})
+	if trailKey == "" || trailKey == signingKey {
+		t.Fatal("the target of the audit trail was defined without a signing key of its own")
+	}
 
 	// The bucket, which keeps versions, and its rules, with S3.
 	if _, err := c.S3("node1").CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(notifyBucket)}); err != nil {
@@ -884,6 +1108,31 @@ func TestBucketNotifications(t *testing.T) {
 			t.Fatalf("the receiver took %d requests within %s (%v); the leader is killed at the %dth", len(lines), notifyWriteLimit, err, notifyHoldAt)
 		}
 	}
+	// Half of the administrative changes begin now, while the receiver
+	// holds its request; the leader is killed once the first few are
+	// answered and the rest are on their way - within seconds, far inside
+	// the receiver's hold of two minutes. Whether the new leader sends a
+	// record of the trail again depends on what the old one had not
+	// acknowledged: it is logged, not required.
+	var groups []string
+	var groupsErr error
+	var made atomic.Int64
+	beforeKill := make(chan struct{})
+	go func() {
+		defer close(beforeKill)
+		groups, groupsErr = trailChangesFrom(ctx, c, root, 0, trailChanges/2, &made)
+	}()
+	begun := time.Now()
+	for made.Load() < trailKillAfter {
+		select {
+		case <-beforeKill:
+			t.Fatalf("the administrative changes before the kill ended after %d: %v", made.Load(), groupsErr)
+		case <-time.After(50 * time.Millisecond):
+		}
+		if time.Since(begun) > notifyWriteLimit/4 {
+			t.Fatalf("%d administrative changes answered within %s", made.Load(), notifyWriteLimit/4)
+		}
+	}
 	victim, err := askLeader(ctx, c, "node4")
 	if err != nil {
 		t.Fatalf("who leads before the kill: %v", err)
@@ -891,6 +1140,18 @@ func TestBucketNotifications(t *testing.T) {
 	killed := time.Now()
 	c.Kill(victim)
 	ackedAtKill := acked.Load()
+	madeAtKill := made.Load()
+	<-beforeKill
+	if groupsErr != nil {
+		t.Fatalf("an administrative change before the kill: %v", groupsErr)
+	}
+	// The other half after them, while the cluster settles.
+	afterKill, err := trailChangesFrom(ctx, c, root, trailChanges/2, trailChanges, &made)
+	if err != nil {
+		t.Fatalf("an administrative change after the kill: %v", err)
+	}
+	groups = append(groups, afterKill...)
+	t.Logf("the leader was killed with %d of the administrative changes answered, the others on their way", madeAtKill)
 	<-done
 	if err := errors.Join(failures...); err != nil {
 		t.Fatalf("a change was not acknowledged: %v", err)
@@ -987,6 +1248,46 @@ func TestBucketNotifications(t *testing.T) {
 			t.Errorf("at the end the target %s is %+v, %v; want ok, and nothing pending, lost or rejected", target, status, err)
 		}
 	}
+
+	// The audit trail: every record from the first, in sequence, without a
+	// gap, the trail's own, the 50 changes among them, the chain whole.
+	var trailHeld []audit.Record
+	var trailAgain int
+	trailDeadline := time.Now().Add(notifyCatchUp)
+	for asked := 0; ; asked++ {
+		var trail []trailRecord
+		trail, err = readTrail(ctx, c, nodes[asked%len(nodes)], root)
+		if err == nil {
+			trailHeld, trailAgain, err = receiverTrail(ctx, receiver, trailKey)
+		}
+		if err == nil {
+			err = judgeTrail(trailHeld, trail, groups)
+		}
+		if err == nil {
+			var status targetStatus
+			status, err = targetState(ctx, c, nodes[asked%len(nodes)], root, notifyTrail)
+			switch {
+			case err != nil:
+				// A node that does not answer the status now is asked
+				// again, as the waits above ask.
+				err = fmt.Errorf("the status %w: %w", errUnreachable, err)
+			case status != (targetStatus{State: "ok"}):
+				err = fmt.Errorf("%w: the target of the audit trail is %+v", errNotYet, status)
+			}
+		}
+		switch {
+		case err == nil:
+		case !errors.Is(err, errNotYet) && !errors.Is(err, errUnreachable):
+			t.Fatalf("the audit trail at the receiver: %v", err)
+		case time.Now().After(trailDeadline):
+			t.Fatalf("the audit trail at the receiver within %s: %v", notifyCatchUp, err)
+		default:
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		break
+	}
+	t.Logf("the audit trail: %d records at the receiver, in sequence, the chain whole, %d of them arrived more than once", len(trailHeld), trailAgain)
 
 	// What arrived more than once: the receiver counts - the message it
 	// held at least - and the stream deduplicates.
