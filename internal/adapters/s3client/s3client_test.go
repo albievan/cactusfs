@@ -595,7 +595,12 @@ func TestMarkerVersionAndLaterChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if etag, found, err := c.HeadVersion(t.Context(), "replica", "doc", markerRef); err != nil || !found || etag != "" {
+	if markerRef != marker.Ref() {
+		t.Errorf("the marker is at the site as %s, sent as %s", markerRef, marker.Ref())
+	}
+	// Asked for by the ID it was sent under, the marker is there with no
+	// entity tag (the contract's row; what a resync asks, PLAN 8.1.6).
+	if etag, found, err := c.HeadVersion(t.Context(), "replica", "doc", marker.Ref()); err != nil || !found || etag != "" {
 		t.Errorf("HeadVersion of a marker = %q, %v, %v", etag, found, err)
 	}
 }

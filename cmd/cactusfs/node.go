@@ -103,6 +103,8 @@ type node struct {
 	// takes its versions from another deployment - and their replication
 	// configuration, which sends them to one (ADR-0026).
 	replication *app.ReplicationService
+	// resync walks the resyncs that were asked for, while this node leads.
+	resync *app.ResyncWorker
 	// publishers makes the publisher of a target for the notifier, and
 	// closes those of targets that are gone.
 	publishers *publishers
@@ -396,21 +398,27 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 		Version: userAgentVersion(ctx, logger, buildinfo.Get().Version), Source: topology.DeploymentID, Clock: n.clock,
 		Active: n.meta.IsLeader, Logger: logger,
 	})
+	// One replicator sends both the outbox's rows and what a resync walks
+	// (PLAN 8.1.6): one rate for both, and never two sends to one object
+	// at once.
+	replicator := app.NewReplicator(app.ReplicatorConfig{
+		Objects: n.objects, Buckets: meta, Sites: n.publishers, Source: topology.DeploymentID,
+		RateBytes: app.ReplicationRateBytes(cfg.ReplicationRateMiB), Clock: n.clock, Logger: logger,
+	})
+	replicationTimeout := app.ReplicationAttemptTimeout(deliveryAttemptTimeout(cfg.DeliveryTimeout),
+		app.ReplicationRateBytes(cfg.ReplicationRateMiB), cfg.ReplicationWorkers)
+	outbox := n.telemetry.InstrumentOutbox(n.meta)
 	n.delivery = app.NewDeliveryWorker(app.DeliveryWorkerConfig{
-		Targets: targetStore, Outbox: n.telemetry.InstrumentOutbox(n.meta), Active: n.meta.IsLeader, Clock: n.clock,
+		Targets: targetStore, Outbox: outbox, Active: n.meta.IsLeader, Clock: n.clock,
 		Logger: logger, AttemptTimeout: deliveryAttemptTimeout(cfg.DeliveryTimeout), Entropy: rand.Reader,
 		OnAttempt: n.telemetry.ObserveDeliveryAttempt, Auditor: n.auditor,
 		AttemptTimeouts: map[delivery.ConsumerKind]func(delivery.Item) time.Duration{
-			delivery.ConsumerReplication: app.ReplicationAttemptTimeout(deliveryAttemptTimeout(cfg.DeliveryTimeout),
-				app.ReplicationRateBytes(cfg.ReplicationRateMiB), cfg.ReplicationWorkers),
+			delivery.ConsumerReplication: replicationTimeout,
 		},
 		Parallel: map[delivery.ConsumerKind]int{delivery.ConsumerReplication: cfg.ReplicationWorkers},
 		Deliverers: map[delivery.ConsumerKind]app.Deliverer{
 			delivery.ConsumerNotification: app.NewNotifier(app.NotifierConfig{Publishers: n.publishers, Logger: logger}),
-			delivery.ConsumerReplication: app.NewReplicator(app.ReplicatorConfig{
-				Objects: n.objects, Buckets: meta, Sites: n.publishers, Source: topology.DeploymentID,
-				RateBytes: app.ReplicationRateBytes(cfg.ReplicationRateMiB), Clock: n.clock, Logger: logger,
-			}),
+			delivery.ConsumerReplication:  replicator,
 		},
 		// The audit trail to the targets defined with audit: true, from
 		// their cursors, through the same publishers (ADR-0025). The
@@ -432,8 +440,18 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// entry that makes it; a configuration names a target, judged against
 	// the targets here and again when it is committed. Below level 5 the
 	// store answers unavailable.
+	replicationStore := n.telemetry.InstrumentReplication(n.meta)
 	n.replication = app.NewReplicationService(app.ReplicationServiceConfig{
-		Buckets: meta, Store: n.telemetry.InstrumentReplication(n.meta), Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
+		Buckets: meta, Store: replicationStore, Targets: targetStore, Authz: n.authorizer, Auditor: n.auditor,
+	})
+	// The resync of a bucket (PLAN 8.1.6): the leader walks every version
+	// of the buckets a resync was asked for, 500 a pass, and sends through
+	// the replicator what the other deployment lacks; the cursor is stored
+	// through Raft after every pass.
+	n.resync = app.NewResyncWorker(app.ResyncWorkerConfig{
+		Buckets: meta, Index: meta, Store: replicationStore, Targets: targetStore, Outbox: outbox, Sender: replicator,
+		AttemptTimeout: replicationTimeout, Active: n.meta.IsLeader, Clock: n.clock, Logger: logger, Entropy: rand.Reader,
+		Auditor: n.auditor,
 	})
 	n.cluster = app.NewClusterService(app.ClusterServiceConfig{
 		View: view, Authz: n.authorizer, NodeID: n.id, Leader: n.meta.Leader, Maintenance: n.maintenance,
@@ -855,6 +873,8 @@ func (n *node) startBackground(ctx context.Context, cfg serverConfig) {
 	n.background.Go(func() { n.counter.Run(ctx) })
 	// Delivers the outbox to its targets, while this node leads.
 	n.background.Go(func() { n.delivery.Run(ctx) })
+	// Walks the resyncs that were asked for, while this node leads.
+	n.background.Go(func() { n.resync.Run(ctx) })
 	// Closes the publishers of targets that are gone, and all of them
 	// where the node does not lead or stops.
 	n.background.Go(func() { n.publishers.Run(ctx) })

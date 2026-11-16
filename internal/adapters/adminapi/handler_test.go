@@ -1687,7 +1687,6 @@ func TestOperationsThatAreNotWrittenYet(t *testing.T) {
 	// adapter takes no POST that does not, and the contract says so.
 	for _, c := range []call{
 		{method: "GET", path: "/buckets/some-bucket/replication/status"},
-		{method: "POST", path: "/buckets/some-bucket/replication/resync", headers: map[string]string{"Content-Type": "application/json"}},
 	} {
 		// Without a credential, and with one nobody has: 401, before
 		// anything is said of what the operation does or does not do.

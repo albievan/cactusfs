@@ -2029,9 +2029,26 @@ func (o *operations) GetBucketReplicationStatus(context.Context, api.GetBucketRe
 	return nil, notYet("replication status")
 }
 
-// ResyncBucketReplication implements api.StrictServerInterface (PLAN 8.1.6).
-func (o *operations) ResyncBucketReplication(context.Context, api.ResyncBucketReplicationRequestObject) (api.ResyncBucketReplicationResponseObject, error) {
-	return nil, notYet("replication resync")
+// ResyncBucketReplication implements api.StrictServerInterface (PLAN 8.1.6):
+// who may start a resync, and of what, is the use case's to decide
+// (ReplicationService.Resync, admin:ResyncReplication); this carries the
+// record it stored to the contract. The walk itself is the leader's.
+func (o *operations) ResyncBucketReplication(ctx context.Context, request api.ResyncBucketReplicationRequestObject) (api.ResyncBucketReplicationResponseObject, error) {
+	replication, err := o.replicationConfigs()
+	if err != nil {
+		return nil, err
+	}
+	record, err := replication.Resync(ctx, who(ctx), request.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return api.ResyncBucketReplication202JSONResponse(replicationResyncOf(record)), nil
+}
+
+// replicationResyncOf maps the record of a resync to the contract.
+func replicationResyncOf(r bucket.Resync) api.ReplicationResync {
+	count := func(n uint64) int64 { return int64(min(n, math.MaxInt64)) }
+	return api.ReplicationResync{State: string(r.State), Scanned: count(r.Scanned), Sent: count(r.Sent)}
 }
 
 // --- replica mode (ADR-0026) ---
