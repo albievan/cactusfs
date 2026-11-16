@@ -177,3 +177,10 @@ func (a *AttemptLimiter) Live(now time.Time) map[string]int {
 	}
 	return live
 }
+
+// WithRememberedBounds lowers the bounds of what the replicator remembers of
+// uploads in progress, so that a test reaches them.
+func (r *Replicator) WithRememberedBounds(uploads, parts int) *Replicator {
+	r.maxUploads, r.maxParts = uploads, parts
+	return r
+}

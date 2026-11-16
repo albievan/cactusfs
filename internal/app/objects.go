@@ -739,28 +739,35 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 		}
 	}
 
-	if err := admitKey(version.Encryption, in.CustomerKey); err != nil {
-		return GetOutput{}, err
-	}
-	if version.Multipart() {
-		body, err := s.openParts(ctx, version, span, in.CustomerKey)
-		if err != nil {
-			return GetOutput{}, err
-		}
-		return GetOutput{Version: version, Range: span, Partial: partial, Body: body}, nil
-	}
-
-	stream, err := s.openVersionKeys(ctx, version, in.CustomerKey)
+	body, err := s.openSpan(ctx, version, span, in.CustomerKey)
 	if err != nil {
 		return GetOutput{}, err
 	}
+	return GetOutput{Version: version, Range: span, Partial: partial, Body: body}, nil
+}
+
+// openSpan opens span of the stored data of one version for reading: every
+// byte the body yields is authenticated, and the first segment is before it
+// is returned. The caller has authorized the read and closes the body.
+func (s *ObjectService) openSpan(ctx context.Context, version object.Version, span object.Range, customerKey []byte) (io.ReadCloser, error) {
+	if err := admitKey(version.Encryption, customerKey); err != nil {
+		return nil, err
+	}
+	if version.Multipart() {
+		return s.openParts(ctx, version, span, customerKey)
+	}
+
+	stream, err := s.openVersionKeys(ctx, version, customerKey)
+	if err != nil {
+		return nil, err
+	}
 	if version.Layout.StoredSize != stream.CiphertextSize(version.Size) {
-		return GetOutput{}, fmt.Errorf("%w: stored size %d does not match object size %d",
+		return nil, fmt.Errorf("%w: stored size %d does not match object size %d",
 			domain.ErrIntegrity, version.Layout.StoredSize, version.Size)
 	}
 	shard, err := s.storage.open(ctx, version.Extent())
 	if err != nil {
-		return GetOutput{}, err
+		return nil, err
 	}
 
 	section := stream.Locate(span, version.Size)
@@ -770,20 +777,20 @@ func (s *ObjectService) open(ctx context.Context, version object.Version, in Get
 	)
 	if _, err := plain.Discard(int(section.Skip)); err != nil {
 		_ = shard.Close()
-		return GetOutput{}, err
+		return nil, err
 	}
 	// Authenticate the first segment now, so that damage is reported as an
 	// error rather than discovered after the response has begun.
 	if _, err := plain.Peek(1); err != nil && !errors.Is(err, io.EOF) {
 		_ = shard.Close()
-		return GetOutput{}, err
+		return nil, err
 	}
 
 	var body io.Reader = plain
 	if span.Length > 0 {
 		body = io.LimitReader(plain, span.Length)
 	}
-	return GetOutput{Version: version, Range: span, Partial: partial, Body: &objectBody{Reader: body, shards: shard, healer: s.healer, version: version}}, nil
+	return &objectBody{Reader: body, shards: shard, healer: s.healer, version: version}, nil
 }
 
 // openVersionKeys unwraps the data key of a stored version and returns the
@@ -1235,8 +1242,13 @@ func (s *ObjectService) Delete(ctx context.Context, principal iam.Principal, in 
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)
 	}
+	// Who deletes is recorded as who put is: a receiver of the change is
+	// told, and a delete marker the lifecycle service makes
+	// (bucket.LifecycleActor) is told apart from a caller's and not sent to
+	// another deployment (ADR-0026).
 	result, err := s.index.DeleteObject(ctx, in.Bucket, in.Key, ports.DeleteOptions{
 		Version: in.Version, MarkerID: markerID, At: s.clock.Now().UTC(), BypassGovernance: in.BypassGovernance, Expect: in.Expect,
+		By: actorOf(principal),
 	})
 	if err != nil {
 		return DeleteOutput{}, fmt.Errorf("object.Delete: %w", err)

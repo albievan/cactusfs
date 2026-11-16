@@ -261,7 +261,11 @@ func (r *ReplicationService) setConfiguration(ctx context.Context, principal iam
 	case b.Versioning != bucket.VersioningEnabled:
 		return bucket.ReplicationConfig{}, fmt.Errorf("%w: bucket %s", domain.ErrVersioningRequired, bucketName)
 	}
-	if err := r.open(ctx, kept.Target, bucketName); err != nil {
+	target, err := r.open(ctx, kept.Target, bucketName)
+	if err != nil {
+		return bucket.ReplicationConfig{}, err
+	}
+	if err := r.refuseShared(ctx, bucketName, target, kept.Bucket); err != nil {
 		return bucket.ReplicationConfig{}, err
 	}
 	if err := r.buckets.SetBucketConfig(ctx, bucketName, bucket.ConfigReplication, document); err != nil {
@@ -276,16 +280,80 @@ func (r *ReplicationService) setConfiguration(ctx context.Context, principal iam
 // target that the replication configuration of the bucket may not name: one
 // that is not there, is no other deployment, or does not admit the bucket -
 // in one sentence for all three.
-func (r *ReplicationService) open(ctx context.Context, name, bucketName string) error {
+func (r *ReplicationService) open(ctx context.Context, name, bucketName string) (delivery.Target, error) {
 	target, err := r.targets.GetTarget(ctx, name)
 	switch {
 	case errors.Is(err, domain.ErrEntityNotFound):
 	case err != nil:
-		return err
+		return delivery.Target{}, err
 	case target.Kind.Serves(delivery.ConsumerReplication) && target.Admits(bucketName):
+		return target, nil
+	}
+	return delivery.Target{}, fmt.Errorf("%w: target %s is not another deployment that is open to bucket %s", domain.ErrInvalidArgument, name, bucketName)
+}
+
+// refuseShared refuses, with an error that wraps domain.ErrInvalidArgument,
+// a bucket of another deployment that the replication configuration of
+// another bucket here already sends to through the same target: two source
+// buckets in one replica bucket would interleave two unrelated sequences of
+// versions there, and the replicator would send versions of one key of both
+// side by side (ADR-0026, "One destination a source bucket"). It is told in
+// the one sentence every refusal of a target has (open), which says nothing
+// of which other bucket names the pair, or that one does.
+//
+// The other configurations are read only when the target counts a document
+// besides the bucket's own (delivery.Target.Refs), and the walk ends once it
+// has found as many as it counts: an index of the pairs that are named would
+// be a field more in the replicated state, so a schema change, and is not
+// made (PLAN, Decisions "8.1.4 re-review"). It is the use case's rule, not
+// the store's: two configurations put at the same moment may each pass it
+// (Decisions "8.1.4 review"); what every member applies is unchanged.
+func (r *ReplicationService) refuseShared(ctx context.Context, bucketName string, target delivery.Target, destination string) error {
+	mine, err := r.buckets.GetBucketConfig(ctx, bucketName, bucket.ConfigReplication)
+	if err != nil {
+		return err
+	}
+	others := target.Refs
+	if config, err := bucket.ParseReplicationConfig(mine); err == nil && config.Target == target.Name {
+		others--
+	}
+	if others <= 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: target %s is not another deployment that is open to bucket %s", domain.ErrInvalidArgument, name, bucketName)
+	buckets, err := r.buckets.ListBuckets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, b := range buckets {
+		if others <= 0 {
+			// Every other document that names the target was read.
+			return nil
+		}
+		if b.Name == bucketName {
+			continue
+		}
+		raw, err := r.buckets.GetBucketConfig(ctx, b.Name, bucket.ConfigReplication)
+		switch {
+		case errors.Is(err, domain.ErrBucketNotFound):
+			continue
+		case err != nil:
+			return err
+		}
+		config, err := bucket.ParseReplicationConfig(raw)
+		if err != nil {
+			// A document this release cannot read could name the pair:
+			// the stricter reading refuses rather than guesses.
+			return fmt.Errorf("%w: the replication configuration of another bucket cannot be read", domain.ErrUnavailable)
+		}
+		if config.Target != target.Name {
+			continue
+		}
+		others--
+		if config.Bucket == destination {
+			return fmt.Errorf("%w: target %s is not another deployment that is open to bucket %s", domain.ErrInvalidArgument, target.Name, bucketName)
+		}
+	}
+	return nil
 }
 
 // refuseTies refuses, with an error that wraps domain.ErrInvalidArgument, two
@@ -565,22 +633,31 @@ func (s *ObjectService) auditReplica(ctx context.Context, principal iam.Principa
 // version but its entity tag, never an upload that is not that source's.
 
 // ReplicaBucket answers the bucket probe of a source: the versioning of a
-// bucket that is the replica of that source. That it answers at all says
+// bucket that is the replica of that source, and whether it has Object Lock. That it answers at all says
 // the bucket is that source's replica; nothing of what the bucket holds is
 // told. It needs s3:ReplicateObject on the bucket. The error wraps
 // domain.ErrAccessDenied, domain.ErrInvalidArgument for a source that is no
 // deployment ID, domain.ErrBucketNotFound, and domain.ErrInvalidBucketState
 // for a bucket that is no replica of that source; any other conflict is
 // domain.ErrUnavailable, never domain.ErrConflict (questionFailed).
-func (s *ObjectService) ReplicaBucket(ctx context.Context, principal iam.Principal, bucketName, source string) (bucket.Versioning, error) {
+func (s *ObjectService) ReplicaBucket(ctx context.Context, principal iam.Principal, bucketName, source string) (ReplicaBucketState, error) {
 	if err := s.admitReplicaUpload(ctx, principal, iam.Resource{Bucket: bucketName}, source); err != nil {
-		return "", fmt.Errorf("object.ReplicaBucket: %w", questionFailed(err))
+		return ReplicaBucketState{}, fmt.Errorf("object.ReplicaBucket: %w", questionFailed(err))
 	}
 	b, err := s.buckets.GetBucket(ctx, bucketName)
 	if err != nil {
-		return "", fmt.Errorf("object.ReplicaBucket: %w", questionFailed(err))
+		return ReplicaBucketState{}, fmt.Errorf("object.ReplicaBucket: %w", questionFailed(err))
 	}
-	return b.Versioning, nil
+	return ReplicaBucketState{Versioning: b.Versioning, ObjectLock: b.ObjectLock}, nil
+}
+
+// ReplicaBucketState is what the bucket probe of a source is told of a
+// replica bucket: whether it keeps versions, and whether it has Object Lock
+// - so that a source holds a version that carries a lock rather than send
+// it where no lock is kept (PLAN 8.1.4 re-review).
+type ReplicaBucketState struct {
+	Versioning bucket.Versioning
+	ObjectLock bool
 }
 
 // questionFailed keeps the one conflict a question is refused with -

@@ -948,8 +948,8 @@ func TestReplicaQuestions(t *testing.T) {
 	f := newReplicaFixture(t)
 	p := replicator()
 
-	if state, err := f.objects.ReplicaBucket(ctx, p, "b", replicaSource); err != nil || state != bucket.VersioningEnabled {
-		t.Errorf("ReplicaBucket = %q, %v", state, err)
+	if state, err := f.objects.ReplicaBucket(ctx, p, "b", replicaSource); err != nil || state != (app.ReplicaBucketState{Versioning: bucket.VersioningEnabled}) {
+		t.Errorf("ReplicaBucket = %+v, %v", state, err)
 	}
 
 	data := []byte("a version")
