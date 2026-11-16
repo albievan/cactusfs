@@ -1,7 +1,15 @@
 # ADR-0025: Bucket notifications and the export of the audit trail
 
-- **Status:** proposed (2026-10-12). It becomes accepted when the code of PLAN 8B has
-  landed and the gates have seen it (PLAN 8.2.9)
+- **Status:** accepted (2026-11-16, PLAN 8.2.9): implemented as written below, with
+  the code of PLAN 8.2.1 to 8.2.8 and the gates of each - the notifier and the record
+  (`app.NotificationService`, `app.Notifier`), S3's configuration and the management
+  API, the webhook and NATS JetStream publishers, their wiring, the four-node test with
+  NATS, a receiver and a killed leader, the overflow said and counted, the export of the
+  audit trail - and the console's Targets screen, a bucket's rules in its details and
+  `networkPolicy.egressTo` of the chart (PLAN 8.2.9). The points under "Open, for the
+  owner" are not answered: their defaults are what is built; the questions the work
+  added are in the threat model (questions 46 to 51) and in PLAN ("Report of 8B"). It
+  was proposed on 2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found", point 6) and to the domain of PLAN 8.0.4
@@ -232,8 +240,13 @@ target.
 
 **How a receiver verifies.** Take the body as bytes, before any parsing. Compute
 HMAC-SHA256 over `<X-Cactusfs-Timestamp>.<body>` with the signing key; compare with the
-header in constant time; refuse on a mismatch. Refuse a timestamp more than five
-minutes from the receiver's clock. Remember the IDs taken, for as long as a message may
+header in constant time; refuse a mismatch with 401. Refuse a timestamp more than five
+minutes from the receiver's clock with 401 too. A 401 holds the target with nothing
+passed until the key or the clock is put right - the only mismatch CactusFS itself meets
+is a key the receiver does not have yet, after a rotation - where a 400 would pass the
+message and lose it; and the answer to a forged request goes to the forger, never to
+the deployment, so its status makes no difference here (amended at the review of PLAN
+8.2.9). Remember the IDs taken, for as long as a message may
 be sent again, and answer 2xx to one that was taken already. The signing key is made
 by the server when the target is defined, shown once, and replaced by asking for a new
 one; the timestamp is of the attempt, so that a message that waited an hour is not
@@ -373,8 +386,10 @@ tags, a secret, a key, a token.
 - One queue a target: a webhook that takes a second a message delivers a message a
   second, whatever the rate of changes. Posts are not batched.
 - **A receiver must not answer 401 or 403 to say no to one message**: those stall its
-  target until somebody acts. A message it will never take is refused with another 4xx
-  (400, 422).
+  target until somebody acts. A message it has verified and will never take is refused
+  with another 4xx (400, 422). A request that does not verify - a wrong key, a stale
+  timestamp - is answered 401, so that nothing is lost while the key or the clock is put
+  right.
 - A target that many buckets use learns the keys of all of them; the list of buckets a
   target admits is what keeps tenants apart.
 - The names of actors go to the receiver. A deployment that must not tell them has no

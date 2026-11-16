@@ -14,7 +14,8 @@ control and a hash-chained audit trail.
 > the observability pack, SBOMs, signatures and the release workflow). Milestone 8
 > (replication between sites, bucket notifications, quotas) is begun: its metadata
 > schema (entry schema 5) and its contracts exist, and of its features quotas on
-> buckets are built ([Quotas](#quotas); in no published release yet).
+> buckets and bucket notifications are built ([Quotas](#quotas),
+> [Notifications](#notifications); in no published release yet).
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -105,14 +106,24 @@ control and a hash-chained audit trail.
   until you open them, the bucket's policy - shown as JSON, edited, saved and removed - and
   its sub-buckets: listed, created with or without a policy, each one's policy edited or
   removed, and an empty one deleted (ADR-0017) - and its tags and tag rules: lower case,
-  the catalogue only, and the tags every object must carry (ADR-0018). An object's tags
-  are edited in its details, and the upload form takes tags, says which the bucket
-  requires and begins with them. The **Tags** screen keeps the catalogue of tags users
-  are offered. A policy is sent as you typed it, and a
+  the catalogue only, and the tags every object must carry (ADR-0018) - and its
+  notification rules: which changes, of which keys, are sent to which target (ADR-0025).
+  An object's tags are edited in its details, and the upload form takes tags, says which
+  the bucket requires and begins with them. The **Tags** screen keeps the catalogue of
+  tags users are offered; the **Targets** screen the places notifications and the audit
+  trail are sent to, with how delivery to each stands. A policy is sent as you typed it, and a
   refused one shows the server's reason next to the editor. An object you may read and either uploaded
   or may preview opens in a preview - images, text, CSV, JSON, PDF, DOCX and XLSX - drawn
   by the console itself, never served inline (ADR-0028). A session that times out
   while it uploads is locked, not ended, until your password unlocks it.
+- **Bucket notifications** ([ADR-0025](docs/adr/0025-bucket-notifications.md)): S3's
+  notification configuration (`PutBucketNotificationConfiguration`, queues and topics
+  named `arn:cactusfs:notify:::<target>`) and the management API's rules send S3's
+  event record of each put, completed upload, delete marker and removed version to a
+  webhook - signed with HMAC-SHA256 - or to a NATS JetStream server, at least once and
+  in order, from the outbox of the metadata; a target can be sent the hash-chained audit
+  trail as well. Targets are defined by administrators, never by a bucket's owner, and
+  each says which buckets may use it ([Notifications](#notifications)).
 - **Deployment.** A distroless, non-root container image; a four-node compose cluster
   for development (Docker or rootless Podman); a Helm chart for Kubernetes and k3s with
   a default-deny NetworkPolicy under the `restricted` Pod Security Standard.
@@ -141,13 +152,11 @@ Said plainly, so that nobody finds out by trying:
   `digests.txt`, and a node's check for releases, which reads GitHub's releases, finds
   none. The binaries ship with the next release. `v0.7.0` predates tag rules and their
   catalogue: no published release enforces them yet.
-- **Milestone 8: replication between sites, bucket notifications.** Neither works.
-  Notification targets can be defined, read, listed and deleted (`/targets`, with their
-  secrets sealed and never shown) - nothing sends to them yet, and their status answers
-  `501`. A bucket's notifications, replication and replica mode are in the contract of
-  the management API and answer `501 Not Implemented`. Events are published inside the
-  process only; there is no NATS or webhook delivery. (Quotas, the third part of
-  milestone 8, are built: [Quotas](#quotas).)
+- **Milestone 8: replication between sites.** It does not work. A bucket's
+  replication and replica mode are in the contract of the management API and answer
+  `501 Not Implemented`, and a target of kind `s3` (another deployment) can be defined
+  and is sent nothing. (Quotas and bucket notifications, the other parts of milestone
+  8, are built: [Quotas](#quotas), [Notifications](#notifications).)
 - **Quotas are on buckets, in bytes, and nothing else.** There is no quota by user, by
   tenant or by number of objects, no soft quota, and no limit on the number of buckets;
   a bucket has no quota until one is set, and the quotas together may promise more than
@@ -161,8 +170,11 @@ Said plainly, so that nobody finds out by trying:
 - **Single sign-on.** Console users are local accounts. The port for another identity
   provider exists (`ports.IdentityProvider`); no OIDC adapter does.
 - **Parts of S3:** ACLs, conditional writes (`If-None-Match` on a PUT), replication,
-  notifications, inventory, analytics, website hosting, storage classes with a parity of
-  their own. What is not implemented answers `501 NotImplemented`.
+  inventory, analytics, website hosting, storage classes with a parity of their own; of
+  notifications, Lambda and EventBridge destinations and event names such as
+  `s3:ObjectCreated:Copy`, `s3:ObjectRestore:*` or `s3:ObjectTagging:*` (a copy is told
+  as a put; a change of tags, retention or a legal hold is not told). What is not
+  implemented answers `501 NotImplemented`.
 - **Metadata is not encrypted at rest.** Object data is; bucket names, object keys,
   sizes, user metadata, the tags of buckets and objects, tag rules, the catalogue's
   descriptions, sub-buckets' policies and what each bucket holds and its quota are in
@@ -454,10 +466,10 @@ there as "set" or "not set" and nothing else.
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C. The same on every node |
-| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
-| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
-| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
+| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source (ADR-0029) and by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
+| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
+| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
+| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
 
 **Maintenance: background work**
 
@@ -797,11 +809,12 @@ days) and for signed streaming (`aws-chunked`) uploads. Errors are S3 XML.
 | Object Lock | buckets created with it; Put/GetObjectLockConfiguration (default retention); Put/GetObjectRetention; Put/GetObjectLegalHold; governance bypass. A version under compliance retention or legal hold is deleted by nobody, root included |
 | Bucket configuration | Get/Put/Delete of BucketPolicy, BucketCors, BucketTagging and BucketLifecycle; CORS preflight. A bucket policy is the only thing that can open a bucket to anonymous readers, and only to read |
 | Object tags | GetObjectTagging, PutObjectTagging, DeleteObjectTagging |
+| Notifications | PutBucketNotificationConfiguration, GetBucketNotificationConfiguration: `QueueConfiguration` and `TopicConfiguration` whose ARN is `arn:cactusfs:notify:::<target>`, the events `s3:ObjectCreated:*`, `:Put`, `:CompleteMultipartUpload`, `s3:ObjectRemoved:*`, `:Delete`, `:DeleteMarkerCreated`, and `prefix` and `suffix` filters ([Notifications](#notifications)) |
 | Lifecycle rules | expire objects, remove old versions, abort unfinished multipart uploads; carried out by the node that leads, every `--lifecycle-interval` |
 | Server-side encryption | always on. SSE-S3 (the default, and `AES256`), SSE-KMS (`aws:kms`, with an encryption context) and SSE-C (a key of the customer's, over TLS and in signed headers only) |
 | Payloads | literal, `UNSIGNED-PAYLOAD` and streaming, with `Content-MD5` and CRC32, CRC32C, CRC64NVME and SHA-256 checksums, verified before anything is stored |
 
-Everything else - ACLs, conditional writes, replication, notifications and the rest -
+Everything else - ACLs, conditional writes, replication and the rest -
 answers `501 NotImplemented`, after authentication. The contract is the compatibility
 suite in `test/s3compat` (`make s3-compat`): the AWS SDK for Go, the AWS CLI and a
 selected list of the S3 tests of Ceph, held to a recorded baseline.
@@ -847,13 +860,15 @@ What the API has, under `/api/v1` (the contract is
 | `/cluster`, `/cluster/maintenance` | nodes, drives and erasure sets; healing, scrubbing and collection |
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
-| `/targets` and `/targets/{name}` | milestone 8: define, read, list and delete a notification target; its secret and signing key sealed through the KMS, the key shown once; answers `503` until every member counts in schema 5 |
-| `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica`, `/targets/{name}/status` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
+| `/targets`, `/targets/{name}`, `/targets/{name}/status` | define, read, list and delete the targets things are sent to (webhooks and NATS servers; other deployments for replication, to come); a secret and the path of an endpoint are written and never read back, a webhook's signing key is shown once; how delivery to each stands, from the node that leads ([Notifications](#notifications)) |
+| `/buckets/{bucket}/notifications` | a bucket's notification rules: read, set (in order) and remove - the configuration S3's `?notification` reads and writes |
+| `/buckets/{bucket}/replication` (with `/status` and `/resync`), `/buckets/{bucket}/replica` | milestone 8: in the contract, and every one answers `501` - nothing of them is built yet |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
 API keys), **Groups**, **Roles**, **Policies**, **Tags** (the catalogue of tags),
-**Cluster**, **Settings** and **Audit log**. It talks only to the management API and decides nothing itself. The version and
+**Targets** (where notifications and the audit trail are sent, and how delivery to each
+stands), **Cluster**, **Settings** and **Audit log**. It talks only to the management API and decides nothing itself. The version and
 build it runs are shown under the logo.
 
 - **Uploads go on across screens.** Files dropped on a bucket are sent while you use
@@ -1086,6 +1101,137 @@ bytes, on what it stores.
   names a bucket. The alerts `CactusFSBucketQuotaFull`, `CactusFSBucketQuotasUnknown` and
   `CactusFSBucketUsageDrift` are in [`deploy/observability`](deploy/observability/README.md).
 
+### Notifications
+
+A bucket's changes can be told to programs outside the deployment
+([ADR-0025](docs/adr/0025-bucket-notifications.md)): S3's event notifications, sent to a
+webhook or to a NATS JetStream server, at least once and in the order the changes were
+made.
+
+- **Targets come first, and are the administrators'.** A target is a place the
+  deployment sends to: `PUT /api/v1/targets/{name}`, or the console's **Targets** screen,
+  with its kind (`webhook`: an `https://` URL; `nats`: a `tls://` server and the one
+  subject it is published to), its credential (a bearer token; a NATS token, or a user
+  and password), the CA certificates it must chain to when they are not public, and the
+  buckets whose rules may name it (names, or patterns with `*`). Defining one is
+  `admin:PutTarget`, `cluster-admin`'s among the built-in roles; a bucket's owner names a
+  target, never an address. Secrets and the path of a webhook's URL are written and never
+  read back - not by the API, the console, a log or the audit trail; a target is shown
+  with the scheme, host and port of its endpoint. Nothing is connected to when a target
+  is defined. The nodes never connect to a loopback or link-local address unless
+  `--egress-allow` admits it, nor to a cloud's metadata address, follow no redirect and
+  use no proxy. On Kubernetes the chart's NetworkPolicy must let them reach each target:
+  `networkPolicy.egressTo`, an address range and a port for each
+  ([the chart](deploy/helm/cactusfs/README.md#who-may-reach-it)).
+- **Rules say what is told.** S3's `PutBucketNotificationConfiguration`, with a
+  `QueueConfiguration` or `TopicConfiguration` whose ARN is
+  `arn:cactusfs:notify:::<target>`; or `PUT /api/v1/buckets/{bucket}/notifications`; or
+  the bucket's details in the console. A rule names a target, the changes -
+  `s3:ObjectCreated:Put` (a put or a copy), `:CompleteMultipartUpload`,
+  `s3:ObjectRemoved:DeleteMarkerCreated`, `:Delete` (a version removed for good), or the
+  wildcards - and, if it likes, a prefix and a suffix of the key. Setting rules is
+  `s3:PutBucketNotification`; a rule naming a target that is not there, or that does not
+  admit the bucket, is refused (400), in the same words either way. From then on every
+  change a rule matches is told; nothing of before.
+- **What is sent** is S3's record, one a message (`cactusfs.notification.object.v1` in
+  [`api/asyncapi/events.yaml`](api/asyncapi/events.yaml)): the time, the event name, who
+  made the change, the bucket, the key (URL-encoded), size, entity tag, version ID and a
+  `sequencer` - of two records the greater was made later. Three differences from S3:
+  `eventSource` is `cactusfs:s3`, there is no address of the client, and a copy is told
+  as a put. Object contents, user metadata and tags are never sent.
+- **At least once, in order.** A message is taken off the outbox, which is replicated
+  with the metadata, only once its target has taken it; after a failure or a change of
+  the node that leads, up to a hundred are sent again. A receiver deduplicates by the
+  ID of the message - `X-Cactusfs-Event-Id` of a webhook, `Nats-Msg-Id` in NATS (which
+  JetStream deduplicates within its window) - and answers 2xx to one it has taken
+  already. A webhook's 2xx, and JetStream's acknowledgement, are "taken". Any other 4xx
+  than 401, 403, 408 and 429 refuses that one message, which is passed and counted
+  (`rejected`); a 401 or 403 is of the credential, holds the target `stalled` until it
+  is put right, and loses nothing. Anything else - a 5xx, a timeout, a refused
+  connection, TLS - is tried again, after a pause that doubles to five minutes. A target
+  that takes nothing keeps its messages until the outbox is at its bound; then its oldest
+  are dropped, counted as `lost`, and the audit trail says so. Writes never wait for a
+  target and never fail for one.
+- **NATS.** CactusFS publishes to the target's subject with TLS, and neither makes nor
+  changes a stream: make one that takes the subject, with a deduplication window
+  (`no_stream` otherwise).
+- **The audit trail through a target.** A target defined with `audit: true` is sent
+  every record of the audit trail, from the first, in sequence, as the line
+  `--audit-export` writes (`cactusfs.audit.exported.v1`, ID `audit-<sequence>`), so that
+  a receiver can verify the chain. No record is ever passed: a target that refuses one is
+  held at it. Defining or changing such a target needs `admin:GetAuditLog` as well.
+- **Watching it.** The Targets screen, and `GET /api/v1/targets/{name}/status`, say of
+  each target its state (`ok`, `retrying`, `stalled`), what waits, what was lost and
+  rejected, and the class of its last failure - never its words or the endpoint, which
+  are in the log of the node that leads. `CactusFSDeliveryStalled` and
+  `CactusFSOutboxDropping` are in [`deploy/observability`](deploy/observability/README.md).
+
+**How a webhook receiver verifies a message.** Every request is a `POST` of the record
+with these headers:
+
+| Header | Value |
+|---|---|
+| `X-Cactusfs-Event-Id` | the ID of the message: the same every time it is sent |
+| `X-Cactusfs-Event-Type` | `cactusfs.notification.object.v1` or `cactusfs.audit.exported.v1` |
+| `X-Cactusfs-Timestamp` | when this attempt was made, in seconds since the Unix epoch |
+| `X-Cactusfs-Signature` | `v1=` and the lower-case hexadecimal of HMAC-SHA256 of the timestamp, a full stop and the body, under the target's signing key |
+| `Authorization` | `Bearer <secret>`, when the target has one |
+
+The signing key is made by the server when a webhook target is defined, and shown once:
+in the answer to that request (`signing_key`) and in the console, until you say you
+have copied it. It is used as it is shown, its characters as the bytes of the key. A new
+one is had only by asking for it (`rotate_signing_key`, or "Make a new signing key" in
+the console); the old one stops being used with the next request. The receiver:
+
+1. reads the body as bytes, before it parses anything;
+2. computes HMAC-SHA256, under the signing key, of `X-Cactusfs-Timestamp`, a full stop
+   (`.`) and those bytes, and writes it as `v1=` and lower-case hexadecimal;
+3. compares that with `X-Cactusfs-Signature` in constant time, and refuses the request
+   **with 401** if they differ;
+4. refuses a timestamp more than five minutes from its own clock, **with 401** as well;
+5. checks `Authorization` if the target has a secret (401 when it is wrong);
+6. remembers the IDs it has taken, and answers 2xx to one it has seen.
+
+Why 401, and not 400: CactusFS treats a 401 or 403 as a credential that is wrong, and
+holds the target - `stalled`, nothing passed, nothing lost - until it is put right; a
+400 or any other 4xx but 408 and 429 is "this one message, never", and that message is
+passed and lost. The only request of CactusFS's own that fails to verify is one signed
+with a key the receiver does not have yet - after a rotation that has not reached it -
+or one whose timestamp a wrong clock refuses: both are put right on the receiver's
+side, after which every held message arrives. Answer 400 or 422 only for a message the
+receiver has verified and will never take. What a receiver answers a forged request
+makes no difference to CactusFS: that answer goes back to the forger, never to the
+deployment.
+
+```go
+// verify reports whether a request of a CactusFS webhook target is genuine and fresh.
+func verify(key []byte, r *http.Request, body []byte, now time.Time) bool {
+	ts := r.Header.Get("X-Cactusfs-Timestamp")
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || now.Sub(time.Unix(sec, 0)).Abs() > 5*time.Minute {
+		return false
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(ts + "."))
+	mac.Write(body)
+	want := "v1=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(want), []byte(r.Header.Get("X-Cactusfs-Signature")))
+}
+```
+
+The same in a shell, for a body saved to `body.json` (compare the result with the
+header, without the `v1=`). It is for trying a receiver out: `openssl -hmac` takes the key
+on its command line, where `ps` shows it to every user of the machine. A receiver in
+production verifies in its own process, as the Go above does:
+
+```sh
+{ printf '%s.' "$TIMESTAMP"; cat body.json; } | openssl dgst -sha256 -hmac "$SIGNING_KEY" -hex
+```
+
+The timestamp is that of the attempt, so a message that waited an hour for its receiver
+is not refused for its age; the ID and the type are not signed, but the body carries the
+`sequencer` (or, of the audit trail, the `sequence`), which is.
+
 ## Users, keys and the audit trail
 
 Access is decided by IAM-style policies (Effect, Action, Resource, Condition; `s3:*` and
@@ -1115,7 +1261,9 @@ user has the balancer's address and shares that count
 
 Every change to identities, every refusal and every failed sign-in is written to a
 hash-chained audit trail (`GET /api/v1/audit`, the console's Audit log);
-`--audit-export` also writes each record to standard output as a JSON line.
+`--audit-export` also writes each record to standard output as a JSON line, and a
+target defined with `audit: true` is sent each record, in sequence, as the same line
+([Notifications](#notifications)).
 
 ## Operations
 

@@ -10,7 +10,7 @@ where one test or gate proves it, the row names it; `implemented, with a limit` 
 `accepted risk` say what the control does not do; `written, not yet run` is a control
 of the release workflow, which cannot run before the first release; `not mitigated`,
 `not planned yet` and `M8` (milestone 8 of `PLAN.md`: begun, with its metadata schema
-and contracts, and of its features quotas alone) mean that nothing answers the threat today;
+and contracts, and of its features quotas and bucket notifications) mean that nothing answers the threat today;
 `rule` is a rule of the project that no gate can prove. The rows of ADR-0029 (updates
 and upgrades, PLAN Goal P) were drafted before their controls were built; they are built
 now (P.1 to P.11) and say `implemented` with their tests; the Kubernetes mode is tried
@@ -24,8 +24,9 @@ of Goal O (ADR-0028) are built and rolled out; checking for releases and upgradi
 the console (Goal P, ADR-0029) are built, off by default, with their review in a real
 browser and on k3s (`make test-k8s`), the roll-out to come (PLAN P.12); milestone 8 is begun:
 entry schema 5 is in the metadata, quotas on buckets are built (PLAN 8A, 2026-11-15;
-ADR-0024) and in no published release yet, and notifications and replication answer
-`501`. CactusFS is not offered as ready for production, and no review of its security by
+ADR-0024) and in no published release yet, bucket notifications and the export of the
+audit trail through a target are built (PLAN 8B, 2026-11-16; ADR-0025) and in no
+published release yet, and replication answers `501`. CactusFS is not offered as ready for production, and no review of its security by
 a party outside the project is recorded in this repository. Do not keep data in it that
 you cannot lose. Since then the record of who uploaded and read an object (ADR-0016)
 and search are built and in 0.7.0; sub-buckets (ADR-0017) and tag rules with a catalogue
@@ -267,6 +268,33 @@ the tag of that very version, and the digest the list gives the artifact.
 | A half-written binary: a crash, a full disk or a power loss during the download or the swap leaves no runnable executable, or one that is not the verified one | Written beside the executable with `os.CreateTemp`, its SHA-256 computed as it is written and compared to the list, fsynced, smoke-run (`<new> version` must name the target), the old kept as `cactusfs.previous`, then renamed into place in one step; a crash before the rename leaves the old binary running and a temporary file; a node that stops before the swap ends the run with the old binary in place, and a swap once begun completes; on Windows the node is not restarted (`restart-required`) | **implemented** (`TestACrashLeavesAWholeBinary`, `TestTheNodeStoppingEndsARunUntilTheSwapBegins`, `TestReplace` of `internal/adapters/upgrade/binary`; a standalone binary upgraded and restarted end to end: `TestUpdates` of `test/integration`) |
 | A node that does not come up on the new image takes the deployment down | One node at a time, this node last, the PodDisruptionBudget respected by eviction; a node must be Ready, report the target's build and answer `/readyz` before the next; the first that does not is put back to the image it ran and the run stops (`failed`) - unless the run has lost its lock meanwhile, read again before anything is put back, when it touches nothing more; a run whose holder moved itself last is read as done by any node, and its lock is replaced with the result by the holder's restarted node, or by any node once the lock is stale - never by a node reading the progress while the holder is alive | **implemented, with a limit** (`TestANodeThatDoesNotComeUpIsPutBackAndTheRunStops`, `TestTimeRunningOutAfterTheLockWasTakenOverPutsNothingBack`, `TestARunSeenDoneByAnotherNodeEndsDone`, `TestSettleAtStart` of `internal/adapters/upgrade/kubernetes`, against a fake API server; on k3s, `TestUpgradeOnK3s` of `test/k8s`: never two nodes away at once, an object read while each was, an image that cannot be pulled put back and the other nodes untouched) |
 | Denial of service: checks used to flood the source (and have the deployment rate-limited or blocked), a huge or endless answer, a stalled download, concurrent upgrades | A check asked through the API at most once a minute a node (429); the background check once per interval with jitter; bodies bounded, `Content-Length` checked first, timeouts on connect, handshake and headers; one upgrade at a time under a lock annotation written with `resourceVersion` (`ErrUpgradeRunning`); `admin:CheckForUpdates` does not begin with Get, so the auditor cannot ask | **implemented** (`TestUpdatesCheck`, `TestUpdatesStartOnlyOneIsVerifiedAtATime` of `internal/app`; `TestFetchBounds`, `TestStall` of `internal/adapters/releases/github`; `TestTheLockIsTakenUnderItsResourceVersion`, `TestALockHeldByAnotherNode` of `internal/adapters/upgrade/kubernetes`) |
+
+### Bucket notifications and the export of the audit trail (ADR-0025)
+
+A bucket's changes, and with `audit: true` the audit trail, are sent to targets outside
+the deployment: webhooks and NATS JetStream servers (PLAN 8B). A target is the one way
+an address outside the deployment is named; a bucket's rules name a target, never an
+address. Outbound connections are those of ADR-0023 (`internal/adapters/egress`): the
+address judged at every connect, no redirect followed, no proxy, the certificate
+verified against the target's CA or the system's roots. What leaves the deployment, to
+the places an administrator named and no other: object keys, sizes, entity tags,
+version IDs, the names of actors and times; to an audit target the trail, which holds
+the addresses of clients. Never object contents, user metadata, tags, a secret, a key
+or a token.
+
+| Threat | Control | Status |
+|---|---|---|
+| SSRF: a target, or a rule, is used to make the nodes call an internal service, a cloud's metadata address or the node itself | Only an administrator defines a target (`admin:PutTarget`; `cluster-admin` among the built-in roles), and a bucket's rules name a target, never an address; a target lists the buckets that may use it. The endpoint is `https://` (webhook) or `tls://` (NATS), without userinfo, query or fragment. Each connection - and every address a NATS server tells the client of - is judged by `delivery.AllowedAddress` through the egress dialer: loopback, link-local, unspecified, multicast and the IPv6 ranges that stand for IPv4 addresses are refused unless `--egress-allow` names them, the metadata addresses of clouds always; no redirect is followed (`redirect`), no proxy used. On Kubernetes the default-deny NetworkPolicy lets the pods reach only what `networkPolicy.egressTo` names, and the chart refuses a rule without peers or without ports, which would open every address or every port (PLAN 8.2.9) | **implemented** (ADR-0023, PLAN 8.0.10, 8.2.3 to 8.2.5: the egress tests, `TestThePublishersOfTargetsAreDecorated`; `make helm-lint` with `ci/refused/egress-*.yaml`) |
+| A bucket's owner sends its changes - or another tenant's - to a place of their choosing | Rules name targets that exist, are of kind webhook or NATS and admit the bucket; a rule that names any other is refused (400) in one sentence for all three, so the existence of a target closed to the bucket is not told; the store judges again at commit. Setting rules is `s3:PutBucketNotification`, and every change is audited. A target that many buckets use learns the keys of all of them: the list of buckets it admits is what keeps tenants apart | **implemented** (PLAN 8.2.1, 8.2.2: `TestNotificationsAreAuthorized`, `TestNotificationRefusalsSayTheSame`, `internal/adapters/s3api/notification_test.go`) |
+| A forged or replayed notification is taken by a receiver as the deployment's | Every webhook request carries `X-Cactusfs-Signature`: HMAC-SHA256, under a signing key the server made for the target, of `X-Cactusfs-Timestamp`, a full stop and the body. The receiver compares in constant time and refuses a mismatch, and a timestamp more than five minutes from its clock, with 401 - which holds the target and loses nothing until the key (after a rotation) or the clock is put right, where a 400 would pass the message and lose it; the status given to a forged request goes back to the forger and has no effect on the deployment. It deduplicates by `X-Cactusfs-Event-Id` (the body carries the `sequencer` or the `sequence`, which are signed). The key is shown once, sealed through the KMS, and replaced only by asking for a new one. TLS to the receiver, verified. NATS: TLS required, the server's certificate verified, `Nats-Msg-Id` for JetStream's deduplication | **implemented, with a limit** (PLAN 8.2.3; every arrival verified with `webhook.Verify` in `TestBucketNotifications`): the ID and the type are not signed (ADR-0025, open point 5); a receiver that does not verify is not protected (README, "Notifications") |
+| A secret of a target - a bearer token, a NATS token or password, a signing key, the path of a webhook's URL, which may hold a token - is disclosed | Sealed through the KMS with the target's name as associated data; opened at each attempt (webhook) or connection (NATS) and cleared; never in an answer of the API (a target is shown with the origin of its endpoint and `secret_set`, `signing_key_set`, `endpoint_path_set`), a log line, a status, an event or the audit trail. In the console every secret field is write-only: a password field that no answer fills, sent only when typed, cleared once sent; the signing key is shown once, from the answer that made it, and held in the screen only until the reader says it was copied | **implemented** (PLAN 8.0.13, 8.2.3, 8.2.5, 8.2.9: the leak tests of the publishers, `TestANodeNotifiesThroughItsTargets`, `web/src/screens/targets.test.tsx`) |
+| The words of a receiver's error, or the address of a target, reach somebody who may not know them | A failure is a `delivery.Error` whose text is its class; a status and an event carry only a class, and a class another node tells is shown only if it is a word (`delivery.ShownClass`); the words and the endpoint stay in the log of the node that leads. The status of a target is behind `admin:GetTargetStatus` (`cluster-admin`, `auditor`) | **implemented** (PLAN 8.0.14, 8.2.1) |
+| Whoever may define targets has the audit trail - which holds the addresses of clients - sent to an address of theirs | Defining a target with `audit: true`, or changing one that has it (its endpoint, its credential, turning the trail off), needs `admin:GetAuditLog` on the trail as well as `admin:PutTarget`; a refusal is audited. `cluster-admin` has both; `auditor` defines no target | **implemented** (PLAN 8.2.8, review: `TestATargetOfTheAuditTrailNeedsTheTrail`); deleting an audit target needs `admin:DeleteTarget` alone (question 51) |
+| The exported trail is cut or edited on its way, or a record is left out | Records are sent in sequence, at least once, with the ID `audit-<sequence>`, as the line the node's exporter writes (`audit.Record.Line`), with `previous_hash` and `hash`. No record is passed: a target that refuses one is held at it, retrying, then `stalled`. A receiver that holds every sequence verifies the chain (`audit.ParseLine`, `audit.Verify`) and sees a gap as a gap | **implemented** (PLAN 8.2.8: `TestBucketNotifications` verifies the chain across a killed leader) |
+| A receiver that is down, slow or hostile holds up writes, the start of a node or other targets | Delivery is from the outbox, after the commit, by the node that leads: a write never waits for a target and never fails for one; a target that cannot be reached holds up neither a start nor readiness. One loop a target, each with its own pause (1 s doubling to 5 min, jittered); an answer bounded in time (`--delivery-timeout`) and size; a 4xx that refuses one message passes it (`rejected`), so one bad message does not stop the rest | **implemented** (PLAN 8.0.14, 8.2.5: the binary test `TestANodeNotifiesThroughItsTargets`) |
+| A target that never answers fills the metadata | The outbox has a bound; at it the oldest rows are dropped and counted against their target (`lost`, `cactusfs_outbox_dropped_total`), an audit record `system/outbox` says so at most once a minute, and `CactusFSOutboxDropping` fires; `CactusFSDeliveryStalled` fires when a target's oldest row has waited 15 minutes | **implemented, with a limit** (PLAN 8.2.7): a notification that was dropped is never sent - at least once holds only while the outbox is under its bound |
+| A mistyped or expired secret makes every message pass undelivered | A webhook's 401 or 403 is the class `auth`, not `rejected`: nothing is passed, the target is `stalled` until the credential is put right, and `CactusFSDeliveryStalled` fires | **implemented** (ADR-0025, ruled on 2026-10-12); a 404 or 410 is `rejected` (question 46) |
+| A notification tells a receiver who made a change | `userIdentity.principalId` is sent as S3 sends it; no address of a client is (the metadata holds none) | **accepted risk** (ADR-0025, open point 6): there is no switch to leave the names of actors out |
 
 ## 5. Open questions for the owner
 
@@ -520,3 +548,33 @@ the owner decides:
     write a record for every attempt and could fill the trail. The stricter reading
     would audit each refusal, perhaps at most one record a bucket and caller a minute.
     Should refusals be audited?
+
+Written at the end of bucket notifications (PLAN 8.2.9, 2026-11-16); built as each
+default says until the owner decides:
+
+46. **A webhook's 404 and 410 are `rejected`** (ADR-0025, "Failures"): the message is
+    passed and counted, as for any 4xx but 401, 403, 408 and 429. A receiver whose path
+    was removed or mistyped therefore loses every message, with a counter as the only
+    trace, where a 401 would stall the target and lose nothing. Should a 404 and a 410
+    hold the target, as `auth` does?
+47. **Rows of a target that no longer admits their bucket pass as `rejected`** (PLAN
+    8.2.1): rows appended while a rule named the target, left after the rule was removed
+    and the target narrowed, are not sent and are counted as refused. Is that wanted, or
+    a class of its own (a domain change)?
+48. **An audit target that a receiver refuses for good stalls**, and every later record
+    with it (PLAN 8.2.8): no record of the trail is ever passed - the stricter reading,
+    since a gap cannot be told from tampering. The other would pass the record and say
+    so in an audit record and a count, as a notification does.
+49. **A new audit target is sent the trail from sequence 1** (PLAN 8.2.8), so that a
+    receiver can verify the chain from its start; a trail of years is sent at the
+    receiver's pace. Starting at the head would need the state machine to set
+    `audit_acked` when the target is defined - a schema change.
+50. **`egress.classify` misses a TLS alert that arrives after the handshake**: a server
+    that refuses the client's certificate after a TLS 1.3 handshake sends its alert on
+    the first read, which is not a `tls.AlertError`, and the failure is classed
+    `connect`, not `tls`. Only the class shown differs; nothing is passed.
+51. **Deleting an audit target needs `admin:DeleteTarget` alone** (PLAN 8.2.8 review):
+    it sends nothing anywhere and is audited, but it stops the export of the trail to the
+    receiver that verifies it. Should it ask `admin:GetAuditLog` as well? Besides, the
+    OpenAPI description of `audit` does not yet say that defining or changing such a
+    target needs `admin:GetAuditLog` (ADR-0025 and ARCHITECTURE do).

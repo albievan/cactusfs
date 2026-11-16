@@ -7,12 +7,14 @@ security first. This document describes the design. `CLAUDE.md` holds the rules,
 expensive to reverse.
 
 Sections marked **(implemented)** describe code that exists. What does not exist yet is
-said where it belongs, with the milestone or goal of `PLAN.md` that holds it: delivery of
-events to NATS and webhooks and replication between sites (milestone 8, of which entry
-schema 5, the domain, the ports, the replicated store, the contracts, outbound
-connections, targets, the delivery worker, the webhook and NATS publishers, the
-notifier that hands bucket notifications to them and the export of the audit trail
-through them exist; the replicator does not). Quotas on buckets
+said where it belongs, with the milestone or goal of `PLAN.md` that holds it:
+replication between sites (milestone 8C; entry schema 5, the domain, the ports, the
+replicated store, the contracts, outbound connections, targets and the delivery worker
+it needs exist, the replicator does not). Bucket notifications (ADR-0025) are
+implemented end to end - the webhook and NATS publishers, the notifier that hands them
+the outbox, the export of the audit trail through them, S3's notification configuration,
+the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
+"Delivery to targets", section 5); no published release has them yet. Quotas on buckets
 (ADR-0024) are implemented end to end - the usage of every bucket counted, the quota
 enforced where entries are applied and checked before a write, the management API, the
 metrics and alerts, and the console (PLAN 8A; "Usage and quotas", section 5); no
@@ -50,8 +52,10 @@ rules (PLAN D.2b): no published release enforces them yet.
                local drives)                  or sealed file)
 ```
 
-The events adapter is the in-process bus alone; NATS JetStream and webhook adapters are
-milestone 8 and do not exist.
+The events adapter is the in-process bus for the events inside the process; the NATS
+JetStream and webhook adapters (`internal/adapters/events/{nats,webhook}`) are the
+publishers of targets, through which notifications and the audit trail leave the
+deployment (ADR-0025, "Events" in section 6).
 
 One Go module, `github.com/albievan/cactusfs`. No external database, no proxy in front of
 the gateway, no cgo.
@@ -249,10 +253,10 @@ test. The binary reads no file of variables: what starts it hands it its environ
 
 | Flag | Variable | Default | Meaning |
 |---|---|---|---|
-| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source now (ADR-0029), and by bucket notifications and replication when they come with PLAN 8B and 8C. The same on every node |
-| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
-| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
-| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by bucket notifications and replication, which come with PLAN 8B and 8C. The same on every node |
+| `--egress-allow` | `CACTUSFS_EGRESS_ALLOW` | none | ranges (CIDRs, separated by commas, such as `127.0.0.1/32`) where the update source (`update-source`, and every address its downloads are redirected to), a notification target or another site may be at an address that is otherwise never connected to: loopback, link-local, and the IPv6 ranges that stand for IPv4 addresses by a gateway's rule (`::/96`, `64:ff9b:1::/48`, `2002::/16`, `::ffff:0:0:0/96`). Private ranges need no entry. A range of every address (`0.0.0.0/0`, `::/0`) and one that could admit nothing (`0.0.0.0/8`, multicast) are refused. The addresses of the metadata services of clouds (169.254.169.254, `fd00:ec2::254`, `fd20:ce::254`, 100.100.100.200) are never connected to, whatever this holds; a range that is allowed is open with everything else in it, so allow the one address a receiver has. The address a name resolves to is judged at every connect. It is read by the update source (ADR-0029) and by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
+| `--delivery-timeout` | `CACTUSFS_DELIVERY_TIMEOUT` | `30s` | how long a notification target or another site has to answer one request, once it is sent, and to make progress reading or writing (`1s` to `5m`); one that does not is tried again later. Connecting and the TLS handshake have 5 seconds each besides. It is read by notification targets, the export of the audit trail included (ADR-0025), and will be by replication when it comes with PLAN 8C. The same on every node |
+| `--replication-workers` | `CACTUSFS_REPLICATION_WORKERS` | `4` | how many versions are replicated to other sites at once (`1` to `32`). It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
+| `--replication-rate-mib` | `CACTUSFS_REPLICATION_RATE_MIB` | `0` | limit on the bytes replication sends to other sites, in MiB per second averaged over 10 seconds (at most `1048576`); `0` is no limit. It has no effect yet: it is read by replication, which comes with PLAN 8C. The same on every node |
 
 **Maintenance: background work**
 
@@ -875,7 +879,7 @@ four at a time.
   written before the node closes. What was dropped before a node came to lead was the
   former leader's to tell, and the count is in every record.
 
-## 6. APIs **(implemented: the S3 API with the depth of milestone 6, the management API, node RPC and events; NATS and webhook delivery is milestone 8)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -917,13 +921,14 @@ four at a time.
   `/roles` and `/policies`, each with `/{name}`; `/cluster` and `/cluster/maintenance`;
   `/settings`; `/audit`. The paths of milestone 8 are in the contract; those of quotas
   (`/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`; PLAN 8A, "Usage and
-  quotas" in section 5) and of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) are
-  implemented and answer 503 below metadata level 5; `/targets/{name}/status` (PLAN
-  8.0.14) is answered by any node, which asks the node that leads ("Delivery to
-  targets", section 5); the rest have no use case yet, so each answers 501
-  `NotImplemented` to a caller that has authenticated:
-  `/buckets/{bucket}/notifications`, `/buckets/{bucket}/replication` (with `/status`
-  and `/resync`) and `/buckets/{bucket}/replica`. A bucket's policy (`/buckets/{bucket}/policy`, the document
+  quotas" in section 5), of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) and
+  of a bucket's notification rules (`/buckets/{bucket}/notifications`,
+  `app.NotificationService`; PLAN 8.2.2) are implemented and answer 503 below metadata
+  level 5; `/targets/{name}/status` (PLAN 8.0.14) is answered by any node, which asks
+  the node that leads ("Delivery to targets", section 5); the rest have no use case yet,
+  so each answers 501 `NotImplemented` to a caller that has authenticated:
+  `/buckets/{bucket}/replication` (with `/status` and `/resync`) and
+  `/buckets/{bucket}/replica`. A bucket's policy (`/buckets/{bucket}/policy`, the document
   S3's `PutBucketPolicy` sets, through the same `BucketService.SetPolicy`; one it cannot
   keep is 400 `InvalidPolicy`) and sub-buckets (`/buckets/{bucket}/subbuckets[/{name}]`,
   `app.SubBucketService`; 404 `NoSuchSubBucket`, 409 `TooManySubBuckets` and
@@ -1133,7 +1138,8 @@ four at a time.
   on while any screen is shown, and a bar at the top of every screen shows them and the
   notices of what the console did (kept for the visit, not stored). An object's details
   open in its own row of the object browser. A bucket's details hold its policy, its
-  sub-buckets, its tags and its tag rules, each folded and asked for only once opened.
+  sub-buckets, its tags, its tag rules and its notification rules, each folded and
+  asked for only once opened.
   Tags (ADR-0018, PLAN D.6; `web/src/screens/{TagSections,ObjectTags,UploadTags,TagsScreen}.tsx`,
   `web/src/ui/{tags.ts,TagRows.tsx}`) are edited as rows of a key and a value and sent
   as the list typed, in its order - a key given twice and an empty key included, for
@@ -1150,7 +1156,19 @@ four at a time.
   reading a bucket's or an object's tags or a bucket's rules offers no editor (they
   are replaced whole, and what cannot be seen is not replaced from here). The keys and
   values of the catalogue and of the rules are offered while a tag is typed, never
-  required.
+  required. The **Targets** screen (PLAN 8.2.9; `web/src/screens/TargetsScreen.tsx`)
+  lists every target with its kind, the origin of its endpoint (the API never gives the
+  path), what it is sent, and - asked of `/targets/{name}/status` for each - its state,
+  what waits (with what was lost or rejected) and the class of its last failure; it
+  defines, changes and deletes targets. Secret fields are write-only: a password field
+  that an answer never fills, sent only when typed (a change without it keeps the
+  secret), cleared once sent; the endpoint likewise. A webhook's signing key, in the
+  answer that made it, is shown once with how a receiver verifies with it, and held in
+  the screen's state until the reader says it was copied. A bucket's details hold its
+  notification rules too (`web/src/screens/BucketNotifications.tsx`): listed in order,
+  added and removed by sending the whole list (`PUT`), all removed by `DELETE`. Which
+  target a bucket may name, and who may do any of it, is the API's to say: a 403 to a
+  list is a line, to a change the API's words.
 - **Console sessions (implemented, ADR-0006, 0007, 0027).** A session is a record in
   the replicated `sessions` store under the SHA-256 of its token, with its user, the
   hash of its CSRF token, `created_at` and `expires_at`; the cookie is
@@ -1191,18 +1209,22 @@ four at a time.
 - **Events.** Every state change other components care about is an event named
   `cactusfs.<aggregate>.<event>.v1`, defined in `api/asyncapi/events.yaml` and derived
   from **applied Raft entries**, never published from a handler. Delivery goes through
-  `ports.EventPublisher`. **Implemented:** the contract, with twenty-two channels:
-  twenty events published inside the process (buckets, objects, versioning, Object
-  Lock, bucket configuration, tags, the root credential, topology, nodes, the audit
-  trail - and, of entry schema 5, the quota and the replica mode of a bucket and a
-  target defined or deleted, which the state machine tells of: a quota set or removed
-  through `app.QuotaService`, a target through `app.TargetService`, and the replica
-  mode by no use case yet), and two messages that are for targets outside the deployment only,
-  `cactusfs.notification.object.v1`, which the notifier sends through the webhook and
-  NATS JetStream publishers of targets (PLAN 8.2.5), and `cactusfs.audit.exported.v1`,
-  the records of the audit trail, which the worker sends through the same publishers to
-  a target defined with `audit: true` (PLAN 8.2.8); and the in-process publisher (at most once per node;
-  counted in `cactusfs_events_total`). Consumers dedupe by event ID.
+  `ports.EventPublisher`. **Implemented:** the contract, with twenty-two channels -
+  twenty events published inside the process, and two messages that leave it for
+  targets only. Inside the process (the in-process publisher, at most once per node,
+  counted in `cactusfs_events_total`; consumers dedupe by event ID):
+
+  | Since | Events |
+  |---|---|
+  | milestones 1 to 7 (sixteen) | `bucket.created`, `bucket.deleted`, `object.created`, `object.deleted`, `bucket.versioning-changed`, `object.delete-marker-created`, `object.retention-changed`, `object.legal-hold-changed`, `bucket.object-lock-changed`, `bucket.configuration-changed` (a policy, CORS, lifecycle rules, tags, tag rules or notification rules - the payload names the bucket, not the document), `object.tags-changed`, `iam.root-credential-set`, `cluster.topology-changed`, `cluster.node-registered`, `cluster.node-removed`, `audit.recorded` |
+  | entry schema 5 (four) | `bucket.quota-changed` (through `app.QuotaService`), `bucket.replica-mode-changed` (no use case yet; 8C), `cluster.target-changed` and `cluster.target-deleted` (through `app.TargetService`) - each told by the state machine as it applies the entry |
+  | to targets only (two) | `cactusfs.notification.object.v1`: S3's event record of a put, a completed upload, a delete marker or a version removed for good, one record a message, sent by the notifier through the webhook and NATS publishers of the targets a bucket's rules name (PLAN 8.2.1 to 8.2.5); `cactusfs.audit.exported.v1`: the records of the audit trail, in sequence, sent by the worker through the same publishers to a target defined with `audit: true` (PLAN 8.2.8) |
+
+  The two messages for targets are not events of the bus: they are rows of the outbox
+  (and records of the trail) that the state machine appends as it applies an entry,
+  delivered at least once by the node that leads, deduplicated by the receiver by the ID
+  of the message (`X-Cactusfs-Event-Id`, `Nats-Msg-Id`), and signed for a webhook with
+  HMAC-SHA256 under the target's signing key (ADR-0025; "Delivery to targets", section 5).
 - **Node RPC.** gRPC over mTLS 1.3, defined in `api/proto/cactusfs/node/v1` and checked
   with `buf lint` and `buf breaking`. **Implemented**, three services: `NodeService`
   (`Info`, `InFlight`, `Settings`), `MetaService` for what only the metadata leader
@@ -1446,7 +1468,7 @@ in `web/public/favicon.svg`. They are used as they are and never redrawn.
 |---|---|
 | Single binary | `dist/cactusfs-<os>-<arch>` — implemented, six targets |
 | Docker Desktop, Podman | `deploy/compose/compose.yaml` — implemented: 4-node development cluster over mTLS, rootless-safe; `make up` / `make down` |
-| k3s, k8s | `deploy/helm/cactusfs` — implemented: a StatefulSet per node, a claim per drive, PDB, default-deny NetworkPolicy, `restricted` Pod Security Standard; rendered, validated and asserted by `make helm-lint`, installed on k3s by `make test-k8s` |
+| k3s, k8s | `deploy/helm/cactusfs` — implemented: a StatefulSet per node, a claim per drive, PDB, default-deny NetworkPolicy (each address the nodes must reach - Vault, a collector, a notification target - an egress rule of `networkPolicy.egressTo`; a rule without peers or ports is refused), `restricted` Pod Security Standard; rendered, validated and asserted by `make helm-lint`, installed on k3s by `make test-k8s` |
 
 Core code uses no cloud-provider API. Hybrid means separate clusters per site linked by
 asynchronous bucket replication; one Raft quorum is never stretched across a WAN.
