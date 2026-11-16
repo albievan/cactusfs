@@ -5135,11 +5135,11 @@
           },
           "target_state": {
             "type": "string",
-            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is\ntried again; `stalled` when the other deployment refuses everything - the credential, the\nbucket, its versioning, its replica mode or its quota - and somebody has to act. A newer release\nmay add to the list.\n"
+            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is\ntried again; `stalled` when the other deployment refuses everything - the credential, the\nbucket, its versioning, its replica mode or its quota, or a version with a retention or a legal\nhold for a bucket there without Object Lock (`object_lock`) - and somebody has to act;\n`unsupported` when the node that leads is of a release that cannot be asked. Any resync held by\na failure to that target - of this bucket or of another bucket sent there - counts as an attempt:\nthe state is no better than that resync's. A newer release may add to the list.\n"
           },
           "last_error_class": {
             "type": "string",
-            "description": "The class of the last failure - never its words, and never the endpoint. Among them `auth`,\n`no_such_bucket`, `versioning`, `not_replica`, `quota`, `timeout`, `connect`, `tls`, `redirect`,\n`egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment does not take\n(a 401 or a 403): it is tried again and stalls the target. `rejected` is a refusal of one request\nthat says nothing of the others - a 4xx other than 401, 403, 408 and 429. The list is not closed.\nAbsent when the last attempt succeeded.\n"
+            "description": "The class of the last failure - never its words, and never the endpoint. Among them `auth`,\n`no_such_bucket`, `versioning`, `not_replica`, `quota`, `object_lock`, `timeout`, `connect`, `tls`,\n`redirect`, `egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment\ndoes not take (a 401 or a 403): it is tried again and stalls the target. `object_lock` is a\nversion with a retention or a legal hold for a bucket there without Object Lock: it is tried\nagain and stalls the target. `rejected` is a refusal of one request that says nothing of the\nothers - a 4xx other than 401, 403, 408 and 429. The list is not closed. Absent when the last\nattempt succeeded.\n"
           },
           "pending": {
             "type": "integer",
@@ -5156,7 +5156,7 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0,
-            "description": "The versions of this bucket that cannot be replicated and were given up on - a version encrypted\nwith a key of the customer's, or one the other deployment refuses for itself: those that say\n`FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin\nagain when another node comes to lead, and falls only when such a version is removed or a resync\nreplicates it.\n"
+            "description": "The versions of this bucket that cannot be replicated and were given up on - a version encrypted\nwith a key of the customer's, or one the other deployment refuses for itself: those that say\n`FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin\nagain when another node comes to lead, and falls only when such a version is removed: `FAILED` is\nfinal, and a resync neither sends such a version nor changes its status.\n"
           },
           "lost": {
             "type": "integer",
@@ -5442,7 +5442,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried\nagain, with a growing pause; `stalled` when the target refuses everything and somebody has to\nact; `unsupported` when the leader is of a release that cannot say. A newer release may add to\nthe list.\n"
+            "description": "`ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried\nagain, with a growing pause; `stalled` when the target refuses everything and somebody has to\nact; `unsupported` when the leader is of a release that cannot say. For another deployment, a\nresync held at a version by a failure to the target counts as an attempt to it: the state is no\nbetter than that resync's, and the class is its failure's, until the resync's next attempt\nsucceeds. A newer release may add to the list.\n"
           },
           "pending": {
             "type": "integer",
@@ -5462,7 +5462,7 @@
           },
           "last_error_class": {
             "type": "string",
-            "description": "The class of the last failure - never its words, and never the endpoint. Among them `timeout`,\n`connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`.\n`auth` is a credential the target does not take - a 401 or a 403 from a webhook, a NATS server\nthat refuses the token: it is tried again, nothing is passed, and the target is `stalled`.\n`rejected` is a refusal of one message. The list is not closed. Absent when the last attempt\nsucceeded.\n"
+            "description": "The class of the last failure - never its words, and never the endpoint. Among them `timeout`,\n`connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`, and\nfor another deployment also `no_such_bucket`, `versioning`, `not_replica`, `quota` and\n`object_lock`. `auth` is a credential the target does not take - a 401 or a 403 from a webhook\nor another deployment, a NATS server that refuses the token: it is tried again, nothing is\npassed, and the target is `stalled`. `object_lock` is a version with a retention or a legal hold\nfor a bucket of another deployment without Object Lock, which stalls the target as well.\n`rejected` is a refusal of one message. The list is not closed. Absent when the last attempt\nsucceeded.\n"
           },
           "lost": {
             "type": "integer",

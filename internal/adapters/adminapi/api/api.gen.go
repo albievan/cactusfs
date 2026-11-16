@@ -790,16 +790,18 @@ type BucketReplicationStatus struct {
 	// Failed The versions of this bucket that cannot be replicated and were given up on - a version encrypted
 	// with a key of the customer's, or one the other deployment refuses for itself: those that say
 	// `FAILED` in `x-amz-replication-status`. Exact, from the bucket's usage record; it does not begin
-	// again when another node comes to lead, and falls only when such a version is removed or a resync
-	// replicates it.
+	// again when another node comes to lead, and falls only when such a version is removed: `FAILED` is
+	// final, and a resync neither sends such a version nor changes its status.
 	Failed int64 `json:"failed"`
 
 	// LastErrorClass The class of the last failure - never its words, and never the endpoint. Among them `auth`,
-	// `no_such_bucket`, `versioning`, `not_replica`, `quota`, `timeout`, `connect`, `tls`, `redirect`,
-	// `egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment does not take
-	// (a 401 or a 403): it is tried again and stalls the target. `rejected` is a refusal of one request
-	// that says nothing of the others - a 4xx other than 401, 403, 408 and 429. The list is not closed.
-	// Absent when the last attempt succeeded.
+	// `no_such_bucket`, `versioning`, `not_replica`, `quota`, `object_lock`, `timeout`, `connect`, `tls`,
+	// `redirect`, `egress_refused`, `rejected`, `server`. `auth` is a credential the other deployment
+	// does not take (a 401 or a 403): it is tried again and stalls the target. `object_lock` is a
+	// version with a retention or a legal hold for a bucket there without Object Lock: it is tried
+	// again and stalls the target. `rejected` is a refusal of one request that says nothing of the
+	// others - a 4xx other than 401, 403, 408 and 429. The list is not closed. Absent when the last
+	// attempt succeeded.
 	LastErrorClass *string `json:"last_error_class,omitempty"`
 
 	// Lost Changes that were dropped before they were sent, because the target could not be reached while
@@ -828,8 +830,11 @@ type BucketReplicationStatus struct {
 
 	// TargetState `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is
 	// tried again; `stalled` when the other deployment refuses everything - the credential, the
-	// bucket, its versioning, its replica mode or its quota - and somebody has to act. A newer release
-	// may add to the list.
+	// bucket, its versioning, its replica mode or its quota, or a version with a retention or a legal
+	// hold for a bucket there without Object Lock (`object_lock`) - and somebody has to act;
+	// `unsupported` when the node that leads is of a release that cannot be asked. Any resync held by
+	// a failure to that target - of this bucket or of another bucket sent there - counts as an attempt:
+	// the state is no better than that resync's. A newer release may add to the list.
 	TargetState string `json:"target_state"`
 }
 
@@ -1851,9 +1856,12 @@ type TargetPutResult struct {
 // older release that leads cannot be asked: `state` is then `unsupported` and the figures are 0.
 type TargetStatus struct {
 	// LastErrorClass The class of the last failure - never its words, and never the endpoint. Among them `timeout`,
-	// `connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`.
-	// `auth` is a credential the target does not take - a 401 or a 403 from a webhook, a NATS server
-	// that refuses the token: it is tried again, nothing is passed, and the target is `stalled`.
+	// `connect`, `tls`, `redirect`, `egress_refused`, `auth`, `rejected`, `server`, `no_stream`, and
+	// for another deployment also `no_such_bucket`, `versioning`, `not_replica`, `quota` and
+	// `object_lock`. `auth` is a credential the target does not take - a 401 or a 403 from a webhook
+	// or another deployment, a NATS server that refuses the token: it is tried again, nothing is
+	// passed, and the target is `stalled`. `object_lock` is a version with a retention or a legal hold
+	// for a bucket of another deployment without Object Lock, which stalls the target as well.
 	// `rejected` is a refusal of one message. The list is not closed. Absent when the last attempt
 	// succeeded.
 	LastErrorClass *string `json:"last_error_class,omitempty"`
@@ -1881,8 +1889,10 @@ type TargetStatus struct {
 
 	// State `ok` when the last attempt succeeded or nothing waits; `retrying` after a failure that is tried
 	// again, with a growing pause; `stalled` when the target refuses everything and somebody has to
-	// act; `unsupported` when the leader is of a release that cannot say. A newer release may add to
-	// the list.
+	// act; `unsupported` when the leader is of a release that cannot say. For another deployment, a
+	// resync held at a version by a failure to the target counts as an attempt to it: the state is no
+	// better than that resync's, and the class is its failure's, until the resync's next attempt
+	// succeeds. A newer release may add to the list.
 	State string `json:"state"`
 }
 
