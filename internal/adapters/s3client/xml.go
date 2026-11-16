@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 
 	"github.com/albievan/cactusfs/internal/domain/bucket"
+	"github.com/albievan/cactusfs/internal/domain/object"
+	"github.com/albievan/cactusfs/internal/ports"
 )
 
 // The bounds of what is read of an answer. The egress client bounds every
@@ -204,6 +207,49 @@ func parseListing(data []byte, key string) (listing, error) {
 			return listing{}, fmt.Errorf("%w: a truncated listing without where it goes on", errDocument)
 		}
 		out.nextKey, out.nextUpload = next, doc.NextUploadIDMarker
+	}
+	return out, nil
+}
+
+// partsDocument is the answer of ListParts.
+type partsDocument struct {
+	XMLName              xml.Name `xml:"ListPartsResult"`
+	UploadID             string   `xml:"UploadId"`
+	IsTruncated          bool     `xml:"IsTruncated"`
+	NextPartNumberMarker int      `xml:"NextPartNumberMarker"`
+	Parts                []struct {
+		PartNumber int    `xml:"PartNumber"`
+		ETag       string `xml:"ETag"`
+		Size       int64  `xml:"Size"`
+	} `xml:"Part"`
+}
+
+// partsPage is one page of a listing of parts.
+type partsPage struct {
+	parts     []ports.SitePart
+	truncated bool
+	// next is the number the next page begins after.
+	next int
+}
+
+// parseParts reads a page of ListParts of the upload uploadID. An answer of
+// another upload, a part whose number is out of range, whose entity tag is
+// none or whose size is below nothing, is errDocument.
+func parseParts(data []byte, uploadID string) (partsPage, error) {
+	var doc partsDocument
+	if err := decodeXML(data, &doc); err != nil {
+		return partsPage{}, err
+	}
+	if doc.UploadID != uploadID {
+		return partsPage{}, fmt.Errorf("%w: the parts of another upload", errDocument)
+	}
+	out := partsPage{truncated: doc.IsTruncated, next: doc.NextPartNumberMarker}
+	for _, part := range doc.Parts {
+		etag := strings.Trim(part.ETag, `"`)
+		if object.ValidatePartNumber(part.PartNumber) != nil || etag == "" || !printableWord(etag) || part.Size < 0 || part.Size > object.MaxSize {
+			return partsPage{}, fmt.Errorf("%w: a part without a number, an entity tag or a size", errDocument)
+		}
+		out.parts = append(out.parts, ports.SitePart{Number: part.PartNumber, ETag: etag, Size: part.Size})
 	}
 	return out, nil
 }

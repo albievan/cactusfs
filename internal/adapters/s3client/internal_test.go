@@ -16,6 +16,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/sigv4"
 	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/delivery"
+	"github.com/albievan/cactusfs/internal/domain/object"
 )
 
 // TestClassOf: what each status and code of an answer is called, for a
@@ -314,6 +315,7 @@ func FuzzParsers(f *testing.F) {
 	f.Add([]byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`), "k")
 	f.Add([]byte(`<InitiateMultipartUploadResult><UploadId>abc</UploadId></InitiateMultipartUploadResult>`), "k")
 	f.Add([]byte(`<ListMultipartUploadsResult><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated><NextKeyMarker>k</NextKeyMarker><Upload><Key>k</Key><UploadId>u</UploadId></Upload></ListMultipartUploadsResult>`), "k")
+	f.Add([]byte(`<ListPartsResult><UploadId>u</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>1</NextPartNumberMarker><Part><PartNumber>1</PartNumber><ETag>"e"</ETag><Size>5</Size></Part></ListPartsResult>`), "u")
 	f.Add([]byte(`<!DOCTYPE x [<!ENTITY e "&e;&e;">]><Error><Code>&e;</Code></Error>`), "")
 	f.Fuzz(func(t *testing.T, data []byte, key string) {
 		if code := parseErrorCode(data); code != "" && !codeWord(code) {
@@ -332,6 +334,17 @@ func FuzzParsers(f *testing.F) {
 			}
 		} else if !validUploadID(id) {
 			t.Fatalf("upload ID %q", id)
+		}
+		if parts, err := parseParts(data, key); err != nil {
+			if !errors.Is(err, errDocument) {
+				t.Fatalf("parseParts: %v", err)
+			}
+		} else {
+			for _, part := range parts.parts {
+				if object.ValidatePartNumber(part.Number) != nil || part.ETag == "" || !printableWord(part.ETag) || part.Size < 0 {
+					t.Fatalf("part %+v", part)
+				}
+			}
 		}
 		page, err := parseListing(data, key)
 		if err != nil {

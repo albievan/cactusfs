@@ -30,6 +30,12 @@ const (
 	headerReplicaSeq       = headerReplicaPrefix + "seq"
 	headerReplicaMTime     = headerReplicaPrefix + "mtime"
 	headerReplicaETag      = headerReplicaPrefix + "etag"
+	// headerReplicaObjectLock is answered to the bucket probe of a source,
+	// with objectLockEnabled, for a replica bucket that has Object Lock: a
+	// source holds a version that carries a lock rather than send it where
+	// no lock is kept. It is never taken on a request.
+	headerReplicaObjectLock = headerReplicaPrefix + "object-lock"
+	objectLockEnabled       = "Enabled"
 
 	// headerReplicationStatus says, on GET and HEAD, where a version
 	// stands in replication: PENDING, COMPLETED or FAILED at the source,

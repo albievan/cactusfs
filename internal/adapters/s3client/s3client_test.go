@@ -150,7 +150,7 @@ func TestCheck(t *testing.T) {
 		class  delivery.Class
 	}{
 		{"replica", ports.SiteBucket{Versioning: bucket.VersioningEnabled, ReplicaOf: source}, delivery.ClassNone},
-		{"locked", ports.SiteBucket{Versioning: bucket.VersioningEnabled, ReplicaOf: source}, delivery.ClassNone},
+		{"locked", ports.SiteBucket{Versioning: bucket.VersioningEnabled, ReplicaOf: source, ObjectLock: true}, delivery.ClassNone},
 		{"plain", ports.SiteBucket{}, delivery.ClassNotReplica},
 		{"other", ports.SiteBucket{}, delivery.ClassNotReplica},
 		{"missing", ports.SiteBucket{}, delivery.ClassNoSuchBucket},
@@ -398,6 +398,27 @@ func TestMultipart(t *testing.T) {
 	if put.header.Get(s3client.HeaderReplicaSource) != "" {
 		t.Errorf("a part carries a replica header")
 	}
+	// The parts there, page by page, as an attempt that goes on from
+	// where another was cut off asks for them.
+	s3client.SetPartsPage(c, 1)
+	there, found, err := c.ListParts(t.Context(), "replica", "large", id)
+	if err != nil || !found || len(there) != 2 {
+		t.Fatalf("ListParts = %+v, %v, %v", there, found, err)
+	}
+	for i, part := range there {
+		want := ports.SitePart{Number: i + 1, ETag: parts[i].ETag, Size: int64(len([][]byte{first, second}[i]))}
+		if part != want {
+			t.Errorf("part %d listed as %+v, want %+v", i+1, part, want)
+		}
+	}
+	listedParts := lastFor(t, s.seen(), http.MethodGet, "/replica/large")
+	signedAndBound(t, listedParts, false)
+	if listedParts.header.Get(s3client.HeaderReplicaSource) != "" || !strings.Contains(listedParts.query, "part-number-marker=1") {
+		t.Errorf("ListParts sent %q, %v", listedParts.query, listedParts.header)
+	}
+	if _, found, err := c.ListParts(t.Context(), "replica", "large", strings.Repeat("0", len(id))); err != nil || found {
+		t.Errorf("ListParts of an upload that is not there = %v, %v", found, err)
+	}
 
 	v.ETag = completedETag(t, s, first, second)
 	if err := c.CompleteReplica(t.Context(), v, id, parts); err != nil {
@@ -409,6 +430,9 @@ func TestMultipart(t *testing.T) {
 		if complete.header.Get(name) == "" {
 			t.Errorf("CompleteReplica without %s", name)
 		}
+	}
+	if _, found, err := c.ListParts(t.Context(), "replica", "large", id); err != nil || found {
+		t.Errorf("ListParts of a completed upload = %v, %v", found, err)
 	}
 	resp, got := s.root(http.MethodGet, "/replica/large", nil, nil)
 	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, whole) || resp.Header.Get("X-Amz-Meta-Parts") != "2" {

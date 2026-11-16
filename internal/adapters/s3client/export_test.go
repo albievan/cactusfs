@@ -11,3 +11,9 @@ func SetChunkSize(c *Client, n int) {
 func SetUploadsPage(c *Client, n int) {
 	c.uploadsPage = n
 }
+
+// SetPartsPage sets how many parts a page of c's listings of parts asks
+// for, so that a test lists a few parts over several pages.
+func SetPartsPage(c *Client, n int) {
+	c.partsPage = n
+}

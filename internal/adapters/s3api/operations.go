@@ -86,10 +86,11 @@ func (h *Handler) headBucket(ctx context.Context, req *request) error {
 	if source != "" {
 		// The bucket probe of a source: answered only for a bucket that
 		// is its replica, which the answer says.
-		if _, err := h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source); err != nil {
+		replica, err := h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source)
+		if err != nil {
 			return err
 		}
-		req.w.Header().Set(headerReplicaSource, source)
+		setReplicaProbe(req.w.Header(), source, replica)
 	} else if _, err := h.cfg.Buckets.Get(ctx, req.principal, req.bucket); err != nil {
 		return err
 	}
@@ -519,5 +520,14 @@ func parseRange(header string) *object.RangeSpec {
 			return nil
 		}
 		return &object.RangeSpec{First: start, Last: end}
+	}
+}
+
+// setReplicaProbe writes what the bucket probe of a source is answered: the
+// source the bucket is a replica of, and whether it has Object Lock.
+func setReplicaProbe(header http.Header, source string, replica app.ReplicaBucketState) {
+	header.Set(headerReplicaSource, source)
+	if replica.ObjectLock {
+		header.Set(headerReplicaObjectLock, objectLockEnabled)
 	}
 }

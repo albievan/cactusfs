@@ -272,10 +272,12 @@ func (h *Handler) getBucketVersioning(ctx context.Context, req *request) error {
 	if source != "" {
 		// The bucket probe of a source: answered only for a bucket that
 		// is its replica, which the answer says.
-		if state, err = h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source); err != nil {
+		replica, err := h.cfg.Objects.ReplicaBucket(ctx, req.principal, req.bucket, source)
+		if err != nil {
 			return err
 		}
-		req.w.Header().Set(headerReplicaSource, source)
+		state = replica.Versioning
+		setReplicaProbe(req.w.Header(), source, replica)
 	} else if state, err = h.cfg.Buckets.Versioning(ctx, req.principal, req.bucket); err != nil {
 		return err
 	}

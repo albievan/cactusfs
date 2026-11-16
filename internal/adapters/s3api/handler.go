@@ -91,7 +91,7 @@ type Objects interface {
 	Tags(ctx context.Context, principal iam.Principal, in app.LockInput) (object.Version, error)
 	SetTags(ctx context.Context, principal iam.Principal, in app.LockInput, tags []object.Tag) (object.Version, error)
 	// The questions of a replica source (ADR-0026).
-	ReplicaBucket(ctx context.Context, principal iam.Principal, bucketName, source string) (bucket.Versioning, error)
+	ReplicaBucket(ctx context.Context, principal iam.Principal, bucketName, source string) (app.ReplicaBucketState, error)
 	ReplicaVersion(ctx context.Context, principal iam.Principal, in app.ReplicaVersionInput) (string, error)
 	ListReplicaUploads(ctx context.Context, principal iam.Principal, in app.ReplicaUploadsInput) (app.ReplicaUploadsOutput, error)
 	AbortReplicaUpload(ctx context.Context, principal iam.Principal, in app.UploadRef, source string) error

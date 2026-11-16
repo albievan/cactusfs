@@ -67,6 +67,11 @@ const (
 	// HeaderReplicaETag is the entity tag of the version, without quotes,
 	// which the other deployment compares with the one it computes.
 	HeaderReplicaETag = "X-Cactusfs-Replica-Etag"
+	// HeaderReplicaObjectLock is answered to the bucket probe, as
+	// "Enabled", for a replica bucket that has Object Lock.
+	HeaderReplicaObjectLock = "X-Cactusfs-Replica-Object-Lock"
+	// objectLockEnabled is the value of HeaderReplicaObjectLock.
+	objectLockEnabled = "Enabled"
 	// MTimeFormat is RFC 3339 in UTC with nine digits of the second: the
 	// time of a version to the nanosecond, of one length always.
 	MTimeFormat = "2006-01-02T15:04:05.000000000Z"
@@ -91,8 +96,9 @@ const (
 // send. A retention that ends sooner is left out, so that the version is
 // not FAILED for it: the copy then goes unretained for the at most 15
 // minutes its retention had left, and its legal hold, which has no date, is
-// sent all the same.
-const RetentionMargin = 15 * time.Minute
+// sent all the same. It is object.RetentionMargin, which the replicator holds
+// later changes to as well.
+const RetentionMargin = object.RetentionMargin
 
 // The bounds of a listing of uploads.
 const (
@@ -103,6 +109,12 @@ const (
 	// beyond them is found by the next attempt, once those found were
 	// aborted.
 	maxUploadPages = 100
+	// maxPartsPage is how many parts one page of a listing of parts asks
+	// for: a page of them stays far below the egress client's 64 KiB.
+	maxPartsPage = 250
+	// maxPartPages bounds how many pages are read of the parts of one
+	// upload: enough for object.MaxParts.
+	maxPartPages = object.MaxParts/maxPartsPage + 1
 )
 
 // Errors of this package; each is the cause of a delivery.Error.
@@ -164,6 +176,9 @@ type Client struct {
 	// uploadsPage the uploads a page of a listing asks for.
 	chunkSize   int
 	uploadsPage int
+	// partsPage is how many parts a page of a listing of parts asks for
+	// (maxPartsPage).
+	partsPage int
 }
 
 var _ ports.SiteClient = (*Client)(nil)
@@ -210,7 +225,7 @@ func New(target delivery.Target, secrets sealed.Opener, client *egress.Client, o
 	}
 	return &Client{
 		target: target.Clone(), secrets: secrets, client: client, clock: clock, source: opts.Source,
-		userAgent: userAgent, host: origin.Host, chunkSize: DefaultChunkSize, uploadsPage: maxUploadsPage,
+		userAgent: userAgent, host: origin.Host, chunkSize: DefaultChunkSize, uploadsPage: maxUploadsPage, partsPage: maxPartsPage,
 	}, nil
 }
 
@@ -323,7 +338,10 @@ func (c *Client) Check(ctx context.Context, bucketName string) (ports.SiteBucket
 	if object.ValidateReplicaSource(replicaOf) != nil {
 		replicaOf = ""
 	}
-	return ports.SiteBucket{Versioning: versioning, ReplicaOf: replicaOf}, nil
+	// Object Lock is said by either answer; a value that is not exactly
+	// the one is none.
+	lock := head.header.Get(HeaderReplicaObjectLock) == objectLockEnabled || get.header.Get(HeaderReplicaObjectLock) == objectLockEnabled
+	return ports.SiteBucket{Versioning: versioning, ReplicaOf: replicaOf, ObjectLock: lock}, nil
 }
 
 // PutReplica implements ports.SiteClient: PutObject with the five replica
@@ -504,6 +522,60 @@ func (c *Client) AbortUpload(ctx context.Context, bucketName, key, uploadID stri
 		return nil
 	}
 	return refused(op, r, kindCopy)
+}
+
+// ListParts implements ports.SiteClient: ListParts of the upload, page by
+// page (partsPage parts a page, so that a page stays below the egress
+// client's bound), at most maxPartPages pages. It carries no replica header:
+// the other deployment takes none on a listing of parts, and judges the
+// listing of the parts of a replica upload as s3:ReplicateObject (ADR-0026,
+// "The destination, as built"). A 404 NoSuchUpload is an upload that is not
+// there: not found, and no error.
+func (c *Client) ListParts(ctx context.Context, bucketName, key, uploadID string) ([]ports.SitePart, bool, error) {
+	const op = "ListParts"
+	if err := checkObject(op, bucketName, key); err != nil {
+		return nil, false, err
+	}
+	if !validUploadID(uploadID) {
+		return nil, false, delivery.Failed(delivery.ClassInternal, fmt.Errorf("s3client.%s: %w: no upload ID", op, ErrVersion))
+	}
+	var parts []ports.SitePart
+	marker := 0
+	for range maxPartPages {
+		query := [][2]string{{"uploadId", uploadID}, {"max-parts", strconv.Itoa(c.partsPage)}}
+		if marker > 0 {
+			query = append(query, [2]string{"part-number-marker", strconv.Itoa(marker)})
+		}
+		r, err := c.do(ctx, call{op: op, method: http.MethodGet, bucket: bucketName, key: key, query: query, header: http.Header{}}, maxListing)
+		if err != nil {
+			return nil, false, err
+		}
+		switch {
+		case r.status == http.StatusNotFound && r.code == codeNoSuchUpload:
+			return nil, false, nil
+		case !r.ok():
+			return nil, false, refused(op, r, kindCopy)
+		}
+		page, err := parseParts(r.body, uploadID)
+		if err != nil {
+			return nil, false, delivery.Failed(delivery.ClassServer, fmt.Errorf("s3client.%s: %w", op, err))
+		}
+		for _, part := range page.parts {
+			if len(parts) > 0 && part.Number <= parts[len(parts)-1].Number || part.Number <= marker {
+				return nil, false, delivery.Failed(delivery.ClassServer, fmt.Errorf("s3client.%s: %w: parts out of order", op, errDocument))
+			}
+			parts = append(parts, part)
+		}
+		if !page.truncated {
+			return parts, true, nil
+		}
+		if page.next <= marker {
+			// A listing that does not move on is not followed round.
+			return nil, false, delivery.Failed(delivery.ClassServer, fmt.Errorf("s3client.%s: %w: a listing that does not go on", op, errDocument))
+		}
+		marker = page.next
+	}
+	return nil, false, delivery.Failed(delivery.ClassServer, fmt.Errorf("s3client.%s: %w: more parts than an upload has", op, errDocument))
 }
 
 // ListReplicaUploads implements ports.SiteClient: ListMultipartUploads of

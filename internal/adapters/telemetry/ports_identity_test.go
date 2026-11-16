@@ -450,6 +450,7 @@ func TestEveryDecoratorIsMarked(t *testing.T) {
 		"BucketUsage":     tel.InstrumentBucketUsage(mem),
 		"Replication":     tel.InstrumentReplication(mem),
 		"Outbox":          tel.InstrumentOutbox(mem),
+		"SiteClient":      tel.InstrumentSiteClient(porttest.NewMemSite(mem)),
 		"DeliveryStatus":  tel.InstrumentDeliveryStatus(porttest.ScriptedDeliveryStatusReader(porttest.DeliveryStatusScript{})),
 		"NodeSettings":    tel.InstrumentNodeSettings(porttest.NewNodeSettingsReader(nil)),
 		"ReleaseSource":   tel.InstrumentReleaseSource(porttest.NewReleaseSource(nil, nil)),
