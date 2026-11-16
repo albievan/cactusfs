@@ -6,6 +6,7 @@ import { formatExactBytes, formatGigabytes, formatTime } from '../ui/format';
 import { useLoad, type Loaded } from '../ui/hooks';
 import { reasonOf } from '../ui/reason';
 import { useUploads } from '../uploads/context';
+import { BucketNotificationsSection } from './BucketNotifications';
 import { ActivityLine, AtLeast, PolicySummary } from './BucketsScreen';
 import { BucketPolicySection, SubBucketsSection } from './SubBuckets';
 import { BucketTagsSection, TagRulesSection } from './TagSections';
@@ -99,8 +100,8 @@ function refused(error: unknown): boolean {
  * uploads and downloads - as far as the API tells the caller, and in its
  * words. A figure the caller may not see is said to be so, one that is not
  * exact is said to be that: neither is ever shown as 0. Below them, folded
- * until asked for, the bucket's policy, its sub-buckets, its tags and its
- * tag rules.
+ * until asked for, the bucket's policy, its sub-buckets, its tags, its
+ * tag rules and its notification rules.
  */
 export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: BucketFacts }) {
   const headingId = useId();
@@ -199,6 +200,7 @@ export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: 
         <SubBucketsSection bucket={name} />
         <BucketTagsSection bucket={name} />
         <TagRulesSection bucket={name} />
+        <BucketNotificationsSection bucket={name} />
       </div>
     </section>
   );

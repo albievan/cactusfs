@@ -109,6 +109,26 @@ export type UpgradeProgress = Schemas['UpgradeProgress'];
 export type UpgradeState = Schemas['UpgradeState'];
 /** One node in an upgrade. */
 export type UpgradeNode = Schemas['UpgradeNode'];
+/**
+ * A place outside the deployment that it sends to (ADR-0023, ADR-0025), as
+ * the API shows it: the origin of its endpoint and never its path, whether
+ * it has a secret and never the secret.
+ */
+export type Target = Schemas['Target'];
+/** A target as it is defined or changed: its secret and the whole URL are written here, never read back. */
+export type TargetPut = Schemas['TargetPut'];
+/** How the deployment proves who it is to a target, as it is written: the secret with it. */
+export type TargetAuthPut = Schemas['TargetAuthPut'];
+/** The answer to a definition or a change: the target, and the signing key when this request made one. */
+export type TargetPutResult = Schemas['TargetPutResult'];
+/** Delivery to one target, as the node that leads has it: a state, counts and the class of the last failure. */
+export type TargetStatus = Schemas['TargetStatus'];
+/** One rule of a bucket's notifications, as the API keeps it. */
+export type NotificationRule = Schemas['NotificationRule'];
+/** One rule of a bucket's notifications, as it is sent. */
+export type NotificationRulePut = Schemas['NotificationRulePut'];
+/** The notification rules of a bucket. */
+export type BucketNotifications = Schemas['BucketNotifications'];
 
 /**
  * The header the API sets on an answer it did not make now but kept: the

@@ -10,6 +10,7 @@ import { RolesScreen } from './RolesScreen';
 import { SearchScreen } from './SearchScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { TagsScreen } from './TagsScreen';
+import { TargetsScreen } from './TargetsScreen';
 import { UpdatesScreen } from './UpdatesScreen';
 import { UserScreen } from './UserScreen';
 import { UsersScreen } from './UsersScreen';
@@ -55,6 +56,8 @@ export function Screens({ passwordSession = false }: ScreensProps) {
       return <PoliciesScreen />;
     case 'tags':
       return <TagsScreen />;
+    case 'targets':
+      return <TargetsScreen />;
     case 'cluster':
       return <ClusterScreen />;
     case 'settings':

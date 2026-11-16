@@ -122,6 +122,7 @@ describe('session', () => {
       'Roles',
       'Policies',
       'Tags',
+      'Targets',
       'Cluster',
       'Settings',
       'Updates',
@@ -131,6 +132,9 @@ describe('session', () => {
       expect(link.querySelector('i.bi')?.getAttribute('aria-hidden')).toBe('true');
     }
     expect(sections.getByRole('link', { name: 'Buckets' }).getAttribute('aria-current')).toBe('page');
+    const targets = sections.getByRole('link', { name: 'Targets' });
+    expect(targets.getAttribute('href')).toBe('#/targets');
+    expect(targets.querySelector('i.bi')?.className).toContain('bi-broadcast');
 
     // Folded, the names are still there for whoever has the page read, the
     // mark stands in for the logo, and the choice is remembered.
