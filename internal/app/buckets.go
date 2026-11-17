@@ -723,7 +723,9 @@ func (s *BucketService) Policy(ctx context.Context, principal iam.Principal, nam
 // audited: a bucket policy is the one thing that can open a bucket to
 // callers who have not authenticated. A document iam.ParseBucketPolicy
 // refuses is an error wrapping domain.ErrInvalidPolicy (and so
-// domain.ErrInvalidArgument), and the policy the bucket had is kept.
+// domain.ErrInvalidArgument) and the parser's *iam.PolicyError, with every
+// fault of the document (PolicyFaults), and the policy the bucket had is
+// kept.
 func (s *BucketService) SetPolicy(ctx context.Context, principal iam.Principal, name string, document []byte) error {
 	action := iam.ActionPutBucketPolicy
 	if document == nil {

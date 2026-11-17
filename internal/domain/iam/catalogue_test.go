@@ -213,11 +213,11 @@ func instance(t *testing.T, template string) iam.Resource {
 		rest := strings.NewReplacer("{bucket}", "site", "{key}", "sub/k").Replace(strings.TrimPrefix(template, "arn:aws:s3:::"))
 		r.Bucket, r.Key, _ = strings.Cut(rest, "/")
 	case strings.HasPrefix(template, "arn:cactusfs:admin:::"):
-		r.Admin = strings.ReplaceAll(strings.TrimPrefix(template, "arn:cactusfs:admin:::"), "{name}", "x")
+		r.Admin = strings.NewReplacer("{name}", "x", "{tag_key}", "team/x").Replace(strings.TrimPrefix(template, "arn:cactusfs:admin:::"))
 	default:
 		t.Fatalf("a template of no kind: %s", template)
 	}
-	want := strings.NewReplacer("{bucket}", "site", "{key}", "sub/k", "{name}", "x").Replace(template)
+	want := strings.NewReplacer("{bucket}", "site", "{key}", "sub/k", "{name}", "x", "{tag_key}", "team/x").Replace(template)
 	if r.String() != want {
 		t.Fatalf("the template %s is the resource %s, not %s", template, r, want)
 	}

@@ -416,7 +416,10 @@ func (s *IAMService) ListRoles(ctx context.Context, p iam.Principal) ([]iam.Role
 }
 
 // PutPolicy adds a policy, or replaces its document. document is the policy
-// in the IAM policy language; it is parsed strictly.
+// in the IAM policy language; it is parsed strictly. A document the parser
+// refuses is an error wrapping domain.ErrInvalidArgument and the parser's
+// *iam.PolicyError, which holds every fault of the document with where it
+// is (PolicyFaults).
 func (s *IAMService) PutPolicy(ctx context.Context, p iam.Principal, name string, document []byte, create bool) error {
 	// The record names the document by its hash: which policy text was put
 	// can be proven later without the trail holding every version of it.
@@ -496,7 +499,9 @@ type APIKeyInput struct {
 //
 // The authorizer is asked whether the caller may make keys for that user
 // (admin:CreateAPIKey on user/<owner>). Whatever the answer, the key can do
-// no more than its owner.
+// no more than its owner. An inline policy the parser refuses is an error
+// wrapping domain.ErrInvalidArgument and the parser's *iam.PolicyError, with
+// every fault of the document (PolicyFaults).
 func (s *IAMService) CreateAPIKey(ctx context.Context, p iam.Principal, in APIKeyInput) (Credentials, iam.APIKey, error) {
 	// A key that is narrowed by a policy of its own makes no keys: the new
 	// key would not carry the narrowing, and would be a way around it.

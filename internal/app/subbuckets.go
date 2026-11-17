@@ -194,7 +194,8 @@ func (s *SubBucketService) GetPolicy(ctx context.Context, principal iam.Principa
 //
 // The policy is confined to the sub-bucket by iam.ParseSubBucketPolicy
 // before anything is proposed: one it refuses is an error wrapping
-// domain.ErrInvalidPolicy, and nothing is changed. A name a sub-bucket
+// domain.ErrInvalidPolicy and the parser's *iam.PolicyError, with every
+// fault of the document (PolicyFaults), and nothing is changed. A name a sub-bucket
 // cannot have wraps domain.ErrInvalidArgument. The eleventh sub-bucket of a
 // bucket is refused with domain.ErrTooManySubBuckets, decided when the
 // change is committed. The error wraps domain.ErrBucketNotFound when there

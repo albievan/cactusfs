@@ -73,9 +73,13 @@ const (
 var undecorated = map[string]string{
 	// Not adapters: the time, and use cases and compositions of this
 	// program that are themselves made of decorated ports.
-	"ports.Clock":       "telling the time crosses no boundary and cannot fail",
-	"ports.Authorizer":  "the authorizer is a use case (app.Authorizer); the policies it reads come through a decorated port",
-	"ports.DriveSource": "composed in this package of decorated shard stores and a decorated view of the cluster; walked below",
+	"ports.Clock":      "telling the time crosses no boundary and cannot fail",
+	"ports.Authorizer": "the authorizer is a use case (app.Authorizer); the policies it reads come through a decorated port",
+	// The explainer of the explanation use case (app.NewExplainer) is the
+	// authorizer's own decision: no boundary is crossed but those it
+	// reads through, which are decorated (PLAN 9.4).
+	"ports.AccessExplainer": "the authorizer's decision and why (app.NewExplainer); the policies it reads come through a decorated port",
+	"ports.DriveSource":     "composed in this package of decorated shard stores and a decorated view of the cluster; walked below",
 	// Pure computation, per stripe of every object: it has no context for
 	// a span to belong to, and its time is part of the request that asked.
 	"ports.ErasureCodec": "computes parity in memory; no I/O, no context, called once a stripe",

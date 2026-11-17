@@ -73,10 +73,11 @@ const (
 
 // The templates of the resources actions are asked on. A placeholder in
 // braces stands for a name: {bucket} for a bucket's, {key} for an object's
-// key, {name} for the name of an administrative resource. Outside the
-// placeholders a template is literal, so a resource fits it when the
-// placeholders, each replaced by one or more characters - none of them a
-// '/' but in {key} - make it the resource's ARN (Resource.String).
+// key, {tag_key} for the key of a tag of the catalogue of tags, {name} for
+// the name of any other administrative resource. Outside the placeholders
+// a template is literal, so a resource fits it when the placeholders, each
+// replaced by one or more characters, make it the resource's ARN
+// (Resource.String): what each placeholder may hold is FitsTemplate's.
 const (
 	resourceAnyPattern     = "*"
 	templateAllBuckets     = s3ARNPrefix + "*"
@@ -97,7 +98,7 @@ const (
 	templateTargets        = adminARNPrefix + "targets"
 	templateTarget         = adminARNPrefix + "target/{name}"
 	templateTagDefinitions = adminARNPrefix + "tag-definitions"
-	templateTagDefinition  = adminARNPrefix + "tag-definition/{name}"
+	templateTagDefinition  = adminARNPrefix + "tag-definition/{tag_key}"
 	templateUpdates        = adminARNPrefix + "updates"
 	templatePolicyCatalog  = adminARNPrefix + "policy-catalogue"
 	templateAnonymous      = adminARNPrefix + "anonymous"
@@ -174,6 +175,80 @@ func Catalogue() []CatalogueAction {
 		})
 	}
 	return actions
+}
+
+// LookupAction returns the catalogue's entry of an action named exactly as
+// the catalogue names it. Any other name is no entry: one with a wildcard,
+// one written in another case, a cluster action, a name of the audit trail.
+func LookupAction(name Action) (CatalogueAction, bool) {
+	for _, action := range Catalogue() {
+		if action.Name == name {
+			return action, true
+		}
+	}
+	return CatalogueAction{}, false
+}
+
+// AskedOn reports whether the action is asked on the resource: the
+// resource fits one of its templates (FitsTemplate).
+func (a CatalogueAction) AskedOn(r Resource) bool {
+	return slices.ContainsFunc(a.Resources, func(template string) bool { return FitsTemplate(template, r) })
+}
+
+// FitsTemplate reports whether a resource fits a template of the catalogue:
+// with each placeholder replaced by one or more characters, the template is
+// the resource's ARN (Resource.String). What a placeholder may hold:
+//
+//   - {bucket} and {name}: no '/' and no wildcard, '*' or '?'. A name stands
+//     for one bucket or one entity, never for a pattern of them: the
+//     resource of every bucket as a whole, "arn:aws:s3:::*", is no bucket,
+//     and "user/*" is no user;
+//   - {tag_key}: no wildcard, '/' allowed - a tag key may hold one
+//     (object.ValidateTagKey), and "tag-definition/team/x" is the
+//     definition of the key "team/x";
+//   - {key}: anything. It is an object's key as it is, which S3 lets hold
+//     any character, '/', '*' and '?' included: the object "a*" is asked
+//     about as itself.
+//
+// Outside its placeholders a template is literal: "arn:aws:s3:::*" is
+// fitted by the resource of every bucket as a whole and by nothing else.
+func FitsTemplate(template string, r Resource) bool {
+	return fits(template, r.String())
+}
+
+// fits matches an ARN against a template, placeholder by placeholder.
+func fits(template, arn string) bool {
+	open := strings.IndexByte(template, '{')
+	if open < 0 {
+		return template == arn
+	}
+	length := strings.IndexByte(template[open:], '}')
+	if length < 0 || !strings.HasPrefix(arn, template[:open]) {
+		return false
+	}
+	placeholder, rest, arn := template[open+1:open+length], template[open+length+1:], arn[open:]
+	for n := 1; n <= len(arn); n++ {
+		if !placeholderHolds(placeholder, arn[n-1]) {
+			return false
+		}
+		if fits(rest, arn[n:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// placeholderHolds reports whether a placeholder of a template may hold a
+// byte (FitsTemplate).
+func placeholderHolds(placeholder string, c byte) bool {
+	switch placeholder {
+	case "key":
+		return true
+	case "tag_key":
+		return c != '*' && c != '?'
+	default:
+		return c != '/' && c != '*' && c != '?'
+	}
 }
 
 // inBucketPolicy reports whether a bucket policy may allow the action: it is

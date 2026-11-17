@@ -85,6 +85,11 @@ type node struct {
 	auditor    *app.Auditor
 	iam        *app.IAMService
 	sessions   *app.SessionService
+	// policyTools answers the catalogue of the policy language and
+	// validates a policy before it is put; explain answers "Who may do
+	// this?" through the one explainer of the node (ADR-0032).
+	policyTools *app.PolicyToolsService
+	explain     *app.ExplainService
 	// cluster, idempotency and maintenance serve the management API.
 	cluster *app.ClusterService
 	// local is how this node was configured, as it says it when asked;
@@ -168,7 +173,7 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// written to becomes reachable when the metadata store is open.
 	// The authorizer is no ports.AccessExplainer. The explainer over it,
 	// app.NewExplainer(n.authorizer), is made in one place, the wiring of
-	// the explanation use case (PLAN 9.5), and until that exists nowhere
+	// the explanation use case below, and nowhere else
 	// (TestOnlyTheExplainUseCaseHoldsAnExplainer).
 	n.auditor = app.NewAuditor(n.telemetry.InstrumentAuditLog(lateAuditLog{node: n}), n.clock, logger)
 	n.authorizer = app.NewAuthorizer(logger, n.clock, n.auditor)
@@ -357,6 +362,15 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	n.iam = app.NewIAMService(app.IAMServiceConfig{
 		Store: identities, Trail: trail, Authz: n.authorizer, Auditor: n.auditor, KMS: kms, Hasher: hasher,
 		Clock: n.clock, Entropy: rand.Reader, Sessions: sessionStore,
+	})
+	n.policyTools = app.NewPolicyToolsService(n.authorizer, n.auditor)
+	// The explanation of access (ADR-0032, Decision 3): the authorizer's
+	// decision and why, through the one explainer of the node, which no
+	// other use case holds. Every answer is appended to the trail before
+	// it is given.
+	n.explain = app.NewExplainService(app.ExplainServiceConfig{
+		Store: identities, Trail: trail, Authz: n.authorizer, Explainer: app.NewExplainer(n.authorizer),
+		Auditor: n.auditor, Clock: n.clock, Logger: logger,
 	})
 	provider, err := app.NewLocalIdentityProvider(identities, hasher, rand.Reader)
 	if err != nil {

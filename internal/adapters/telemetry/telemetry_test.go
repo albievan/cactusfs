@@ -598,6 +598,14 @@ func TestMetricsRequireAuthenticationAndAuthorization(t *testing.T) {
 	if len(requests) != 1 || requests[0].Action != iam.ActionGetMetrics || !requests[0].Principal.Root {
 		t.Errorf("authorizer saw %+v, want one admin:GetMetrics request by root", requests)
 	}
+	// The question is the catalogue's: admin:GetMetrics, on a resource of
+	// one of its templates (PLAN 9.5; the use cases are held to it in
+	// internal/app, TestUseCasesAskWhatTheCatalogueSays).
+	for _, request := range requests {
+		if entry, ok := iam.LookupAction(request.Action); !ok || !entry.AskedOn(request.Resource) {
+			t.Errorf("%s on %s fits no template of the catalogue", request.Action, request.Resource)
+		}
+	}
 
 	// An authenticated principal the authorizer refuses gets 403.
 	denied := tel.MetricsHandler(notRoot{identities}, authz, logger)
