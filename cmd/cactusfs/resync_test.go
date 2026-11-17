@@ -154,14 +154,31 @@ func TestANodeResyncsWhatWasThereBefore(t *testing.T) {
 	for _, data := range written {
 		sent += len(data)
 	}
-	got := samples(t, a.node.telemetry)
+	// The gauges are read as a scrape reads them: the worker stores a
+	// resync's end before it forgets the walk, so for an instant after the
+	// record says done the walk may still be counted - they are asked again
+	// until they show it, within a deadline.
+	gauges := map[string]float64{
+		"cactusfs_replication_lag_entries{}": 0, "cactusfs_replication_lag_seconds{}": 0, "cactusfs_replication_resyncs{state=walking}": 0,
+	}
+	var got map[string]float64
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		got = samples(t, a.node.telemetry)
+		settled := true
+		for name, want := range gauges {
+			if value, ok := got[name]; !ok || value != want {
+				settled = false
+			}
+		}
+		if settled || time.Now().After(deadline) {
+			break
+		}
+	}
 	if got["cactusfs_replication_bytes_total{}"] < float64(sent) || got["cactusfs_replication_versions_total{result=completed}"] < 4 {
 		t.Errorf("bytes %v (want at least %d), versions completed %v (want at least 4)",
 			got["cactusfs_replication_bytes_total{}"], sent, got["cactusfs_replication_versions_total{result=completed}"])
 	}
-	for name, want := range map[string]float64{
-		"cactusfs_replication_lag_entries{}": 0, "cactusfs_replication_lag_seconds{}": 0, "cactusfs_replication_resyncs{state=walking}": 0,
-	} {
+	for name, want := range gauges {
 		if value, ok := got[name]; !ok || value != want {
 			t.Errorf("%s = %v (exposed %v), want %v", name, value, ok, want)
 		}
