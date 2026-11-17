@@ -14,13 +14,20 @@ import (
 // reaches the progress writer in one Write. A client that takes it steadily,
 // but slower than the whole of it in a stall, is not cut off: every step of
 // the write has a stall of its own.
+//
+// The stall is three seconds, not one: the client here is a goroutine of a
+// test that runs beside others under -race, and a runner that is busy can
+// leave it unscheduled for more than a second - which is a client that
+// really stopped, and is rightly cut off. The pause is set so that the body
+// still takes longer than one stall (128 steps of 40 ms, some 5 s), which
+// the last check holds to.
 func TestAWriteLargerThanAStallIsTakenAStepAtATime(t *testing.T) {
 	t.Parallel()
 	const (
-		stall = time.Second
+		stall = 3 * time.Second
 		size  = 8 << 20
 		step  = 64 << 10
-		pause = 20 * time.Millisecond
+		pause = 40 * time.Millisecond
 	)
 	body := bytes.Repeat([]byte("cactus"), size/6)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
