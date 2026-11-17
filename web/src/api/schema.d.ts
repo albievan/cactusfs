@@ -497,8 +497,9 @@ export interface paths {
         post?: never;
         /**
          * Remove the replication configuration of a bucket
-         * @description Nothing more is matched. What was matched and not yet sent is still sent. Nothing is removed at the
-         *     other end, and the bucket there stays a replica until it is promoted there.
+         * @description Nothing more is matched, and nothing more is sent: what was matched and not yet sent is passed over,
+         *     and those versions keep the status `PENDING` (a resync under a new configuration settles them).
+         *     Nothing is removed at the other end, and the bucket there stays a replica until it is promoted there.
          */
         delete: operations["deleteBucketReplication"];
         options?: never;

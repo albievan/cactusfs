@@ -1279,7 +1279,7 @@
           "buckets"
         ],
         "summary": "Remove the replication configuration of a bucket",
-        "description": "Nothing more is matched. What was matched and not yet sent is still sent. Nothing is removed at the\nother end, and the bucket there stays a replica until it is promoted there.\n",
+        "description": "Nothing more is matched, and nothing more is sent: what was matched and not yet sent is passed over,\nand those versions keep the status `PENDING` (a resync under a new configuration settles them).\nNothing is removed at the other end, and the bucket there stays a replica until it is promoted there.\n",
         "x-cactusfs-action": "s3:PutReplicationConfiguration",
         "parameters": [
           {
