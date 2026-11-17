@@ -201,6 +201,51 @@ Two things about console sessions concern whoever sets up the balancer
 The three settings `session-lifetime`, `session-upload-grace` and `session-lock-max`
 must be the same on every node behind the balancer.
 
+### Another deployment that replicates through the balancer
+
+Replication between sites ([ADR-0026](adr/0026-replication-between-sites.md); README,
+"Replication between sites") sends from one deployment to another as an S3 client. The
+endpoint a target of kind `s3` names - `https://<name>:9000`, no path - is the **S3
+port of the other site**: a balancer in front of that site's gateways on 9000, or one of
+its nodes. Never 9001, 9002 or 9003. What that balancer must do is the checklist above;
+three points of it decide whether replication works at all:
+
+- **TLS passed through.** The sending site verifies the certificate it is shown
+  against the target's `ca_pem` (or the system's roots) and the host of the endpoint,
+  which it also sends as the server name (SNI); there is no way to turn that off. With
+  passthrough the certificate on the receiving nodes must carry that name. A balancer
+  that ends TLS must show a certificate of that CA for that name, and must still meet
+  the next point.
+- **The request as it was signed.** Every header the sending node sets is signed with
+  SigV4 - `Host` and the `x-cactusfs-replica-*` headers among them. The bodies of
+  objects and parts are sent as signed chunks (`Content-Encoding: aws-chunked`,
+  `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, `X-Amz-Decoded-Content-Length`), 64 KiB a
+  chunk; an XML document (a completion, a retention, tags) is signed by its SHA-256. A
+  balancer that drops or rewrites a signed header, adds an `x-cactusfs-replica-*` or
+  `x-amz-*` header, or frames a body anew has the request refused, which holds the
+  target (mostly `auth`, `stalled`) until it is put right. An unsigned header it adds
+  that is none of those, such as `X-Forwarded-For`, breaks nothing. A passthrough
+  balancer cannot do any of it.
+- **No cap on a request below 5 GiB, and no buffering.** A version that was uploaded
+  in one request is sent in one `PUT`, of up to 5 GiB; one that was uploaded in parts is
+  sent as a multipart upload of the same parts, each up to 5 GiB. **A `413` from the
+  balancer is read as the other site refusing that version for itself**: the version is
+  marked `FAILED` and never sent again. A body is streamed at the pace
+  `replication-rate-mib` allows; a balancer that buffers it whole holds it back and
+  needs the room.
+
+Beyond those: the sending node gives the other site `--delivery-timeout` (30 s) to
+answer each request and to keep the transfer moving, so an idle timeout of the balancer
+shorter than that cuts transfers that would have gone on (they are tried again, and a
+version of parts goes on from the parts that arrived while one node leads; after a
+change of leader it starts again from part 1). The sending node speaks
+HTTP/1.1. Behind a balancer that opens its own connections the receiving site sees the
+balancer's address in its audit trail and in `aws:SourceIp`, as for any client: a
+condition on `aws:SourceIp` in the policy of the replication key would test the
+balancer. The sending site connects to private addresses as it is; a loopback or
+link-local one needs `--egress-allow` there, and on Kubernetes its NetworkPolicy must
+let its pods reach the balancer (`networkPolicy.egressTo`).
+
 ## 2. Docker Desktop (compose)
 
 The development cluster of [`deploy/compose/compose.yaml`](../deploy/compose/compose.yaml)

@@ -13,9 +13,11 @@ control and a hash-chained audit trail.
 > S3 depth listed below, and deployment hardening (the Helm chart, certificate rotation,
 > the observability pack, SBOMs, signatures and the release workflow). Milestone 8
 > (replication between sites, bucket notifications, quotas) is begun: its metadata
-> schema (entry schema 5) and its contracts exist, and of its features quotas on
-> buckets and bucket notifications are built ([Quotas](#quotas),
-> [Notifications](#notifications); in no published release yet).
+> schema (entry schema 5) and its contracts exist, and its three features are built -
+> quotas on buckets, bucket notifications and replication between sites
+> ([Quotas](#quotas), [Notifications](#notifications),
+> [Replication between sites](#replication-between-sites)) - in no published release
+> yet.
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -107,7 +109,9 @@ control and a hash-chained audit trail.
   its sub-buckets: listed, created with or without a policy, each one's policy edited or
   removed, and an empty one deleted (ADR-0017) - and its tags and tag rules: lower case,
   the catalogue only, and the tags every object must carry (ADR-0018) - and its
-  notification rules: which changes, of which keys, are sent to which target (ADR-0025).
+  notification rules: which changes, of which keys, are sent to which target (ADR-0025) -
+  and its replication: where it is sent and how far that has come, a resync, and whether
+  it is a replica, with a promotion that asks for its name to be typed (ADR-0026).
   An object's tags are edited in its details, and the upload form takes tags, says which
   the bucket requires and begins with them. The **Tags** screen keeps the catalogue of
   tags users are offered; the **Targets** screen the places notifications and the audit
@@ -124,6 +128,14 @@ control and a hash-chained audit trail.
   in order, from the outbox of the metadata; a target can be sent the hash-chained audit
   trail as well. Targets are defined by administrators, never by a bucket's owner, and
   each says which buckets may use it ([Notifications](#notifications)).
+- **Replication between sites** ([ADR-0026](docs/adr/0026-replication-between-sites.md)):
+  the versions of a bucket are copied, asynchronously and with their version IDs, times
+  and order, to a bucket of another CactusFS deployment - its own cluster, CA, keys and
+  users - that is a read-only replica until it is promoted. Configured with S3's
+  `PutBucketReplication` or the management API, sent by the node that leads as an S3
+  client of the other site with a key that site issued and that can do nothing but
+  replicate; a resync sends what was there before; the status of each bucket, metrics
+  and alerts say how far it has come ([below](#replication-between-sites)).
 - **Deployment.** A distroless, non-root container image; a four-node compose cluster
   for development (Docker or rootless Podman); a Helm chart for Kubernetes and k3s with
   a default-deny NetworkPolicy under the `restricted` Pod Security Standard.
@@ -152,16 +164,15 @@ Said plainly, so that nobody finds out by trying:
   `digests.txt`, and a node's check for releases, which reads GitHub's releases, finds
   none. The binaries ship with the next release. `v0.7.0` predates tag rules and their
   catalogue: no published release enforces them yet.
-- **Milestone 8: replication between sites.** Written, and not yet through its gate on
-  the test host nor in a release. A bucket can be made a replica
-  (`/buckets/{bucket}/replica`) and given a replication configuration (S3's
-  `?replication`, `/buckets/{bucket}/replication`) that names a target of kind `s3`
-  (another deployment); the replicator sends the new versions a rule matches and their
-  later changes (PLAN 8.1.4, 8.1.5), and a resync (`/buckets/{bucket}/replication/resync`,
-  PLAN 8.1.6) sends what was there before the configuration or was lost at the bound of
-  the outbox. The status of a bucket's replication is still to come (`/status` answers
-  `501 Not Implemented`). (Quotas and bucket notifications, the other parts of milestone
-  8, are built: [Quotas](#quotas), [Notifications](#notifications).)
+- **Replication is active-passive, one hop, and fails back by hand.** A bucket is
+  written by its clients or by one source, never both; a bucket has one destination;
+  a replica is never sent on; permanent deletes, bucket configuration, policies and
+  identities are not replicated, nor are versions under a customer's key (SSE-C). There
+  is no automatic fail-back, and a fail-back carries only what the promoted bucket wrote
+  itself ([what fail-back is not](#what-fail-back-is-not)). Only prefixes filter: S3's
+  filters on tags, Replication Time Control, replication metrics and the other elements
+  listed under [The S3 API](#the-s3-api) answer `501`, and there is no Batch
+  Replication. Replication is in no published release yet.
 - **Quotas are on buckets, in bytes, and nothing else.** There is no quota by user, by
   tenant or by number of objects, no soft quota, and no limit on the number of buckets;
   a bucket has no quota until one is set, and the quotas together may promise more than
@@ -174,8 +185,8 @@ Said plainly, so that nobody finds out by trying:
   a vote later. Gateways can join.
 - **Single sign-on.** Console users are local accounts. The port for another identity
   provider exists (`ports.IdentityProvider`); no OIDC adapter does.
-- **Parts of S3:** ACLs, conditional writes (`If-None-Match` on a PUT), replication,
-  inventory, analytics, website hosting, storage classes with a parity of their own; of
+- **Parts of S3:** ACLs, conditional writes (`If-None-Match` on a PUT), the parts of
+  replication named above, inventory, analytics, website hosting, storage classes with a parity of their own; of
   notifications, Lambda and EventBridge destinations and event names such as
   `s3:ObjectCreated:Copy`, `s3:ObjectRestore:*` or `s3:ObjectTagging:*` (a copy is told
   as a put; a change of tags, retention or a legal hold is not told). What is not
@@ -678,8 +689,9 @@ majority of the voters to start. Things to know for now:
   added afterwards yet.
 - **A voter that lost its metadata directory must be removed from the cluster before it
   is started again**, not simply restarted empty.
-- **Keep the cluster on one site.** Sites are to be linked by replication (milestone 8,
-  not built), not by stretching the metadata group across a WAN.
+- **Keep the cluster on one site.** Sites are linked by replication of buckets
+  ([Replication between sites](#replication-between-sites)), each site a cluster of its
+  own, never by stretching the metadata group across a WAN.
 
 ## On Kubernetes
 
@@ -814,7 +826,7 @@ days) and for signed streaming (`aws-chunked`) uploads. Errors are S3 XML.
 | Object Lock | buckets created with it; Put/GetObjectLockConfiguration (default retention); Put/GetObjectRetention; Put/GetObjectLegalHold; governance bypass. A version under compliance retention or legal hold is deleted by nobody, root included |
 | Bucket configuration | Get/Put/Delete of BucketPolicy, BucketCors, BucketTagging and BucketLifecycle; CORS preflight. A bucket policy is the only thing that can open a bucket to anonymous readers, and only to read |
 | Object tags | GetObjectTagging, PutObjectTagging, DeleteObjectTagging |
-| Replication configuration | PutBucketReplication, GetBucketReplication, DeleteBucketReplication: the role `arn:cactusfs:replication:::<target>` names a target of kind `s3`, every rule names one destination bucket, with a prefix, a priority and delete markers; two enabled rules of one priority whose prefixes overlap are refused. `Filter` with `Tag` or `And`, `SourceSelectionCriteria`, `ExistingObjectReplication`, and the destination's `StorageClass`, `EncryptionConfiguration`, `ReplicationTime`, `Metrics`, `Account` and `AccessControlTranslation` answer `501`. A rule of the first form of the schema (`<Prefix>` in the rule) that says nothing of delete markers does not copy them, where S3 would; one of the later form (`<Filter>`) must say. What a rule matches is sent by the replicator (milestone 8), and what was there before by a resync |
+| Replication configuration | PutBucketReplication, GetBucketReplication, DeleteBucketReplication: the role `arn:cactusfs:replication:::<target>` names a target of kind `s3`, every rule names one destination bucket, with a prefix, a priority and delete markers; two enabled rules of one priority whose prefixes overlap are refused. `Filter` with `Tag` or `And`, `SourceSelectionCriteria`, `ExistingObjectReplication`, and the destination's `StorageClass`, `EncryptionConfiguration`, `ReplicationTime`, `Metrics`, `Account` and `AccessControlTranslation` answer `501`. A rule of the first form of the schema (`<Prefix>` in the rule) that says nothing of delete markers does not copy them, where S3 would; one of the later form (`<Filter>`) must say. What a rule matches is sent by the node that leads, and what was there before by a resync ([Replication between sites](#replication-between-sites)). `x-amz-replication-status` is answered on GetObject and HeadObject |
 | Notifications | PutBucketNotificationConfiguration, GetBucketNotificationConfiguration: `QueueConfiguration` and `TopicConfiguration` whose ARN is `arn:cactusfs:notify:::<target>`, the events `s3:ObjectCreated:*`, `:Put`, `:CompleteMultipartUpload`, `s3:ObjectRemoved:*`, `:Delete`, `:DeleteMarkerCreated`, and `prefix` and `suffix` filters ([Notifications](#notifications)) |
 | Lifecycle rules | expire objects, remove old versions, abort unfinished multipart uploads; carried out by the node that leads, every `--lifecycle-interval` |
 | Server-side encryption | always on. SSE-S3 (the default, and `AES256`), SSE-KMS (`aws:kms`, with an encryption context) and SSE-C (a key of the customer's, over TLS and in signed headers only) |
@@ -866,17 +878,19 @@ What the API has, under `/api/v1` (the contract is
 | `/cluster`, `/cluster/maintenance` | nodes, drives and erasure sets; healing, scrubbing and collection |
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
-| `/targets`, `/targets/{name}`, `/targets/{name}/status` | define, read, list and delete the targets things are sent to (webhooks and NATS servers; other deployments for replication, to come); a secret and the path of an endpoint are written and never read back, a webhook's signing key is shown once; how delivery to each stands, from the node that leads ([Notifications](#notifications)) |
+| `/targets`, `/targets/{name}`, `/targets/{name}/status` | define, read, list and delete the targets things are sent to (webhooks and NATS servers; other deployments, of kind `s3`, for replication); a secret and the path of an endpoint are written and never read back, a webhook's signing key is shown once; how delivery to each stands, from the node that leads ([Notifications](#notifications), [Replication between sites](#replication-between-sites)) |
 | `/buckets/{bucket}/notifications` | a bucket's notification rules: read, set (in order) and remove - the configuration S3's `?notification` reads and writes |
-| `/buckets/{bucket}/replication`, `/buckets/{bucket}/replica` | milestone 8: a bucket's replication configuration (read, set, removed - the document S3's `?replication` reads and writes) and whether it is a replica of another deployment |
-| `/buckets/{bucket}/replication/resync` | milestone 8: starts the resync of a bucket again from its first version (`admin:ResyncReplication`, which only `cluster-admin` holds; `202` with the record), walked by the node that leads |
-| `/buckets/{bucket}/replication/status` | milestone 8: in the contract, and answers `501` - not built yet |
+| `/buckets/{bucket}/replication`, `/buckets/{bucket}/replica` | a bucket's replication configuration (read, set, removed - the document S3's `?replication` reads and writes) and whether it is a replica of another deployment: made one, or promoted ([Replication between sites](#replication-between-sites)) |
+| `/buckets/{bucket}/replication/resync` | starts the resync of a bucket, from its first version (`admin:ResyncReplication`, which only `cluster-admin` holds; `202` with the record), walked by the node that leads |
+| `/buckets/{bucket}/replication/status` | how far a bucket's replication has come: what waits and what failed, the state of its target and the class of its last failure, what was lost, and the resync (`admin:GetReplicationStatus`: `cluster-admin`, `auditor`) |
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
 API keys), **Groups**, **Roles**, **Policies**, **Tags** (the catalogue of tags),
 **Targets** (where notifications and the audit trail are sent, and how delivery to each
-stands), **Cluster**, **Settings** and **Audit log**. It talks only to the management API and decides nothing itself. The version and
+stands), **Cluster**, **Settings** and **Audit log**; a bucket's replication, resync and
+replica mode are in its details, and the object browser shows the replication status of
+an object's current version (`replication_status` of `/object/metadata`). It talks only to the management API and decides nothing itself. The version and
 build it runs are shown under the logo.
 
 - **Uploads go on across screens.** Files dropped on a bucket are sent while you use
@@ -1239,6 +1253,282 @@ production verifies in its own process, as the Go above does:
 The timestamp is that of the attempt, so a message that waited an hour for its receiver
 is not refused for its age; the ID and the type are not signed, but the body carries the
 `sequencer` (or, of the audit trail, the `sequence`), which is.
+
+### Replication between sites
+
+The versions of a bucket at one site can be copied to a bucket at another
+([ADR-0026](docs/adr/0026-replication-between-sites.md)). The two sites are two
+deployments, each with its own cluster, CA, key service, users and keys - never one
+metadata group stretched across a WAN. Replication is **asynchronous** and
+**active-passive**: the bucket at the other site (the replica) takes versions from its
+source and from nobody else until it is promoted. Each version keeps its version ID, its
+time and its order; versions may arrive in any order and are put in the order of the
+source.
+
+Below, site A is the source and site B the other site. `$A_KEY` and `$B_KEY` stand for
+`<access key ID>:<secret key>` of a `cluster-admin` at each site; the addresses are
+placeholders. Both sites must run this release on every node (metadata level 5): until
+then every call below answers `503`.
+
+**Site A must reach site B's S3 port, 9000,** at a name in site B's certificate - a
+node, or a balancer that passes TLS through and caps no request below 5 GiB
+([load balancing](docs/load-balancing.md#another-deployment-that-replicates-through-the-balancer)).
+Site A connects to private addresses as it is; a loopback or link-local address needs
+`--egress-allow` on site A's nodes, and on Kubernetes the chart's NetworkPolicy must let
+site A's pods reach it (`networkPolicy.egressTo`). Site B never connects to site A.
+
+#### 1. At site B: the replica bucket
+
+The replica keeps versions. Give it Object Lock too, or a version that carries a
+retention or a legal hold holds the whole target with the class `object_lock`:
+
+```sh
+aws --endpoint-url https://s3.site-b.example.test:9000 --ca-bundle site-b-ca.pem \
+    s3api create-bucket --bucket photos-replica --object-lock-enabled-for-bucket
+```
+
+(Without Object Lock: `create-bucket`, then `put-bucket-versioning` with
+`Status=Enabled`.) Read site A's deployment ID - `deployment_id` in the answer to
+`GET /api/v1/cluster` at site A - and make the bucket its replica:
+
+```sh
+curl --cacert site-b-ca.pem -X PUT -H "Authorization: Bearer $B_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: photos-replica-mode-1' \
+     -d '{"source":"<deployment_id of site A>"}' \
+     https://admin.site-b.example.test:9001/api/v1/buckets/photos-replica/replica
+```
+
+It answers `{"replica":true,"source":"..."}`. Only `cluster-admin` may
+(`admin:PutBucketReplicaMode`). The bucket must keep versions, have no replication
+configuration of its own and hold **no version at all** (`409 BucketNotEmpty`
+otherwise): a bucket becomes a replica before anything is put into it. From then on it
+refuses every new version or delete marker that does not come from site A - the root
+identity's too - with `409 InvalidBucketState`. It is read as before, and removing a
+version for good is judged by site B's own permissions, Object Lock and lifecycle rules.
+Site B's own users, with the actions for it, can still change the tags, retention and
+legal hold of a version there; site A's next later change of that version sets them
+again as site A has them (a retention there is never shortened).
+
+#### 2. At site B: the key site A sends with
+
+Site A sends with an API key **of site B** that may replicate into that bucket and do
+nothing else. This is the whole policy - the replicate actions and those of the later
+changes of a version, on the bucket and its objects:
+
+```sh
+POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+ "Action":["s3:ReplicateObject","s3:ReplicateDelete","s3:PutObjectTagging",
+           "s3:DeleteObjectTagging","s3:PutObjectRetention","s3:PutObjectLegalHold"],
+ "Resource":["arn:aws:s3:::photos-replica","arn:aws:s3:::photos-replica/*"]}]}'
+```
+
+Give it to a user of its own through a role, and give the user's key the same document
+as its inline policy, so that the key stays this narrow if the user is given more later
+(`TestSiteReplication` does exactly this). In bash or zsh:
+
+```sh
+B=https://admin.site-b.example.test:9001/api/v1
+b() { curl --cacert site-b-ca.pem -H "Authorization: Bearer $B_KEY" \
+           -H 'Content-Type: application/json' -H "Idempotency-Key: $1" "${@:2}"; }
+b replicate-policy-1 -d "{\"name\":\"replicate-from-a\",\"document\":$POLICY}" "$B/policies"
+b replicate-role-1   -d '{"name":"replicator","policies":["replicate-from-a"]}' "$B/roles"
+b replicate-user-1   -d '{"name":"site-a","roles":["replicator"]}' "$B/users"
+b replicate-key-1    -d "{\"description\":\"site A replicates\",\"inline_policy\":$POLICY}" \
+                     "$B/users/site-a/keys"
+```
+
+The last answer holds the key's `access_key_id` and its `secret_key`, shown once. With
+that key, site A can add versions and delete markers to the replica, change the tags and
+extend the locks of versions there, ask whether a version is there and its entity tag,
+and list and abort the uploads it began. It cannot read an object, list a bucket, remove
+a version, shorten a compliance retention, write to any other bucket or call site B's
+management API. `s3:ReplicateObject` and `s3:ReplicateDelete` are granted only by a
+statement that names them: no wildcard grants them - not `s3:*`, so neither
+`cluster-admin` nor `bucket-admin` holds them - and no bucket policy can. (The root
+identity does hold them: [threat model](docs/threat-model.md), question 52.)
+
+#### 3. At site A: the target
+
+A target of kind `s3` is site B, as site A's administrators name it
+([Notifications](#notifications) says what a target is):
+
+```sh
+curl --cacert site-a-ca.pem -X PUT -H "Authorization: Bearer $A_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: target-site-b-1' \
+     -d '{"kind":"s3","endpoint":"https://s3.site-b.example.test:9000",
+          "region":"us-east-1","ca_pem":"<PEM of the CA of site B, newlines as \n>",
+          "buckets":["photos"],
+          "auth":{"mode":"sigv4","id":"<access_key_id>","secret":"<secret_key>"}}' \
+     https://admin.site-a.example.test:9001/api/v1/targets/site-b
+```
+
+- `endpoint` is `https://`, the host and port of site B's S3 API, and no path.
+- `region` is site B's `--region` (`us-east-1` unless it was set): requests are signed
+  for it, and another one is refused there (class `auth`).
+- `ca_pem` is what site B's S3 certificate chains to; leave it out for a public CA.
+- `buckets` are the buckets of site A that may be sent through the target.
+- The secret is sealed through site A's key service and never shown again. Defining a
+  target is `admin:PutTarget` (`cluster-admin`).
+
+#### 4. At site A: the configuration
+
+```sh
+curl --cacert site-a-ca.pem -X PUT -H "Authorization: Bearer $A_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: photos-replication-1' \
+     -d '{"target":"site-b","destination_bucket":"photos-replica",
+          "rules":[{"id":"everything","enabled":true,"priority":1,"delete_markers":true}]}' \
+     https://admin.site-a.example.test:9001/api/v1/buckets/photos/replication
+```
+
+Each rule gives `id`, `enabled`, `priority` and `delete_markers`, and may give a
+`prefix`; of the enabled rules that match a key, the one of the greatest priority
+decides. The bucket must keep versions (`400` otherwise; versioning cannot be suspended
+afterwards), must not be a replica, and must be one the target admits. S3's
+`PutBucketReplication` sets the same: the role `arn:cactusfs:replication:::site-b`, the
+destination `arn:aws:s3:::photos-replica` ([The S3 API](#the-s3-api)). Setting it is
+`s3:PutReplicationConfiguration`, which a `bucket-admin` holds - for a target an
+administrator opened to the bucket, and no other. Make the bucket at site B a replica
+first: until it is, the target stalls with `not_replica`.
+
+From then on, every new version a rule matches is sent by the node that leads site A's
+metadata group: `replication-workers` (4) at a time, never two of one object at once,
+within `replication-rate-mib` when it is set. Sent: new versions with their content
+type, user metadata, tags, retention and legal hold; later changes of their tags,
+retention and legal hold; delete markers that a caller made, when the rule says
+`delete_markers`. **Not sent:** a version removed for good (a source that was taken over
+cannot purge the replica), a delete marker of a lifecycle rule, a version under a
+customer's key (SSE-C: `FAILED`), a version that is itself a replica, the bucket's
+configuration and policy, users and keys. An SSE-KMS version arrives encrypted under
+site B's default. Who uploaded is not carried: site B records its key as the uploader.
+
+#### 5. What was there before: a resync
+
+Versions that were in the bucket before the configuration are sent by a resync, and so
+are the changes a target lost while it was out of reach for too long:
+
+```sh
+curl --cacert site-a-ca.pem -X POST -H "Authorization: Bearer $A_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: photos-resync-1' \
+     https://admin.site-a.example.test:9001/api/v1/buckets/photos/replication/resync
+```
+
+It answers `202` with the record of the resync; it has no body, and must still say
+`Content-Type: application/json`. Only `cluster-admin` may (`admin:ResyncReplication`):
+a resync puts its load on the link and on site B. The node that leads walks every version
+of the bucket, 500 at a time, asks site B for each and sends what it lacks; it goes on
+across a change of leader from where it had come, and asking again starts it from the
+beginning. A version that is `FAILED` stays so: a resync neither sends it nor changes its
+status.
+
+#### Watching it
+
+- `GET /api/v1/buckets/photos/replication/status` (`cluster-admin`, `auditor`):
+  `pending` and `failed` versions of the bucket (exact, from its usage record),
+  `target_state` (`ok`, `retrying`, `stalled`, or `unsupported` when the node that leads
+  cannot be asked) and `last_error_class` of the target,
+  `oldest_pending_at`, `lost` and `resync_needed`, and the resync (`state` `running` or
+  `done`, `scanned`, `sent`). Any node answers. The console shows the same in the
+  bucket's details, with **Resync**.
+- Each version says where it stands: `x-amz-replication-status` on a HEAD or GET of it
+  (`PENDING`, `COMPLETED`, `FAILED`; `REPLICA` at site B), and `replication_status` in
+  the console's object browser for the current version.
+- **A stalled target** has a class somebody has to act on: `auth` (site B refuses the
+  key - deleted, expired, another region), `no_such_bucket`, `versioning`,
+  `not_replica` (the bucket there is not the replica of site A, was promoted, or runs a
+  release before replication), `quota` (site B's quota is full), `object_lock` (a lock
+  for a bucket there without Object Lock), `tls`, `redirect` (site B, or what is in front
+  of it, answered with a redirect, which is never followed), `egress_refused` (an
+  address site A does not connect to). It holds every bucket sent through it and loses nothing, and is
+  tried again with pauses that grow to five minutes. `timeout`, `connect` and `server`
+  are tried again too, and show `stalled` after ten failures in a row.
+- **`FAILED` is final**: a version under a customer's key (`sse_c`), or one site B
+  refuses for itself (`rejected`: too large, a key too long, other bytes under its ID).
+- **Alerts** ([`deploy/observability`](deploy/observability/README.md)):
+  `CactusFSReplicationLag` - a change has waited more than 15 minutes to be sent;
+  `CactusFSReplicationResyncHeld` - a resync held at a version for 15 minutes;
+  `CactusFSOutboxDropping` - changes are dropped at the bound of the outbox, so a target
+  loses them (`lost` rises, `resync_needed` turns true). **When `resync_needed` is true,
+  ask for a resync** of one bucket sent to that target: once it ends, the node that leads
+  resyncs every other bucket sent there by itself, and clears the mark when all are
+  through.
+- Metrics, among them: `cactusfs_replication_lag_seconds`, `cactusfs_replication_lag_entries`,
+  `cactusfs_replication_versions_total{result}`, `cactusfs_replication_bytes_total`,
+  `cactusfs_replication_resyncs{state}`, `cactusfs_replication_resync_events_total{event}`;
+  none names a bucket or a target.
+
+#### Failing over: promoting the replica
+
+**A planned switchover**, while site A still runs, goes in this order, so that nothing
+written at site A is left behind:
+
+1. Stop writes to site A's bucket (its clients, or a bucket policy that denies them).
+2. At site A, wait until the bucket's status says `pending` 0 and `resync_needed`
+   false - and, if the bucket held versions before its configuration was put, until a
+   resync says `done`. `pending` 0 alone says nothing of versions from before the
+   configuration, or of changes the target lost.
+3. Note `failed`: those versions - under a customer's key, or refused by site B for
+   themselves - are not at site B and will not be.
+4. Promote the replica at site B (below).
+5. Remove the configuration at site A (`DELETE /api/v1/buckets/photos/replication`).
+6. Move the clients to site B.
+
+**When site A is lost**, or cannot be asked, promote the replica at site B at once:
+
+```sh
+curl --cacert site-b-ca.pem -X PUT -H "Authorization: Bearer $B_KEY" \
+     -H 'Content-Type: application/json' -H 'Idempotency-Key: photos-replica-promote-1' \
+     -d '{"source":""}' \
+     https://admin.site-b.example.test:9001/api/v1/buckets/photos-replica/replica
+```
+
+(In the console: **Promote** in the bucket's details, after typing the bucket's name.)
+From then on the bucket takes writes, and nothing more from site A; nothing is sent
+back. That is the whole of failing over. What follows is the operator's:
+
+- **What site A had not sent is not at site B.** Replication is asynchronous; read
+  `pending` and `oldest_pending_at` at site A first, while it can still be asked.
+- **Clients need credentials of site B**, and site B's endpoint: users and keys are not
+  replicated. Version IDs are the same at both sites, so a client keeps the IDs it had.
+- **Stop writes to site A's bucket** if site A comes back, before it takes any: a source
+  and a promoted replica that both take writes part for good, and nothing reconciles
+  them.
+- **Remove the configuration at site A**, there too
+  (`DELETE /api/v1/buckets/photos/replication`): the bucket at site B is no longer its
+  replica, so the target stalls with `not_replica` - and holds every other bucket sent
+  through it - until then. The versions matched and not sent stay `PENDING` at site A.
+- **It cannot be undone.** The promoted bucket holds versions, and a bucket that holds a
+  version can never be made a replica again.
+
+#### What fail-back is not
+
+There is no fail-back: nothing switches back by itself, a promotion sends nothing back,
+and the old source's bucket cannot become a replica of the new source (it holds
+versions, whose order there would be wrong). Going back to site A is a new replication
+the other way, into an **empty** bucket, made by hand:
+
+1. At site A, make a bucket that keeps versions (with Object Lock if site B's versions
+   carry locks) and holds none the replica of site B's deployment ID (step 1, the sites
+   swapped). The old bucket can be that bucket only once it holds no version at all and
+   its replication configuration is removed - which a version under compliance retention
+   prevents; otherwise make a new one.
+2. At site A, a key for site B, with the policy of step 2 on the new bucket.
+3. At site B, a target to site A and a configuration of the promoted bucket that names
+   the new bucket (steps 3 and 4), then a resync (step 5).
+4. **Only what site B wrote itself crosses back.** The versions site B took from site A
+   before its promotion stay `REPLICA` there, and a replica is never sent on. They are
+   still in site A's old bucket, where they were made. If site A was lost they exist only
+   at site B, and no replication carries them: writing them again (a copy within the
+   bucket) sends them, with new version IDs and times
+   ([ADR-0026](docs/adr/0026-replication-between-sites.md), open 18). **When site A's
+   old bucket is gone, make those copies before step 5**, or that history is not at
+   site A when it takes over.
+5. When site B's status says `pending` 0, `resync_needed` false and the resync `done`,
+   stop writes at site B, let `pending` reach 0 again (with `resync_needed` still
+   false), promote the bucket at site A, remove the configuration at site B and move
+   the clients back.
+
+To replicate from site A to site B again afterwards, site B needs a new, empty replica
+bucket in turn: every round trip copies the data again.
 
 ## Users, keys and the audit trail
 

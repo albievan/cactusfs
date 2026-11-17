@@ -7,14 +7,14 @@ security first. This document describes the design. `CLAUDE.md` holds the rules,
 expensive to reverse.
 
 Sections marked **(implemented)** describe code that exists. What does not exist yet is
-said where it belongs, with the milestone or goal of `PLAN.md` that holds it:
-replication between sites (milestone 8C; entry schema 5, the domain, the ports, the
-replicated store, the contracts, outbound connections, targets and the delivery worker
-it needs exist, and so do the destination - replica mode, replica requests and the
-questions a source asks, PLAN 8.1.1 and 8.1.1a, "Replica requests" in section 6 - and
-the client of another site, PLAN 8.1.2, and the replicator with the later changes of a version, PLAN
-8.1.4 and 8.1.5, and the resync, PLAN 8.1.6, through their gate; the status and telemetry of a
-bucket's replication, PLAN 8.1.7, written and not yet through its gate). Bucket notifications (ADR-0025) are
+said where it belongs, with the milestone or goal of `PLAN.md` that holds it.
+Replication between sites (ADR-0026) is implemented end to end - the destination's
+replica mode, replica requests and the questions a source asks, the client of another
+site, the replication configuration, the replicator with the later changes of a version,
+the resync, the status of a bucket's replication with its metrics and alerts, and the
+console (PLAN 8C; "Replication between sites" and "Delivery to targets" in section 5,
+"Replica requests" and "Replication configuration" in section 6); no published release
+has it yet. Bucket notifications (ADR-0025) are
 implemented end to end - the webhook and NATS publishers, the notifier that hands them
 the outbox, the export of the audit trail through them, S3's notification configuration,
 the management API and the console's Targets screen and a bucket's rules (PLAN 8B;
@@ -95,10 +95,10 @@ Conventions that follow from it:
 | Package | Purpose |
 |---|---|
 | `internal/domain` | typed sentinel errors, and their names on the wire between nodes |
-| `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018), the usage record and the rule of a quota (`Usage.Admits`; ADR-0023, 0024); notification and replication documents (ADR-0025, 0026): rules only, used by no use case yet |
+| `internal/domain/bucket` | bucket naming rules, bucket configuration (CORS, tags), lifecycle rules, the record of a bucket's latest use (ADR-0019); sub-buckets and tag rules (ADR-0017, 0018), the usage record and the rule of a quota (`Usage.Admits`; ADR-0023, 0024); notification and replication documents and what they match (`Match`, `Replicates`; ADR-0025, 0026), applied by the state machine and kept by `app.NotificationService` and `app.ReplicationService`; the record of a resync |
 | `internal/domain/object` | IDs, keys, version metadata, ranges, listing rules, conditions, tags, Object Lock, multipart, SSE, the record of who read an object (ADR-0016), the streaming AEAD (ADR-0002) |
 | `internal/domain/iam` | principals (a locked console session among them, ADR-0027), actions, the policy language and the decision, bucket policies, users, groups, roles, API keys, built-in roles, sealed secrets |
-| `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure and the pause between attempts (ADR-0023, 0025: used by the metadata store, the use case of targets and the delivery worker) |
+| `internal/domain/delivery` | targets of delivery and their endpoints, the items of the outbox, classes of failure and the pause between attempts (ADR-0023, 0025, 0026: used by the metadata store, the use case of targets, the delivery worker, the notifier and the replicator) |
 | `internal/domain/audit` | audit records, their hash chain and their exported line (`Record.Line`, `ParseLine`) |
 | `internal/domain/cluster` | readiness; nodes, roles and labels; drive topology: planning across nodes, slots, reconciliation, replacement; a node's settings and their redaction (ADR-0022) |
 | `internal/domain/erasure` | erasure parameters, quorum, set layout, placement, stripe geometry |
@@ -107,9 +107,9 @@ Conventions that follow from it:
 | `internal/domain/preview/previewtest` | the hostile files of the preview's tests, made by code, for the domain's, the use case's and the API's suites (a depguard rule keeps it out of the binary) |
 | `internal/domain/release` | versions (semantic versioning 2.0), releases and their files, the channels, what may be installed (`Allowed`, `NextStep`), the signed lists `SHA256SUMS` and `digests.txt` read strictly, `Verified` - the one thing an upgrader takes - and the progress of an upgrade (ADR-0029) |
 | `internal/domain/tagging` | the catalogue of tag definitions (ADR-0018), kept by `app.TagDefinitionService` |
-| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore` (kept by `app.UsageCounter`, read by `app.QuotaService` and the object use cases), `TargetStore` (of `app.TargetService`), `Outbox` (read by `app.DeliveryWorker`) and `ReplicationStore` (of `app.ReplicationService`), implemented by the metadata store; `DeliveryStatusReader`, of milestone 8, implemented by nothing but the fakes of `porttest` yet; `SiteClient`, implemented by `internal/adapters/s3client` and called by no use case yet |
+| `internal/ports` | `KMS`, `ShardStore` (`ShardWriter`, `ShardReader`), `ErasureCodec`, `BucketStore`, `BucketPolicies`, `ObjectIndex`, `UploadStore`, `ObjectAccessStore`, `BucketActivityStore`, `RootCredentialStore`, `TopologyStore`, `NodeRegistry`, `ClusterView`, `DriveSource`, `NodeSettingsReader`, `LocalSettings` (a function), `EventPublisher`, `IAMStore`, `AuditLog`, `SessionStore`, `IdempotencyStore`, `PasswordHasher`, `IdentityProvider`, `Authorizer`, `Clock`, `ReadinessCheck`, `ReleaseSource`, `ReleaseVerifier`, `Upgrader` (ADR-0029); `SubBucketStore` and `TagDefinitionStore` (read by the object use cases and kept by `app.TagDefinitionService`), and of milestone 8 `BucketUsageStore` (kept by `app.UsageCounter`, read by `app.QuotaService` and the object use cases), `TargetStore` (of `app.TargetService`), `Outbox` (read by `app.DeliveryWorker`) and `ReplicationStore` (of `app.ReplicationService` and `app.ResyncWorker`), implemented by the metadata store; `DeliveryStatusReader` (implemented by `app.DeliveryWorker` on the node that leads and, on the others, by asking it over node RPC - `leaderDelivery` in `cmd/cactusfs`; read by `app.TargetService` and `app.ReplicationService`); `SiteClient` (implemented by `internal/adapters/s3client`, called by `app.Replicator`) |
 | `internal/ports/porttest` | in-memory fakes and the contract tests every implementation runs |
-| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; quotas and the usage of buckets (`QuotaService`, `UsageCounter`, ADR-0024); targets (`TargetService`); checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
+| `internal/app` | bucket, object (previews included), multipart, lifecycle, search, settings and identity use cases; quotas and the usage of buckets (`QuotaService`, `UsageCounter`, ADR-0024); targets (`TargetService`); delivery to targets (`DeliveryWorker`) and the export of the audit trail (`AuditExporter`); bucket notifications (`NotificationService`, `Notifier`, ADR-0025); replication between sites (`ReplicationService`, `Replicator`, `ResyncWorker`, ADR-0026); checking for releases and installing one (`UpdateService`, ADR-0029); sessions and idempotency; who read what; striped storage, healing, scrubbing, garbage collection, topology; the authorizer; the audit trail; health |
 | `internal/buildinfo` | the version, build and commit of the binary, and whether it was built as the image's (section 8) |
 | `internal/tools` | tools of `make` targets, built with the tag `tools`: `trustedroot` fetches Sigstore's trusted root through its TUF client (`make trusted-root`) |
 | `internal/adapters/s3api` | in: S3 API (SigV4, XML) |
@@ -772,7 +772,47 @@ four at a time.
   against it, "not set", or "not counted yet" - and an editor in GB (10^9 bytes) for
   whoever may read it; the server decides every change.
 
-### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5; the audit trail through a target, PLAN 8.2.8; the replicator, ADR-0026, PLAN 8.1.4)**
+### Replication between sites **(implemented, ADR-0026; PLAN 8C)**
+
+- **Two deployments, one writer.** A site is a deployment of its own - cluster, CA, KMS,
+  users - and two sites are linked by replication of buckets, never by one metadata
+  group across a WAN. A bucket is written by its clients or by exactly one source: a
+  replica bucket (`replica_from`, `bucket.replica.put`, `admin:PutBucketReplicaMode`)
+  takes versions and delete markers only from requests that carry `replica` from that
+  source, and the state refuses every other new version or delete marker in apply
+  (`409 InvalidBucketState`), the root identity's too. It becomes a replica only while
+  it holds no version. The destination's own users may still change the tags, retention
+  and legal hold of a version there, and the source's next later change of that version
+  sets them again as the source has them (a retention is never shortened there). No two
+  writers make versions, so there are no conflicts to resolve.
+- **Order by the source's sequence.** A replica version keeps its source's version ID,
+  time and sequence, and is current exactly when no version of its key has a greater
+  sequence, so arrivals in any order give the same state, byte for byte
+  (`TestAnyOrderOfArrivalGivesTheSameVersions`); a copy sent twice is refused the second
+  time, which the source takes as "there".
+- **The source** appends a row for `r:<target>` as it commits a version a rule of the
+  bucket's configuration matches (status `PENDING`), and the node that leads sends it
+  through the delivery worker's replicator as an S3 client of the other site (below,
+  "Delivery to targets"); results come back through `outbox.ack` (`COMPLETED`,
+  `FAILED`), by row or, for a resync, by version. `pending` and `failed` of a bucket are
+  counted in its usage record by every member.
+- **What crosses**: new versions with their metadata, tags and locks, later changes of
+  tags, retention and legal hold, and a caller's delete markers when a rule says so.
+  **Never**: a version removed for good, a lifecycle rule's marker, an SSE-C version
+  (`FAILED`), a replica (one hop - also after its bucket's promotion, ADR-0026 open 18),
+  bucket configuration, policies, identities. No key crosses: the source decrypts inside
+  TLS, the destination encrypts under its own keys.
+- **Failing over is a promotion** (`PUT /buckets/{bucket}/replica` with an empty
+  source): the bucket takes writes again and nothing more from its source. **Fail-back
+  is by hand**, into a new, empty replica bucket at the old site, and carries only what
+  the promoted bucket wrote itself (README, "What fail-back is not").
+- Where each part is: the destination's requests and questions, and the configuration,
+  in section 6 ("Replica requests", "Replication configuration"); the replicator, the
+  resync and the status of a bucket's replication under "Delivery to targets" below; the
+  console in section 6 ("Console"); the threats in the threat model ("Replication
+  between sites").
+
+### Delivery to targets **(implemented: the worker and its status, ADR-0023, PLAN 8.0.14; the notifier and the publishers of targets, ADR-0025, PLAN 8.2.5; the audit trail through a target, PLAN 8.2.8; the replicator, its resync and the status of replication, ADR-0026, PLAN 8.1.4 to 8.1.7)**
 
 - **One node delivers.** `app.DeliveryWorker` runs on every node and works on the one that
   leads the metadata group (it asks every second); when the node stops leading it stops
@@ -1027,7 +1067,7 @@ four at a time.
   written before the node closes. What was dropped before a node came to lead was the
   former leader's to tell, and the count is in every record.
 
-## 6. APIs **(implemented: the S3 API with the depth of milestone 6 and bucket notifications, the management API, node RPC and events with NATS and webhook delivery to targets; replication is milestone 8C - replica requests, the replication configuration, the replicator, later changes and the resync are there, the status of a bucket's replication is not yet)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6, bucket notifications and replication, the management API, node RPC and events with NATS and webhook delivery to targets)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -1141,7 +1181,9 @@ four at a time.
   `/session/unlock`; `/buckets`,
   `/buckets/{bucket}` and `/buckets/{bucket}/usage` (with, when asked, who created each
   bucket, what its policy is and who used it last); `/buckets/{bucket}/objects` (list),
-  `/buckets/{bucket}/object` (upload, download, delete), `/buckets/{bucket}/object/metadata`,
+  `/buckets/{bucket}/object` (upload, download, delete), `/buckets/{bucket}/object/metadata`
+  (with the replication status of the current version, `replication_status`, when a rule
+  is about it; PLAN 8.1.10, ADR-0026 open 17),
   `/buckets/{bucket}/object/access` (who uploaded and who downloaded) and
   `/buckets/{bucket}/object/preview` (an object's bytes for the console to show, below); `/search`;
   `/users`, `/users/{name}`, `/users/{name}/keys` and `/keys/{access_key_id}`; `/groups`,
@@ -1407,7 +1449,17 @@ four at a time.
   notification rules too (`web/src/screens/BucketNotifications.tsx`): listed in order,
   added and removed by sending the whole list (`PUT`), all removed by `DELETE`. Which
   target a bucket may name, and who may do any of it, is the API's to say: a 403 to a
-  list is a line, to a change the API's words.
+  list is a line, to a change the API's words. A bucket's details hold its replication
+  too (PLAN 8.1.10; `web/src/screens/BucketReplication.tsx`): the target, the bucket
+  there and the rules as the API keeps them, and the status - the target's state with
+  the console's words for its class, pending (or "not counted yet" while the bucket's
+  usage is not exact), failed, lost, the stored record of the resync and
+  `resync_needed` - with **Resync** behind a question; and its replica mode with
+  **Promote**, enabled only once the bucket's name is typed exactly, in a dialog that
+  says what promotion does. The configuration and making a bucket a replica are shown,
+  not edited. The object browser shows the replication status of an object's current
+  version, from `replication_status` of `/object/metadata`; the Targets screen names
+  the classes of another deployment.
 - **Console sessions (implemented, ADR-0006, 0007, 0027).** A session is a record in
   the replicated `sessions` store under the SHA-256 of its token, with its user, the
   hash of its CSRF token, `created_at` and `expires_at`; the cookie is
@@ -1557,6 +1609,15 @@ The full analysis is in `docs/threat-model.md`. In brief:
   begins; each deletion is still judged by the authorizer, so that is a confirmation,
   not a permission (threat model, open question 32).
 - Versioning and Object Lock for ransomware resistance **(implemented, ADR-0008, 0009)**.
+- Replication between sites **(implemented, ADR-0026)**: the source is an S3 client of
+  the other site over verified TLS, through the egress client, with a key of that site
+  that holds `s3:ReplicateObject` and `s3:ReplicateDelete` - granted by no wildcard and
+  no bucket policy - and the actions of later changes, and can read, list and remove
+  nothing; every replica header and every payload is signed; a replica bucket refuses
+  every other new version or delete marker in apply (its own users may still change
+  tags, retention and legal hold, which the source's next later change sets again); a version removed for good is never replicated, so a
+  source that was taken over cannot purge its copy; no key or wrapped key crosses (the
+  source decrypts inside TLS, the destination encrypts under its own keys).
 - Air-gap safe: no runtime call to the internet, no telemetry, no CDN asset. The one
   call a deployment can be told to make for itself - asking an update source for
   releases - is off until an operator sets `update-source`.

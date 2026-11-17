@@ -9,8 +9,9 @@ control.
 where one test or gate proves it, the row names it; `implemented, with a limit` and
 `accepted risk` say what the control does not do; `written, not yet run` is a control
 of the release workflow, which cannot run before the first release; `not mitigated`,
-`not planned yet` and `M8` (milestone 8 of `PLAN.md`: begun, with its metadata schema
-and contracts, and of its features quotas and bucket notifications) mean that nothing answers the threat today;
+`not planned yet` and `M8` (milestone 8 of `PLAN.md`: begun, with its metadata schema,
+its contracts and its three features - quotas, bucket notifications and replication
+between sites - built, its verification (8.9) to come) mean that nothing answers the threat today;
 `rule` is a rule of the project that no gate can prove. The rows of ADR-0029 (updates
 and upgrades, PLAN Goal P) were drafted before their controls were built; they are built
 now (P.1 to P.11) and say `implemented` with their tests; the Kubernetes mode is tried
@@ -26,7 +27,8 @@ browser and on k3s (`make test-k8s`), the roll-out to come (PLAN P.12); mileston
 entry schema 5 is in the metadata, quotas on buckets are built (PLAN 8A, 2026-11-15;
 ADR-0024) and in no published release yet, bucket notifications and the export of the
 audit trail through a target are built (PLAN 8B, 2026-11-16; ADR-0025) and in no
-published release yet, and replication answers `501`. CactusFS is not offered as ready for production, and no review of its security by
+published release yet, and replication between sites is built (PLAN 8C, 2026-11-17;
+ADR-0026) and in no published release yet. CactusFS is not offered as ready for production, and no review of its security by
 a party outside the project is recorded in this repository. Do not keep data in it that
 you cannot lose. Since then the record of who uploaded and read an object (ADR-0016)
 and search are built and in 0.7.0; sub-buckets (ADR-0017) and tag rules with a catalogue
@@ -71,6 +73,9 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 6. Source repository ↔ built artefact.
 7. Process ↔ the update source an operator named, and, in the Kubernetes upgrade mode,
    the Kubernetes API (ADR-0029). Both off by default.
+8. Site ↔ site: the node that leads one deployment, as an S3 client, ↔ the S3 API
+   (`9000`) of another deployment it replicates to (ADR-0026). Each side has its own CA,
+   KMS and identities; all the receiving side knows of the sender is a key it issued.
 
 ## 4. Threats and controls
 
@@ -131,7 +136,7 @@ physical side channels; denial of service by volumetric flooding (left to the ne
 | A node started with the wrong key | A missing key file on an existing deployment, a wrong passphrase or another deployment's key stops the node | **implemented** |
 | Theft of the metadata store reveals API secrets | Secrets are envelope-encrypted through the KMS and shown once; console passwords are Argon2id hashes; sessions are stored as hashes of their tokens | **implemented** |
 | The KMS key is on the nodes | `--kms vault`: the key stays in Vault Transit; wrapped data keys are bound to their owner by associated data, and a key type that cannot bind is refused at start; HTTPS only; the token is read from a file and never logged | **implemented**; token authentication only, renewal is the platform's job |
-| Bucket names, keys or object metadata read from the metadata store | Not encrypted: `state.db` and the Raft log hold names, sizes and user metadata in the clear - and so the tags of buckets and objects, tag rules (with the names of the sub-buckets they confine), the catalogue of tags (keys, descriptions, values) and sub-buckets' policies; and, of entry schema 5, each bucket's usage record (how many objects and versions, how many bytes stored and in uploads, where a count stands) and its quota | **not mitigated** — see open question 6. No metric names a bucket; a drift is logged with the bucket's name, and a change of a quota is an event of its bucket (`cactusfs.bucket.quota-changed.v1`) |
+| Bucket names, keys or object metadata read from the metadata store | Not encrypted: `state.db` and the Raft log hold names, sizes and user metadata in the clear - and so the tags of buckets and objects, tag rules (with the names of the sub-buckets they confine), the catalogue of tags (keys, descriptions, values) and sub-buckets' policies; and, of entry schema 5, each bucket's usage record (how many objects and versions, how many bytes stored and in uploads, where a count stands, how many versions wait for replication or failed it) and its quota, a bucket's replication configuration (its target and the bucket there) and replica mode (the deployment ID of its source), the replication status of every version and the record of a resync | **not mitigated** — see open question 6. No metric names a bucket; a drift is logged with the bucket's name, and a change of a quota is an event of its bucket (`cactusfs.bucket.quota-changed.v1`) |
 | Secrets in logs | Secrets, keys, tokens and object contents are never logged; secrets have no command-line flag | **implemented**, tested for the root secret and the KMS passphrase |
 | Internal state disclosed through errors | Integrity, key and storage failures all answer `InternalError`; the cause is logged, not returned | **implemented** |
 | Metrics disclose tenants | `/metrics` is authenticated and authorized (`admin:GetMetrics`); no label holds a bucket, key or access key | **implemented** |
@@ -295,6 +300,35 @@ or a token.
 | A target that never answers fills the metadata | The outbox has a bound; at it the oldest rows are dropped and counted against their target (`lost`, `cactusfs_outbox_dropped_total`), an audit record `system/outbox` says so at most once a minute, and `CactusFSOutboxDropping` fires; `CactusFSDeliveryStalled` fires when a target's oldest row has waited 15 minutes | **implemented, with a limit** (PLAN 8.2.7): a notification that was dropped is never sent - at least once holds only while the outbox is under its bound |
 | A mistyped or expired secret makes every message pass undelivered | A webhook's 401 or 403 is the class `auth`, not `rejected`: nothing is passed, the target is `stalled` until the credential is put right, and `CactusFSDeliveryStalled` fires | **implemented** (ADR-0025, ruled on 2026-10-12); a 404 or 410 is `rejected` (question 46) |
 | A notification tells a receiver who made a change | `userIdentity.principalId` is sent as S3 sends it; no address of a client is (the metadata holds none) | **accepted risk** (ADR-0025, open point 6): there is no switch to leave the names of actors out |
+
+### Replication between sites (ADR-0026)
+
+The versions of a bucket are copied to a bucket of another deployment (PLAN 8C). The
+node that leads the source sends, as an S3 client, over TLS, to the S3 port of the other
+site (trust boundary 8); the other site sees an API key it issued itself and nothing
+else of the source. Outbound connections are those of ADR-0023, as for notifications.
+What leaves the source, to the deployment an administrator named and no other: object
+contents (decrypted at the source, inside TLS, and encrypted again at the destination
+under its own keys), keys, sizes, entity tags, version IDs, times, sequences, user
+metadata, tags, retentions and legal holds. Never a key or a wrapped key, never an SSE-C
+version, never who uploaded.
+
+| Threat | Control | Status |
+|---|---|---|
+| A caller makes versions in a bucket with an ID, a time and an order of its choosing, by sending replica headers | A replica request needs `s3:ReplicateObject` (`s3:ReplicateDelete` for a marker), which only a statement that names it grants: no wildcard - not `s3:*` or `*`, so neither `cluster-admin` nor `bucket-admin` - and no bucket policy (refused when put, ignored if stored). Every `x-cactusfs-replica-*` header must be signed and the payload signed (its SHA-256, or signed chunks; never `UNSIGNED-PAYLOAD`, never a presigned URL), judged before the body is read and audited as a failed authentication; a replica header on any other request is refused (`400 ReplicaHeaderNotTaken`), never passed over. The bucket must be the replica of exactly that source, decided again in apply. Every copy committed is audited | **implemented, with a limit** (PLAN 8.1.1, 8.1.1a: `TestReplicateIsNeverGrantedByAWildcard`, `TestNoBucketPolicyGrantsReplicate`, `TestReplicaPutOverHTTP`, `TestUnsignedReplicasAreAudited`, `TestReplicaHeadersOnOtherOperations`, `FuzzReplicaHeaders`, `TestAReplicaBucketTakesTheVersionsOfItsSourceAndNoOthers`): the root identity holds the two actions, as it holds `s3:BypassGovernanceRetention` (question 52) |
+| A replica is written by somebody other than its source - the root identity, an application that was not moved, a second source - and the two sites differ in ways nobody can order | In a replica bucket every entry that would make a version or a marker is refused in apply unless it carries `replica` from that source (`409 InvalidBucketState`), whoever asks and through whichever node. A bucket becomes a replica only while it holds no version, and has a configuration or is a replica, never both | **implemented** (PLAN 8.0.9, 8.1.1: `TestAReplicaBucketTakesNoOrdinaryWrite`, `TestReplicaBucketTakesNothingElse`, `TestABucketBecomesAReplicaOnlyEmptyAndCounted`; end to end in `TestSiteReplication`) |
+| The replication key is stolen, and its holder reads, lists or destroys the replica | The key is of the destination, and needs only the replicate actions and those of later changes (tags, retention, legal hold) on the replica bucket and its objects. Its questions - is the bucket a replica of this source and does it keep versions and Object Lock, is this version there and its entity tag, the uploads this source began of one key and their abort - are judged as `s3:ReplicateObject` and answer nothing more: no listing, no byte, no other header, no other source's upload, and the caller as every upload's initiator. It cannot remove a version, shorten a compliance retention, lift a lock (a bypass with the source header is refused) or reach the management API | **implemented, with a limit** (PLAN 8.1.1a, 8.1.8: `TestReplicaQuestionsOverHTTP`, `TestReplicaQuestionsAreRefused`, `TestReplicaChangesOverHTTP`; in `TestSiteReplication` the key is refused a read, a listing, a removal, a write to a bucket that is no replica and `GET /users`): its holder can add versions and delete markers up to the destination's quota - hiding current versions, never removing them - and learn whether a version exists and its entity tag. **Through the grants of later changes it can also lock the replica for good:** `s3:PutObjectRetention` lets it put a compliance retention of any length on any version of the replica bucket, or extend one, and `s3:PutObjectLegalHold` set legal holds - storage held that nobody, `cluster-admin` included, can free before the date; and `s3:PutObjectTagging`/`s3:DeleteObjectTagging` let it rewrite or remove the tags of any version there. The destination does not require the source header on a later change today, so the key needs none to do it (question 59) |
+| A source that was taken over, or one at fault, purges or rewrites the copy that exists to survive it | A version removed for good is never replicated; a version ID that is there already is refused (`ErrConflict`), so nothing is overwritten; a delete marker hides and removes nothing; removing a version at the destination is judged by its own permissions and Object Lock, and a compliance-locked copy is removed by nobody; a later change that Object Lock refuses there (`403 ObjectLocked`) fails that change alone. A replica's sequence is bounded (1 to 2^62), so no copy can sit above every later local version | **implemented, with a limit** (PLAN 8.0.9, 8.1.1a, 8.1.5: `TestAnyOrderOfArrivalGivesTheSameVersions`, `TestMaxReplicaSeq`, `TestMarkerVersionAndLaterChanges`, `TestReplicatorLaterChanges`; a version removed for good at A still at B in `TestSiteReplication`): such a source can still add versions and, where a rule copies markers, hide current versions; protecting them needs Object Lock at the destination |
+| The other site is impersonated, or the path to it is read or changed; a target is used to reach an internal address | Only an administrator defines a target (`admin:PutTarget`), with an `https://` endpoint and no path, userinfo, query or fragment; the address is judged at every connection by the egress dialer (loopback, link-local and the rest unless `--egress-allow` names them, cloud metadata addresses always), no redirect is followed and a client that would follow one is refused, no proxy is used; the certificate is verified against `ca_pem` or the system's roots, with the endpoint's host as the server name, and cannot be turned off. Every request and every chunk of a body is signed, so a request changed on its way is refused and a body cut short commits nothing | **implemented** (ADR-0023, PLAN 8.1.2, 8.1.4: the egress tests, `TestRedirectsOfAClient`, `TestBodyCutShortNeverCommits`, `TestChangedRequestIsRefused`, `TestThePublishersOfTargetsAreDecorated` - the client of another deployment refused and counted at the egress boundary) |
+| A bucket's administrator sends a bucket's versions to a place of their choosing, or into a bucket there that another bucket already fills | The configuration names a target, never an address; the target must exist, be another deployment and admit the bucket - refused in one sentence for all three, so nothing is told of targets closed to the bucket; the store judges again at commit. A bucket there takes the versions of one bucket here: a configuration naming a target and bucket that another configuration names is refused | **implemented, with a limit** (PLAN 8.1.3, 8.1.4: `TestReplicationConfigurationIsAuthorized`, `TestReplicationRefusalsSayTheSame`, `TestReplicationDestinationIsOneBucketsOnly`): the rule of one destination is the use case's, and two configurations put at the same moment through two nodes may both pass it (question 53) |
+| The replication key's secret is disclosed at the source | Sealed through the source's KMS with the target's name as associated data; opened for each request and cleared once it is signed; a body of chunks holds the signing key of the day, never the secret, and clears it when it ends; nothing reads a body after a call returns. Never in an answer of the API, a status, a log line, an event, a metric or a span; a failure is told by its class | **implemented** (PLAN 8.1.2, 8.1.4: `TestSecretNeverShown`, `TestNoReadAfterReturn`, `TestSiteClientIsCountedAndTraced`) |
+| A version is said to be at the other site when it is not, and the operator fails over to a copy without it | `COMPLETED` is written only when the other site took the version, or answers that it holds it with the entity tag sent; an answer that may mean "there" (`409 OperationAborted`) is checked with a question; the destination compares the entity tag of what it received with the one named (`400 BadDigest`); a version there with other bytes under its ID is `FAILED`, never `COMPLETED`; `FAILED` is final, and a resync neither lifts it nor writes over a newer one. `pending` and `failed` of a bucket are counted by every member | **implemented** (PLAN 8.1.2, 8.1.4, 8.1.6, 8.1.9: `TestConflictIsAskedAbout`, `TestConflictAtTheSite`, `TestResyncNeverLiftsFailed`; `TestChaosReplication`: two leader kills and a cut site, every acknowledged version `COMPLETED` and at B) |
+| A key, a wrapped key or a customer's key crosses to the other site | The source decrypts and sends inside TLS; the destination encrypts again under its own data key and KMS key; a copy asks for no encryption of its own (SSE-KMS or SSE-C with replica headers is refused). A version under a customer's key is never read for replication and is `FAILED` (`sse_c`) | **implemented** (PLAN 8.1.1, 8.1.4: `TestReplicaPutOverHTTP`, `TestReplicatorClasses`; the SSE-C version `FAILED` at A and absent at B in `TestSiteReplication`) |
+| The other site - slow, down or hostile - holds up writes at the source, or makes it read without end | Replication is from the outbox, after the commit, by the node that leads: a write never waits for it. Every request has a deadline, every answer is bounded, the bytes sent are held to `replication-rate-mib`; a target that refuses everything is `stalled` and holds only the buckets sent through it. At the outbox's bound the oldest rows are dropped, counted in `lost`, and mark the target `resync_needed` | **implemented, with a limit** (PLAN 8.1.4, 8.1.6 to 8.1.9: `TestReplicatorKeepsToItsRate`; B paused a minute in `TestSiteReplication`, cut off in `TestChaosReplication`): a version not sent before its row was dropped crosses only with a resync, and rows lost under an earlier leader may not restart a walk that is under way (question 56) |
+| A source fills the destination | A copy is held to the destination's quota like any put; at the quota the source's target stalls with `quota` and loses nothing | **implemented** (ADR-0024; PLAN 8.1.2: the class `quota`) |
+| Who made a bucket a replica, promoted it, changed its replication or started a resync cannot be told | A change of replica mode carries its audit record in the entry; a configuration's change, and the start of a resync, are audited by the use case after the commit; every copy committed at the destination is audited there, and every refused replica request | **implemented, with a limit** (PLAN 8.1.1, 8.1.3, 8.1.6: `TestReplicaModeIsAuthorized`, `TestReplicationConfigurationIsAuthorized`, `TestReplicationResync`): a node that stops between the commit and the record leaves a configuration's change or a resync's start unaudited (question 54) |
+| The metrics of replication tell one tenant of another | No metric names a bucket, a key, a target or the source; a failure is a class | **implemented** (PLAN 8.1.7: `TestReplicationIsCounted`, `TestReplicationBytesAreCounted`, `TestSiteClientIsCountedAndTraced`) |
+| Data is lost in a fail-over or a fail-back | Replication is asynchronous: what the source had not sent is not at the destination when it is promoted, and the lag is measured (`CactusFSReplicationLag`). A promotion sends nothing back and cannot be undone; fail-back is by hand, into an empty bucket, and carries only what the promoted bucket wrote itself | **accepted risk** (ADR-0026, "Consequences"; README, "What fail-back is not"): question 55 |
 
 ## 5. Open questions for the owner
 
@@ -578,3 +612,56 @@ default says until the owner decides:
     receiver that verifies it. Should it ask `admin:GetAuditLog` as well? Besides, the
     OpenAPI description of `audit` does not yet say that defining or changing such a
     target needs `admin:GetAuditLog` (ADR-0025 and ARCHITECTURE do).
+
+Written at the end of replication between sites (PLAN 8.1.11, 2026-11-17); built as
+each default says until the owner decides (ADR-0026, "Open, for the owner", has them
+all, with those that are not of security):
+
+52. **The root identity holds `s3:ReplicateObject` and `s3:ReplicateDelete`** (ADR-0026,
+    open 5), as it holds `s3:BypassGovernanceRetention`: root is allowed before any
+    policy is read. So root can make a version with an ID and a time of its choosing,
+    and ask a source's questions, in a bucket that is the replica of that source - never
+    in any other. The stricter answer - root holds none of the actions granted by name
+    only - would also change what root can do to a governance retention today.
+53. **Two configurations naming one bucket there, put at the same moment** (ADR-0026,
+    open 9). "One destination a source bucket" is the use case's check; two puts racing
+    through two nodes may each read the other's absence and both be committed, and the
+    bucket there would interleave two unrelated sequences of versions. Closing it means
+    judging it in apply - a schema change. Default: the check; an operator who finds two
+    buckets sent to one there removes one configuration.
+54. **The start of a resync is audited after its commit, and may be overwritten**
+    (ADR-0026, open 19). `replication.resync.put` carries no audit record, so a node that
+    stops between the commit and the record leaves a resync started and unaudited (as a
+    change of a bucket's policy, CORS, lifecycle, notification or replication
+    configuration can be); and between the walk's read of the record and its proposal, a
+    resync asked again can be overwritten by the pass before it. Both need a schema
+    change.
+55. **Fail-back carries only what the promoted bucket wrote itself** (ADR-0026, open
+    18). A replica is never sent on, also after its bucket's promotion, so the history
+    that came from the old source does not cross back; if the old site was lost, it
+    exists at the new source only, and only a copy with new IDs carries it on. Should a
+    promoted bucket send its replicas on (a change of the replicated format, and of "one
+    hop")?
+56. **Rows lost under an earlier leader do not restart a walk** (ADR-0026, open 13). A
+    resync begins again when its target lost rows since it began, as the node that walks
+    it saw the count; rows lost while an earlier leader walked are not seen, and the
+    walk can end `done` without them. `resync_needed` was set by them all the same, and
+    the next resync asked for sends them. Closing it means keeping the count in the
+    record - a schema change.
+57. **A user's delete marker made before the configuration is never resynced**
+    (ADR-0026, open 14): a stored marker does not say who made it, and a lifecycle marker
+    must not cross. S3 Batch Replication copies such a marker; here it stays at the
+    source - the stricter reading, since a marker that crosses can hide a version there.
+58. **`CactusFSDeliveryStalled` no longer fires for another deployment** (ADR-0026, open
+    21): `CactusFSReplicationLag` does, at the same threshold and hold, and
+    `CactusFSReplicationResyncHeld` for a resync held 15 minutes. Whoever routed the
+    first for every target must route the other two.
+59. **A replication key can lock the replica for good** (ADR-0026, open 22). The key
+    needs `s3:PutObjectRetention`, `s3:PutObjectLegalHold` and the tagging actions to
+    carry later changes, and the destination judges a change without the source header
+    as an ordinary one: whoever holds the key can put a compliance retention of any
+    length, or extend one, and legal holds on every version of the replica bucket, and
+    rewrite or remove their tags - a lock-in of storage that nobody can undo before its
+    date. Should a replica bucket take a later change of tags, retention or legal hold
+    from that key only with the signed source header (and so only as the source's
+    version has it), or refuse such changes from the source's key altogether without it?

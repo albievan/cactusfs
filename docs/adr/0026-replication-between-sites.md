@@ -1,7 +1,18 @@
 # ADR-0026: Replication between sites, and the conflict rule
 
-- **Status:** proposed (2026-10-12). It becomes accepted when the code of PLAN 8C has
-  landed and the gates have seen it (PLAN 8.1.11)
+- **Status:** accepted (2026-11-17, PLAN 8.1.11): implemented as written below, with
+  the code of PLAN 8.1.1 to 8.1.10 and the gate of each - replica mode and the replica
+  requests and questions of the destination (`app.ReplicationService`,
+  `internal/adapters/s3api/replica.go`), the client of another site
+  (`internal/adapters/s3client`), the replication configuration in S3 and the management
+  API, the replicator with the later changes of a version (`app.Replicator`), the resync
+  (`app.ResyncWorker`), the status of a bucket's replication with its metrics and alerts,
+  two sites in a container test (`TestSiteReplication`) and under chaos
+  (`TestChaosReplication`), and the console. No step changed the entry schema, anything
+  on disk or the crypto design: schema 5 (ADR-0023) carried all of it. The points under
+  "Open, for the owner" are not answered: their defaults are what is built; the questions
+  the work added are there (8 to 22) and in PLAN ("Report of 8C"). It was proposed on
+  2026-10-12
 - **Date:** 2026-10-12
 - **Revised:** 2026-10-12, to the owner-side rulings of that day (PLAN, Decisions: "the
   holes the writing of ADR-0023 to 0026 found", points 1 to 5 and 7) and to the domain
@@ -18,7 +29,12 @@
   the later changes of PLAN 8.1.5 ("The replicator, as built"); to the resync as
   PLAN 8.1.6 wrote it and its review and verification amended it ("Resync, as built"; open 10 to 14);
   and to the status and the telemetry as PLAN 8.1.7 wrote them and its review amended them
-  ("Status and telemetry, as built"; open 15, and 16 closed)
+  ("Status and telemetry, as built"; open 15, and 16 closed); to the two-site and chaos
+  tests of PLAN 8.1.8 and 8.1.9 and the console of PLAN 8.1.10 ("Two sites, chaos and the
+  console, as built"; open 17); 2026-11-17, at its acceptance (PLAN 8.1.11): fail-back
+  said as the code does it - a replica version is never sent on, so what crosses back is
+  what the new source wrote itself (open 18) - and the open items brought to one list
+  (18 to 21 added; 22 at its review)
 - **Builds on:** ADR-0023 (entry schema 5: the outbox, targets, outbound connections,
   `high`), ADR-0008 (versions and their sequence), ADR-0009 (Object Lock and the clock
   that decides), ADR-0010 (key hierarchy), ADR-0012 (multipart uploads), ADR-0013
@@ -76,10 +92,20 @@ exactly one source deployment.
   (`409 BucketNotEmpty` in the management API). Promoting a bucket that is no replica
   changes nothing and is no error.
 - **Fail-back is a procedure, not a feature, and it is into an empty bucket**: at the
-  old source, make a new, empty bucket a replica of the new source, resync all of it,
-  review, promote. The bucket the old source had cannot be made a replica as it stands -
-  a version it held and had not sent could outrank what the new source wrote since - and
-  nothing does any of this by itself.
+  old source, make a new, empty bucket a replica of the new source, give the new source
+  a configuration that names it, resync, review, promote. The bucket the old source had
+  cannot be made a replica as it stands - a version it held and had not sent could
+  outrank what the new source wrote since - and nothing does any of this by itself.
+  **What crosses back is what the new source wrote itself.** Promotion changes nothing
+  of the versions a bucket holds, and the versions it took from its source keep the
+  status `REPLICA`, which neither the outbox nor a resync ever sends on ("What is
+  replicated": one hop; `bucket.ReplicationConfig.Replicates`, `app.resyncs`). So the
+  new, empty bucket at the old source receives the versions written at the new source
+  since its promotion, and not those that came from the old source before: those are
+  in the old source's own bucket, where they were made, or - if that site was lost -
+  only in the promoted bucket, under their IDs, and no replication carries them (open,
+  18). *Corrected at PLAN 8.1.11: this paragraph, and "Consequences", said that
+  everything crosses again, which the code never did.*
 
 ### The source is an S3 client of the other site
 
@@ -442,7 +468,7 @@ purpose, and is accepted.
 | a later change of the tags, retention or legal hold of a version | yes (PLAN 8.1.5, "Later changes, as built"): as the version has them when the row is sent; a refusal there is `FAILED` | |
 | **a version removed for good** | **never** | a source that was taken over must not be able to purge the destination |
 | a version encrypted with a key of the customer's (SSE-C) | **no**: status `FAILED`, class `sse_c` | the key is not ours to use |
-| a version that is itself a replica | **no** | no loops; one hop |
+| a version that is itself a replica | **no** - also after its bucket was promoted (open, 18) | no loops; one hop |
 | a version that was there before the configuration | only by a resync | |
 | the configuration of the bucket, its policy, IAM | no | each site is administered by itself |
 | who uploaded (`created_by`) | no | the destination records the replication key as the uploader |
@@ -735,9 +761,8 @@ leaves a choice:
   and only the replicator (PLAN 8.1.4) delivers such rows. A release with the one and
   not the other would hold the target's cursor on the first row, stop the trimming of
   the outbox for every target, let it grow towards its bound, and leave the matched
-  versions `PENDING`. So PLAN 8.1.3 and 8.1.4 land in the same commit series and the
-  same release, as 8.1.1 and 8.1.1a did; until 8.1.4 is merged a configuration is not
-  put outside tests.
+  versions `PENDING`. So PLAN 8.1.3 and 8.1.4 landed in the same commit series
+  (bc47af00 to f9f24bf2) and land in the same release, as 8.1.1 and 8.1.1a did.
 
 - **Who and where.** `app.ReplicationService.Configuration`, `SetConfiguration` and
   `DeleteConfiguration` ask the single authorizer for `s3:GetReplicationConfiguration`
@@ -988,12 +1013,12 @@ its clearing of `resync_needed` are schema 5's (PLAN 8.0.9), the result by versi
 
 ### Status and telemetry, as built (PLAN 8.1.7)
 
-Written 2026-11-16 and amended by its review the same day (PLAN, Decisions "8.1.7
-review"), checked locally on darwin. No schema, entry, on-disk, port or Go contract
-change; the descriptions of `last_error_class` (both schemas) and of `failed` in
-`admin.yaml` were corrected, which regenerates the comments of the generated code and the
-web client - regenerated on the test host 2026-11-16 (description-only diff verified); the
-review corrected the description of `target_state` too, to be regenerated again.
+Written 2026-11-16 and amended by its review and verification the same day (PLAN,
+Decisions "8.1.7 review", "8.1.7 verification"); its gate passed that day. No schema,
+entry, on-disk, port or Go contract change; the descriptions of `last_error_class` (both
+schemas), of `failed`, of `target_state` and of `TargetStatus.state` in `admin.yaml` were
+corrected, which changes the comments of the generated code and the web client - each
+regenerated on the test host 2026-11-16 (description-only diffs verified).
 
 - **The status of a bucket** (`ReplicationService.Status`, behind
   `GET /buckets/{bucket}/replication/status`; `admin:GetReplicationStatus` on the bucket,
@@ -1057,6 +1082,49 @@ review corrected the description of `target_state` too, to be regenerated again.
   `InstrumentDeliveryStatus`, `InstrumentReplication`, `InstrumentMetadata` behind the
   bucket store); the composition root's walk holds it to that.
 
+### Two sites, chaos and the console, as built (PLAN 8.1.8 to 8.1.10)
+
+No product code changed for the two tests, and none of the schema, of anything on disk
+or of the Go contract for the console; the contract gained one optional field.
+
+- **Two sites** (`TestSiteReplication`, `test/integration/replication_test.go`; PLAN
+  8.1.8). Site A is a cluster of four nodes, site B one standalone node with four drives
+  (`clustertest.StartStandalone`), each with its own CA, key file and root. B's bucket is
+  made the replica of A's `deployment_id` (`GET /cluster`) before anything is in it, both
+  buckets with Object Lock. The key of A at B is that of a user `site-a` whose role holds
+  one policy - `s3:ReplicateObject`, `s3:ReplicateDelete`, `s3:PutObjectTagging`,
+  `s3:DeleteObjectTagging`, `s3:PutObjectRetention`, `s3:PutObjectLegalHold` on
+  `arn:aws:s3:::<bucket>` and `arn:aws:s3:::<bucket>/*` - and whose key carries the same
+  document as its inline policy ("Credentials"); the test shows it cannot read, list or
+  remove there, write to a bucket that is no replica, or call B's management API. A's
+  target names `https://<B>:9000`, B's CA, the region and the key (`auth.mode` `sigv4`).
+  Asserted by the two listings of versions, in their document order: 500 versions, 50
+  delete markers, a 12 MiB version of parts and a tagged, retained version equal in ID,
+  order, size, entity tag, time, tags and retention, the bytes read back from B; a later
+  change of tags and retention carried; an SSE-C version `FAILED` at A and absent at B;
+  a version removed for good at A still at B; B paused for a minute (the target not
+  `ok`, class `timeout`, the puts of the minute pending), then everything arrives; a
+  version from before the configuration crosses only by a resync; an ordinary put into
+  B's bucket is 409; after promotion a put there is the newest version.
+- **Chaos** (`TestChaosReplication`, `test/chaos/replication_test.go`; PLAN 8.1.9). While
+  300 versions are written to A, A's leader is killed twice and B is cut off for a minute
+  (blackhole routes, `Cluster.CutOff`) and joined again; afterwards every acknowledged
+  version is in A's listing under its key and entity tag, both listings are equal, every
+  version says `COMPLETED`, B's audit trail holds exactly one committed copy of each
+  (`s3:ReplicateObject`) and no other, and the PutObject requests B authenticated exceed
+  the versions by at most 100 in all. A copy that arrives again is refused ("Order") and
+  writes no record, so the audit trail counts copies and B's
+  `cactusfs_s3_requests_total{operation="PutObject"}` counts sends.
+- **The console** (PLAN 8.1.10; `web/src/screens/BucketReplication.tsx`). A bucket's
+  details show its replication - target, bucket there, rules, and the status
+  (`target_state` with its class, pending, failed, lost, the resync record,
+  `resync_needed`) - with **Resync** behind a question, and its replica mode with
+  **Promote** behind a typed confirmation of the bucket's name. The configuration and
+  making a bucket a replica are shown, not edited there (the management API and S3 set
+  them). The object browser shows the replication status of an object's current version,
+  from the new optional `ObjectMetadata.replication_status` (`PENDING`, `COMPLETED`,
+  `FAILED`, `REPLICA`; additive, `oasdiff` clean); an older version's is open, 17.
+
 ### Limits
 
 `replication-workers` versions are sent at once (4; 1 to 32). `replication-rate-mib`
@@ -1076,7 +1144,9 @@ it needs: the probes are judged as `s3:ReplicateObject`.
 
 **What whoever holds that key can do:** add versions and delete markers to the replica
 buckets of one source - and so fill them, which is what a quota at the destination is
-for (ADR-0024) - and change tags and extend locks of versions there; learn whether a
+for (ADR-0024) - and change tags and extend locks of versions there: put a compliance
+retention of any length, or a legal hold, on any version of those buckets, which nobody
+can lift before its date (open, 22); learn whether a
 version is there and its entity tag, whether the bucket keeps versions and whose replica
 it is; and list and abort the replica uploads of that source. **What they
 cannot do:** read an object, list a bucket, remove a version, shorten a compliance
@@ -1117,12 +1187,14 @@ the date and differ, by that much, on the moment it passes. Accepted.
   measured.
 - A destination can be promoted while the source lives. Then both take writes and the
   two part for good; nothing prevents it but the administrator.
-- **Fail-back is into an empty bucket, with a full resync.** A bucket that holds a
-  version - the old source's own bucket, or any bucket that was ever written to - cannot
-  be made a replica; what it held stays where it is, under its old name or deleted by
-  hand, and everything crosses again. That is the price of sequences that mean
-  something at one site only; the README is to say so where it says what fail-back is
-  not (PLAN 8.1.11).
+- **Fail-back is into an empty bucket, with a resync, and carries only what the new
+  source wrote.** A bucket that holds a version - the old source's own bucket, or any
+  bucket that was ever written to - cannot be made a replica; what it held stays where
+  it is, under its old name or deleted by hand. What crosses into the new bucket is what
+  the promoted bucket wrote itself: the versions it had taken as a replica are never
+  sent on (open, 18). That is the price of sequences that mean something at one site
+  only, and of one hop; the README says so where it says what fail-back is not
+  ("Replication between sites").
 - A bucket has to be made a replica before anything is put into it: there is no turning
   an existing copy into a replica.
 - The replication key can ask whether a version exists and what its entity tag is. That
@@ -1133,7 +1205,11 @@ the date and differ, by that much, on the moment it passes. Accepted.
 - A multipart object starts again from its first part after a change of leader. An
   object of terabytes over a poor link, with leaders that change, may never arrive.
 - The endpoint a target names is a balancer or a node on the S3 port, with TLS passed
-  through and no cap on a request below 5 GiB (`docs/load-balancing.md`).
+  through and no cap on a request below 5 GiB (`docs/load-balancing.md`, "Another
+  deployment that replicates through the balancer").
+- After a promotion, the old source's configuration fails: the bucket there is no
+  replica of it any more, so its target stalls (`not_replica`) - and with it every bucket
+  sent through that target - until the configuration is removed at the old source.
 - Version IDs are the same at both sites, so a client that fails over keeps the IDs it
   had.
 
@@ -1167,7 +1243,9 @@ Defaults are applied until answered.
    do is what the state refuses to everybody: a replica into a bucket that is no replica
    of that source. The stricter answer - root holds none of the three actions that are
    granted by name only, and a user must be given them - would change what root can do
-   to a governance retention today, and is the owner's to choose.
+   to a governance retention today, and is the owner's to choose. As built (PLAN 8.1.1,
+   8.1.1a), the default: root may also ask the questions of any source ("What the source
+   asks"), in a bucket that is the replica of that source.
 6. **The null version of before versions cannot cross as it stands** (found at PLAN
    8.0.9, for PLAN 8.1.6). A version written while its bucket kept no versions is stored
    at sequence 0, as it always was; a replica's sequence is from 1 (`Replica.Validate`).
@@ -1189,7 +1267,9 @@ Defaults are applied until answered.
    left out too, so that clocks that differ and the time a copy takes to send do not
    make the destination refuse it. The price: such a copy is unretained at the
    destination for the at most 15 minutes its retention had left; its legal hold goes
-   with it all the same.
+   with it all the same. As built, the margin is `object.RetentionMargin` (since the
+   re-review of PLAN 8.1.4; `s3client.RetentionMargin` is the same constant), and a
+   later change of a retention that ends within it is passed too.
 8. **A row whose bucket is no longer sent to its target** (found at PLAN 8.1.4). A
    configuration removed, or pointed at another target, before its rows were sent
    leaves their versions `PENDING`, counted in `replication_pending`, although nothing
@@ -1263,6 +1343,54 @@ Defaults are applied until answered.
     `/object/preview` is, and a listing of versions for the object browser to choose
     from - an additive contract change. Default: the current version only, as the object
     browser works today.
+18. **Fail-back carries only what the promoted bucket wrote itself** (found at PLAN
+    8.1.11, writing the README's fail-back from the code). Promotion turns replica mode
+    off and changes nothing of the versions: those that arrived from the source keep
+    `REPLICA`, and a replica is never sent on - not by the outbox
+    (`ReplicationConfig.Replicates`, part of the replicated format) and not by a resync
+    (`app.resyncs`). A fail-back into a new, empty bucket at the old source therefore
+    receives the versions written at the new source since its promotion, and none of the
+    history that came from the old source. While the old site and its bucket survive,
+    that history is there; when the old site was lost, it exists at the new source only,
+    as replicas, and the only way to carry it on is to write it again (an S3 copy within
+    the bucket, which makes new versions with new IDs and times). Carrying it would mean
+    sending a replica on after its bucket's promotion - a change of `Replicates` and of
+    the resync, and of the rule "one hop", so a schema change and a new ruling. Default:
+    not carried; the README says so.
+19. **The start of a resync is audited after its commit, and may be overwritten in a
+    narrow race** (review of PLAN 8.1.6). `replication.resync.put` carries no audit
+    record, so `ReplicationService.Resync` writes the record once the start is committed:
+    a node that stops in between leaves a resync started and unaudited, as a change of a
+    bucket's policy, CORS or lifecycle can be. And between the walk's read of the record
+    (`save`) and its proposal, a resync asked again can be overwritten by the pass before
+    it, so that the walk goes on from its cursor instead of from the first version. Both
+    need a field more in the entry or a store with a compare - a schema change. Default:
+    as built.
+20. **A rule of the first form that says nothing of delete markers copies none**
+    (PLAN 8.1.3 (6)). S3 copies them by default for such a rule; here a marker crosses
+    only when a rule says so, since a marker that crosses can hide a version at the
+    destination. A client that relies on S3's default sees markers stay at the source.
+    Default: the stricter reading; README and `GET ?replication` (which writes every rule
+    in the later form, with `DeleteMarkerReplication` said) show what was kept.
+21. **`CactusFSDeliveryStalled` no longer covers another deployment** (PLAN 8.1.7). The
+    alert now reads `cactusfs_delivery_oldest_pending_seconds{kind!="s3"}`, and the same
+    moment for a target of kind `s3` fires `CactusFSReplicationLag` - one cause, one
+    alert. An operator who routed `CactusFSDeliveryStalled` for every target must route
+    `CactusFSReplicationLag` (and `CactusFSReplicationResyncHeld`) as well. Default: as
+    built.
+22. **The replication key can lock the replica for good** (review of PLAN 8.1.11). The
+    key holds `s3:PutObjectRetention`, `s3:PutObjectLegalHold`, `s3:PutObjectTagging`
+    and `s3:DeleteObjectTagging` on the replica bucket so that later changes can be
+    carried ("Credentials"), and the destination takes a later change without
+    `x-cactusfs-replica-source` as an ordinary one (`ObjectService.admitChange` judges
+    the source only when the header is there). So whoever holds the key can put a
+    compliance retention of any length, or extend one, and legal holds on any version of
+    the replica bucket, and rewrite or remove tags there: storage that nobody,
+    `cluster-admin` included, can free before the date. Should a replica bucket take a
+    later change from the source's key only with the signed source header - or take
+    later changes from no key but with it? Either is a change of the destination's
+    rules (not of the entry schema). Default: as built; "What whoever holds that key can
+    do" above says "extend locks".
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode
