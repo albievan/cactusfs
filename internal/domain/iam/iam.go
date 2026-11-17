@@ -389,6 +389,11 @@ type Principal struct {
 	// every role held directly or through a group, resolved when the
 	// request was authenticated.
 	Policies []Document
+	// PolicyNames are the names of the policies of Policies, in the same
+	// order: PolicyNames[i] is the name of Policies[i]. They decide
+	// nothing; an explanation cites a statement by them, and only when
+	// there is one name for each document. They are held in memory only.
+	PolicyNames []string
 	// Boundary, when set, is the inline policy of the API key: the request
 	// must be allowed by it as well.
 	Boundary *Document
@@ -564,7 +569,7 @@ const (
 // session, which wraps domain.ErrSessionLocked and not ErrAccessDenied: it
 // says nothing of what the user may do.
 func Decide(req Request) error {
-	_, err := Evaluate(req)
+	_, _, err := evaluate(req, nil)
 	return err
 }
 
@@ -572,12 +577,27 @@ func Decide(req Request) error {
 // source of the answer: of an Allow, the first source that allowed it (the
 // caller's own policies before the bucket's, the bucket's before the
 // sub-bucket's); of a refusal, the source that denied it, or SourceNone when
-// nothing allowed it.
+// nothing allowed it. It is the projection of Explain: the same evaluation,
+// with nothing collected.
 func Evaluate(req Request) (Source, error) {
+	source, _, err := evaluate(req, nil)
+	return source, err
+}
+
+// evaluate is the one evaluation of a request: Decide, Evaluate and Explain
+// are its views. With a nil collector it collects nothing and does nothing
+// the decision does not need: a source stops at its first matching Deny, and
+// the key's own policy is read only when the others allowed. With a
+// collector every source that has a say is read whole - the bucket's of an
+// anonymous caller also when the sub-bucket's has refused them - and the
+// key's own policy whatever the others said. The source, the rule and the
+// error are the same either way: what is read only for the collector is
+// never weighed.
+func evaluate(req Request, c *collector) (Source, Rule, error) {
 	if req.Principal.LockedSession && req.Action != ActionPutObject {
 		// First of all: no policy, no kind of principal and no kind of
 		// action has a say in it.
-		return SourceRule, fmt.Errorf("%w: %s may not %s on %s until it is unlocked", domain.ErrSessionLocked, req.Principal.Name(), req.Action, req.Resource)
+		return SourceRule, RuleLockedSession, fmt.Errorf("%w: %s may not %s on %s until it is unlocked", domain.ErrSessionLocked, req.Principal.Name(), req.Action, req.Resource)
 	}
 	if req.Principal.Anonymous() {
 		// Only the policy of a bucket lets anybody in unauthenticated,
@@ -585,21 +605,25 @@ func Evaluate(req Request) (Source, error) {
 		// anonymous, but its Deny holds for them as for anybody: a
 		// private sub-bucket of a public bucket stays private.
 		session := Context{SourceIP: req.Principal.Session.SourceIP, SecureTransport: req.Principal.Session.SecureTransport, Now: req.Now}
-		if req.SubBucketPolicy != nil && req.SubBucketPolicy.judge(req, req.Resource.String(), session) == denied {
-			return SourceSubBucket, fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+		subDenied := req.SubBucketPolicy != nil && req.SubBucketPolicy.judge(req, req.Resource.String(), session, c) == denied
+		if subDenied && c == nil {
+			return SourceSubBucket, "", fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 		}
-		source := SourceRule
+		source, rule, bucket := SourceRule, RuleAnonymous, silent
 		if req.BucketPolicy != nil && anonymousReadable(req.Action) {
-			switch req.BucketPolicy.judge(req.Principal, req.Action, req.Resource.String(), session) {
-			case allowed:
-				return SourceBucket, nil
-			case denied:
-				source = SourceBucket
-			default:
+			bucket = req.BucketPolicy.judge(req.Principal, req.Action, req.Resource.String(), session, c, SourceBucket)
+			source, rule = SourceBucket, ""
+			if bucket == silent {
 				source = SourceNone
 			}
 		}
-		return source, fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+		switch {
+		case subDenied:
+			source, rule = SourceSubBucket, ""
+		case bucket == allowed:
+			return SourceBucket, "", nil
+		}
+		return source, rule, fmt.Errorf("%w: anonymous principal may not %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
 	}
 	refused := fmt.Errorf("%w: %s may not %s on %s", domain.ErrAccessDenied, req.Principal.Name(), req.Action, req.Resource)
 	if service := req.Principal.Service; service != "" {
@@ -607,9 +631,9 @@ func Evaluate(req Request) (Source, error) {
 		// what it may do is fixed here.
 		p := req.Principal
 		if p.AccessKeyID == "" && !p.Root && p.NodeID == "" && p.User == "" && serviceMay(service, req.Action) {
-			return SourceRule, nil
+			return SourceRule, RuleService, nil
 		}
-		return SourceRule, refused
+		return SourceRule, RuleService, refused
 	}
 	if node := req.Principal.NodeID; node != "" || req.Action.cluster() {
 		// A node adds, records and removes itself only, and reports no
@@ -618,40 +642,51 @@ func Evaluate(req Request) (Source, error) {
 		own := req.Action == ActionNodeRPC || req.Resource.Node == node
 		if node != "" && !req.Principal.NodeRevoked && req.Principal.AccessKeyID == "" && !req.Principal.Root &&
 			req.Principal.User == "" && req.Action.cluster() && own {
-			return SourceRule, nil
+			return SourceRule, RuleNode, nil
 		}
-		return SourceRule, refused
+		return SourceRule, RuleNode, refused
 	}
 	if req.Principal.Root {
 		if req.Principal.User != "" {
-			return SourceRule, refused
+			return SourceRule, RuleRoot, refused
 		}
-		return SourceRule, nil
+		return SourceRule, RuleRoot, nil
 	}
 	if req.Principal.User == "" {
-		return SourceRule, refused
+		return SourceRule, RuleNoUser, refused
 	}
 	ctx := Context{
 		SourceIP: req.Principal.Session.SourceIP, SecureTransport: req.Principal.Session.SecureTransport,
 		Now: req.Now, Username: req.Principal.User,
 	}
 	resource := req.Resource.String()
+	if c != nil {
+		c.name(req.Principal)
+	}
 	// The user's own policies, the bucket's and the sub-bucket's: any may
 	// allow, and a Deny in any wins over every Allow. The sub-bucket's has
 	// a say only in what it covers.
 	verdicts := []struct {
 		source  Source
 		verdict verdict
-	}{{SourceIdentity, judge(req.Principal.Policies, req.Action, resource, ctx)}, {SourceBucket, silent}, {SourceSubBucket, silent}}
+	}{{SourceIdentity, judge(req.Principal.Policies, req.Action, resource, ctx, c, SourceIdentity)}, {SourceBucket, silent}, {SourceSubBucket, silent}}
 	if req.BucketPolicy != nil {
-		verdicts[1].verdict = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx)
+		verdicts[1].verdict = req.BucketPolicy.judge(req.Principal, req.Action, resource, ctx, c, SourceBucket)
 	}
 	if req.SubBucketPolicy != nil {
-		verdicts[2].verdict = req.SubBucketPolicy.judge(req, resource, ctx)
+		verdicts[2].verdict = req.SubBucketPolicy.judge(req, resource, ctx, c)
+	}
+	boundary := req.Principal.Boundary
+	if c != nil && boundary != nil {
+		// What the key's own policy says is told whatever the others
+		// said; it is weighed below exactly as without a collector.
+		c.key = &KeyPolicyVerdict{}
+		keyAllowed := judge([]Document{*boundary}, req.Action, resource, ctx, c, SourceKeyBound) == allowed
+		c.key.Allowed = keyAllowed
 	}
 	for _, v := range verdicts {
 		if v.verdict == denied {
-			return v.source, refused
+			return v.source, "", refused
 		}
 	}
 	source := SourceNone
@@ -665,12 +700,18 @@ func Evaluate(req Request) (Source, error) {
 		source = SourceOwner
 	}
 	if source == SourceNone {
-		return SourceNone, refused
+		return SourceNone, "", refused
 	}
-	if boundary := req.Principal.Boundary; boundary != nil && judge([]Document{*boundary}, req.Action, resource, ctx) != allowed {
-		return SourceKeyBound, fmt.Errorf("%w: the API key's own policy does not allow %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+	if boundary != nil {
+		keyAllows := c != nil && c.key.Allowed
+		if c == nil {
+			keyAllows = judge([]Document{*boundary}, req.Action, resource, ctx, nil, SourceKeyBound) == allowed
+		}
+		if !keyAllows {
+			return SourceKeyBound, "", fmt.Errorf("%w: the API key's own policy does not allow %s on %s", domain.ErrAccessDenied, req.Action, req.Resource)
+		}
 	}
-	return source, nil
+	return source, "", nil
 }
 
 // owns reports whether the request is the preview of an object version by

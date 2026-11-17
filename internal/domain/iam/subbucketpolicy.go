@@ -217,10 +217,10 @@ func (p SubBucketPolicy) covers(req Request) bool {
 }
 
 // judge says what the policy says about the request, and is silent about
-// every request it does not cover.
-func (p SubBucketPolicy) judge(req Request, resource string, ctx Context) verdict {
+// every request it does not cover: then it tells a collector nothing.
+func (p SubBucketPolicy) judge(req Request, resource string, ctx Context, c *collector) verdict {
 	if !p.covers(req) {
 		return silent
 	}
-	return p.policy.judge(req.Principal, req.Action, resource, ctx)
+	return p.policy.judge(req.Principal, req.Action, resource, ctx, c, SourceSubBucket)
 }

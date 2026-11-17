@@ -689,8 +689,10 @@ func patternCovers(effect Effect, pattern string, action Action) bool {
 	return pattern == "*" || wildcardMatch(strings.ToLower(pattern), strings.ToLower(string(action)))
 }
 
-// matches reports whether the statement applies to the request.
-func (s Statement) matches(action Action, resource string, ctx Context) bool {
+// matches reports whether the statement applies to the request. When
+// unknown is not nil, it is set when a condition on the source address was
+// decided without one (Condition.holds); it is left as it is otherwise.
+func (s *Statement) matches(action Action, resource string, ctx Context, unknown *bool) bool {
 	hit := false
 	for _, pattern := range s.Actions {
 		if patternCovers(s.Effect, pattern, action) {
@@ -712,6 +714,9 @@ func (s Statement) matches(action Action, resource string, ctx Context) bool {
 		return false
 	}
 	for _, c := range s.Conditions {
+		if unknown != nil && (c.Operator == OpIPAddress || c.Operator == OpNotIPAddress) && !ctx.SourceIP.IsValid() {
+			*unknown = true
+		}
 		if !c.holds(ctx, s.Effect) {
 			return false
 		}
@@ -729,18 +734,40 @@ const (
 )
 
 // judge evaluates documents: an explicit Deny wins over everything, an Allow
-// is needed for anything, and silence is a refusal.
-func judge(documents []Document, action Action, resource string, ctx Context) verdict {
+// is needed for anything, and silence is a refusal. With a nil collector it
+// stops at the first Deny that matches and allocates nothing; with one it
+// reads every statement and tells the collector, as from source, each that
+// matched and each whose condition on the source address was decided without
+// one. The verdict is the same either way.
+func judge(documents []Document, action Action, resource string, ctx Context, c *collector, source Source) verdict {
 	result := silent
-	for _, doc := range documents {
-		for _, s := range doc.Statements {
-			if !s.matches(action, resource, ctx) {
+	for d := range documents {
+		// By pointer: a statement is not copied to be read.
+		statements := documents[d].Statements
+		for i := range statements {
+			s := &statements[i]
+			var unknown bool
+			var decidedUnknown *bool
+			if c != nil {
+				decidedUnknown = &unknown
+			}
+			matched := s.matches(action, resource, ctx, decidedUnknown)
+			if c != nil {
+				c.cite(source, d, i, s, matched, unknown)
+			}
+			if !matched {
 				continue
 			}
 			if s.Effect == Deny {
-				return denied
+				if c == nil {
+					return denied
+				}
+				result = denied
+				continue
 			}
-			result = allowed
+			if result != denied {
+				result = allowed
+			}
 		}
 	}
 	return result

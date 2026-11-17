@@ -248,29 +248,50 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// judge says what the policy says about a request by the principal.
-func (p BucketPolicy) judge(principal Principal, action Action, resource string, ctx Context) verdict {
+// judge says what the policy says about a request by the principal, as the
+// package-level judge does: with a nil collector it stops at the first Deny
+// that matches; with one it reads every statement and tells the collector,
+// as from source, those that had a say - a statement about somebody else,
+// and an Allow of what only a user's own policy gives, have none.
+func (p BucketPolicy) judge(principal Principal, action Action, resource string, ctx Context, c *collector, source Source) verdict {
 	result := silent
-	for i, s := range p.Document.Statements {
+	for i := range p.Document.Statements {
+		s := &p.Document.Statements[i]
 		about := false
 		for _, name := range p.Principals[i] {
 			// A user is named by name. The root identity and anonymous
 			// callers have none, and are reached by "*" only.
 			about = about || name == PrincipalAnyone || (principal.User != "" && name == principal.User)
 		}
-		if !about || !s.matches(action, resource, ctx) {
+		if !about {
 			continue
-		}
-		if s.Effect == Deny {
-			return denied
 		}
 		// What only a user's own policy gives, by name, no bucket policy
 		// gives - not even one that names it, should one have been stored
 		// before ParseBucketPolicy refused it.
-		if action.byNameOnly() {
+		mute := s.Effect == Allow && action.byNameOnly()
+		var unknown bool
+		var decidedUnknown *bool
+		if c != nil && !mute {
+			decidedUnknown = &unknown
+		}
+		matched := s.matches(action, resource, ctx, decidedUnknown)
+		if c != nil && !mute {
+			c.cite(source, 0, i, s, matched, unknown)
+		}
+		if !matched || mute {
 			continue
 		}
-		result = allowed
+		if s.Effect == Deny {
+			if c == nil {
+				return denied
+			}
+			result = denied
+			continue
+		}
+		if result != denied {
+			result = allowed
+		}
 	}
 	return result
 }

@@ -184,6 +184,10 @@ type Identity struct {
 	// Policies are the documents of every policy of every role the user
 	// holds directly or through a group.
 	Policies []Document
+	// PolicyNames are the names of the policies of Policies, in the same
+	// order: PolicyNames[i] is the name of Policies[i]. They are held in
+	// memory only, and decide nothing.
+	PolicyNames []string
 }
 
 // RoleNames returns the roles a user holds, directly and through the given
