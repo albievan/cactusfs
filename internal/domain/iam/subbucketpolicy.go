@@ -108,20 +108,24 @@ func ParseSubBucketPolicy(doc []byte, bucketName, sub string) (SubBucketPolicy, 
 
 // parseSubBucketPolicy parses the policy of a sub-bucket whose names are
 // valid, collecting its faults, located when it is refused (parseLocated).
+// A sub-bucket's policy is never read with the tolerance of a stored bucket
+// policy (ParseStoredBucketPolicy): none was ever stored with a closing
+// bracket after it.
 func parseSubBucketPolicy(doc []byte, bucketName, sub string) (SubBucketPolicy, *faultList) {
-	return parseLocated(func(faults *faultList) SubBucketPolicy { return parseSubBucketPolicyInto(faults, doc, bucketName, sub) })
+	return parseLocated(false, func(faults *faultList) SubBucketPolicy { return parseSubBucketPolicyInto(faults, doc, bucketName, sub) })
 }
 
 // parseSubBucketPolicyInto parses the policy of a sub-bucket whose names are
 // valid, recording its faults in the order ParseSubBucketPolicy has always
-// met them.
+// met them, a closing bracket after the document last (strayClose).
 func parseSubBucketPolicyInto(faults *faultList, doc []byte, bucketName, sub string) SubBucketPolicy {
 	if len(doc) > MaxPolicyBytes {
 		faults.add("", invalidSubBucketPolicy("larger than %d bytes", MaxPolicyBytes))
 		return SubBucketPolicy{}
 	}
-	parsed := parseBucketPolicyInto(faults, doc, bucketName)
+	parsed := readBucketPolicy(faults, doc, bucketName)
 	if faults.failed() {
+		faults.strayClose(doc)
 		return SubBucketPolicy{}
 	}
 	own := Resource{Bucket: bucketName}.String()
@@ -146,6 +150,7 @@ func parseSubBucketPolicyInto(faults *faultList, doc []byte, bucketName, sub str
 			}
 		}
 	}
+	faults.strayClose(doc)
 	if faults.failed() {
 		return SubBucketPolicy{}
 	}

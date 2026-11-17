@@ -1,6 +1,7 @@
 package iam_test
 
 import (
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"strings"
@@ -156,6 +157,36 @@ func TestBucketPolicyDecisions(t *testing.T) {
 	}
 }
 
+// TestStoredPolicyDocument: the document of a stored bucket policy is the
+// record cut after its first value when a closing bracket follows that
+// value, and the record itself otherwise - byte for byte when it is JSON.
+func TestStoredPolicyDocument(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, raw, want string
+	}{
+		{"JSON", publicRead, publicRead},
+		{"JSON with white space around it", " \n" + publicRead + "\r\n\t ", " \n" + publicRead + "\r\n\t "},
+		{"a closing brace after it", publicRead + "}", publicRead},
+		{"a closing bracket after white space", publicRead + " \n]", publicRead},
+		{"a closing bracket and more", publicRead + "]}x{", publicRead},
+		{"white space before it, a brace after it", "\n" + publicRead + "}", "\n" + publicRead},
+		{"a value after it", publicRead + " x", publicRead + " x"},
+		{"another document after it", publicRead + "{}", publicRead + "{}"},
+		{"not JSON", "Principal: *", "Principal: *"},
+		{"cut short", publicRead[:20], publicRead[:20]},
+		{"empty", "", ""},
+	} {
+		got := iam.StoredPolicyDocument([]byte(tt.raw))
+		if string(got) != tt.want {
+			t.Errorf("%s: StoredPolicyDocument = %q, want %q", tt.name, got, tt.want)
+		}
+		if _, err := iam.ParseStoredBucketPolicy([]byte(tt.raw), "site"); err == nil && !json.Valid(got) {
+			t.Errorf("%s: a stored policy read as %q, which is not JSON", tt.name, got)
+		}
+	}
+}
+
 // FuzzBucketPolicy: whatever the document, parsing never panics; what
 // parses has a principal for every statement and is about its bucket only;
 // and no policy lets an anonymous caller do anything but read.
@@ -163,6 +194,9 @@ func FuzzBucketPolicy(f *testing.F) {
 	f.Add([]byte(publicRead), "s3:PutObject", "index.html")
 	f.Add([]byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":"s3:*","Resource":"arn:aws:s3:::site/*"}]}`), "s3:DeleteObject", "k")
 	f.Add([]byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:G*","Resource":"arn:aws:s3:::site"}]}`), "s3:GetObject", "")
+	// A closing brace after the document: refused (PLAN 9.2a), so that
+	// GetBucketPolicy never hands out a text that is not JSON.
+	f.Add([]byte(publicRead+"}"), "s3:GetObject", "index.html")
 	f.Fuzz(func(t *testing.T, document []byte, action, key string) {
 		policy, err := iam.ParseBucketPolicy(document, "site")
 		if err != nil {
@@ -170,6 +204,11 @@ func FuzzBucketPolicy(f *testing.F) {
 				t.Fatalf("untyped error: %v", err)
 			}
 			return
+		}
+		// What is accepted - and stored as sent - is one JSON value and
+		// nothing else.
+		if !json.Valid(document) {
+			t.Fatalf("a document that is not JSON was accepted: %q", document)
 		}
 		if len(policy.Principals) != len(policy.Document.Statements) {
 			t.Fatalf("%d statements, %d principals", len(policy.Document.Statements), len(policy.Principals))

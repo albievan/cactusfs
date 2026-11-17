@@ -98,6 +98,13 @@ func (e *PolicyError) Truncated() bool { return e.truncated }
 type faultList struct {
 	// locate says that the tree is built and the faults are located.
 	locate bool
+	// stored says that the document is one already stored, read with the
+	// tolerance of strayClose.
+	stored bool
+	// decoded says that the document was decoded, and end is the byte
+	// offset just after it.
+	decoded bool
+	end     int64
 	// tree is the document as read, once it could be read; pointers are
 	// held against it.
 	tree      *jsonNode
@@ -109,13 +116,16 @@ type faultList struct {
 // faults and, when it is refused, again to locate them. Should the second
 // reading find no fault, which the two make the same checks to prevent, the
 // faults of the first are kept: a document is never accepted by the second.
-func parseLocated[T any](parse func(faults *faultList) T) (T, *faultList) {
-	quick := &faultList{}
+//
+// stored is the tolerance of the fault lists: true for a document already
+// stored (strayClose).
+func parseLocated[T any](stored bool, parse func(faults *faultList) T) (T, *faultList) {
+	quick := &faultList{stored: stored}
 	result := parse(quick)
 	if !quick.failed() {
 		return result, quick
 	}
-	located := &faultList{locate: true}
+	located := &faultList{locate: true, stored: stored}
 	var zero T
 	if parse(located); !located.failed() {
 		return zero, quick
@@ -134,6 +144,48 @@ func (l *faultList) addAt(pointer string, offset int64, err error) {
 	}
 	pointer = l.clamp(pointer)
 	l.faults = append(l.faults, PolicyFault{Pointer: pointer, Statement: l.statementOf(pointer), Reason: err.Error(), Offset: offset})
+}
+
+// decodedTo records that the document was decoded, and that it ends at the
+// byte offset end.
+func (l *faultList) decodedTo(end int64) {
+	l.decoded, l.end = true, end
+}
+
+// strayClose records the fault "data after the document" when the document
+// was decoded and what follows it, after white space, begins with a closing
+// bracket - "}" or "]" (PLAN 9.2a). It is called last, so that a document
+// refused for something else reads as it did before.
+//
+// Every other byte after a document but white space is refused before: by
+// the walk when a value begins there (readDocument), and right after the
+// document is decoded when not (json.Decoder.More). A closing bracket was
+// the one text the parsers took after a document before PLAN 9.2a: the walk
+// cannot read a token there, and More reports none. A document already
+// stored (stored) keeps that tolerance, so that a policy stored before it is
+// read as it was; one being put never has it.
+func (l *faultList) strayClose(data []byte) {
+	if !l.decoded || l.stored {
+		return
+	}
+	at, found := afterDocument(data, l.end)
+	if found && (data[at] == '}' || data[at] == ']') {
+		l.addAt("", at, invalidPolicy("data after the document"))
+	}
+}
+
+// afterDocument returns the byte offset of the first byte of data from end
+// on that is not JSON white space (RFC 8259: space, tab, line feed, carriage
+// return); found is false when there is none.
+func afterDocument(data []byte, end int64) (at int64, found bool) {
+	for i := max(end, 0); i < int64(len(data)); i++ {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+		default:
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // failed reports whether a fault was recorded.
@@ -328,8 +380,10 @@ func readDocument(faults *faultList, data []byte, fields func(where string) []st
 	before := len(faults.faults)
 	root := w.value("", "")
 	if !w.broken {
-		offset := w.decoder.InputOffset()
+		end := w.decoder.InputOffset()
 		if _, err := w.decoder.Token(); err == nil {
+			// The fault is where the data after the document begins.
+			offset, _ := afterDocument(data, end)
 			faults.addAt("", offset, invalidPolicy("data after the document"))
 		}
 	}

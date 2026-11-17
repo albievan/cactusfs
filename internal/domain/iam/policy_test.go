@@ -424,6 +424,8 @@ func FuzzParsePolicy(f *testing.F) {
 	f.Add([]byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Effect":"Allow","Action":"s3:*","Resource":"*"}]}`))
 	f.Add([]byte(`{"Version":"2012-10-17","Statement":[{"effect":"Allow","Action":"s3:*","Resource":"*","Condition":{"IpAddress":{}}}]}`))
 	f.Add([]byte(`[]`))
+	// A closing brace after the document: refused (PLAN 9.2a).
+	f.Add([]byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::b/*"}]}}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		doc, err := iam.ParsePolicy(data)
 		if err != nil {
@@ -431,6 +433,10 @@ func FuzzParsePolicy(f *testing.F) {
 				t.Fatalf("ParsePolicy error is not an invalid argument: %v", err)
 			}
 			return
+		}
+		// What is accepted is one JSON value and nothing else.
+		if !json.Valid(data) {
+			t.Fatalf("a document that is not JSON was accepted: %q", data)
 		}
 		if err := doc.Validate(); err != nil {
 			t.Fatalf("a parsed document does not validate: %v", err)

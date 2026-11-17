@@ -707,9 +707,16 @@ func (p *policySummaries) of(ctx context.Context, bucketName string) (summary *i
 }
 
 // Policy returns the policy of a bucket as it was given, or nil when the
-// bucket has none.
+// bucket has none. It is the document the authorizer enforces
+// (iam.StoredPolicyDocument): a policy stored before PLAN 9.2a with a
+// closing bracket after it is returned without that text, so that every
+// API hands out JSON; every other is returned byte for byte as stored.
 func (s *BucketService) Policy(ctx context.Context, principal iam.Principal, name string) ([]byte, error) {
-	return s.config(ctx, principal, iam.ActionGetBucketPolicy, name, bucket.ConfigPolicy, "bucket.Policy")
+	raw, err := s.config(ctx, principal, iam.ActionGetBucketPolicy, name, bucket.ConfigPolicy, "bucket.Policy")
+	if err != nil || raw == nil {
+		return raw, err
+	}
+	return iam.StoredPolicyDocument(raw), nil
 }
 
 // SetPolicy replaces the policy of a bucket; nil removes it. The change is

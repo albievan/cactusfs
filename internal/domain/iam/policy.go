@@ -220,7 +220,7 @@ func ParsePolicy(data []byte) (Document, error) {
 // parsePolicy parses a policy document, collecting its faults, located when
 // it is refused (parseLocated).
 func parsePolicy(data []byte) (Document, *faultList) {
-	return parseLocated(func(faults *faultList) Document { return parsePolicyInto(faults, data) })
+	return parseLocated(false, func(faults *faultList) Document { return parsePolicyInto(faults, data) })
 }
 
 // parsePolicyInto parses a policy document, recording its faults. It makes
@@ -260,6 +260,7 @@ func parsePolicyInto(faults *faultList, data []byte) Document {
 		addDecodeFaults(faults, err, typeFaults(tree, shapeString, identityShape))
 		return Document{}
 	}
+	faults.decodedTo(decoder.InputOffset())
 	if decoder.More() {
 		faults.addAt("", decoder.InputOffset(), invalidPolicy("data after the document"))
 	}
@@ -273,6 +274,7 @@ func parsePolicyInto(faults *faultList, data []byte) Document {
 		doc.Statements = append(doc.Statements, readStatement(faults, i, ws, condition))
 	}
 	doc.validate(faults)
+	faults.strayClose(data)
 	if faults.failed() {
 		return Document{}
 	}

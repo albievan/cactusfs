@@ -67,11 +67,53 @@ func bucketShape(field string) shape {
 // ParseBucketPolicy parses and validates the policy of the named bucket.
 // Every statement needs a Principal - "*", {"AWS": "*"}, or users named as
 // "arn:aws:iam:::user/<name>" - and may be about that bucket and its objects
-// only, and about S3 actions only. The error wraps domain.ErrInvalidArgument;
-// it is a *PolicyError, which reads as the first fault of the document and
-// holds every fault found.
+// only, and about S3 actions only. Nothing but JSON white space may follow
+// the document. The error wraps domain.ErrInvalidArgument; it is a
+// *PolicyError, which reads as the first fault of the document and holds
+// every fault found.
 func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
-	policy, faults := parseBucketPolicy(data, bucketName)
+	return parseBucketPolicyAs(false, data, bucketName)
+}
+
+// ParseStoredBucketPolicy parses the policy of the named bucket as it was
+// stored: as ParseBucketPolicy does, but for one text after the document,
+// which it takes as the parsers before PLAN 9.2a did - white space and then
+// a closing bracket, "}" or "]", whatever follows that. Only the document is
+// read (StoredPolicyDocument is that document). It is for a policy already
+// stored, which such a text must not make unreadable.
+//
+// Never use it on a document being put or validated: it accepts text that is
+// not JSON. A document being put or validated is parsed with
+// ParseBucketPolicy. Only the authorizer's read of a stored policy calls it
+// (internal/app/authz.go; a test of internal/app holds that).
+func ParseStoredBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
+	return parseBucketPolicyAs(true, data, bucketName)
+}
+
+// StoredPolicyDocument returns the policy document a stored bucket policy is:
+// raw cut just after its first JSON value when what follows that value,
+// after white space, begins with a closing bracket - the one text the
+// parsers took after a document before PLAN 9.2a, and which
+// ParseStoredBucketPolicy still takes - and raw itself otherwise. A record
+// that is JSON is returned as it is, byte for byte.
+func StoredPolicyDocument(raw []byte) []byte {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var first json.RawMessage
+	if decoder.Decode(&first) != nil {
+		return raw
+	}
+	end := decoder.InputOffset()
+	at, found := afterDocument(raw, end)
+	if !found || (raw[at] != '}' && raw[at] != ']') {
+		return raw
+	}
+	return raw[:end:end]
+}
+
+// parseBucketPolicyAs parses a bucket policy, with the tolerance of a stored
+// one when stored is true.
+func parseBucketPolicyAs(stored bool, data []byte, bucketName string) (BucketPolicy, error) {
+	policy, faults := parseBucketPolicy(stored, data, bucketName)
 	if err := faults.err(domain.ErrInvalidArgument); err != nil {
 		return BucketPolicy{}, err
 	}
@@ -80,13 +122,26 @@ func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
 
 // parseBucketPolicy parses a bucket policy, collecting its faults, located
 // when it is refused (parseLocated).
-func parseBucketPolicy(data []byte, bucketName string) (BucketPolicy, *faultList) {
-	return parseLocated(func(faults *faultList) BucketPolicy { return parseBucketPolicyInto(faults, data, bucketName) })
+func parseBucketPolicy(stored bool, data []byte, bucketName string) (BucketPolicy, *faultList) {
+	return parseLocated(stored, func(faults *faultList) BucketPolicy { return parseBucketPolicyInto(faults, data, bucketName) })
 }
 
 // parseBucketPolicyInto parses a bucket policy, recording its faults in the
-// order ParseBucketPolicy has always met them.
+// order ParseBucketPolicy has always met them, a closing bracket after the
+// document last (strayClose).
 func parseBucketPolicyInto(faults *faultList, data []byte, bucketName string) BucketPolicy {
+	policy := readBucketPolicy(faults, data, bucketName)
+	faults.strayClose(data)
+	if faults.failed() {
+		return BucketPolicy{}
+	}
+	return policy
+}
+
+// readBucketPolicy parses a bucket policy, recording its faults but for a
+// closing bracket after the document: the policy of a sub-bucket records
+// its own faults before that one.
+func readBucketPolicy(faults *faultList, data []byte, bucketName string) BucketPolicy {
 	if len(data) > MaxPolicyBytes {
 		faults.add("", invalidPolicy("larger than %d bytes", MaxPolicyBytes))
 		return BucketPolicy{}
@@ -103,6 +158,7 @@ func parseBucketPolicyInto(faults *faultList, data []byte, bucketName string) Bu
 		addDecodeFaults(faults, err, typeFaults(tree, shapeAny, bucketShape))
 		return BucketPolicy{}
 	}
+	faults.decodedTo(decoder.InputOffset())
 	if decoder.More() {
 		faults.addAt("", decoder.InputOffset(), invalidPolicy("data after the document"))
 	}

@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -113,6 +114,12 @@ func faultRows() []faultRow {
 		// Data after the document is at where it begins.
 		{"identity: data after the document", identityKind, statementDoc(identityBody) + `{}`, []string{""}, int64(len(statementDoc(identityBody)))},
 		{"identity: a value after the document", identityKind, statementDoc(identityBody) + ` x`, []string{""}, int64(len(statementDoc(identityBody)) + 1)},
+		{"identity: a value after white space", identityKind, statementDoc(identityBody) + " \n{}", []string{""}, int64(len(statementDoc(identityBody)) + 2)},
+		// A closing bracket after the document, which the frozen parsers
+		// took (PLAN 9.2a): refused, last.
+		{"identity: a closing brace after the document", identityKind, statementDoc(identityBody) + `}`, []string{""}, int64(len(statementDoc(identityBody)))},
+		{"identity: a closing bracket and more after white space", identityKind, statementDoc(identityBody) + " \r\n]x", []string{""}, int64(len(statementDoc(identityBody)) + 3)},
+		{"identity: a wrong Version, then a closing brace", identityKind, `{"Version":"1","Statement":[{` + identityBody + `}]}}`, []string{"/Version", ""}, none},
 		{"identity: a null Condition", identityKind, statementDoc(identityBody + `,"Condition":null`), []string{"/Statement/0/Condition"}, none},
 		// What encoding/json refuses.
 		{"identity: not an object", identityKind, `[]`, []string{""}, none},
@@ -186,6 +193,8 @@ func faultRows() []faultRow {
 		{"bucket: too large", bucketKind, tooLarge, []string{""}, none},
 		{"bucket: not JSON", bucketKind, `Principal: *`, []string{""}, 1},
 		{"bucket: data after the document", bucketKind, statementDoc(bucketBody) + `{}`, []string{""}, int64(len(statementDoc(bucketBody)))},
+		{"bucket: a closing brace after the document", bucketKind, statementDoc(bucketBody) + "\t}", []string{""}, int64(len(statementDoc(bucketBody)) + 1)},
+		{"bucket: another bucket, then a closing bracket", bucketKind, statementDoc(`"Principal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::other/*"`) + `]`, []string{"/Statement/0/Resource", ""}, none},
 		{"bucket: NotPrincipal", bucketKind, statementDoc(`"NotPrincipal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"`), []string{"/Statement/0/NotPrincipal"}, none},
 		{"bucket: a principal of another kind", bucketKind, statementDoc(`"Principal":{"Service":"s3.amazonaws.com"},"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"`), []string{"/Statement/0/Principal/Service"}, none},
 		{"bucket: a Sid that is a number", bucketKind, statementDoc(`"Sid":1,` + bucketBody), []string{"/Statement/0/Sid"}, none},
@@ -228,6 +237,10 @@ func faultRows() []faultRow {
 
 		// A sub-bucket's policy.
 		{"sub-bucket: too large", subBucketKind, tooLarge, []string{""}, none},
+		{"sub-bucket: data after the document", subBucketKind, statementDoc(subBucketBody) + ` x`, []string{""}, int64(len(statementDoc(subBucketBody)) + 1)},
+		{"sub-bucket: a closing bracket after the document", subBucketKind, statementDoc(subBucketBody) + `]`, []string{""}, int64(len(statementDoc(subBucketBody)))},
+		{"sub-bucket: anyone, then a closing brace", subBucketKind, statementDoc(`"Principal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/reports/*"`) + `}`, []string{"/Statement/0/Principal", ""}, none},
+		{"sub-bucket: what a bucket policy refuses, then a closing brace", subBucketKind, statementDoc(`"Principal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::other/*"`) + `}`, []string{"/Statement/0/Resource", ""}, none},
 		{"sub-bucket: what a bucket policy refuses", subBucketKind, statementDoc(`"Principal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::other/*"`), []string{"/Statement/0/Resource"}, none},
 		{"sub-bucket: anyone", subBucketKind, statementDoc(`"Principal":"*","Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/reports/*"`), []string{"/Statement/0/Principal"}, none},
 		{"sub-bucket: anyone, as AWS", subBucketKind, statementDoc(`"Principal":{"AWS":"*"},"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/reports/*"`), []string{"/Statement/0/Principal/AWS"}, none},
@@ -267,16 +280,32 @@ func TestFaultsAreLocated(t *testing.T) {
 		if faults[0].Offset != row.offset {
 			t.Errorf("%s: offset %d, want %d", row.name, faults[0].Offset, row.offset)
 		}
+		for _, f := range faults {
+			// Data after the document has its offset wherever it is:
+			// where that data begins.
+			if f.Reason == dataAfterReason {
+				if at, stray := strayAfter([]byte(row.doc)); !stray || f.Offset != at {
+					t.Errorf("%s: data after the document at %d, read apart at %d (%v)", row.name, f.Offset, at, stray)
+				}
+			}
+		}
 		for _, f := range faults[1:] {
-			if f.Offset != NoOffset {
+			if f.Offset != NoOffset && f.Reason != dataAfterReason {
 				t.Errorf("%s: a fault after the first has the offset %d", row.name, f.Offset)
 			}
 		}
 		_, before := row.kind.oracle([]byte(row.doc))
-		if before == nil || err.Error() != before.Error() {
-			t.Errorf("%s: reads %q, read %v", row.name, err, before)
+		if before == nil {
+			// The one refusal the frozen parsers did not make.
+			if !refusedForStrayClose(row.kind, []byte(row.doc), err) {
+				t.Errorf("%s: reads %q, was accepted", row.name, err)
+			}
+		} else {
+			if err.Error() != before.Error() {
+				t.Errorf("%s: reads %q, read %v", row.name, err, before)
+			}
+			holdSentinels(t, row.name, err, before)
 		}
-		holdSentinels(t, row.name, err, before)
 		for _, f := range faults {
 			if want := expectedStatement(f.Pointer); f.Statement != want {
 				t.Errorf("%s: the fault at %q is of statement %d, want %d", row.name, f.Pointer, f.Statement, want)
@@ -374,6 +403,65 @@ func TestFaultsAreBounded(t *testing.T) {
 	if _, err := ParsePolicy([]byte(few)); !errors.As(err, &refused) || len(refused.Faults()) != 50 || refused.Truncated() {
 		t.Errorf("50 faults: %v", err)
 	}
+}
+
+// dataAfterReason is the reason of data after the document.
+var dataAfterReason = invalidPolicy("data after the document").Error()
+
+// strayAfter reports whether data begins with one JSON value followed by
+// something other than JSON white space, and the byte offset at which that
+// begins: read apart from the parsers, with encoding/json.
+func strayAfter(data []byte) (int64, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var first json.RawMessage
+	if decoder.Decode(&first) != nil {
+		return 0, false
+	}
+	rest := bytes.TrimLeft(data[decoder.InputOffset():], " \t\r\n")
+	if len(rest) == 0 {
+		return 0, false
+	}
+	return int64(len(data) - len(rest)), true
+}
+
+// refusedForStrayClose reports whether err is the one refusal the parsers
+// make of a document the frozen parsers accepted (PLAN 9.2a): the document
+// is followed by a closing bracket - the one text after a document those
+// took - and its only fault is data after the document, at that bracket,
+// wrapping the sentinels of the parser.
+func refusedForStrayClose(kind policyKind, data []byte, err error) bool {
+	at, stray := strayAfter(data)
+	var refused *PolicyError
+	if !stray || (data[at] != '}' && data[at] != ']') || !errors.As(err, &refused) {
+		return false
+	}
+	want := PolicyFault{Pointer: "", Statement: NoStatement, Reason: dataAfterReason, Offset: at}
+	faults := refused.Faults()
+	sentinels := errors.Is(err, domain.ErrInvalidArgument) && errors.Is(err, domain.ErrInvalidPolicy) == (kind == subBucketKind) &&
+		!errors.Is(err, domain.ErrInvalidBucketName)
+	return len(faults) == 1 && faults[0] == want && err.Error() == dataAfterReason && sentinels && !refused.Truncated()
+}
+
+// holdToOracle fails unless a parser's result and error are the frozen
+// parser's: the same documents accepted, to the same result; the same
+// refused, with the same reason (sameReason) and the same sentinels. It
+// reports whether the document was refused.
+func holdToOracle(t *testing.T, name string, data []byte, got any, err error, was any, before error) bool {
+	t.Helper()
+	if (err == nil) != (before == nil) {
+		t.Fatalf("%s: accepted %v, was accepted %v: %v / %v\n%q", name, err == nil, before == nil, err, before, data)
+	}
+	if err == nil {
+		if !reflect.DeepEqual(got, was) {
+			t.Fatalf("%s: parsed as %+v, was %+v", name, got, was)
+		}
+		return false
+	}
+	if !sameReason(data, err.Error(), before.Error()) {
+		t.Fatalf("%s: reads %q, read %q\n%q", name, err, before, data)
+	}
+	holdSentinels(t, name, err, before)
+	return true
 }
 
 // expectedStatement is the statement a pointer is in, read apart from the
@@ -529,7 +617,11 @@ func resolves(data []byte, pointer string) bool {
 // is there in the document (but one of syntax, which has an offset), of the
 // statement its pointer is in. And the parsers accept and refuse what the
 // frozen parsers did: the same documents, to the same result; the same
-// refusals, with the same text and the same sentinels.
+// refusals, with the same text and the same sentinels - but for one class
+// (PLAN 9.2a): a document followed by a closing bracket, which they took and
+// the parsers refuse as data after the document, its only fault. What the
+// parsers accept is JSON. A stored bucket policy is read as the frozen
+// parser read it, that class included, and its StoredPolicyDocument is JSON.
 func FuzzPolicyFaults(f *testing.F) {
 	for _, row := range faultRows() {
 		f.Add([]byte(row.doc))
@@ -555,19 +647,39 @@ func FuzzPolicyFaults(f *testing.F) {
 			}
 			got, err := kind.parse(data)
 			was, before := kind.oracle(data)
-			if (err == nil) != (before == nil) {
-				t.Fatalf("%s: accepted %v, was accepted %v: %v / %v\n%q", kind, err == nil, before == nil, err, before, data)
+			// A bucket's policy already stored is read as the frozen
+			// parser read it: a closing bracket after it is taken. What
+			// is read is StoredPolicyDocument, which is JSON, and the
+			// parser of a put takes it to the same policy. A record that
+			// is JSON is its own document.
+			if kind == bucketKind {
+				stored, storedErr := ParseStoredBucketPolicy(data, "site")
+				holdToOracle(t, "bucket, stored", data, stored, storedErr, was, before)
+				document := StoredPolicyDocument(data)
+				if json.Valid(data) && !bytes.Equal(document, data) {
+					t.Fatalf("StoredPolicyDocument changed a record that is JSON\n%q\n%q", data, document)
+				}
+				if storedErr == nil {
+					again, err := ParseBucketPolicy(document, "site")
+					if err != nil || !json.Valid(document) || !reflect.DeepEqual(again, stored) {
+						t.Fatalf("StoredPolicyDocument of a stored policy: %v\n%q\n%q", err, data, document)
+					}
+				}
 			}
-			if err == nil {
-				if !reflect.DeepEqual(got, was) {
-					t.Fatalf("%s: parsed as %+v, was %+v", kind, got, was)
+			// What is accepted is one JSON value and nothing else.
+			if err == nil && !json.Valid(data) {
+				t.Fatalf("%s: accepted what is not JSON\n%q", kind, data)
+			}
+			if err != nil && before == nil {
+				// The one refusal the frozen parsers did not make.
+				if !refusedForStrayClose(kind, data, err) {
+					t.Fatalf("%s: refused with %q, was accepted\n%q", kind, err, data)
 				}
 				continue
 			}
-			if !sameReason(data, err.Error(), before.Error()) {
-				t.Fatalf("%s: reads %q, read %q\n%q", kind, err, before, data)
+			if !holdToOracle(t, kind.String(), data, got, err, was, before) {
+				continue
 			}
-			holdSentinels(t, kind.String(), err, before)
 			var refused *PolicyError
 			if !errors.As(err, &refused) {
 				t.Fatalf("%s: %v is no *PolicyError", kind, err)

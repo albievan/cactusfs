@@ -235,6 +235,8 @@ func FuzzSubBucketPolicy(f *testing.F) {
 	f.Add([]byte(subDocument(subStatement("Deny", `"*"`, `"s3:ListBucket"`, siteARN))), "reports", "s3:ListBucket", "", "reports/x")
 	f.Add([]byte(subDocument(subStatement("Allow", aliceARN, `"s3:BypassGovernanceRetention"`, reportKeys))), "reports", "s3:BypassGovernanceRetention", "reports/a", "")
 	f.Add([]byte(subDocument(subStatement("Allow", aliceARN, `"S3:PutObject"`, `"arn:aws:s3:::site/reports/*"`))), "reports", "s3:PutObject", "reports/x/y", "")
+	// A closing bracket after the document: refused (PLAN 9.2a).
+	f.Add([]byte(readReports+"\n]"), "reports", "s3:GetObject", "reports/a", "")
 	f.Fuzz(func(t *testing.T, document []byte, sub, action, key, prefix string) {
 		policy, err := iam.ParseSubBucketPolicy(document, "site", sub)
 		if err != nil {
@@ -242,6 +244,11 @@ func FuzzSubBucketPolicy(f *testing.F) {
 				t.Fatalf("untyped error: %v", err)
 			}
 			return
+		}
+		// What is accepted - and stored as sent - is one JSON value and
+		// nothing else.
+		if !json.Valid(document) {
+			t.Fatalf("a document that is not JSON was accepted: %q", document)
 		}
 		if bucket.ValidateSubBucketName(sub) != nil || policy.Bucket() != "site" || policy.Name() != sub {
 			t.Fatalf("kept as the policy of %q/%q, asked for %q", policy.Bucket(), policy.Name(), sub)

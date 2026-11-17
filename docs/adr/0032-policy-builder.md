@@ -145,6 +145,14 @@ first is, word for word, the text the put's error has today. A fault of JSON syn
 carries a byte offset in the domain; it cannot arrive through this API, whose body is
 JSON with the document in it, and the contract has no field for it.
 
+One class is an exception to the law that the parsers accept and refuse what the frozen
+parsers of 3e620ef did (PLAN 9.2a): a document followed, after white space, by a closing
+bracket `}` or `]`, which those took and every parser now refuses as "data after the
+document", its only fault, so that what is accepted is always JSON; a bucket's policy
+already stored is read with the old tolerance (`iam.ParseStoredBucketPolicy`, called only
+by the authorizer) and is shown as the document enforced (`iam.StoredPolicyDocument`),
+while a sub-bucket's, never stored so, is read strictly.
+
 The **analysis** says of each statement, from `iam.AnalysePolicy`,
 `AnalyseBucketPolicy` and `AnalyseSubBucketPolicy` (PLAN 9.2):
 

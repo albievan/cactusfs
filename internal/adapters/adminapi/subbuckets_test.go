@@ -15,6 +15,7 @@ import (
 	"github.com/albievan/cactusfs/internal/adapters/adminapi"
 	"github.com/albievan/cactusfs/internal/adapters/httpsession"
 	"github.com/albievan/cactusfs/internal/domain/audit"
+	"github.com/albievan/cactusfs/internal/domain/bucket"
 	"github.com/albievan/cactusfs/internal/domain/iam"
 )
 
@@ -220,6 +221,29 @@ func TestBucketPolicy(t *testing.T) {
 	} {
 		if p := f.must(http.StatusNotFound, c).problem(t); p["code"] != "NoSuchBucket" {
 			t.Errorf("%s %s: problem = %v", c.method, c.path, p)
+		}
+	}
+}
+
+// TestStoredBucketPolicyReadsAsJSON: a bucket policy stored before PLAN 9.2a
+// with a closing bracket after it is shown as the document the authorizer
+// enforces, which is JSON - not 500 - and one stored as JSON as it is.
+func TestStoredBucketPolicyReadsAsJSON(t *testing.T) {
+	t.Parallel()
+	document := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::some-bucket/*"}]}`
+	for name, stored := range map[string]string{"a closing brace after it": document + "}", "JSON": document} {
+		f := newFixture(t)
+		f.must(http.StatusCreated, call{method: "POST", path: "/buckets", body: map[string]any{"name": "some-bucket"}})
+		if err := f.meta.SetBucketConfig(t.Context(), "some-bucket", bucket.ConfigPolicy, []byte(stored)); err != nil {
+			t.Fatal(err)
+		}
+		r := f.must(http.StatusOK, call{method: "GET", path: "/buckets/some-bucket/policy"})
+		var got struct {
+			Document json.RawMessage `json:"document"`
+		}
+		r.decode(t, &got)
+		if string(got.Document) != document {
+			t.Errorf("%s: GET = %s, want the document %s", name, r.body, document)
 		}
 	}
 }

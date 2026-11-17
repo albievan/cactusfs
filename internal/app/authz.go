@@ -198,6 +198,8 @@ func (a *Authorizer) parseSubBucketPolicy(bucketName, name string, document []by
 	if policy, ok := a.parsed.getSubBucket(bucketName, name, sum); ok {
 		return readSubBucketPolicy{policy: policy}
 	}
+	// Strictly, as it was put: no sub-bucket's policy was ever stored with
+	// a closing bracket after it (PLAN 9.2a), unlike a bucket's.
 	policy, err := iam.ParseSubBucketPolicy(document, bucketName, name)
 	if err != nil {
 		// The stored policy is damaged; that is no fault of the request.
@@ -229,12 +231,14 @@ func (a *Authorizer) bucketPolicy(ctx context.Context, req iam.Request) (*iam.Bu
 }
 
 // storedBucketPolicy reads the policy document a bucket has; nil when it has
-// none.
+// none. It is read as it was stored (iam.ParseStoredBucketPolicy): a policy
+// put before PLAN 9.2a may be followed by a closing bracket, and must not
+// become unreadable for that.
 func storedBucketPolicy(raw []byte, bucketName string) (*iam.BucketPolicy, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	policy, err := iam.ParseBucketPolicy(raw, bucketName)
+	policy, err := iam.ParseStoredBucketPolicy(raw, bucketName)
 	if err != nil {
 		// The stored policy is damaged; that is no fault of the request.
 		// Only what it says is kept, not what it is: a damaged record must

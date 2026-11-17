@@ -452,6 +452,60 @@ func subBucketSite(t *testing.T) *porttest.MemMetadata {
 	return meta
 }
 
+// TestStoredPoliciesAreReadAsStored: a bucket's policy stored before PLAN
+// 9.2a, followed by a closing bracket, is read as it was then - the parsers
+// refuse such a document now, and it must not make the bucket unreadable -
+// while other data after a stored document is damage, as it always was. A
+// sub-bucket's policy is read strictly: none was ever stored so (sub-buckets
+// came after the last release, and their one put is the admin API's JSON
+// body), and one that is is damage.
+func TestStoredPoliciesAreReadAsStored(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	meta := porttest.NewMemMetadata()
+	public := func(bucketName string) string {
+		return `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::` + bucketName + `/*"}]}`
+	}
+	for name, policy := range map[string]string{"brace": public("brace") + "}", "bracket": public("bracket") + " \n]x", "damaged": public("damaged") + " x", "plain": public("plain")} {
+		if err := meta.CreateBucket(ctx, bucket.Bucket{Name: name, CreatedAt: testNow}); err != nil {
+			t.Fatal(err)
+		}
+		if err := meta.SetBucketConfig(ctx, name, bucket.ConfigPolicy, []byte(policy)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	private := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::plain/private/*"}]}`
+	for name, policy := range map[string]string{
+		"private":   private,
+		"bracketed": strings.ReplaceAll(private, "/private/", "/bracketed/") + "]",
+		"damaged":   strings.ReplaceAll(private, "/private/", "/damaged/") + "x",
+	} {
+		if err := meta.PutSubBucket(ctx, "plain", bucket.SubBucket{Name: name, Policy: []byte(policy), CreatedAt: testNow}, audit.Record{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	authz := app.NewAuthorizer(slog.New(slog.DiscardHandler), porttest.NewClock(testNow), nil).WithBucketPolicies(meta).WithSubBuckets(meta)
+	get := func(bucketName, key string) iam.Request {
+		return iam.Request{Principal: iam.Principal{}, Action: iam.ActionGetObject, Resource: iam.Resource{Bucket: bucketName, Key: key}}
+	}
+	for _, tt := range []struct {
+		name    string
+		request iam.Request
+		want    error
+	}{
+		{"a bucket policy followed by a brace", get("brace", "index.html"), nil},
+		{"a bucket policy followed by a bracket and more", get("bracket", "index.html"), nil},
+		{"a sub-bucket policy", get("plain", "private/salaries.csv"), domain.ErrAccessDenied},
+		{"a sub-bucket policy followed by a bracket is read strictly", get("plain", "bracketed/x"), domain.ErrIntegrity},
+		{"a bucket policy followed by a value", get("damaged", "index.html"), domain.ErrIntegrity},
+		{"a sub-bucket policy followed by a value", get("plain", "damaged/x"), domain.ErrIntegrity},
+	} {
+		if err := authz.Authorize(app.WithRequestScope(ctx), tt.request); (err == nil) != (tt.want == nil) || (tt.want != nil && !errors.Is(err, tt.want)) {
+			t.Errorf("%s: Authorize = %v, want %v", tt.name, err, tt.want)
+		}
+	}
+}
+
 // TestSubBucketPolicies: the authorizer decides a request in a sub-bucket
 // from three sources (ADR-0017) - the caller's own policies, the bucket's and
 // the sub-bucket's: a Deny in any refuses, an Allow in any allows, the bound

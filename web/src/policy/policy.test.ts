@@ -173,7 +173,6 @@ describe('the reader', () => {
     ['a Principal that is a list', bucket('["*"]'), 'sub-bucket', 'Principal: want "*" or {"AWS": ...}, not a list', '/Statement/0/Principal'],
     ['an AWS that is an object', bucket('{"AWS":{}}'), 'bucket', 'AWS: want a string or a list of strings, not an object', '/Statement/0/Principal/AWS'],
     ['data after the document', '{} {}', 'identity', 'not JSON: data after the document at character 3', ''],
-    // The API's parsers take this one today (PLAN 9.7 review); it is not JSON, and is kept.
     ['a stray brace after the document', `${identity(allow)}}`, 'identity', 'not JSON: data after the document at character 114', ''],
     ['a stray bracket after the document', `${bucket('"*"')}]`, 'bucket', 'not JSON: data after the document at character 130', ''],
     ['an empty text', '', 'identity', 'not JSON: the text ends too soon', ''],

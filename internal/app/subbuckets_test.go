@@ -185,6 +185,9 @@ func TestSubBucketServicePut(t *testing.T) {
 		"a policy that is not JSON": {
 			principal: subAdmin, name: "reports", policy: "{not json", want: domain.ErrInvalidPolicy, absent: true,
 		},
+		"a policy followed by a closing brace": {
+			principal: subAdmin, name: "reports", policy: reportsPolicy + "}", want: domain.ErrInvalidPolicy, absent: true,
+		},
 		"an invalid policy leaves the one it had": {
 			setup: func(t *testing.T, f *subBucketFixture) {
 				f.register(t, "site", map[string]string{"reports": reportsPolicy})

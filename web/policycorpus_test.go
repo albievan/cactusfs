@@ -31,13 +31,6 @@ import (
 // seeds of the parsers' fuzz targets are read from their sources - the
 // arguments of each f.Add, and the files of testdata/fuzz - and the parsers
 // are asked, through their exported API, which they accept.
-//
-// One text the parsers accept today is not taken by the reader, and is in no
-// seed or generated document: a document followed by a stray "}" or "]",
-// which ParsePolicy and ParseBucketPolicy accept and the console keeps as it
-// is (found in the review of PLAN 9.7; the parsers are mended in a step of
-// their own after 9.3). Should a seed be such a text, the corpus test of the
-// console fails, as it should.
 
 const (
 	// iamSources is the package whose fuzz seeds begin the corpus.

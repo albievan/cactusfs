@@ -25,12 +25,6 @@ import { valuesOf } from './model';
 // is read and modelled as written: the API's validation says what is wrong
 // with it. Nothing here decides who may do what.
 //
-// One text the API takes is kept here, until the parsers are mended: a
-// document followed by a stray "}" or "]", which ParsePolicy and
-// ParseBucketPolicy accept today (found in the review of PLAN 9.7, to be
-// mended in a step of its own after 9.3). It is not JSON, so it is kept as it
-// is - the stricter reading.
-//
 // JSON.parse cannot be the reader: of a field given twice it keeps the last,
 // so a text the API refuses would be read as one it takes. The text is read
 // with a tokenizer of its own, as the API's parsers read it token by token.

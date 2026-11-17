@@ -1091,6 +1091,10 @@ func TestSetPolicyRefusesAPolicyThatCannotBeKept(t *testing.T) {
 		{"an action that is not S3's", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"admin:ListUsers","Resource":"arn:aws:s3:::site"}]}`},
 		{"governance bypass", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:BypassGovernanceRetention","Resource":"arn:aws:s3:::site/*"}]}`},
 		{"larger than allowed", `{"Version":"2012-10-17","Statement":[{"Sid":"` + strings.Repeat("x", iam.MaxPolicyBytes) + `","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`},
+		// Stored as sent, it would be handed to S3 clients as a text that
+		// is not JSON (PLAN 9.2a).
+		{"a closing brace after the document", string(kept) + `}`},
+		{"a closing bracket after the document", string(kept) + "\n]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1108,6 +1112,48 @@ func TestSetPolicyRefusesAPolicyThatCannotBeKept(t *testing.T) {
 	elsewhere := bytes.ReplaceAll(kept, []byte(":::site/"), []byte(":::nowhere/"))
 	if err := buckets.SetPolicy(ctx, porttest.Root(), "nowhere", elsewhere); !errors.Is(err, domain.ErrBucketNotFound) || errors.Is(err, domain.ErrInvalidPolicy) {
 		t.Errorf("SetPolicy on a bucket that is not there = %v", err)
+	}
+}
+
+// TestPolicyIsTheDocumentEnforced: the policy a bucket is read back with is
+// the document the authorizer enforces. A record stored before PLAN 9.2a
+// with a closing bracket after its document reads back as that document,
+// which is JSON; every other record reads back byte for byte as stored -
+// one that is JSON, however it is laid out, and one that is damaged.
+func TestPolicyIsTheDocumentEnforced(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	document := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`
+	tests := []struct {
+		name   string
+		stored string
+		want   string
+	}{
+		{"JSON", document, document},
+		{"JSON laid out with white space", " \n" + strings.ReplaceAll(document, ",", ",\n\t") + "\r\n ", " \n" + strings.ReplaceAll(document, ",", ",\n\t") + "\r\n "},
+		{"a closing brace after it", document + "}", document},
+		{"a closing bracket and more after white space", document + " \n]x", document},
+		{"a value after it", document + " x", document + " x"},
+		{"not JSON", "not a policy", "not a policy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			meta := porttest.NewMemMetadata()
+			clock := porttest.NewClock(testNow)
+			if err := meta.CreateBucket(ctx, bucket.Bucket{Name: "site"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := meta.SetBucketConfig(ctx, "site", bucket.ConfigPolicy, []byte(tt.stored)); err != nil {
+				t.Fatal(err)
+			}
+			authz := app.NewAuthorizer(slog.New(slog.DiscardHandler), clock, nil).WithBucketPolicies(meta)
+			buckets := app.NewBucketService(meta, authz, clock)
+			got, err := buckets.Policy(ctx, porttest.Root(), "site")
+			if err != nil || string(got) != tt.want {
+				t.Errorf("Policy = %q, %v; want %q", got, err, tt.want)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,7 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -22,6 +23,35 @@ const sitePolicy = `{"Version":"2012-10-17","Statement":[
 	{"Sid":"public","Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:ListBucket","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::site","arn:aws:s3:::site/*"]},
 	{"Sid":"drafts","Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/drafts/*"},
 	{"Sid":"editor","Effect":"Allow","Principal":{"AWS":"arn:aws:iam:::user/editor"},"Action":"s3:PutObject","Resource":"arn:aws:s3:::site/*"}]}`
+
+// TestStoredPolicyReadsAsJSON: a bucket policy stored before PLAN 9.2a with
+// a closing bracket after it is read back by GetBucketPolicy as the document
+// the authorizer enforces, which is JSON, and is enforced; one stored as JSON
+// reads back byte for byte.
+func TestStoredPolicyReadsAsJSON(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, tt := range map[string]struct{ stored, want string }{
+		"a closing brace after it": {sitePolicy + "}", sitePolicy},
+		"JSON":                     {sitePolicy + "\n", sitePolicy + "\n"},
+	} {
+		s := newTestServer(t, "")
+		s.createBucket("site")
+		s.putObject("/site/index.html", []byte("hello"))
+		if err := s.meta.SetBucketConfig(ctx, "site", bucket.ConfigPolicy, []byte(tt.stored)); err != nil {
+			t.Fatal(err)
+		}
+		got := s.mustStatus(s.do(call{method: http.MethodGet, path: "/site?policy"}), http.StatusOK)
+		if string(got.body) != tt.want || !json.Valid(got.body) {
+			t.Errorf("%s: GetBucketPolicy = %q, want %q", name, got.body, tt.want)
+		}
+		// The policy that reads back is the one enforced: anybody reads.
+		r := s.do(call{method: http.MethodGet, path: "/site/index.html", unsigned: true})
+		if r.status != http.StatusOK {
+			t.Errorf("%s: an anonymous read = %d", name, r.status)
+		}
+	}
+}
 
 // TestSubBucketPolicyOverHTTP: over the S3 API, the policy of a sub-bucket
 // (ADR-0017) keeps a part of a public bucket private from readers who have
@@ -104,12 +134,18 @@ func TestBucketPolicyOverHTTP(t *testing.T) {
 		"empty":                {"", "InvalidArgument"},
 		"no principal":         {`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::site/*"}]}`, "InvalidArgument"},
 		"about another bucket": {strings.ReplaceAll(sitePolicy, "site", "private"), "InvalidArgument"},
+		// Kept as sent, GetBucketPolicy would hand out a text that is not
+		// JSON (PLAN 9.2a).
+		"a closing brace after it":   {sitePolicy + "}", "InvalidArgument"},
+		"a closing bracket after it": {sitePolicy + "\n]", "InvalidArgument"},
 	} {
 		r := s.do(call{method: http.MethodPut, path: "/site?policy", body: []byte(tt.body)})
 		if code := s.errorCode(r); r.status != http.StatusBadRequest || code != tt.code {
 			t.Errorf("PutBucketPolicy with %s = %d %s", name, r.status, code)
 		}
 	}
+	// None of them was kept.
+	s.expectError(s.do(call{method: http.MethodGet, path: "/site?policy"}), http.StatusNotFound, "NoSuchBucketPolicy")
 	// A policy the signature does not cover decides nothing.
 	s.expectError(s.do(call{method: http.MethodPut, path: "/site?policy", body: []byte(sitePolicy), payloadHash: "UNSIGNED-PAYLOAD"}),
 		http.StatusBadRequest, "InvalidRequest")
