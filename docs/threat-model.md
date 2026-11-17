@@ -732,3 +732,14 @@ as each default says until the owner decides ([ADR-0032](adr/0032-policy-builder
     README says so; the stricter answer - making `admin:ExplainAccess` an action granted
     by name only, as `s3:BypassGovernanceRetention` is - would also keep it from
     `cluster-admin`, which holds it by `admin:*`.
+
+71. **A damaged stored policy's text in the node log** (review of PLAN 9.5). The
+    authorizer, when it decides a request, logs a stored bucket policy that cannot be
+    read with the parser's error, and the admin API logs a 5xx error whole; the parser's
+    error can quote the document. No caller sees it - 5xx answers carry no detail and the
+    explanation and validation use cases answer a damaged policy with fixed text - but an
+    operator with the node log reads a part of a policy they may not be granted to read.
+    Policy text is not a secret, key, token or object content (CLAUDE.md section 3).
+    Default: left as it is; the stricter answer - logging only that the policy of a
+    bucket or sub-bucket cannot be read, as `parseSubBucketPolicy` already does - is a
+    small change to the authorizer and the admin API's error log, for Albie to choose.
