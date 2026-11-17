@@ -27,6 +27,7 @@ import { UPLOADS_AT_ONCE } from '../uploads/engine';
 import { totalsOf } from '../uploads/state';
 import { UploadTile } from '../uploads/UploadTile';
 import { BucketDetails, useBucketFacts } from './BucketDetails';
+import { REPLICATION_STATUS_HINTS } from './BucketReplication';
 import { DeleteAll } from './DeleteAll';
 import { ObjectTags } from './ObjectTags';
 import { UploadTags } from './UploadTags';
@@ -1053,6 +1054,15 @@ function ObjectDetails({ bucket, object, known, onKnown }: ObjectDetailsProps) {
             <dd>{metadata.content_type}</dd>
             <dt>Encryption</dt>
             <dd>{metadata.encryption}</dd>
+            {/* Absent for a version no replication rule is about: then nothing is said. */}
+            {metadata.replication_status === undefined ? null : (
+              <>
+                <dt>Replication</dt>
+                <dd>
+                  <span title={REPLICATION_STATUS_HINTS[metadata.replication_status]}>{metadata.replication_status}</span>
+                </dd>
+              </>
+            )}
           </dl>
           {/* Offered from the type the API told; whether it is shown is the API's answer. */}
           {offersPreview(metadata.content_type) ? (

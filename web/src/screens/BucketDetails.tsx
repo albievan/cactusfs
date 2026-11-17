@@ -7,6 +7,7 @@ import { useLoad, type Loaded } from '../ui/hooks';
 import { reasonOf } from '../ui/reason';
 import { useUploads } from '../uploads/context';
 import { BucketNotificationsSection } from './BucketNotifications';
+import { BucketReplicaSection, BucketReplicationSection } from './BucketReplication';
 import { ActivityLine, AtLeast, PolicySummary } from './BucketsScreen';
 import { BucketPolicySection, SubBucketsSection } from './SubBuckets';
 import { BucketTagsSection, TagRulesSection } from './TagSections';
@@ -101,7 +102,8 @@ function refused(error: unknown): boolean {
  * words. A figure the caller may not see is said to be so, one that is not
  * exact is said to be that: neither is ever shown as 0. Below them, folded
  * until asked for, the bucket's policy, its sub-buckets, its tags, its
- * tag rules and its notification rules.
+ * tag rules, its notification rules, its replication and whether it is a
+ * replica.
  */
 export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: BucketFacts }) {
   const headingId = useId();
@@ -201,6 +203,8 @@ export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: 
         <BucketTagsSection bucket={name} />
         <TagRulesSection bucket={name} />
         <BucketNotificationsSection bucket={name} />
+        <BucketReplicationSection bucket={name} exact={usage.data?.exact} />
+        <BucketReplicaSection bucket={name} />
       </div>
     </section>
   );

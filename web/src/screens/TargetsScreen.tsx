@@ -333,7 +333,7 @@ function SentOf({ target }: { target: Target }) {
 }
 
 /** What a class of failure means, in the words of the console; the class itself is the API's. */
-const CLASS_HINTS: Record<string, string> = {
+export const CLASS_HINTS: Record<string, string> = {
   auth: 'The target does not take the credential (a 401 or 403, a token refused): nothing is passed until it is put right.',
   rejected: 'The target refused one message, which was passed: the others go on.',
   connect: 'The target could not be connected to: is the address right, and does the network let the nodes reach it?',
@@ -343,11 +343,16 @@ const CLASS_HINTS: Record<string, string> = {
   server: 'The target answered with a 5xx, a 408 or a 429, or with no status at all.',
   egress_refused: 'The deployment does not connect to that address (--egress-allow).',
   no_stream: 'No JetStream stream takes the subject: the stream is the operator of the NATS server to make.',
+  no_such_bucket: 'The bucket the versions are sent to is not there at the other deployment.',
+  versioning: 'The bucket at the other deployment does not keep versions, which it must.',
+  not_replica: 'The bucket at the other deployment is not a replica of this deployment: it was promoted, or never made one.',
+  quota: 'The bucket at the other deployment is at its quota.',
+  object_lock: 'A version with a retention or a legal hold is sent to a bucket without Object Lock there.',
   internal: 'A failure on this side: the credential could not be opened, or an error without a class.',
 };
 
 /** The class of a state, for its look. */
-function stateClass(state: string): string {
+export function stateClass(state: string): string {
   switch (state) {
     case 'ok':
       return 'state state-online';
