@@ -665,3 +665,70 @@ all, with those that are not of security):
     date. Should a replica bucket take a later change of tags, retention or legal hold
     from that key only with the signed source header (and so only as the source's
     version has it), or refuse such changes from the source's key altogether without it?
+
+Written at the planning of the visual policy builder (PLAN 9.0, 2026-11-17); to be built
+as each default says until the owner decides ([ADR-0032](adr/0032-policy-builder.md),
+"Open, for the owner"):
+
+60. **Group or role principals in bucket policies** (the first cut of PLAN 9.3 named
+    them). The language has users (`arn:aws:iam:::user/<name>`) and anyone (`*`) only;
+    a new kind of principal is a change of the language, which a node of an older
+    release would refuse in a stored policy during a rolling upgrade, and it needs its
+    own ADR and upgrade test. Default: not built; the builder offers users and anyone,
+    in every form they are written.
+61. **Who holds `admin:ExplainAccess`.** An explanation tells what another identity may
+    do, and by which statement. Default: `cluster-admin` only - the name does not begin
+    with Get, so `auditor` (`admin:Get*`) does not hold it. The alternative, a `Get...`
+    name, would give it to every auditor.
+62. **May a user ask about their own access without the action** ("why was I
+    refused")? It would tell a user which statement of which policy refused them, and
+    a policy of another may have done so. Default: no; the action is needed for oneself
+    too.
+63. **A cited policy the caller may not read.** Default: hidden, its name included - the
+    citation says "a policy you may not read", and the verdict and its source are still
+    given. A caller may read it when they hold `admin:GetPolicy`, `s3:GetBucketPolicy`,
+    `s3:GetSubBucketPolicy` or `admin:ListAPIKeys` on the key's owner, as the place is.
+64. **Is every explanation audited, allowed ones included?** Each is a Raft entry through
+    the audit trail. Default: yes, and stricter than the background queue that records
+    other successes (`Auditor.Succeeded`, which drops a record when it is full): every
+    request that passes authorization - answered with a decision, "would not
+    authenticate", 404 or 400 - is recorded before it is answered, and an answer that
+    cannot be recorded is not given (503, or 500 when the store cannot say whether the
+    record was appended).
+65. **Validation endpoints.** Default: each is authorized by the action that would store
+    the document there (`admin:PutPolicy`; `admin:CreateAPIKey` on the owner for a new
+    key's inline policy, refused to an API key with an inline policy of its own as
+    `createAPIKey` refuses it; `s3:PutBucketPolicy`; `s3:PutSubBucket`), with no new
+    action; they read nothing beyond what the put's own authorization reads, and so say
+    nothing a put would not; they accept `Idempotency-Key` and ignore it, and need the
+    CSRF token.
+66. **Ownership of a version (previews) in an explanation** (ADR-0028). Default: not
+    considered, and the answer says so: considering it would read and disclose who
+    committed the version, which needs `admin:GetObjectAccess`.
+67. **`NotAction`, `NotResource` and `NotPrincipal` stay refused** (ADR-0006,
+    ADR-0011): each turns a list of what is meant into a list of what is not, which a
+    new action silently joins. Default: yes; neither the builder nor the JSON can write
+    them.
+68. **The builder edits all four kinds of policy** - named policies, the inline policy
+    of a new API key, a bucket's and a sub-bucket's - not only the two the first cut
+    named. Default: yes.
+69. **Milestone 9 and CLAUDE.md section 8**, which lists milestones 0 to 8: adding
+    milestone 9 is the owner's amendment of that file. Default: the plan runs without
+    it, as the Decisions row of 2026-10-13 says.
+70. **What an explanation tells of the policies it depends on, and grants that gain
+    `admin:ExplainAccess`** (review of PLAN 9.0). Authorized on its subject alone, an
+    explanation about a bucket would let its caller probe the bucket's and a
+    sub-bucket's policies without the right to read them: through the verdict, the
+    `source`, the effects of the citations, how the answer moves with `source_ip`,
+    `secure_transport` and `list_prefix`, and the 500 a damaged stored policy gives.
+    Default: an answer about an `s3:` action on a bucket also needs `s3:GetBucketPolicy`
+    on it, one whose key or listing prefix could lie in a sub-bucket also
+    `s3:GetSubBucketPolicy` (asked whether or not such a sub-bucket is registered, so the
+    requirement tells nothing), otherwise 403, audited; a policy that cannot be read is
+    answered as that refusal. Besides, a stored policy that allows `admin:*` (or another
+    wildcard that matches `ExplainAccess`) on `arn:cactusfs:admin:::user/*` or `*` holds
+    the new action from the release that brings it, and its holders can then ask what
+    the users it covers may do with admin actions. Default: such grants keep it, and the
+    README says so; the stricter answer - making `admin:ExplainAccess` an action granted
+    by name only, as `s3:BypassGovernanceRetention` is - would also keep it from
+    `cluster-admin`, which holds it by `admin:*`.
