@@ -18,6 +18,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 )
@@ -349,7 +351,25 @@ func (b *bench) roundTrip(bucket, key string) []byte {
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.client().CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+	// The first request of a run: a pod is Ready a moment before the
+	// node port forwards to it, and in that moment a connection is reset.
+	// Only a request that was not answered is sent again; an answer of any
+	// kind ends the wait, and a bucket made by a request whose answer was
+	// lost is the run's own.
+	made := func(ctx context.Context) (bool, error) {
+		_, err := b.client().CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		var answered *smithyhttp.ResponseError
+		var owned *types.BucketAlreadyOwnedByYou
+		switch {
+		case err == nil, errors.As(err, &owned):
+			return true, nil
+		case errors.As(err, &answered):
+			return false, fmt.Errorf("%w: %w", errAbort, err)
+		default:
+			return false, err
+		}
+	}
+	if err := within(ctx, time.Minute, 2*time.Second, made); err != nil {
 		t.Fatalf("create the bucket through %s: %v", b.s3Address, err)
 	}
 	if err := b.put(ctx, bucket, key, data); err != nil {
