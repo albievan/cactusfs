@@ -282,6 +282,27 @@ const (
 	ActionUpgradeCluster Action = "admin:UpgradeCluster"
 )
 
+// The admin actions of the policy builder (ADR-0032).
+const (
+	// ActionGetPolicyCatalogue allows reading the catalogue of the policy
+	// language - every grantable action, the condition keys, the resource
+	// kinds and the limits of a document - asked on the resource
+	// "policy-catalogue" (arn:cactusfs:admin:::policy-catalogue). It tells
+	// nothing that the contract and the source do not. It begins with Get,
+	// so the built-in auditor holds it by "admin:Get*"; the built-in
+	// bucket-admin holds it by name, to build the policies of its buckets.
+	ActionGetPolicyCatalogue Action = "admin:GetPolicyCatalogue"
+	// ActionExplainAccess allows asking what another identity may do and
+	// which statements decide it. It is asked on the resource "user/<name>"
+	// of the user asked about - for an API key, of the key's owner - on
+	// "user" for an access key that does not exist (as DeleteAPIKey asks, so
+	// that a refusal tells nothing of the key), or on "anonymous" for a
+	// caller without credentials. It discloses the permissions of others: it
+	// does not begin with Get, so that of the built-in roles only the
+	// cluster-admin holds it.
+	ActionExplainAccess Action = "admin:ExplainAccess"
+)
+
 // ARN prefixes of the two kinds of resource a policy can name.
 const (
 	s3ARNPrefix    = "arn:aws:s3:::"

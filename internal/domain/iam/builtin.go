@@ -28,8 +28,10 @@ func BuiltInPolicies() map[string]Document {
 		RoleClusterAdmin: statement([]string{"s3:*", "admin:*"}, everything),
 		// All of S3 on every bucket - the tag rules of a bucket included
 		// (ADR-0018) - and of administration only the preview of objects
-		// it may read anyway (ADR-0028) and reading the catalogue of tags.
-		RoleBucketAdmin: statement(append([]string{"s3:*", string(ActionPreviewObject)}, readCatalogue...), everything),
+		// it may read anyway (ADR-0028), reading the catalogue of tags, and
+		// reading the catalogue of the policy language, which the builder
+		// of a bucket's policy needs (ADR-0032).
+		RoleBucketAdmin: statement(append([]string{"s3:*", string(ActionPreviewObject), string(ActionGetPolicyCatalogue)}, readCatalogue...), everything),
 		// Read and write objects; buckets can be listed, not made or removed.
 		RoleReadWrite: statement(append([]string{
 			"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetBucketLocation",
@@ -54,7 +56,9 @@ func BuiltInPolicies() map[string]Document {
 		// - and preview none: admin:PreviewObject begins with neither Get
 		// nor List. Of releases (ADR-0029) it reads what the node knows,
 		// admin:GetUpdates, and neither asks the source nor upgrades. The
-		// catalogue of tags it reads by the same two wildcards.
+		// catalogue of tags, and that of the policy language, it reads by
+		// the same two wildcards; it explains nobody's access
+		// (admin:ExplainAccess begins with neither).
 		RoleAuditor: statement([]string{"admin:Get*", "admin:List*"}, everything),
 	}
 }

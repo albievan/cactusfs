@@ -324,6 +324,13 @@ func TestBuiltInRoles(t *testing.T) {
 		{iam.ActionGetUpdates, updates, []string{iam.RoleClusterAdmin, iam.RoleAuditor}},
 		{iam.ActionCheckForUpdates, updates, []string{iam.RoleClusterAdmin}},
 		{iam.ActionUpgradeCluster, updates, []string{iam.RoleClusterAdmin}},
+		// The policy builder (ADR-0032): its catalogue for whoever writes
+		// policies or looks at how the deployment is run; an explanation
+		// of another's access, which discloses it, for the cluster-admin
+		// alone - about a user or about a caller without credentials.
+		{iam.ActionGetPolicyCatalogue, iam.Resource{Admin: "policy-catalogue"}, []string{iam.RoleClusterAdmin, iam.RoleBucketAdmin, iam.RoleAuditor}},
+		{iam.ActionExplainAccess, admin, []string{iam.RoleClusterAdmin}},
+		{iam.ActionExplainAccess, iam.Resource{Admin: "anonymous"}, []string{iam.RoleClusterAdmin}},
 	}
 	for _, tt := range hybrid {
 		for role := range policies {
@@ -331,6 +338,18 @@ func TestBuiltInRoles(t *testing.T) {
 			if want := slices.Contains(tt.holders, role); want != (err == nil) {
 				t.Errorf("%s: %s on %s allowed = %v, want %v", role, tt.action, tt.resource, err == nil, want)
 			}
+		}
+	}
+	// The bucket-admin holds the catalogue by its name, and by nothing that
+	// would give it more of administration; the auditor and the
+	// cluster-admin by their wildcards, which name neither new action.
+	for role, want := range map[string]bool{iam.RoleBucketAdmin: true, iam.RoleAuditor: false, iam.RoleClusterAdmin: false, iam.RoleReadWrite: false, iam.RoleReadOnly: false} {
+		var named []string
+		for _, s := range policies[role].Statements {
+			named = append(named, s.Actions...)
+		}
+		if slices.Contains(named, string(iam.ActionGetPolicyCatalogue)) != want || slices.Contains(named, string(iam.ActionExplainAccess)) {
+			t.Errorf("%s names %v; want admin:GetPolicyCatalogue named = %v, admin:ExplainAccess never", role, named, want)
 		}
 	}
 	if iam.IsBuiltIn("operator") {
