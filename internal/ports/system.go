@@ -40,3 +40,25 @@ type Authorizer interface {
 	// ends the operation that asked, and is recorded as one of Authorize.
 	Allowed(ctx context.Context, req iam.Request) (bool, error)
 }
+
+// AccessExplainer reports the decision the Authorizer would make and why.
+// It is not an Authorizer and is never to be used as the gate of an
+// operation: whatever a caller asks for goes through Authorizer.Authorize.
+// The explanation use case alone is to hold one (ADR-0032, Decision 3). The
+// authorizer of the use cases implements Authorizer and not this, so a
+// type assertion of an Authorizer to it fails; the one implementation is
+// made by app.NewExplainer. A test of the source of internal/app,
+// internal/adapters and cmd/cactusfs (TestOnlyTheExplainUseCaseHoldsAnExplainer)
+// refuses this type, app.NewExplainer and a call of Explain anywhere there
+// but in the explanation use case, the one place that wires it, and the
+// file of app.NewExplainer. Tests are not held to it.
+type AccessExplainer interface {
+	// Explain reports the decision Authorize would make for req and why -
+	// the same decision, from the same reading of the policies of the
+	// bucket and of the sub-bucket. Nothing is logged or audited, a
+	// refusal included. A refusal is no error: it is the explanation's
+	// Err. The error is not nil only when no decision could be made - a
+	// policy could not be read, and for a stored policy that is damaged
+	// it wraps domain.ErrIntegrity - and then the explanation is empty.
+	Explain(ctx context.Context, req iam.Request) (iam.Explanation, error)
+}

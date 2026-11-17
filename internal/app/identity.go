@@ -280,9 +280,9 @@ func (s *IdentityService) rootCredential(ctx context.Context) (iam.RootCredentia
 
 // SecretFor returns the secret key of an access key, which an inbound adapter
 // needs to verify a request signature, and the principal the key stands for:
-// the root identity, or a user with every policy that applies, resolved at
-// this moment. The caller must not log the secret and should clear it after
-// use.
+// the root identity, or a user with every policy that applies and the
+// policies' names, resolved at this moment. The caller must not log the
+// secret and should clear it after use.
 //
 // The error wraps domain.ErrCredentialNotFound for an access key that does
 // not exist, has expired or belongs to a user who is disabled. A key that
@@ -320,7 +320,7 @@ func (s *IdentityService) SecretFor(ctx context.Context, accessKeyID string) ([]
 	}
 	return secret, iam.Principal{
 		AccessKeyID: identity.Key.AccessKeyID, User: identity.User.Name,
-		Policies: identity.Policies, Boundary: identity.Key.InlinePolicy,
+		Policies: identity.Policies, PolicyNames: identity.PolicyNames, Boundary: identity.Key.InlinePolicy,
 	}, nil
 }
 

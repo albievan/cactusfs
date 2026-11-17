@@ -374,10 +374,12 @@ func (m *MemIAM) TouchAPIKey(_ context.Context, accessKeyID string, usedAt time.
 	})
 }
 
-func (m *MemIAM) resolve(name string) (iam.User, []iam.Document, error) {
+// resolve returns a user, the documents of every policy that applies and
+// their names, in the same order.
+func (m *MemIAM) resolve(name string) (iam.User, []iam.Document, []string, error) {
 	user, ok := m.users[name]
 	if !ok {
-		return iam.User{}, nil, fmt.Errorf("%w: user %s", domain.ErrEntityNotFound, name)
+		return iam.User{}, nil, nil, fmt.Errorf("%w: user %s", domain.ErrEntityNotFound, name)
 	}
 	var groups []iam.Group
 	for _, groupName := range user.Groups {
@@ -395,14 +397,15 @@ func (m *MemIAM) resolve(name string) (iam.User, []iam.Document, error) {
 	}
 	slices.Sort(policyNames)
 	var documents []iam.Document
+	var names []string
 	for _, policyName := range slices.Compact(policyNames) {
 		if doc, ok := iam.BuiltInPolicies()[policyName]; ok {
-			documents = append(documents, doc)
+			documents, names = append(documents, doc), append(names, policyName)
 		} else if policy, ok := m.policies[policyName]; ok {
-			documents = append(documents, policy.Document)
+			documents, names = append(documents, policy.Document), append(names, policyName)
 		}
 	}
-	return user, documents, nil
+	return user, documents, names, nil
 }
 
 // ResolveIdentity implements ports.IAMStore.
@@ -413,22 +416,22 @@ func (m *MemIAM) ResolveIdentity(_ context.Context, accessKeyID string) (iam.Ide
 	if !ok {
 		return iam.Identity{}, domain.ErrCredentialNotFound
 	}
-	user, documents, err := m.resolve(key.Owner)
+	user, documents, names, err := m.resolve(key.Owner)
 	if err != nil {
 		return iam.Identity{}, err
 	}
-	return iam.Identity{Key: key, User: user, Policies: documents}, nil
+	return iam.Identity{Key: key, User: user, Policies: documents, PolicyNames: names}, nil
 }
 
 // ResolveUser implements ports.IAMStore.
 func (m *MemIAM) ResolveUser(_ context.Context, name string) (iam.Identity, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	user, documents, err := m.resolve(name)
+	user, documents, names, err := m.resolve(name)
 	if err != nil {
 		return iam.Identity{}, err
 	}
-	return iam.Identity{User: user, Policies: documents}, nil
+	return iam.Identity{User: user, Policies: documents, PolicyNames: names}, nil
 }
 
 // AppendAudit implements ports.AuditLog.

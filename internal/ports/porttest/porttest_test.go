@@ -236,6 +236,38 @@ func TestClockAuthorizerAndEntropy(t *testing.T) {
 	}
 }
 
+// TestExplainer: the fake explainer answers as the domain explains, records
+// what it was asked, fails when told to, and is no Authorizer.
+func TestExplainer(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	explainer := &porttest.Explainer{}
+	var _ ports.AccessExplainer = explainer
+	if _, ok := any(explainer).(ports.Authorizer); ok {
+		t.Error("the fake explainer is an Authorizer")
+	}
+	for name, tt := range map[string]struct {
+		request iam.Request
+		allowed bool
+		source  iam.Source
+	}{
+		"root":      {iam.Request{Principal: porttest.Root(), Action: iam.ActionGetObject}, true, iam.SourceRule},
+		"anonymous": {iam.Request{Action: iam.ActionGetObject}, false, iam.SourceRule},
+	} {
+		got, err := explainer.Explain(ctx, tt.request)
+		if err != nil || got.Allowed != tt.allowed || got.Source != tt.source || (got.Err() == nil) != tt.allowed {
+			t.Errorf("%s: Explain = %+v, %v; want allowed %v from %s", name, got, err, tt.allowed, tt.source)
+		}
+	}
+	explainer.Fail = domain.ErrIntegrity
+	if got, err := explainer.Explain(ctx, iam.Request{Principal: porttest.Root()}); !errors.Is(err, domain.ErrIntegrity) || got.Allowed {
+		t.Errorf("a failing Explain = %+v, %v", got, err)
+	}
+	if n := len(explainer.Requests()); n != 3 {
+		t.Errorf("recorded %d requests, want 3", n)
+	}
+}
+
 func TestMemIAMContract(t *testing.T) {
 	t.Parallel()
 	porttest.IAMContract(t, func(*testing.T) porttest.IAM { return porttest.NewMemIAM() })

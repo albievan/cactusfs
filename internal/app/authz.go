@@ -21,6 +21,7 @@ import (
 // domain's rules - default deny, explicit deny wins, a key never exceeds its
 // owner - to the principal a request was authenticated as, and records every
 // refusal in the audit trail and in the log. Neither ever contains a secret.
+// It is not a ports.AccessExplainer: NewExplainer makes one over it.
 type Authorizer struct {
 	logger  *slog.Logger
 	clock   ports.Clock
@@ -720,12 +721,17 @@ func NewAuthorizer(logger *slog.Logger, clock ports.Clock, auditor *Auditor) *Au
 	}
 }
 
-// decide is the one decision behind Authorize and Allowed. It returns the
-// request as it was judged - with the time, the policy of its bucket and
-// that of its sub-bucket - where the answer came from, and the refusal,
-// which is nil when the request is allowed. The error says that no decision
-// could be made: a policy could not be read, and that has been logged.
-func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Request, source iam.Source, refusal, err error) {
+// decide is the one decision behind Authorize, Allowed and the explainer. It
+// returns the request as it was judged - with the time, the policy of its
+// bucket and that of its sub-bucket - where the answer came from, and the
+// refusal, which is nil when the request is allowed. The error says that no
+// decision could be made: a policy could not be read.
+//
+// With explanation nil, the decision is iam.Evaluate's, and a policy that
+// cannot be read is logged. With explanation set, it is iam.Explain's - the
+// same evaluation, which also says why - stored there, and nothing is
+// logged: an explanation leaves no trace.
+func (a *Authorizer) decide(ctx context.Context, req iam.Request, explanation *iam.Explanation) (judged iam.Request, source iam.Source, refusal, err error) {
 	// The time of the decision is this node's, never the caller's.
 	req.Now = a.clock.Now()
 	if req.Principal.LockedSession {
@@ -734,6 +740,9 @@ func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Re
 		// bucket, it answers that already, and no policy is read for it.
 		// The decision is the domain's; this only spares the reading.
 		if source, refusal := iam.Evaluate(req); errors.Is(refusal, domain.ErrSessionLocked) {
+			if explanation != nil {
+				*explanation = iam.Explain(req)
+			}
 			return req, source, refusal, nil
 		}
 	}
@@ -745,20 +754,29 @@ func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Re
 	}
 	policy, err := a.scopedPolicy(ctx, scope, req)
 	if err != nil {
-		a.logger.ErrorContext(ctx, "the policy of a bucket cannot be read; the request is refused",
-			slog.String("bucket", req.Resource.Bucket), slog.Any("error", err))
-		return req, "", nil, fmt.Errorf("authorize: %w", err)
+		if explanation == nil {
+			a.logger.ErrorContext(ctx, "the policy of a bucket cannot be read; the request is refused",
+				slog.String("bucket", req.Resource.Bucket), slog.Any("error", err))
+		}
+		return req, "", nil, err
 	}
 	req.BucketPolicy = policy
 	sub, err := a.subBucketPolicy(ctx, scope, req)
 	if err != nil {
-		// What the policy says is not logged, only that it cannot be read.
-		name, _ := subBucketOf(req)
-		a.logger.ErrorContext(ctx, "the policy of a sub-bucket cannot be read; the request is refused",
-			slog.String("bucket", req.Resource.Bucket), slog.String("sub_bucket", name), slog.Any("error", err))
-		return req, "", nil, fmt.Errorf("authorize: %w", err)
+		if explanation == nil {
+			// What the policy says is not logged, only that it cannot be
+			// read.
+			name, _ := subBucketOf(req)
+			a.logger.ErrorContext(ctx, "the policy of a sub-bucket cannot be read; the request is refused",
+				slog.String("bucket", req.Resource.Bucket), slog.String("sub_bucket", name), slog.Any("error", err))
+		}
+		return req, "", nil, err
 	}
 	req.SubBucketPolicy = sub
+	if explanation != nil {
+		*explanation = iam.Explain(req)
+		return req, explanation.Source, explanation.Err(), nil
+	}
 	source, refusal = iam.Evaluate(req)
 	return req, source, refusal, nil
 }
@@ -775,9 +793,9 @@ func (a *Authorizer) decide(ctx context.Context, req iam.Request) (judged iam.Re
 // records it; the auditor counts the repeats of one caller, so a filter that
 // asks a hundred times writes one record.
 func (a *Authorizer) Allowed(ctx context.Context, req iam.Request) (bool, error) {
-	req, source, refusal, err := a.decide(ctx, req)
+	req, source, refusal, err := a.decide(ctx, req, nil)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("authorize: %w", err)
 	}
 	if errors.Is(refusal, domain.ErrSessionLocked) {
 		a.refused(ctx, req, source, refusal)
@@ -807,9 +825,9 @@ func (a *Authorizer) refused(ctx context.Context, req iam.Request, source iam.So
 
 // Authorize implements ports.Authorizer.
 func (a *Authorizer) Authorize(ctx context.Context, req iam.Request) error {
-	req, source, refusal, err := a.decide(ctx, req)
+	req, source, refusal, err := a.decide(ctx, req, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("authorize: %w", err)
 	}
 	if refusal != nil {
 		a.refused(ctx, req, source, refusal)

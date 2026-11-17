@@ -640,9 +640,9 @@ func (s *SessionService) SignIn(ctx context.Context, username, password string, 
 }
 
 // Authenticate returns the principal a session token stands for: the user,
-// with every policy that applies now. The error wraps domain.ErrAccessDenied
-// when the token names no session, the session has ended, or the user is
-// gone or disabled.
+// with every policy that applies now and the policies' names. The error
+// wraps domain.ErrAccessDenied when the token names no session, the session
+// has ended, or the user is gone or disabled.
 //
 // A session that has reached its timeout while objects are being uploaded
 // with it has not ended: it is locked, and the principal says so
@@ -683,7 +683,8 @@ func (s *SessionService) Authenticate(ctx context.Context, token, csrfToken stri
 		return iam.Principal{}, fmt.Errorf("session.Authenticate: %w", err)
 	}
 	return iam.Principal{
-		User: identity.User.Name, UserCreatedAt: identity.User.CreatedAt, Policies: identity.Policies, Session: session,
+		User: identity.User.Name, UserCreatedAt: identity.User.CreatedAt, Policies: identity.Policies,
+		PolicyNames: identity.PolicyNames, Session: session,
 		LockedSession: state == sessionLocked,
 	}, nil
 }

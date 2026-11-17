@@ -836,7 +836,7 @@ func (s *Store) ResolveIdentity(ctx context.Context, accessKeyID string) (iam.Id
 		if identity.Key, err = key.toDomain(); err != nil {
 			return err
 		}
-		identity.User, identity.Policies, err = resolveUser(tx, key.Owner)
+		identity.User, identity.Policies, identity.PolicyNames, err = resolveUser(tx, key.Owner)
 		return err
 	})
 	if err != nil {
@@ -849,7 +849,7 @@ func (s *Store) ResolveIdentity(ctx context.Context, accessKeyID string) (iam.Id
 func (s *Store) ResolveUser(ctx context.Context, name string) (iam.Identity, error) {
 	var identity iam.Identity
 	err := s.view(ctx, func(tx *bbolt.Tx) (err error) {
-		identity.User, identity.Policies, err = resolveUser(tx, name)
+		identity.User, identity.Policies, identity.PolicyNames, err = resolveUser(tx, name)
 		return err
 	})
 	if err != nil {
@@ -859,23 +859,26 @@ func (s *Store) ResolveUser(ctx context.Context, name string) (iam.Identity, err
 }
 
 // resolveUser reads a user and the documents of every policy of every role
-// the user holds, directly or through a group. A role or policy this binary
-// cannot find contributes nothing: what is unknown allows nothing.
-func resolveUser(tx *bbolt.Tx, name string) (iam.User, []iam.Document, error) {
+// the user holds, directly or through a group, with the names of those
+// policies: names[i] is the name of documents[i]. A role or policy this
+// binary cannot find contributes nothing, neither document nor name: what
+// is unknown allows nothing. The names are what it reads; nothing is
+// stored for them.
+func resolveUser(tx *bbolt.Tx, name string) (user iam.User, documents []iam.Document, names []string, err error) {
 	var record userRecord
 	found, err := getJSON(tx, usersBucket(), name, &record)
 	if err != nil {
-		return iam.User{}, nil, err
+		return iam.User{}, nil, nil, err
 	}
 	if !found {
-		return iam.User{}, nil, fmt.Errorf("%w: user %s", domain.ErrEntityNotFound, name)
+		return iam.User{}, nil, nil, fmt.Errorf("%w: user %s", domain.ErrEntityNotFound, name)
 	}
-	user := record.toDomain()
+	user = record.toDomain()
 	var groups []iam.Group
 	for _, groupName := range user.Groups {
 		var g groupRecord
 		if found, err := getJSON(tx, groupsBucket(), groupName, &g); err != nil {
-			return iam.User{}, nil, err
+			return iam.User{}, nil, nil, err
 		} else if found {
 			groups = append(groups, iam.Group{Name: g.Name, Roles: g.Roles})
 		}
@@ -889,33 +892,32 @@ func resolveUser(tx *bbolt.Tx, name string) (iam.User, []iam.Document, error) {
 		}
 		var r roleRecord
 		if found, err := getJSON(tx, rolesBucket(), roleName, &r); err != nil {
-			return iam.User{}, nil, err
+			return iam.User{}, nil, nil, err
 		} else if found {
 			policyNames = append(policyNames, r.Policies...)
 		}
 	}
 	slices.Sort(policyNames)
-	var documents []iam.Document
 	for _, policyName := range slices.Compact(policyNames) {
 		if doc, ok := builtIn[policyName]; ok {
-			documents = append(documents, doc)
+			documents, names = append(documents, doc), append(names, policyName)
 			continue
 		}
 		var p policyRecord
 		found, err := getJSON(tx, policiesBucket(), policyName, &p)
 		if err != nil {
-			return iam.User{}, nil, err
+			return iam.User{}, nil, nil, err
 		}
 		if !found {
 			continue
 		}
 		policy, err := policyFromRecord(p)
 		if err != nil {
-			return iam.User{}, nil, err
+			return iam.User{}, nil, nil, err
 		}
-		documents = append(documents, policy.Document)
+		documents, names = append(documents, policy.Document), append(names, policyName)
 	}
-	return user, documents, nil
+	return user, documents, names, nil
 }
 
 func (s *Store) getEntity(ctx context.Context, op string, bucket []byte, name, what string, into any) error {

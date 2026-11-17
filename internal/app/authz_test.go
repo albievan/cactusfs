@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -983,5 +984,184 @@ func TestDamagedBucketPolicyWithSubBuckets(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "the policy of a bucket cannot be read") || strings.Contains(logs.String(), "damaged-sentinel") {
 		t.Errorf("the log: %s", logs.String())
+	}
+}
+
+// TestExplainIsDecide: Explain reports the decision Allowed and Authorize
+// make - the same answer from the same source, through the same reading of
+// the policies of the bucket and the sub-bucket, over the in-memory stores,
+// for principals resolved as a request resolves them (an API key by
+// SecretFor, a console session by Authenticate), whose policies are named -
+// and leaves nothing in the audit trail or the log: not a refusal, not the
+// refusal of a locked session, not a policy that cannot be read.
+func TestExplainIsDecide(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newIAMFixture(t)
+	site := subBucketSite(t)
+	f.authz.WithBucketPolicies(site).WithSubBuckets(site)
+	explainer := app.NewExplainer(f.authz)
+	// The authorizer is no explainer, and neither is what holds it as an
+	// Authorizer: a type assertion cannot find one.
+	if _, ok := any(f.authz).(ports.AccessExplainer); ok {
+		t.Fatal("*app.Authorizer is a ports.AccessExplainer")
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, document := range map[string]string{
+		"everything":   `{"Version":"2012-10-17","Statement":[{"Sid":"All","Effect":"Allow","Action":"s3:*","Resource":"*"}]}`,
+		"put-anything": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}`,
+		"deny-puts":    `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:PutObject","Resource":"*"}]}`,
+	} {
+		must(f.iam.PutPolicy(ctx, f.root, name, []byte(document), true))
+	}
+	for role, policy := range map[string]string{"all": "everything", "putter": "put-anything", "no-puts": "deny-puts"} {
+		must(f.iam.PutRole(ctx, f.root, iam.Role{Name: role, Policies: []string{policy}}, true))
+	}
+	carol := f.as(t, f.user(t, "carol", "all"))
+	dave := f.as(t, f.user(t, "dave", "putter"))
+	erin := f.as(t, f.user(t, "erin", "no-puts"))
+	bob := f.as(t, f.user(t, "bob"))
+	mallory := f.as(t, f.user(t, "mallory"))
+	bound, _, err := f.iam.CreateAPIKey(ctx, f.root, app.APIKeyInput{
+		Owner: "bob", InlinePolicy: []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`),
+	})
+	must(err)
+	bobsKey := f.as(t, bound)
+	_, err = f.iam.CreateUser(ctx, f.root, app.UserInput{Name: "frank", Roles: []string{iam.RoleReadOnly}, Password: "correct horse battery"})
+	must(err)
+	signedIn, err := f.sessions.SignIn(ctx, "frank", "correct horse battery", session("10.0.0.7"))
+	must(err)
+	frank, err := f.sessions.Authenticate(ctx, signedIn.Token, "", false, session("10.0.0.7"))
+	must(err)
+	locked := carol
+	locked.LockedSession = true
+	anonymous := iam.Principal{Session: session("10.0.0.8")}
+
+	// The names travel with the documents, from the store to the
+	// principal.
+	for _, tt := range []struct {
+		who       string
+		principal iam.Principal
+		names     []string
+	}{
+		{"carol's key", carol, []string{"everything"}},
+		{"bob's bound key", bobsKey, nil},
+		{"frank's session", frank, []string{iam.RoleReadOnly}},
+	} {
+		if !slices.Equal(tt.principal.PolicyNames, tt.names) || len(tt.principal.PolicyNames) != len(tt.principal.Policies) {
+			t.Errorf("%s: PolicyNames %q for %d documents, want %q", tt.who, tt.principal.PolicyNames, len(tt.principal.Policies), tt.names)
+		}
+	}
+
+	object := func(k string) iam.Resource { return iam.Resource{Bucket: "site", Key: k} }
+	elsewhere := iam.Resource{Bucket: "other", Key: "x"}
+	tests := []struct {
+		name    string
+		request iam.Request
+		allowed bool
+		// source is that of the answer, when the row names one; rule is
+		// the rule's, when source is SourceRule.
+		source iam.Source
+		rule   iam.Rule
+		// want is the error of a decision that could not be made, or the
+		// refusal of a locked session.
+		want error
+		// cites is a policy of the caller's own a statement is cited from.
+		cites string
+	}{
+		{name: "root, where a policy is damaged", request: iam.Request{Principal: f.root, Action: iam.ActionDeleteObject, Resource: object("broken/q1.csv")}, allowed: true, source: iam.SourceRule, rule: iam.RuleRoot},
+		{name: "anonymous, what the bucket makes public", request: iam.Request{Principal: anonymous, Action: iam.ActionGetObject, Resource: object("index.html")}, allowed: true, source: iam.SourceBucket},
+		{name: "anonymous, a private sub-bucket of a public bucket", request: iam.Request{Principal: anonymous, Action: iam.ActionGetObject, Resource: object("private/salaries.csv")}, source: iam.SourceSubBucket},
+		{name: "anonymous, what the sub-bucket allows users", request: iam.Request{Principal: anonymous, Action: iam.ActionPutObject, Resource: object("reports/q1.csv")}, source: iam.SourceRule, rule: iam.RuleAnonymous},
+		{name: "a user, by the sub-bucket's policy", request: iam.Request{Principal: bob, Action: iam.ActionPutObject, Resource: object("reports/q1.csv")}, allowed: true, source: iam.SourceSubBucket},
+		{name: "a key, beyond its bound", request: iam.Request{Principal: bobsKey, Action: iam.ActionPutObject, Resource: object("reports/q1.csv")}, source: iam.SourceKeyBound},
+		{name: "a key, within its bound", request: iam.Request{Principal: bobsKey, Action: iam.ActionGetObject, Resource: object("reports/q1.csv")}, allowed: true},
+		{name: "a listing within a sub-bucket", request: iam.Request{Principal: bob, Action: iam.ActionListBucket, Resource: iam.Resource{Bucket: "site"}, ListPrefix: "reports/"}, allowed: true, source: iam.SourceSubBucket},
+		{name: "a listing of the whole bucket", request: iam.Request{Principal: bob, Action: iam.ActionListBucket, Resource: iam.Resource{Bucket: "site"}}, source: iam.SourceNone},
+		{name: "the sub-bucket's deny wins over the caller's allow", request: iam.Request{Principal: carol, Action: iam.ActionDeleteObject, Resource: object("reports/q1.csv")}, source: iam.SourceSubBucket, cites: "everything"},
+		{name: "the caller's own policy", request: iam.Request{Principal: carol, Action: iam.ActionDeleteObject, Resource: object("open/q1.csv")}, allowed: true, source: iam.SourceIdentity, cites: "everything"},
+		{name: "the bucket's deny wins over the sub-bucket's allow", request: iam.Request{Principal: mallory, Action: iam.ActionGetObject, Resource: object("reports/q1.csv")}, source: iam.SourceBucket},
+		{name: "the caller's deny wins over the sub-bucket's allow", request: iam.Request{Principal: erin, Action: iam.ActionPutObject, Resource: object("reports/q1.csv")}, source: iam.SourceIdentity, cites: "deny-puts"},
+		{name: "a bucket without a policy", request: iam.Request{Principal: dave, Action: iam.ActionPutObject, Resource: elsewhere}, allowed: true, source: iam.SourceIdentity, cites: "put-anything"},
+		{name: "a session, by a built-in policy", request: iam.Request{Principal: frank, Action: iam.ActionGetObject, Resource: elsewhere}, allowed: true, source: iam.SourceIdentity, cites: iam.RoleReadOnly},
+		{name: "a session, beyond its built-in policy", request: iam.Request{Principal: frank, Action: iam.ActionDeleteObject, Resource: elsewhere}, source: iam.SourceNone},
+		{name: "an administration action", request: iam.Request{Principal: carol, Action: "admin:ListUsers", Resource: iam.Resource{Admin: "users"}}, source: iam.SourceNone},
+		{name: "a locked session", request: iam.Request{Principal: locked, Action: iam.ActionGetObject, Resource: object("open/q1.csv")}, source: iam.SourceRule, rule: iam.RuleLockedSession, want: domain.ErrSessionLocked},
+		{name: "a sub-bucket's policy that does not parse", request: iam.Request{Principal: dave, Action: iam.ActionPutObject, Resource: object("broken/q1.csv")}, want: domain.ErrIntegrity},
+		{name: "a sub-bucket's policy that does not parse, read anonymously", request: iam.Request{Principal: anonymous, Action: iam.ActionGetObject, Resource: object("broken/q1.csv")}, want: domain.ErrIntegrity},
+	}
+	// records counts the records of the trail, with what was queued
+	// written first. The rows run in turn: each counts the one trail.
+	records := func(t *testing.T) int {
+		t.Helper()
+		f.auditor.Flush(ctx)
+		trail, err := f.store.ListAudit(ctx, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(trail)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before, logged := records(t), len(f.logs.String())
+			explanation, err := explainer.Explain(ctx, tt.request)
+			if after := records(t); after != before || len(f.logs.String()) != logged {
+				t.Fatalf("Explain left %d audit records and this in the log: %s", after-before, f.logs.String()[logged:])
+			}
+			allowed, allowedErr := f.authz.Allowed(ctx, tt.request)
+			afterAllowed := len(f.logs.String())
+			authorized := f.authz.Authorize(ctx, tt.request)
+
+			if errors.Is(tt.want, domain.ErrIntegrity) {
+				// No decision: Explain says so as Allowed and Authorize
+				// do, with no part of an answer - and it alone says it
+				// in no log.
+				empty := !explanation.Allowed && explanation.Source == "" && explanation.Rule == "" && explanation.Statements == nil &&
+					explanation.KeyPolicy == nil && explanation.UnknownAddress == nil && explanation.Err() == nil
+				if !errors.Is(err, domain.ErrIntegrity) || !empty ||
+					!errors.Is(allowedErr, domain.ErrIntegrity) || !errors.Is(authorized, domain.ErrIntegrity) {
+					t.Errorf("Explain = %+v, %v; Allowed = %v, %v; Authorize = %v; want %v from each", explanation, err, allowed, allowedErr, authorized, tt.want)
+				}
+				if !strings.HasPrefix(allowedErr.Error(), "authorize: ") || !strings.HasPrefix(authorized.Error(), "authorize: ") {
+					t.Errorf("Allowed = %v, Authorize = %v; want each to begin with \"authorize: \"", allowedErr, authorized)
+				}
+				const cannot = "the policy of a sub-bucket cannot be read"
+				if logs := f.logs.String(); !strings.Contains(logs[logged:afterAllowed], cannot) || !strings.Contains(logs[afterAllowed:], cannot) {
+					t.Errorf("Allowed and Authorize each log %q; the log after Explain: %s", cannot, logs[logged:])
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Explain: %v", err)
+			}
+			if tt.want != nil {
+				// A locked session's refusal is the error of Allowed and
+				// of Authorize, and the Err of the explanation.
+				if !errors.Is(allowedErr, tt.want) || !errors.Is(explanation.Err(), tt.want) || !errors.Is(authorized, tt.want) {
+					t.Errorf("Explain.Err = %v, Allowed = %v, Authorize = %v; want %v", explanation.Err(), allowedErr, authorized, tt.want)
+				}
+			} else if allowedErr != nil {
+				t.Fatalf("Allowed: %v", allowedErr)
+			}
+			if explanation.Allowed != allowed || explanation.Allowed != tt.allowed || (explanation.Err() == nil) != explanation.Allowed {
+				t.Errorf("Explain allowed %v (%v), Allowed %v; want %v", explanation.Allowed, explanation.Err(), allowed, tt.allowed)
+			}
+			if (authorized == nil) != explanation.Allowed || (authorized != nil && !strings.HasSuffix(authorized.Error(), explanation.Err().Error())) {
+				t.Errorf("Authorize = %v, Explain.Err = %v", authorized, explanation.Err())
+			}
+			if (tt.source != "" && explanation.Source != tt.source) || explanation.Rule != tt.rule {
+				t.Errorf("Explain source %s, rule %q; want %s, %q", explanation.Source, explanation.Rule, tt.source, tt.rule)
+			}
+			if tt.cites != "" && !slices.ContainsFunc(explanation.Statements, func(c iam.CitedStatement) bool {
+				return c.Source == iam.SourceIdentity && c.Policy == tt.cites
+			}) {
+				t.Errorf("Explain cites %+v; want a statement of %s", explanation.Statements, tt.cites)
+			}
+		})
 	}
 }

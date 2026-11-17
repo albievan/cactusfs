@@ -60,11 +60,15 @@ type IAMStore interface {
 	TouchAPIKey(ctx context.Context, accessKeyID string, usedAt time.Time) error
 
 	// ResolveIdentity returns, as of one moment, an API key, its owner and
-	// every policy document that applies to the owner. The error wraps
+	// every policy document that applies to the owner, each policy once,
+	// with the policy names: Identity.PolicyNames[i] is the name of
+	// Identity.Policies[i]. A policy that cannot be found is left out,
+	// its name with its document. The error wraps
 	// domain.ErrCredentialNotFound when there is no such key.
 	ResolveIdentity(ctx context.Context, accessKeyID string) (iam.Identity, error)
 	// ResolveUser returns a user and every policy document that applies,
-	// for a session that acts as the user without an API key.
+	// with their names as ResolveIdentity returns them, for a session that
+	// acts as the user without an API key.
 	ResolveUser(ctx context.Context, name string) (iam.Identity, error)
 }
 

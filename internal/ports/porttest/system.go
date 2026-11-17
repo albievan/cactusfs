@@ -144,6 +144,37 @@ func (a *Authorizer) Filtered() []iam.Request {
 	return append([]iam.Request(nil), a.filtered...)
 }
 
+// Explainer is a ports.AccessExplainer that explains by the domain's
+// iam.Explain alone, without a policy of a bucket or a sub-bucket but those
+// a request carries, and records every request it was asked about. It is
+// not a ports.Authorizer, as no AccessExplainer is.
+type Explainer struct {
+	mu       sync.Mutex
+	requests []iam.Request
+	// Fail, when set, is returned by Explain, with no explanation: a
+	// decision that could not be made.
+	Fail error
+}
+
+// Explain implements ports.AccessExplainer.
+func (e *Explainer) Explain(_ context.Context, req iam.Request) (iam.Explanation, error) {
+	e.mu.Lock()
+	e.requests = append(e.requests, req)
+	fail := e.Fail
+	e.mu.Unlock()
+	if fail != nil {
+		return iam.Explanation{}, fail
+	}
+	return iam.Explain(req), nil
+}
+
+// Requests returns every request Explain has seen so far.
+func (e *Explainer) Requests() []iam.Request {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]iam.Request(nil), e.requests...)
+}
+
 // Root is the root principal used in tests.
 func Root() iam.Principal {
 	return iam.Principal{AccessKeyID: "ROOTACCESSKEY", Root: true}

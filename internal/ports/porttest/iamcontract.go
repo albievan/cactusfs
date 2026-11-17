@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -324,6 +325,89 @@ func IAMContract(t *testing.T, open func(t *testing.T) IAM) {
 		if _, err := s.GetSession(ctx, "h1"); !errors.Is(err, domain.ErrEntityNotFound) {
 			t.Errorf("a session outlived its user: %v", err)
 		}
+	})
+
+	// ResolveNamesPolicies (PLAN 9.4): a resolution names the policies it
+	// returns, each name beside its document - PolicyNames[i] is the name
+	// of Policies[i] - each policy once however many ways it reaches the
+	// user, built-in and stored alike, by ResolveIdentity and ResolveUser
+	// alike, and as the policies are now.
+	t.Run("ResolveNamesPolicies", func(t *testing.T) {
+		t.Parallel()
+		s := open(t)
+		setup(t, s)
+		for i, err := range []error{
+			s.PutRole(ctx, iam.Role{Name: "both", Policies: []string{"p-read", "p-deny"}, CreatedAt: contractTime}, true, auditOf("admin:PutRole", "role/both")),
+			// bob reaches p-read through his role and through his group.
+			s.PutUser(ctx, iam.User{Name: "bob", Groups: []string{"team"}, Roles: []string{"both", iam.RoleReadOnly}, CreatedAt: contractTime}, true, auditOf("admin:PutUser", "user/bob")),
+			s.PutUser(ctx, iam.User{Name: "carol", CreatedAt: contractTime}, true, auditOf("admin:PutUser", "user/carol")),
+			s.CreateAPIKey(ctx, key("AKIDBOB000000000001", "bob"), auditOf("admin:CreateAPIKey", "user/bob")),
+			s.CreateAPIKey(ctx, key("AKIDALICE0000000001", "alice"), auditOf("admin:CreateAPIKey", "user/alice")),
+			s.CreateAPIKey(ctx, key("AKIDCAROL0000000001", "carol"), auditOf("admin:CreateAPIKey", "user/carol")),
+		} {
+			if err != nil {
+				t.Fatalf("step %d: %v", i, err)
+			}
+		}
+		// named holds a resolution to its names, and each name to the
+		// document of the policy of that name.
+		named := func(t *testing.T, what string, identity iam.Identity, want []string) {
+			t.Helper()
+			if !slices.Equal(identity.PolicyNames, want) {
+				t.Errorf("%s: PolicyNames = %q, want %q", what, identity.PolicyNames, want)
+			}
+			if len(identity.Policies) != len(identity.PolicyNames) {
+				t.Fatalf("%s: %d documents and %d names", what, len(identity.Policies), len(identity.PolicyNames))
+			}
+			for i, name := range identity.PolicyNames {
+				want, ok := iam.BuiltInPolicies()[name]
+				if !ok {
+					policy, err := s.GetPolicy(ctx, name)
+					if err != nil {
+						t.Fatalf("%s: GetPolicy(%s): %v", what, name, err)
+					}
+					want = policy.Document
+				}
+				if !reflect.DeepEqual(identity.Policies[i], want) {
+					t.Errorf("%s: the document beside the name %s is %+v, want %+v", what, name, identity.Policies[i], want)
+				}
+			}
+		}
+		resolve := func(t *testing.T, user, accessKeyID string, want []string) {
+			t.Helper()
+			identity, err := s.ResolveIdentity(ctx, accessKeyID)
+			if err != nil {
+				t.Fatalf("ResolveIdentity(%s): %v", accessKeyID, err)
+			}
+			named(t, "ResolveIdentity("+accessKeyID+")", identity, want)
+			identity, err = s.ResolveUser(ctx, user)
+			if err != nil {
+				t.Fatalf("ResolveUser(%s): %v", user, err)
+			}
+			named(t, "ResolveUser("+user+")", identity, want)
+		}
+		for _, tt := range []struct {
+			user, key string
+			want      []string
+		}{
+			{user: "alice", key: "AKIDALICE0000000001", want: []string{"p-read", iam.RoleReadWrite}},
+			{user: "bob", key: "AKIDBOB000000000001", want: []string{"p-deny", "p-read", iam.RoleReadOnly}},
+			{user: "carol", key: "AKIDCAROL0000000001"},
+		} {
+			resolve(t, tt.user, tt.key, tt.want)
+		}
+
+		// A change is named by the very next resolution.
+		if err := s.PutRole(ctx, iam.Role{Name: "viewers", Policies: []string{"p-deny"}}, false, audit.Record{}); err != nil {
+			t.Fatal(err)
+		}
+		resolve(t, "alice", "AKIDALICE0000000001", []string{"p-deny", iam.RoleReadWrite})
+		resolve(t, "bob", "AKIDBOB000000000001", []string{"p-deny", "p-read", iam.RoleReadOnly})
+		changed := contractPolicy(t, `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::photos"}]}`)
+		if err := s.PutPolicy(ctx, iam.Policy{Name: "p-deny", Document: changed}, false, audit.Record{}); err != nil {
+			t.Fatal(err)
+		}
+		resolve(t, "alice", "AKIDALICE0000000001", []string{"p-deny", iam.RoleReadWrite})
 	})
 
 	t.Run("every change is audited with the change, and the trail is a chain", func(t *testing.T) {

@@ -166,6 +166,10 @@ func (n *node) open(ctx context.Context, cfg serverConfig, logger *slog.Logger, 
 	// The one authorization decision point. Node RPC needs it first.
 	// Refusals are audited from the first request on; the trail they are
 	// written to becomes reachable when the metadata store is open.
+	// The authorizer is no ports.AccessExplainer. The explainer over it,
+	// app.NewExplainer(n.authorizer), is made in one place, the wiring of
+	// the explanation use case (PLAN 9.5), and until that exists nowhere
+	// (TestOnlyTheExplainUseCaseHoldsAnExplainer).
 	n.auditor = app.NewAuditor(n.telemetry.InstrumentAuditLog(lateAuditLog{node: n}), n.clock, logger)
 	n.authorizer = app.NewAuthorizer(logger, n.clock, n.auditor)
 	stores := make([]ports.ShardStore, 0, len(cfg.Data))
