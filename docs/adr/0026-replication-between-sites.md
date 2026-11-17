@@ -1247,10 +1247,22 @@ Defaults are applied until answered.
     (`cactusfs_replication_resyncs{state}`, `cactusfs_replication_resync_events_total{event}`)
     and the log. Showing them per bucket means new fields in the contract and a call of
     node RPC that asks the leader (a follower cannot read them otherwise). Default: not in
-    the status; the console of PLAN 8.1.10 is the natural place to decide it.
+    the status; the console of PLAN 8.1.10 is the natural place to decide it. PLAN 8.1.10
+    kept the default: the console shows the stored record (`state`, `scanned`, `sent`)
+    and its target's state and class, and nothing of the leader's memory.
 16. *Closed by the review of PLAN 8.1.7:* a resync that stays held has an alert,
     `CactusFSReplicationResyncHeld` (held for 15 minutes), and shows in its target's
     status.
+17. **The admin API tells the replication status of the current version only** (PLAN
+    8.1.10). `ObjectMetadata.replication_status` (optional; `PENDING`, `COMPLETED`,
+    `FAILED`, `REPLICA`) is the status of the version `GET /buckets/{bucket}/object/metadata`
+    reads, which is the current one: that operation takes no `version_id`, and the admin
+    API lists no versions. The S3 API tells any version's (`x-amz-replication-status` on
+    GET and HEAD with `versionId`). Telling an older version's through the admin API
+    needs `version_id` on `/object/metadata`, judged as `s3:GetObjectVersion` as
+    `/object/preview` is, and a listing of versions for the object browser to choose
+    from - an additive contract change. Default: the current version only, as the object
+    browser works today.
 
 Ruled on 2026-10-12 and now in the text above: the probes of the replication client are
 judged as `s3:ReplicateObject` and answer existence and entity tag only; replica mode
