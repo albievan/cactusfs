@@ -308,8 +308,11 @@ func decideWithSubBucketPolicy(t *testing.T, policy *iam.SubBucketPolicy, action
 			if (iam.Decide(req) == nil) != (err == nil) {
 				t.Fatal("Decide and Evaluate disagree")
 			}
-			// A Deny of the bucket's policy stays a Deny.
-			if bucketPolicy == denyAll && err == nil {
+			// A Deny of the bucket's policy stays a Deny - for an action
+			// it covers: denyAll denies s3:*, and an action the fuzzer
+			// made that is not one of s3: (allowed by the identity
+			// policy everything) is not denied by it.
+			if bucketPolicy == denyAll && err == nil && strings.HasPrefix(strings.ToLower(string(action)), "s3:") {
 				t.Fatalf("%s %s on %s (prefix %q): the bucket denies it, and %s allowed it", p.Name(), action, resource, prefix, source)
 			}
 			// The bound of an API key holds.

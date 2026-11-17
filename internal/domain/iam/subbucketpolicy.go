@@ -3,6 +3,7 @@ package iam
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/albievan/cactusfs/internal/domain"
@@ -64,18 +65,10 @@ func (p SubBucketPolicy) Name() string { return p.name }
 // each is about.
 func (p SubBucketPolicy) Policy() BucketPolicy { return p.policy }
 
-// policyError is a policy a sub-bucket cannot keep: it reads as the reason,
-// and is a domain.ErrInvalidPolicy.
-type policyError struct{ err error }
-
-// Error returns the reason the policy cannot be kept.
-func (e policyError) Error() string { return e.err.Error() }
-
-// Unwrap returns domain.ErrInvalidPolicy and the reason.
-func (e policyError) Unwrap() []error { return []error{domain.ErrInvalidPolicy, e.err} }
-
+// invalidSubBucketPolicy is the reason of a fault only the policy of a
+// sub-bucket has.
 func invalidSubBucketPolicy(format string, args ...any) error {
-	return policyError{invalidPolicy("sub-bucket policy: %s", fmt.Sprintf(format, args...))}
+	return invalidPolicy("sub-bucket policy: %s", fmt.Sprintf(format, args...))
 }
 
 // ParseSubBucketPolicy parses and validates the policy of the sub-bucket sub
@@ -97,43 +90,83 @@ func invalidSubBucketPolicy(format string, args ...any) error {
 //
 // A document larger than MaxPolicyBytes is refused as well. An error about
 // the document wraps domain.ErrInvalidPolicy, which is a
-// domain.ErrInvalidArgument. A name that cannot be the bucket's wraps
-// domain.ErrInvalidBucketName, and one that cannot be the sub-bucket's
-// domain.ErrInvalidArgument without domain.ErrInvalidPolicy: they are errors
-// about the names, not the document.
+// domain.ErrInvalidArgument; it is a *PolicyError, which reads as the first
+// fault of the document and holds every fault found. A name that cannot be
+// the bucket's wraps domain.ErrInvalidBucketName, and one that cannot be the
+// sub-bucket's domain.ErrInvalidArgument without domain.ErrInvalidPolicy:
+// they are errors about the names, not the document, and have no faults.
 func ParseSubBucketPolicy(doc []byte, bucketName, sub string) (SubBucketPolicy, error) {
 	if err := checkNames(bucketName, sub); err != nil {
 		return SubBucketPolicy{}, fmt.Errorf("iam.ParseSubBucketPolicy: %w", err)
 	}
-	if len(doc) > MaxPolicyBytes {
-		return SubBucketPolicy{}, invalidSubBucketPolicy("larger than %d bytes", MaxPolicyBytes)
+	policy, faults := parseSubBucketPolicy(doc, bucketName, sub)
+	if err := faults.err(domain.ErrInvalidPolicy, domain.ErrInvalidArgument); err != nil {
+		return SubBucketPolicy{}, err
 	}
-	parsed, err := ParseBucketPolicy(doc, bucketName)
-	if err != nil {
-		return SubBucketPolicy{}, policyError{err}
+	return policy, nil
+}
+
+// parseSubBucketPolicy parses the policy of a sub-bucket whose names are
+// valid, collecting its faults, located when it is refused (parseLocated).
+func parseSubBucketPolicy(doc []byte, bucketName, sub string) (SubBucketPolicy, *faultList) {
+	return parseLocated(func(faults *faultList) SubBucketPolicy { return parseSubBucketPolicyInto(faults, doc, bucketName, sub) })
+}
+
+// parseSubBucketPolicyInto parses the policy of a sub-bucket whose names are
+// valid, recording its faults in the order ParseSubBucketPolicy has always
+// met them.
+func parseSubBucketPolicyInto(faults *faultList, doc []byte, bucketName, sub string) SubBucketPolicy {
+	if len(doc) > MaxPolicyBytes {
+		faults.add("", invalidSubBucketPolicy("larger than %d bytes", MaxPolicyBytes))
+		return SubBucketPolicy{}
+	}
+	parsed := parseBucketPolicyInto(faults, doc, bucketName)
+	if faults.failed() {
+		return SubBucketPolicy{}
 	}
 	own := Resource{Bucket: bucketName}.String()
 	keys := Resource{Bucket: bucketName, Key: sub + "/"}.String()
 	for i, s := range parsed.Document.Statements {
 		if s.Effect == Allow && slices.Contains(parsed.Principals[i], PrincipalAnyone) {
-			return SubBucketPolicy{}, invalidSubBucketPolicy("statement %d: an Allow names the users it allows, never \"*\"", i)
+			faults.add(anyonePointer(faults, pointerOf(statementPointer(i), "Principal")), invalidSubBucketPolicy("statement %d: an Allow names the users it allows, never \"*\"", i))
 		}
-		for _, name := range s.Actions {
+		for j, name := range s.Actions {
 			action, known := subBucketAction(name)
 			if !known {
-				return SubBucketPolicy{}, invalidSubBucketPolicy("statement %d: %q is not an action on objects or a listing, named without a wildcard", i, name)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Action"), j), invalidSubBucketPolicy("statement %d: %q is not an action on objects or a listing, named without a wildcard", i, name))
+				continue
 			}
 			if s.Effect == Deny && slices.Contains(subBucketListActions(), action) {
-				return SubBucketPolicy{}, invalidSubBucketPolicy("statement %d: a sub-bucket policy cannot deny %s", i, action)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Action"), j), invalidSubBucketPolicy("statement %d: a sub-bucket policy cannot deny %s", i, action))
 			}
 		}
-		for _, resource := range s.Resources {
+		for j, resource := range s.Resources {
 			if resource != own && !strings.HasPrefix(resource, keys) {
-				return SubBucketPolicy{}, invalidSubBucketPolicy("statement %d: resource %q is neither a key of the sub-bucket (%s*) nor the bucket", i, resource, keys)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Resource"), j), invalidSubBucketPolicy("statement %d: resource %q is neither a key of the sub-bucket (%s*) nor the bucket", i, resource, keys))
 			}
 		}
 	}
-	return SubBucketPolicy{bucket: bucketName, name: sub, policy: parsed}, nil
+	if faults.failed() {
+		return SubBucketPolicy{}
+	}
+	return SubBucketPolicy{bucket: bucketName, name: sub, policy: parsed}
+}
+
+// anyonePointer returns the pointer of the "*" a Principal at pointer
+// names: the Principal when it is "*", its AWS when that is "*", or the
+// first "*" of its list.
+func anyonePointer(faults *faultList, pointer string) string {
+	aws := pointer + "/AWS"
+	node := faults.tree.lookup(aws)
+	if node == nil || node.kind != kindArray {
+		return faults.clamp(aws)
+	}
+	for i, name := range node.elems {
+		if name.kind == kindString && name.text == PrincipalAnyone {
+			return aws + "/" + strconv.Itoa(i)
+		}
+	}
+	return aws
 }
 
 // checkNames refuses names a bucket or a sub-bucket cannot have, as far as

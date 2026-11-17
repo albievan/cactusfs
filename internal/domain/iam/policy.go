@@ -3,8 +3,11 @@ package iam
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -121,6 +124,9 @@ type Context struct {
 // wire forms: fields that may be one string or a list of strings.
 type oneOrMany []string
 
+// errWantStrings is what oneOrMany says of a value that is neither.
+const errWantStrings = errString("want a string or a list of strings")
+
 // UnmarshalJSON accepts a string or a list of strings.
 func (o *oneOrMany) UnmarshalJSON(data []byte) error {
 	var one string
@@ -130,7 +136,7 @@ func (o *oneOrMany) UnmarshalJSON(data []byte) error {
 	}
 	var many []string
 	if err := json.Unmarshal(data, &many); err != nil {
-		return fmt.Errorf("want a string or a list of strings")
+		return errWantStrings
 	}
 	*o = many
 	return nil
@@ -172,88 +178,199 @@ func invalidPolicy(format string, args ...any) error {
 	return fmt.Errorf("%w: policy: %s", domain.ErrInvalidArgument, fmt.Sprintf(format, args...))
 }
 
+// conditionOperators are the operators of the language, in the order a
+// statement keeps its conditions.
+func conditionOperators() []string {
+	return []string{
+		OpStringEquals, OpStringNotEquals, OpStringLike, OpStringNotLike, OpIPAddress, OpNotIPAddress,
+		OpBool, OpDateGreaterThan, OpDateLessThan,
+	}
+}
+
+// conditionKeys are the condition keys of the language, in the order a
+// statement keeps its conditions.
+func conditionKeys() []string {
+	return []string{KeySourceIP, KeySecureTransport, KeyCurrentTime, KeyUsername}
+}
+
+// identityShape is the shape of each field of a statement of an identity
+// policy in its wire form.
+func identityShape(field string) shape {
+	switch field {
+	case "Action", "Resource":
+		return shapeStrings
+	case "Condition":
+		return shapeConditions
+	default:
+		return shapeString
+	}
+}
+
 // ParsePolicy parses and validates a policy document. The error wraps
-// domain.ErrInvalidArgument.
+// domain.ErrInvalidArgument; it is a *PolicyError, which reads as the first
+// fault of the document and holds every fault found.
 func ParsePolicy(data []byte) (Document, error) {
-	if len(data) > MaxPolicyBytes {
-		return Document{}, invalidPolicy("larger than %d bytes", MaxPolicyBytes)
-	}
-	// encoding/json is forgiving in ways a policy must not be: of two
-	// fields with one name it keeps the last, and it matches names without
-	// regard to case. Both would let a document mean something else than
-	// it reads.
-	if err := checkFields(data, fieldsAt); err != nil {
-		return Document{}, invalidPolicy("%v", err)
-	}
-	if nullCondition(data) {
-		return Document{}, invalidPolicy("a Condition is null")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var wire wireDocument
-	if err := decoder.Decode(&wire); err != nil {
-		return Document{}, invalidPolicy("%v", err)
-	}
-	if decoder.More() {
-		return Document{}, invalidPolicy("data after the document")
-	}
-	doc := Document{Version: wire.Version}
-	for i, ws := range wire.Statement {
-		statement := Statement{Sid: ws.Sid, Effect: Effect(ws.Effect), Actions: ws.Action, Resources: ws.Resource}
-		// A condition block that is there and tests nothing would make a
-		// statement that was meant to be restricted apply always.
-		if ws.Condition != nil && len(ws.Condition) == 0 {
-			return Document{}, invalidPolicy("statement %d: Condition is empty", i)
-		}
-		for operator, tests := range ws.Condition {
-			if len(tests) == 0 {
-				return Document{}, invalidPolicy("statement %d: condition %s tests nothing", i, operator)
-			}
-		}
-		// Conditions are kept in a fixed order, so that a document always
-		// reads back the same.
-		for _, operator := range []string{
-			OpStringEquals, OpStringNotEquals, OpStringLike, OpStringNotLike, OpIPAddress, OpNotIPAddress,
-			OpBool, OpDateGreaterThan, OpDateLessThan,
-		} {
-			tests, ok := ws.Condition[operator]
-			if !ok {
-				continue
-			}
-			delete(ws.Condition, operator)
-			for _, key := range []string{KeySourceIP, KeySecureTransport, KeyCurrentTime, KeyUsername} {
-				if values, ok := tests[key]; ok {
-					statement.Conditions = append(statement.Conditions, Condition{Operator: operator, Key: key, Values: values})
-					delete(tests, key)
-				}
-			}
-			for key := range tests {
-				return Document{}, invalidPolicy("statement %d: condition key %q is not supported", i, key)
-			}
-		}
-		for operator := range ws.Condition {
-			return Document{}, invalidPolicy("statement %d: condition operator %q is not supported", i, operator)
-		}
-		doc.Statements = append(doc.Statements, statement)
-	}
-	if err := doc.Validate(); err != nil {
+	doc, faults := parsePolicy(data)
+	if err := faults.err(domain.ErrInvalidArgument); err != nil {
 		return Document{}, err
 	}
 	return doc, nil
 }
 
-// checkFields walks a document and refuses a field that appears twice in
-// one object, and, where the fields are fixed, one that is not spelled
-// exactly as the policy language spells it.
-func checkFields(data []byte, fields func(where string) []string) error {
+// parsePolicy parses a policy document, collecting its faults, located when
+// it is refused (parseLocated).
+func parsePolicy(data []byte) (Document, *faultList) {
+	return parseLocated(func(faults *faultList) Document { return parsePolicyInto(faults, data) })
+}
+
+// parsePolicyInto parses a policy document, recording its faults. It makes
+// the checks it has always made, in the order it has always made them, so
+// that the first fault is the one it has always reported; it goes on after
+// a fault for as long as the document can still be read.
+func parsePolicyInto(faults *faultList, data []byte) Document {
+	if len(data) > MaxPolicyBytes {
+		faults.add("", invalidPolicy("larger than %d bytes", MaxPolicyBytes))
+		return Document{}
+	}
+	// encoding/json is forgiving in ways a policy must not be: of two
+	// fields with one name it keeps the last, and it matches names without
+	// regard to case. Both would let a document mean something else than
+	// it reads.
+	tree, ok := readDocument(faults, data, fieldsAt)
+	if !ok {
+		return Document{}
+	}
+	faults.tree = tree
+	if nullCondition(data) {
+		located := false
+		for i, statement := range tree.statements() {
+			if condition := statement.child("Condition"); condition != nil && condition.kind == kindNull {
+				faults.add(statementPointer(i)+"/Condition", invalidPolicy("a Condition is null"))
+				located = true
+			}
+		}
+		if !located {
+			faults.add("", invalidPolicy("a Condition is null"))
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := walkFields(decoder, "", fields); err != nil {
-		return err
+	decoder.DisallowUnknownFields()
+	var wire wireDocument
+	if err := decoder.Decode(&wire); err != nil {
+		addDecodeFaults(faults, err, typeFaults(tree, shapeString, identityShape))
+		return Document{}
 	}
-	if _, err := decoder.Token(); err == nil {
-		return fmt.Errorf("data after the document")
+	if decoder.More() {
+		faults.addAt("", decoder.InputOffset(), invalidPolicy("data after the document"))
 	}
-	return nil
+	doc := Document{Version: wire.Version}
+	statements := tree.statements()
+	for i, ws := range wire.Statement {
+		var condition *jsonNode
+		if i < len(statements) {
+			condition = statements[i].child("Condition")
+		}
+		doc.Statements = append(doc.Statements, readStatement(faults, i, ws, condition))
+	}
+	doc.validate(faults)
+	if faults.failed() {
+		return Document{}
+	}
+	return doc
+}
+
+// readStatement makes a statement of its wire form, recording the faults of
+// its Condition. condition is the Condition as written, for the order of its
+// operators and keys; without it - when the faults are not located - they
+// are taken in the order of the map, and a fault is a fault all the same.
+func readStatement(faults *faultList, i int, ws wireStatement, condition *jsonNode) Statement {
+	statement := Statement{Sid: ws.Sid, Effect: Effect(ws.Effect), Actions: ws.Action, Resources: ws.Resource}
+	if ws.Condition == nil {
+		return statement
+	}
+	// A condition block that is there and tests nothing would make a
+	// statement that was meant to be restricted apply always.
+	if len(ws.Condition) == 0 {
+		faults.add(pointerOf(statementPointer(i), "Condition"), invalidPolicy("statement %d: Condition is empty", i))
+	}
+	// Each check is made of every operator, or key, in the order written
+	// when the faults are located and in the order of the map otherwise:
+	// ranging over the map itself, as the parser always has, allocates
+	// nothing.
+	var testsNothing map[string]bool
+	emptyOperator := func(operator string) {
+		if len(ws.Condition[operator]) == 0 {
+			faults.add(pointerOf(statementPointer(i), "Condition", operator), invalidPolicy("statement %d: condition %s tests nothing", i, operator))
+			if testsNothing == nil {
+				testsNothing = map[string]bool{}
+			}
+			testsNothing[operator] = true
+		}
+	}
+	unknownOperator := func(operator string) {
+		if !slices.Contains(conditionOperators(), operator) && !testsNothing[operator] {
+			faults.add(pointerOf(statementPointer(i), "Condition", operator), invalidPolicy("statement %d: condition operator %q is not supported", i, operator))
+		}
+	}
+	if condition != nil {
+		for _, operator := range condition.fieldNames() {
+			emptyOperator(operator)
+		}
+	} else {
+		for operator := range ws.Condition {
+			emptyOperator(operator)
+		}
+	}
+	// Conditions are kept in a fixed order, so that a document always
+	// reads back the same.
+	for _, operator := range conditionOperators() {
+		tests, ok := ws.Condition[operator]
+		if !ok {
+			continue
+		}
+		for _, key := range conditionKeys() {
+			if values, ok := tests[key]; ok {
+				statement.Conditions = append(statement.Conditions, Condition{Operator: operator, Key: key, Values: values})
+			}
+		}
+		unknownKey := func(key string) {
+			if !slices.Contains(conditionKeys(), key) {
+				faults.add(pointerOf(statementPointer(i), "Condition", operator, key), invalidPolicy("statement %d: condition key %q is not supported", i, key))
+			}
+		}
+		if condition != nil {
+			for _, key := range condition.child(operator).fieldNames() {
+				unknownKey(key)
+			}
+		} else {
+			for key := range tests {
+				unknownKey(key)
+			}
+		}
+	}
+	if condition != nil {
+		for _, operator := range condition.fieldNames() {
+			unknownOperator(operator)
+		}
+	} else {
+		for operator := range ws.Condition {
+			unknownOperator(operator)
+		}
+	}
+	return statement
+}
+
+// statementPointer is the JSON pointer of the i-th statement.
+func statementPointer(i int) string { return "/Statement/" + strconv.Itoa(i) }
+
+// pointerOf is the JSON pointer of the value at the field names under
+// pointer. It is made when a fault is recorded, never on the way to a
+// document that is accepted.
+func pointerOf(pointer string, names ...string) string {
+	for _, name := range names {
+		pointer += "/" + escapePointer(name)
+	}
+	return pointer
 }
 
 // fieldsAt lists the fields of the objects whose fields are fixed, by where
@@ -271,56 +388,6 @@ func fieldsAt(where string) []string {
 
 // maxPolicyDepth bounds how deeply a document may nest.
 const maxPolicyDepth = 8
-
-func walkFields(decoder *json.Decoder, where string, fields func(where string) []string) error {
-	if strings.Count(where, "/") > maxPolicyDepth {
-		return fmt.Errorf("nested too deeply")
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := map[string]bool{}
-		for decoder.More() {
-			token, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			name, _ := token.(string)
-			if seen[name] {
-				return fmt.Errorf("field %q appears twice", name)
-			}
-			seen[name] = true
-			if allowed := fields(where); allowed != nil {
-				known := false
-				for _, field := range allowed {
-					known = known || field == name
-				}
-				if !known {
-					return fmt.Errorf("unknown field %q", name)
-				}
-			}
-			if err := walkFields(decoder, where+"/"+name, fields); err != nil {
-				return err
-			}
-		}
-	case '[':
-		for decoder.More() {
-			if err := walkFields(decoder, where+"/[]", fields); err != nil {
-				return err
-			}
-		}
-	}
-	// The closing bracket.
-	_, err = decoder.Token()
-	return err
-}
 
 // MarshalJSON writes the document in the policy language.
 func (d Document) MarshalJSON() ([]byte, error) {
@@ -352,43 +419,65 @@ func (d *Document) UnmarshalJSON(data []byte) error {
 }
 
 // Validate reports whether the document is well formed. The error wraps
-// domain.ErrInvalidArgument.
+// domain.ErrInvalidArgument; it is a *PolicyError, whose pointers count every
+// field that may be a list as one, as MarshalJSON writes them.
 func (d Document) Validate() error {
+	faults := &faultList{}
+	d.validate(faults)
+	return faults.err(domain.ErrInvalidArgument)
+}
+
+// validate records every fault of a document; the first is the one
+// Validate has always reported.
+func (d Document) validate(faults *faultList) {
 	if d.Version != PolicyVersion {
-		return invalidPolicy("Version must be %q", PolicyVersion)
+		faults.add("/Version", invalidPolicy("Version must be %q", PolicyVersion))
 	}
 	if len(d.Statements) == 0 || len(d.Statements) > MaxPolicyStatements {
-		return invalidPolicy("must have 1 to %d statements", MaxPolicyStatements)
+		faults.add("/Statement", invalidPolicy("must have 1 to %d statements", MaxPolicyStatements))
 	}
 	for i, s := range d.Statements {
-		if s.Effect != Allow && s.Effect != Deny {
-			return invalidPolicy("statement %d: Effect must be Allow or Deny", i)
-		}
-		if len(s.Actions) == 0 || len(s.Actions) > maxPolicyValues || len(s.Resources) == 0 || len(s.Resources) > maxPolicyValues {
-			return invalidPolicy("statement %d: needs 1 to %d actions and resources", i, maxPolicyValues)
-		}
-		for _, action := range s.Actions {
-			if err := validateActionPattern(action); err != nil {
-				return invalidPolicy("statement %d: %v", i, err)
-			}
-		}
-		for _, resource := range s.Resources {
-			if err := validateResourcePattern(resource); err != nil {
-				return invalidPolicy("statement %d: %v", i, err)
-			}
-		}
-		seen := map[string]bool{}
-		for _, c := range s.Conditions {
-			if err := c.validate(); err != nil {
-				return invalidPolicy("statement %d: %v", i, err)
-			}
-			if seen[c.Operator+"\x00"+c.Key] {
-				return invalidPolicy("statement %d: condition %s on %s is given twice", i, c.Operator, c.Key)
-			}
-			seen[c.Operator+"\x00"+c.Key] = true
+		s.validate(faults, i)
+	}
+}
+
+// validate records every fault of the i-th statement of a document.
+func (s Statement) validate(faults *faultList, i int) {
+	if s.Effect != Allow && s.Effect != Deny {
+		faults.add(pointerOf(statementPointer(i), "Effect"), invalidPolicy("statement %d: Effect must be Allow or Deny", i))
+	}
+	// One reason for both, as it has always read; each field that has too
+	// few or too many is pointed at.
+	if len(s.Actions) == 0 || len(s.Actions) > maxPolicyValues {
+		faults.add(pointerOf(statementPointer(i), "Action"), invalidPolicy("statement %d: needs 1 to %d actions and resources", i, maxPolicyValues))
+	}
+	if len(s.Resources) == 0 || len(s.Resources) > maxPolicyValues {
+		faults.add(pointerOf(statementPointer(i), "Resource"), invalidPolicy("statement %d: needs 1 to %d actions and resources", i, maxPolicyValues))
+	}
+	for j, action := range s.Actions {
+		if err := validateActionPattern(action); err != nil {
+			faults.add(faults.item(pointerOf(statementPointer(i), "Action"), j), invalidPolicy("statement %d: %v", i, err))
 		}
 	}
-	return nil
+	for j, resource := range s.Resources {
+		if err := validateResourcePattern(resource); err != nil {
+			faults.add(faults.item(pointerOf(statementPointer(i), "Resource"), j), invalidPolicy("statement %d: %v", i, err))
+		}
+	}
+	seen := map[string]bool{}
+	for _, c := range s.Conditions {
+		for _, fault := range c.faults() {
+			pointer := pointerOf(statementPointer(i), "Condition", c.Operator, c.Key)
+			if fault.value >= 0 {
+				pointer = faults.item(pointer, fault.value)
+			}
+			faults.add(pointer, invalidPolicy("statement %d: %v", i, fault.err))
+		}
+		if seen[c.Operator+"\x00"+c.Key] {
+			faults.add(pointerOf(statementPointer(i), "Condition", c.Operator, c.Key), invalidPolicy("statement %d: condition %s on %s is given twice", i, c.Operator, c.Key))
+		}
+		seen[c.Operator+"\x00"+c.Key] = true
+	}
 }
 
 // validateActionPattern accepts "*" and "<service>:<name>" with wildcards in
@@ -424,38 +513,45 @@ func validateResourcePattern(pattern string) error {
 	return nil
 }
 
-func (c Condition) validate() error {
+// conditionFault is a fault of a condition: of one of its values, by index,
+// or of the whole condition when value is negative.
+type conditionFault struct {
+	value int
+	err   error
+}
+
+// faults lists what is wrong with a condition: a key, an operator or a
+// number of values it cannot have - after which nothing more is said of it -
+// or else each value its operator cannot read.
+func (c Condition) faults() []conditionFault {
 	allowed := operatorsFor(c.Key)
 	if allowed == nil {
-		return fmt.Errorf("condition key %q is not supported", c.Key)
+		return []conditionFault{{-1, fmt.Errorf("condition key %q is not supported", c.Key)}}
 	}
-	ok := false
-	for _, operator := range allowed {
-		ok = ok || operator == c.Operator
-	}
-	if !ok {
-		return fmt.Errorf("condition operator %q cannot be used with %s", c.Operator, c.Key)
+	if !slices.Contains(allowed, c.Operator) {
+		return []conditionFault{{-1, fmt.Errorf("condition operator %q cannot be used with %s", c.Operator, c.Key)}}
 	}
 	if len(c.Values) == 0 || len(c.Values) > maxPolicyValues {
-		return fmt.Errorf("condition %s on %s needs 1 to %d values", c.Operator, c.Key, maxPolicyValues)
+		return []conditionFault{{-1, fmt.Errorf("condition %s on %s needs 1 to %d values", c.Operator, c.Key, maxPolicyValues)}}
 	}
-	for _, value := range c.Values {
+	var faults []conditionFault
+	for j, value := range c.Values {
 		var err error
 		switch c.Operator {
 		case OpIPAddress, OpNotIPAddress:
 			_, err = parsePrefix(value)
 		case OpBool:
 			if value != "true" && value != "false" {
-				err = fmt.Errorf("want true or false")
+				err = errors.New("want true or false")
 			}
 		case OpDateGreaterThan, OpDateLessThan:
 			_, err = time.Parse(time.RFC3339, value)
 		}
 		if err != nil {
-			return fmt.Errorf("condition %s on %s: value %q: %w", c.Operator, c.Key, value, err)
+			faults = append(faults, conditionFault{j, fmt.Errorf("condition %s on %s: value %q: %w", c.Operator, c.Key, value, err)})
 		}
 	}
-	return nil
+	return faults
 }
 
 // parsePrefix reads an address or a CIDR range.
@@ -580,22 +676,24 @@ func sameCharacter(pattern string, width int) bool {
 	return w == width
 }
 
+// patternCovers reports whether an action pattern of a statement with the
+// given effect covers the action.
+func patternCovers(effect Effect, pattern string, action Action) bool {
+	// Lifting a retention, and committing a replica, are allowed only by
+	// their names (Action.byNameOnly). A Deny may still cover them with a
+	// wildcard: denying more is never wrong.
+	if action.byNameOnly() && effect == Allow {
+		return strings.EqualFold(pattern, string(action))
+	}
+	// Action names are matched without regard to case, as in IAM.
+	return pattern == "*" || wildcardMatch(strings.ToLower(pattern), strings.ToLower(string(action)))
+}
+
 // matches reports whether the statement applies to the request.
 func (s Statement) matches(action Action, resource string, ctx Context) bool {
 	hit := false
 	for _, pattern := range s.Actions {
-		// Lifting a retention, and committing a replica, are allowed only
-		// by their names (Action.byNameOnly). A Deny may still cover them
-		// with a wildcard: denying more is never wrong.
-		if action.byNameOnly() && s.Effect == Allow {
-			if strings.EqualFold(pattern, string(action)) {
-				hit = true
-				break
-			}
-			continue
-		}
-		// Action names are matched without regard to case, as in IAM.
-		if pattern == "*" || wildcardMatch(strings.ToLower(pattern), strings.ToLower(string(action))) {
+		if patternCovers(s.Effect, pattern, action) {
 			hit = true
 			break
 		}

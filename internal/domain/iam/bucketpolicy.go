@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+
+	"github.com/albievan/cactusfs/internal/domain"
 )
 
 // A bucket policy is a policy attached to a bucket instead of to a user: its
@@ -53,31 +55,64 @@ func bucketPolicyFieldsAt(where string) []string {
 	}
 }
 
+// bucketShape is the shape of each field of a statement of a bucket policy
+// in its wire form: all but the Sid are read later.
+func bucketShape(field string) shape {
+	if field == "Sid" {
+		return shapeString
+	}
+	return shapeAny
+}
+
 // ParseBucketPolicy parses and validates the policy of the named bucket.
 // Every statement needs a Principal - "*", {"AWS": "*"}, or users named as
 // "arn:aws:iam:::user/<name>" - and may be about that bucket and its objects
-// only, and about S3 actions only. The error wraps domain.ErrInvalidArgument.
+// only, and about S3 actions only. The error wraps domain.ErrInvalidArgument;
+// it is a *PolicyError, which reads as the first fault of the document and
+// holds every fault found.
 func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
+	policy, faults := parseBucketPolicy(data, bucketName)
+	if err := faults.err(domain.ErrInvalidArgument); err != nil {
+		return BucketPolicy{}, err
+	}
+	return policy, nil
+}
+
+// parseBucketPolicy parses a bucket policy, collecting its faults, located
+// when it is refused (parseLocated).
+func parseBucketPolicy(data []byte, bucketName string) (BucketPolicy, *faultList) {
+	return parseLocated(func(faults *faultList) BucketPolicy { return parseBucketPolicyInto(faults, data, bucketName) })
+}
+
+// parseBucketPolicyInto parses a bucket policy, recording its faults in the
+// order ParseBucketPolicy has always met them.
+func parseBucketPolicyInto(faults *faultList, data []byte, bucketName string) BucketPolicy {
 	if len(data) > MaxPolicyBytes {
-		return BucketPolicy{}, invalidPolicy("larger than %d bytes", MaxPolicyBytes)
+		faults.add("", invalidPolicy("larger than %d bytes", MaxPolicyBytes))
+		return BucketPolicy{}
 	}
-	if err := checkFields(data, bucketPolicyFieldsAt); err != nil {
-		return BucketPolicy{}, invalidPolicy("%v", err)
+	tree, ok := readDocument(faults, data, bucketPolicyFieldsAt)
+	if !ok {
+		return BucketPolicy{}
 	}
+	faults.tree = tree
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var wire wireBucketPolicy
 	if err := decoder.Decode(&wire); err != nil {
-		return BucketPolicy{}, invalidPolicy("%v", err)
+		addDecodeFaults(faults, err, typeFaults(tree, shapeAny, bucketShape))
+		return BucketPolicy{}
 	}
 	if decoder.More() {
-		return BucketPolicy{}, invalidPolicy("data after the document")
+		faults.addAt("", decoder.InputOffset(), invalidPolicy("data after the document"))
 	}
+	nullConditions := false
 	for i, ws := range wire.Statement {
 		// A condition that is there and says nothing would make a
 		// statement that was meant to be restricted apply always.
 		if bytes.Equal(bytes.TrimSpace(ws.Condition), []byte("null")) {
-			return BucketPolicy{}, invalidPolicy("statement %d: Condition is null", i)
+			faults.add(pointerOf(statementPointer(i), "Condition"), invalidPolicy("statement %d: Condition is null", i))
+			nullConditions = true
 		}
 	}
 	policy := BucketPolicy{}
@@ -86,9 +121,13 @@ func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
 	rest := map[string]any{"Version": wire.Version}
 	statements := make([]map[string]any, 0, len(wire.Statement))
 	for i, ws := range wire.Statement {
-		principals, err := parsePrincipal(ws.Principal)
-		if err != nil {
-			return BucketPolicy{}, invalidPolicy("statement %d: %v", i, err)
+		principals, refused := parsePrincipal(ws.Principal)
+		for _, fault := range refused {
+			pointer := pointerOf(statementPointer(i), "Principal") + fault.where
+			if fault.item >= 0 {
+				pointer = faults.item(pointer, fault.item)
+			}
+			faults.add(pointer, invalidPolicy("statement %d: %v", i, fault.err))
 		}
 		policy.Principals = append(policy.Principals, principals)
 		statement := map[string]any{"Effect": ws.Effect, "Action": ws.Action, "Resource": ws.Resource}
@@ -103,44 +142,75 @@ func ParseBucketPolicy(data []byte, bucketName string) (BucketPolicy, error) {
 	rest["Statement"] = statements
 	identity, err := json.Marshal(rest)
 	if err != nil {
-		return BucketPolicy{}, invalidPolicy("%v", err)
+		faults.add("", invalidPolicy("%v", err))
+		return BucketPolicy{}
 	}
-	if policy.Document, err = ParsePolicy(identity); err != nil {
-		return BucketPolicy{}, err
+	// The identity policy has the statements, and the fields of each, of
+	// the document as sent: its faults are where they are in it, located or
+	// not as this document's are. A null Condition, which the step above
+	// said of each statement in the words of a bucket policy, is not said
+	// again in those of an identity policy; every other fault is kept, also
+	// where another is at the same place.
+	identityFaults := &faultList{locate: faults.locate}
+	document := parsePolicyInto(identityFaults, identity)
+	for _, fault := range identityFaults.faults {
+		if nullConditions && fault.Reason == invalidPolicy("a Condition is null").Error() {
+			continue
+		}
+		faults.add(faults.clamp(fault.Pointer), errString(fault.Reason))
 	}
+	faults.truncated = faults.truncated || identityFaults.truncated
+	if identityFaults.failed() {
+		return BucketPolicy{}
+	}
+	policy.Document = document
 	own, objects := Resource{Bucket: bucketName}.String(), Resource{Bucket: bucketName, Key: "x"}.String()
 	objects = strings.TrimSuffix(objects, "x")
 	for i, s := range policy.Document.Statements {
-		for _, action := range s.Actions {
+		for j, action := range s.Actions {
 			if !strings.HasPrefix(strings.ToLower(action), "s3:") {
-				return BucketPolicy{}, invalidPolicy("statement %d: a bucket policy is about S3 actions, not %q", i, action)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Action"), j), invalidPolicy("statement %d: a bucket policy is about S3 actions, not %q", i, action))
+				continue
 			}
 			// Lifting a governance retention and committing a replica
 			// are given by a policy of the user, by name, and by nothing
 			// else. Whoever may write a bucket's policy - by a wildcard,
 			// perhaps - must not be able to give them to themselves.
 			if s.Effect == Allow && Action(action).byNameOnly() {
-				return BucketPolicy{}, invalidPolicy("statement %d: a bucket policy cannot allow %s", i, action)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Action"), j), invalidPolicy("statement %d: a bucket policy cannot allow %s", i, action))
 			}
 		}
-		for _, resource := range s.Resources {
+		for j, resource := range s.Resources {
 			if resource != own && !strings.HasPrefix(resource, objects) {
-				return BucketPolicy{}, invalidPolicy("statement %d: resource %q is not this bucket or in it", i, resource)
+				faults.add(faults.item(pointerOf(statementPointer(i), "Resource"), j), invalidPolicy("statement %d: resource %q is not this bucket or in it", i, resource))
 			}
 		}
 	}
-	return policy, nil
+	if faults.failed() {
+		return BucketPolicy{}
+	}
+	return policy
 }
 
-func parsePrincipal(raw json.RawMessage) ([]string, error) {
+// principalFault is a fault of a Principal: where in it - "" for the
+// Principal itself, "/AWS" for its AWS - and, for a name of a list, which.
+type principalFault struct {
+	where string
+	item  int
+	err   error
+}
+
+// parsePrincipal reads the Principal of a statement: the names of its users,
+// or PrincipalAnyone. It reports every name it refuses.
+func parsePrincipal(raw json.RawMessage) ([]string, []principalFault) {
 	if len(raw) == 0 {
-		return nil, errString("Principal is required")
+		return nil, []principalFault{{"", -1, errString("Principal is required")}}
 	}
 	var names oneOrMany
 	var anyone string
 	if err := json.Unmarshal(raw, &anyone); err == nil {
 		if anyone != PrincipalAnyone {
-			return nil, errString(`a Principal that is a string must be "*"`)
+			return nil, []principalFault{{"", -1, errString(`a Principal that is a string must be "*"`)}}
 		}
 		return []string{PrincipalAnyone}, nil
 	}
@@ -148,20 +218,28 @@ func parsePrincipal(raw json.RawMessage) ([]string, error) {
 		AWS oneOrMany `json:"AWS"`
 	}
 	if err := json.Unmarshal(raw, &object); err != nil {
-		return nil, errString(`Principal must be "*" or {"AWS": ...}`)
+		where := ""
+		if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+			where = "/AWS"
+		}
+		return nil, []principalFault{{where, -1, errString(`Principal must be "*" or {"AWS": ...}`)}}
 	}
 	if len(object.AWS) == 0 || len(object.AWS) > maxPolicyValues {
-		return nil, errString("Principal names nobody, or too many")
+		return nil, []principalFault{{"/AWS", -1, errString("Principal names nobody, or too many")}}
 	}
-	for _, name := range object.AWS {
+	var faults []principalFault
+	for i, name := range object.AWS {
 		switch user, isUser := strings.CutPrefix(name, userARNPrefix); {
 		case name == PrincipalAnyone:
 			names = append(names, PrincipalAnyone)
 		case isUser && ValidateName(user) == nil:
 			names = append(names, user)
 		default:
-			return nil, errString(`a principal is "*" or "` + userARNPrefix + `<name>"`)
+			faults = append(faults, principalFault{"/AWS", i, errString(`a principal is "*" or "` + userARNPrefix + `<name>"`)})
 		}
+	}
+	if len(faults) > 0 {
+		return nil, faults
 	}
 	return names, nil
 }
