@@ -129,6 +129,18 @@ export type NotificationRule = Schemas['NotificationRule'];
 export type NotificationRulePut = Schemas['NotificationRulePut'];
 /** The notification rules of a bucket. */
 export type BucketNotifications = Schemas['BucketNotifications'];
+/** Where the versions of a bucket are copied to (ADR-0026): one target, one bucket there, and the rules. */
+export type BucketReplication = Schemas['BucketReplication'];
+/** One rule of a bucket's replication. */
+export type ReplicationRule = Schemas['ReplicationRule'];
+/** How far the replication of a bucket has come, as the node that leads has it. */
+export type BucketReplicationStatus = Schemas['BucketReplicationStatus'];
+/** The walk that sends another deployment what it lacks of a bucket. */
+export type ReplicationResync = Schemas['ReplicationResync'];
+/** Whether a bucket is the replica of another deployment's, and of which. */
+export type BucketReplicaMode = Schemas['BucketReplicaMode'];
+/** Where one version stands in replication, as `x-amz-replication-status` says it. */
+export type ReplicationStatus = NonNullable<ObjectMetadata['replication_status']>;
 
 /**
  * The header the API sets on an answer it did not make now but kept: the

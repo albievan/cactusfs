@@ -2256,6 +2256,17 @@ export interface components {
             content_type: string;
             /** @description How the object is encrypted at rest. */
             encryption: string;
+            /**
+             * @description Where the current version stands in replication to another deployment, as the S3 API's
+             *     `x-amz-replication-status` says it: `PENDING` while a rule of the bucket matched it and the other
+             *     deployment has not taken it yet, `COMPLETED` once it has, `FAILED` when it cannot be replicated
+             *     and was given up on (`FAILED` is final), and `REPLICA` for a version that arrived from another
+             *     deployment. Absent for a version no replication rule is about. It is stored with the version when
+             *     the version is committed and changed only by the replication of that version, so a rule edited
+             *     later does not change it.
+             * @enum {string}
+             */
+            replication_status?: "PENDING" | "COMPLETED" | "FAILED" | "REPLICA";
         };
         ObjectReader: {
             /** @description The reader, as the audit trail names actors - `root`, `user/<name>`, `key/<access key ID>` or `anonymous`. */

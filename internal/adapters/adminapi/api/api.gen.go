@@ -185,6 +185,30 @@ func (e NotificationRulePutEvents) Valid() bool {
 	}
 }
 
+// Defines values for ObjectMetadataReplicationStatus.
+const (
+	COMPLETED ObjectMetadataReplicationStatus = "COMPLETED"
+	FAILED    ObjectMetadataReplicationStatus = "FAILED"
+	PENDING   ObjectMetadataReplicationStatus = "PENDING"
+	REPLICA   ObjectMetadataReplicationStatus = "REPLICA"
+)
+
+// Valid indicates whether the value is a known member of the ObjectMetadataReplicationStatus enum.
+func (e ObjectMetadataReplicationStatus) Valid() bool {
+	switch e {
+	case COMPLETED:
+		return true
+	case FAILED:
+		return true
+	case PENDING:
+		return true
+	case REPLICA:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PreviewKind.
 const (
 	Csv  PreviewKind = "csv"
@@ -1206,8 +1230,26 @@ type ObjectMetadata struct {
 	Etag         string    `json:"etag"`
 	Key          string    `json:"key"`
 	LastModified time.Time `json:"last_modified"`
-	Size         int64     `json:"size"`
+
+	// ReplicationStatus Where the current version stands in replication to another deployment, as the S3 API's
+	// `x-amz-replication-status` says it: `PENDING` while a rule of the bucket matched it and the other
+	// deployment has not taken it yet, `COMPLETED` once it has, `FAILED` when it cannot be replicated
+	// and was given up on (`FAILED` is final), and `REPLICA` for a version that arrived from another
+	// deployment. Absent for a version no replication rule is about. It is stored with the version when
+	// the version is committed and changed only by the replication of that version, so a rule edited
+	// later does not change it.
+	ReplicationStatus *ObjectMetadataReplicationStatus `json:"replication_status,omitempty"`
+	Size              int64                            `json:"size"`
 }
+
+// ObjectMetadataReplicationStatus Where the current version stands in replication to another deployment, as the S3 API's
+// `x-amz-replication-status` says it: `PENDING` while a rule of the bucket matched it and the other
+// deployment has not taken it yet, `COMPLETED` once it has, `FAILED` when it cannot be replicated
+// and was given up on (`FAILED` is final), and `REPLICA` for a version that arrived from another
+// deployment. Absent for a version no replication rule is about. It is stored with the version when
+// the version is committed and changed only by the replication of that version, so a rule edited
+// later does not change it.
+type ObjectMetadataReplicationStatus string
 
 // ObjectReader defines model for ObjectReader.
 type ObjectReader struct {

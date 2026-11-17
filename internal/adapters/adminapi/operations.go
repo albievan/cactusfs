@@ -329,10 +329,17 @@ func (o *operations) ListObjects(ctx context.Context, request api.ListObjectsReq
 }
 
 func metadataOf(v object.Version) api.ObjectMetadata {
-	return api.ObjectMetadata{
+	out := api.ObjectMetadata{
 		Bucket: v.Bucket, Key: v.Key, Size: v.Size, Etag: v.ETag, LastModified: v.ModifiedAt,
 		ContentType: v.ContentType, Encryption: v.Encryption.Scheme,
 	}
+	// A status no rule gave the version is absent, and so is one the
+	// contract does not name (a newer release's, read from a newer entry):
+	// the field is an enum, and a word outside it would break a client.
+	if s := api.ObjectMetadataReplicationStatus(v.Replication); s.Valid() {
+		out.ReplicationStatus = &s
+	}
+	return out
 }
 
 // GetObjectMetadata implements api.StrictServerInterface.
