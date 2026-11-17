@@ -55,7 +55,7 @@ ROLLING_TEST        ?= TestRollingUpgradeFromSchema4ToSchema5
 BUILDER_TARGETS := gen settings-docs fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
 	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy \
-	trusted-root check
+	trusted-root policy-corpus check
 
 .PHONY: help builder shell run up down clean release $(BUILDER_TARGETS)
 
@@ -80,6 +80,7 @@ help:
 	@echo "  verify-clone   prove a clean export builds with Go alone and with a container engine alone"
 	@echo "  gen            regenerate code from API contracts, and the settings documents"
 	@echo "  settings-docs  write deploy/cactusfs.env.example and the settings tables of README and ARCHITECTURE"
+	@echo "  policy-corpus  write web/src/policy/testdata/corpus.json from the API's policy parsers"
 	@echo "  tidy           go mod tidy                web-lock    rewrite web/pnpm-lock.yaml"
 	@echo "  trusted-root   refresh Sigstore's trusted root the release verifier embeds (network; not part of check)"
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
@@ -235,6 +236,12 @@ settings-docs:
 
 tidy:
 	go mod tidy
+
+# The corpus of the console's policy reader and writer (PLAN 9.7): the
+# documents the API's parsers accept, from their fuzz seeds and a generator
+# with a fixed seed. TestBuilderCorpusIsCurrent fails when it is stale.
+policy-corpus:
+	CACTUSFS_WRITE_CORPUS=1 go test -count=1 -run '^TestWriteBuilderCorpus$$' ./web/
 
 # The trusted root of Sigstore's public-good instance that the verifier of
 # releases embeds (internal/adapters/releases/sigstore/trusted_root.json;
