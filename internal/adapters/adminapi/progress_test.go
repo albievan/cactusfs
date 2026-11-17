@@ -20,9 +20,14 @@ import (
 // leave it unscheduled for more than a second - which is a client that
 // really stopped, and is rightly cut off. The pause is set so that the body
 // still takes longer than one stall (128 steps of 40 ms, some 5 s), which
-// the last check holds to.
+// the last check holds to. It is not run in parallel with the other tests
+// of the package: under -race on a runner given two processors, a sibling
+// test could starve the reading goroutine, or the writing one between
+// extending its deadline and writing, for the whole stall - a client or a
+// server that really stopped, as far as a deadline of the wall clock can
+// tell (seen once in make check on the test host, 7.3 s, cut at 6.97 MB of
+// 8 MiB).
 func TestAWriteLargerThanAStallIsTakenAStepAtATime(t *testing.T) {
-	t.Parallel()
 	const (
 		stall = 3 * time.Second
 		size  = 8 << 20
