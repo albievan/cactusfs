@@ -1,4 +1,5 @@
 import { useRoute } from '../router';
+import { AccessScreen } from './AccessScreen';
 import { AuditScreen } from './AuditScreen';
 import { BucketsScreen } from './BucketsScreen';
 import { ClusterScreen } from './ClusterScreen';
@@ -54,6 +55,11 @@ export function Screens({ passwordSession = false }: ScreensProps) {
       return item === undefined ? <RolesScreen /> : <RoleScreen key={item} name={item} />;
     case 'policies':
       return <PoliciesScreen />;
+    case 'access': {
+      const user = route.query.get('user') ?? '';
+      // The key makes a fresh form for every user a link fills in.
+      return <AccessScreen key={user} user={user} />;
+    }
     case 'tags':
       return <TagsScreen />;
     case 'targets':

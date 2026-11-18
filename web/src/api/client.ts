@@ -79,6 +79,10 @@ export type PolicyValidation = Schemas['PolicyValidation'];
 export type PolicyFault = Schemas['PolicyFault'];
 /** What one statement of a valid document does, as the node classifies it. */
 export type StatementAnalysis = Schemas['StatementAnalysis'];
+/** The answer to "Who may do this?": what the authorizer decides for a subject, and why (ADR-0032). */
+export type AccessExplanation = Schemas['AccessExplanation'];
+/** A statement that had a say in a decision, named only where the caller may read its policy. */
+export type CitedStatement = Schemas['CitedStatement'];
 /** An API key, without its secret. */
 export type APIKey = Schemas['APIKey'];
 /** A new API key together with its secret, which is returned once. */

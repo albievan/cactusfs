@@ -121,6 +121,7 @@ describe('session', () => {
       'Groups',
       'Roles',
       'Policies',
+      'Who may do this?',
       'Tags',
       'Targets',
       'Cluster',

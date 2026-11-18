@@ -33,6 +33,14 @@ export function UserScreen({ name }: UserScreenProps) {
       <p>
         <a className="btn btn-outline-secondary btn-sm" href={routeHref(['users'])} title="Back to the list of users">
           <i className="bi bi-arrow-left" aria-hidden="true" /> <span className="btn-text">All users</span>
+        </a>{' '}
+        <a
+          className="btn btn-outline-secondary btn-sm"
+          href={routeHref(['access'], { user: name })}
+          title={`Ask what the authorizer decides for ${name}, and why`}
+        >
+          <i className="bi bi-person-check" aria-hidden="true" />{' '}
+          <span className="btn-text">What may {name} do?</span>
         </a>
       </p>
       <ProblemNotice error={action.error ?? user.error} />

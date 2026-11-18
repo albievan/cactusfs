@@ -3623,3 +3623,99 @@ details[open] > summary .node-card-mark {
     padding-left: 0;
   }
 }
+
+/* "Who may do this?" (PLAN 9.10): the question in groups whose fields wrap
+   side by side on a wide screen, the answer under it. Below 576 px every
+   group and every field is one column, one above the other, and every
+   control one a finger can hit. */
+.access-form {
+  align-items: start;
+}
+
+.access-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  align-items: end;
+  gap: 0.85rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.access-group > legend,
+.access-group > .access-choices,
+.access-group > .form-hint {
+  grid-column: 1 / -1;
+}
+
+.access-group > legend {
+  margin-bottom: 0.25rem;
+  color: var(--night-green);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.access-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+}
+
+.access-template code,
+.access-answer code {
+  overflow-wrap: anywhere;
+}
+
+.access-more > summary {
+  color: var(--night-green);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.access-more-fields {
+  margin-top: 0.75rem;
+}
+
+.access-verdict {
+  margin: 0 0 0.75rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.access-allowed,
+.access-allow {
+  color: var(--saguaro);
+}
+
+.access-denied,
+.access-deny {
+  color: var(--danger);
+}
+
+.access-part h3 {
+  margin-top: 0.75rem;
+  color: var(--night-green);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.access-citations {
+  padding-left: 1.25rem;
+}
+
+@media (max-width: 575.98px) {
+  .access-form,
+  .access-group,
+  .access-more-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .access-choices {
+    flex-direction: column;
+  }
+
+  .access-choices .check,
+  .access-more > summary,
+  .access-form .btn {
+    min-height: 44px;
+  }
+}
