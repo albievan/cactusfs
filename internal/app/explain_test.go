@@ -27,9 +27,15 @@ type countingIAM struct {
 	ports.IAMStore
 	writes atomic.Int64
 	broken map[string]error
+	// resolved, when set, is called as a user is resolved: a test's hook
+	// into the middle of an explanation.
+	resolved func()
 }
 
 func (c *countingIAM) ResolveUser(ctx context.Context, name string) (iam.Identity, error) {
+	if c.resolved != nil {
+		c.resolved()
+	}
 	if err := c.broken[name]; err != nil {
 		return iam.Identity{}, err
 	}
@@ -119,13 +125,17 @@ func (c *countingIAM) TouchAPIKey(ctx context.Context, accessKeyID string, usedA
 	return c.IAMStore.TouchAPIKey(ctx, accessKeyID, usedAt)
 }
 
-// countingTrail is an audit trail that counts what is appended to it.
+// countingTrail is an audit trail that counts what is appended to it. Like
+// the replicated store, it takes nothing on a context that has ended.
 type countingTrail struct {
 	ports.AuditLog
 	appended atomic.Int64
 }
 
 func (c *countingTrail) AppendAudit(ctx context.Context, record audit.Record) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", domain.ErrUnavailable, err)
+	}
 	c.appended.Add(1)
 	return c.AuditLog.AppendAudit(ctx, record)
 }
@@ -733,6 +743,23 @@ func TestExplainNeedsItsRecord(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAnExplanationIsRecordedWhenItsCallerGoes: a caller that goes once its
+// question is authorized - a closed connection ends the request's context -
+// does not take the record of the question with it: the answer is not
+// given, but the trail has it.
+func TestAnExplanationIsRecordedWhenItsCallerGoes(t *testing.T) {
+	t.Parallel()
+	f := newExplainFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.identities.resolved = cancel
+	before := f.appended.appended.Load()
+	_, _ = f.explain.Explain(ctx, f.ops, app.ExplainRequest{User: "bob", Action: iam.ActionGetObject, Bucket: "site", Key: "index.html"})
+	if got := f.appended.appended.Load() - before; got != 1 {
+		t.Fatalf("%d records appended for a question whose caller went; want 1", got)
 	}
 }
 

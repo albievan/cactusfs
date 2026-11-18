@@ -525,9 +525,14 @@ func (s *ExplainService) damaged(ctx context.Context, request iam.Request) {
 }
 
 // record appends the record of an answer to the audit trail, synchronously:
-// an answer whose record is not in the trail is not given.
+// an answer whose record is not in the trail is not given. The question was
+// authorized and answered, so its record is written even when the caller
+// has gone - a closed connection ends the request's context - within the
+// bound every audit write has.
 func (s *ExplainService) record(ctx context.Context, p iam.Principal, gate iam.Request, outcome audit.Outcome, details map[string]string) error {
 	record := s.auditor.Record(p, iam.ActionExplainAccess, gate.Resource, outcome, details)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
 	err := s.trail.AppendAudit(ctx, record)
 	switch {
 	case err == nil:
