@@ -181,6 +181,13 @@ func (s *fakeServer) handle(ctx context.Context, raw net.Conn) {
 			s.mu.Unlock()
 			if s.token != "" && connect["auth_token"] != s.token {
 				_, _ = io.WriteString(conn, "-ERR 'Authorization Violation'\r\n")
+				// What the client sent after its CONNECT (its PING) is
+				// read until it closes, as after a refused handshake: a
+				// close now, with that unread, resets the connection, and
+				// on Windows the reset discards the refusal before the
+				// client reads it.
+				_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
+				_, _ = io.Copy(io.Discard, r)
 				return
 			}
 		case "PING":
