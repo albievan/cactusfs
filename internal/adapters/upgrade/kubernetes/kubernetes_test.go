@@ -455,26 +455,27 @@ func lockOf(f *fakeAPI, lock lockRecord) {
 
 func TestALockHeldByAnotherNode(t *testing.T) {
 	t.Parallel()
-	now := time.Now().UTC()
 	tests := []struct {
-		name    string
-		lock    func(image string) lockRecord
+		name string
+		// lock is the lock there, at the time the subtest runs: a
+		// heartbeat of now is live when it is read.
+		lock    func(image string, now time.Time) lockRecord
 		atStart bool // every node at the lock's image before
 		running bool // Start is refused
 	}{
-		{"alive", func(image string) lockRecord {
+		{"alive", func(image string, now time.Time) lockRecord {
 			return lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 		}, false, true},
-		{"stale", func(image string) lockRecord {
+		{"stale", func(image string, now time.Time) lockRecord {
 			return lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now.Add(-time.Hour), Heartbeat: now.Add(-5 * time.Second)}
 		}, false, false},
-		{"of this node, whose process holds no run", func(image string) lockRecord {
+		{"of this node, whose process holds no run", func(image string, now time.Time) lockRecord {
 			return lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 		}, false, false},
-		{"alive, and every node already there", func(image string) lockRecord {
+		{"alive, and every node already there", func(image string, now time.Time) lockRecord {
 			return lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 		}, true, false},
-		{"that does not parse", func(string) lockRecord { return lockRecord{} }, false, false},
+		{"that does not parse", func(string, time.Time) lockRecord { return lockRecord{} }, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -482,7 +483,7 @@ func TestALockHeldByAnotherNode(t *testing.T) {
 			f := newFakeAPI(t, fourNodes...)
 			u := newUpgrader(t, f, fourNodes, nil)
 			v, image := target(t, f)
-			lockOf(f, tt.lock(image))
+			lockOf(f, tt.lock(image, time.Now().UTC()))
 			if tt.atStart {
 				f.do(func() {
 					for _, n := range fourNodes {
@@ -1319,9 +1320,11 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 	)
 	tests := []struct {
 		name string
-		// lock is the lock there, of the fake's image; nil writes one that
-		// does not parse.
-		lock func(image string) *lockRecord
+		// lock is the lock there, of the fake's image, at the time the
+		// subtest runs - a heartbeat of now is live when it is read, however
+		// long the subtest waited for its turn; nil writes one that does
+		// not parse.
+		lock func(image string, now time.Time) *lockRecord
 		// atTarget puts every node at the image first.
 		atTarget bool
 		conflict bool
@@ -1337,7 +1340,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		{
 			name: "the restarted holder reads the progress of its run, done",
 			from: true,
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, act: "progress",
@@ -1347,7 +1350,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		{
 			name: "the restarted holder settles as it starts",
 			from: true,
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, act: "settle",
@@ -1356,7 +1359,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		},
 		{
 			name: "a lock written before it said where it started from",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, act: "progress",
@@ -1366,7 +1369,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		{
 			name: "a stale lock of a run that is done, by any node",
 			from: true,
-			lock: func(image string) *lockRecord {
+			lock: func(image string, _ time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
 			},
 			atTarget: true, act: "progress",
@@ -1376,7 +1379,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		{
 			name: "a stale lock of a run not done is replaced by the result failed",
 			from: true,
-			lock: func(image string) *lockRecord {
+			lock: func(image string, _ time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
 			},
 			act:    "progress",
@@ -1385,21 +1388,21 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		},
 		{
 			name: "a replacement that lost the race",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, conflict: true, act: "progress",
 		},
 		{
 			name: "a live holder's run, done, read by another node",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, act: "progress",
 		},
 		{
 			name: "a live holder's run under way",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			act: "progress",
@@ -1407,7 +1410,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		{
 			name: "a stale lock taken over by a new run",
 			from: true,
-			lock: func(image string) *lockRecord {
+			lock: func(image string, _ time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", From: "0.7.0", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
 			},
 			act:  "start",
@@ -1415,7 +1418,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		},
 		{
 			name: "a lock of this node, cut off, taken over by a new run",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: self, StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			act:  "start",
@@ -1423,7 +1426,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		},
 		{
 			name: "a live holder's lock of a run done, taken over by a new run",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, now time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: now, Heartbeat: now}
 			},
 			atTarget: true, act: "start",
@@ -1433,7 +1436,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 			// Every node is done against the earlier run's result: a lock
 			// read as a zero record would be settled over it.
 			name: "a lock that does not parse, over a result",
-			lock: func(string) *lockRecord { return nil },
+			lock: func(string, time.Time) *lockRecord { return nil },
 			act:  "progress",
 			before: &resultRecord{
 				Run: "zzzz", Target: "0.7.0", Image: oldImage, Holder: "store-meta-0", StartedBy: "user/carol",
@@ -1442,12 +1445,12 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 		},
 		{
 			name: "a lock that names no run, taken over",
-			lock: func(string) *lockRecord { return nil },
+			lock: func(string, time.Time) *lockRecord { return nil },
 			act:  "start",
 		},
 		{
 			name: "a take-over that lost the race",
-			lock: func(image string) *lockRecord {
+			lock: func(image string, _ time.Time) *lockRecord {
 				return &lockRecord{Run: "aaaa", Target: "0.7.1", Image: image, Holder: "store-meta-2", StartedBy: "user/bob", StartedAt: old, Heartbeat: old}
 			},
 			conflict: true, act: "start",
@@ -1463,7 +1466,7 @@ func TestTheEndOfARunIsToldOnce(t *testing.T) {
 				c.Current = mustVersion(t, "0.7.0")
 			})
 			v, image := target(t, f)
-			if lock := tt.lock(image); lock != nil {
+			if lock := tt.lock(image, time.Now().UTC()); lock != nil {
 				lockOf(f, *lock)
 			} else {
 				f.do(func() { f.sets["store-data-0"].annotations[LockAnnotation] = `{"run":""}` })
