@@ -372,6 +372,11 @@ func wellFormedCalls(keyID string, document map[string]any) map[string]call {
 		"getPolicy":                  {path: "/policies/some-policy"},
 		"updatePolicy":               {path: "/policies/some-policy", body: map[string]any{"document": document}},
 		"deletePolicy":               {path: "/policies/some-policy"},
+		"getPolicyCatalogue":         {path: "/policy-catalogue"},
+		"validatePolicy":             {path: "/policy-validation", body: map[string]any{"name": "some-policy", "document": document}},
+		"validateBucketPolicy":       {path: "/buckets/some-bucket/policy/validation", body: map[string]any{"document": document}},
+		"validateSubBucketPolicy":    {path: "/buckets/some-bucket/subbuckets/reports/policy/validation", body: map[string]any{"policy": document}},
+		"explainAccess":              {path: "/access/explain?user=somebody&action=s3:GetObject&bucket=some-bucket&key=k"},
 		"getCluster":                 {path: "/cluster"},
 		"getMaintenance":             {path: "/cluster/maintenance"},
 		"getSettings":                {path: "/settings"},
@@ -476,8 +481,9 @@ func TestALockedSessionOnlyUploads(t *testing.T) {
 		"listAudit": {"/audit?limit=1"},
 	}
 	// The operations that take Idempotency-Key and do nothing with it, as
-	// unlocking does: with a key they are asked as without one.
-	keyIgnored := []string{"startUpgrade"}
+	// unlocking does: with a key they are asked as without one. The
+	// validations of a policy change nothing (ADR-0032).
+	keyIgnored := []string{"startUpgrade", "validatePolicy", "validateBucketPolicy", "validateSubBucketPolicy"}
 	// The calls that are refused for another action than the contract
 	// names for their operation: the first question the use case asks. A
 	// search of all buckets asks first whether the caller may list them.

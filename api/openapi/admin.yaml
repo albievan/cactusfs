@@ -480,7 +480,8 @@ paths:
         is the bucket or keys in it; no statement may allow `s3:BypassGovernanceRetention`, and nothing that
         writes, deletes or configures is ever allowed to a caller who has not authenticated, whatever the
         document says. A document of more than 20 KiB, or one that does not keep to these rules, is refused
-        with 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept.
+        with 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept. The problem
+        then carries `faults`: every fault of the document, located, as `validateBucketPolicy` gives them.
       x-cactusfs-action: s3:PutBucketPolicy
       parameters:
         - $ref: '#/components/parameters/BucketName'
@@ -502,7 +503,7 @@ paths:
         '400':
           description: |
             The document is not a bucket policy that can be kept (`code` is `InvalidPolicy`); `detail` says
-            what is wrong with it.
+            what is wrong with it first, and `faults` says every fault, where it is.
           content:
             application/problem+json:
               schema:
@@ -524,6 +525,53 @@ paths:
       responses:
         '204':
           description: Removed, or there was none.
+        default:
+          $ref: '#/components/responses/Problem'
+  /buckets/{bucket}/policy/validation:
+    post:
+      operationId: validateBucketPolicy
+      tags: [buckets]
+      summary: Check a policy for a bucket without setting it
+      description: |
+        Says whether `putBucketPolicy` would take the document, as a document, every fault of it, located,
+        and what each of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A
+        document that is refused is answered 200 with `valid: false` and its faults - never 400; the faults
+        are those a `putBucketPolicy` of the same document is refused with. A put of a valid document can
+        still be refused for what is not in the document: a bucket that is not there, say.
+
+        It is authorized as the put is, `s3:PutBucketPolicy` on the bucket: whoever may set the policy may
+        check one, and nobody else. Nothing is read beyond what the authorization of the put reads - the
+        bucket's policy - so a bucket that is not there is no error: its name only confines the document.
+
+        `Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and
+        `unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives
+        `document` twice, in any case, is refused with 400.
+      x-cactusfs-action: s3:PutBucketPolicy
+      parameters:
+        - $ref: '#/components/parameters/BucketName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BucketPolicyPut'
+      responses:
+        '200':
+          description: What the document is, and what each of its statements does.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyValidation'
+        '400':
+          description: |
+            The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `document`,
+            `document` given twice, a name no bucket can have. A refused document is not this: it is a 200.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         default:
           $ref: '#/components/responses/Problem'
   /buckets/{bucket}/subbuckets:
@@ -603,7 +651,8 @@ paths:
         are those on objects and listing. It cannot allow `s3:BypassGovernanceRetention`, cannot allow
         anything to a caller who has not authenticated, and cannot deny listing. A document that does not
         keep to these rules, or is larger than 20 KiB, is refused with 400 and the problem code
-        `InvalidPolicy`, and nothing is changed.
+        `InvalidPolicy`, and nothing is changed. The problem then carries `faults`: every fault of the
+        document, located, as `validateSubBucketPolicy` gives them.
 
         The authorizer judges a request on a key of the sub-bucket by the caller's own policies, the
         bucket's policy and this one together: a deny in any refuses, an allow in any allows. Having this
@@ -630,7 +679,8 @@ paths:
         '400':
           description: |
             The policy is not one a sub-bucket can have (`code` is `InvalidPolicy`; `detail` says what is
-            wrong with it), or the name is not one a sub-bucket can have (`code` is `InvalidArgument`).
+            wrong with it first, and `faults` every fault, where it is), or the name is not one a sub-bucket
+            can have (`code` is `InvalidArgument`).
           content:
             application/problem+json:
               schema:
@@ -670,6 +720,55 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '409':
           description: The bucket holds keys under the sub-bucket's name (`code` is `SubBucketNotEmpty`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /buckets/{bucket}/subbuckets/{name}/policy/validation:
+    post:
+      operationId: validateSubBucketPolicy
+      tags: [buckets]
+      summary: Check a policy for a sub-bucket without setting it
+      description: |
+        Says whether `putSubBucket` would take the policy, as a document, every fault of it, located, and
+        what each of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A policy
+        that is refused is answered 200 with `valid: false` and its faults - never 400; the faults are those
+        a `putSubBucket` with the same policy is refused with. A put of a valid policy can still be refused
+        for what is not in it: a bucket that is not there, or an 11th sub-bucket, say.
+
+        The body is the put's own, with `policy` required: a sub-bucket without a policy has nothing to
+        validate. It is authorized as the put is, `s3:PutSubBucket` on the bucket, and neither the bucket
+        nor the sub-bucket is looked up: their names only confine the document.
+
+        `Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and
+        `unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives
+        `policy` twice, in any case, is refused with 400.
+      x-cactusfs-action: s3:PutSubBucket
+      parameters:
+        - $ref: '#/components/parameters/BucketName'
+        - $ref: '#/components/parameters/SubBucketName'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubBucketPolicyValidationRequest'
+      responses:
+        '200':
+          description: What the policy is, and what each of its statements does.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyValidation'
+        '400':
+          description: |
+            The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `policy`,
+            `policy` given twice, a name no bucket or sub-bucket can have. A refused policy is not this: it
+            is a 200.
           content:
             application/problem+json:
               schema:
@@ -2047,6 +2146,10 @@ paths:
       description: |
         The key acts as the user and can never do more than the user can. An inline policy narrows it further.
         The secret key is returned once.
+
+        An inline policy that is not one is refused with 400 and the problem code `InvalidArgument`; the
+        problem then carries `faults`: every fault of the document, located, as `validatePolicy` with
+        `key_owner` gives them.
       x-cactusfs-action: admin:CreateAPIKey
       parameters:
         - $ref: '#/components/parameters/EntityName'
@@ -2305,6 +2408,9 @@ paths:
       summary: Create a policy
       description: |
         A policy document in the IAM policy language. Anything in it that is not understood is refused.
+
+        A document that is not one is refused with 400 and the problem code `InvalidArgument`; the problem
+        then carries `faults`: every fault of the document, located, as `validatePolicy` gives them.
       x-cactusfs-action: admin:PutPolicy
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -2345,6 +2451,10 @@ paths:
       operationId: updatePolicy
       tags: [policies]
       summary: Change a policy
+      description: |
+        Sets the document of the policy, in place of the one it had. A document that is not one is refused
+        with 400 and the problem code `InvalidArgument`; the problem then carries `faults`: every fault of
+        the document, located, as `validatePolicy` gives them.
       x-cactusfs-action: admin:PutPolicy
       parameters:
         - $ref: '#/components/parameters/EntityName'
@@ -2377,6 +2487,221 @@ paths:
       responses:
         '204':
           description: Deleted.
+        default:
+          $ref: '#/components/responses/Problem'
+  /policy-catalogue:
+    get:
+      operationId: getPolicyCatalogue
+      tags: [policies]
+      summary: What a policy can say
+      description: |
+        The catalogue of the policy language, as this node understands it (ADR-0032): every action a policy
+        can grant, with what it allows, the resources it is asked on and how policies may grant it; the
+        condition keys and their operators; the kinds of resource; the limits of a document; and the forms
+        of a bucket policy's `Principal`. It is a property of the release of the node asked: in a deployment
+        being upgraded, two nodes may answer two catalogues, and each validates by its own.
+
+        A caller without `admin:GetPolicyCatalogue` is refused with 403 (`code` is `AccessDenied`). A node
+        of a release without the catalogue answers 404 with the code `NotFound`.
+      x-cactusfs-action: admin:GetPolicyCatalogue
+      responses:
+        '200':
+          description: The catalogue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyCatalogue'
+        default:
+          $ref: '#/components/responses/Problem'
+  /policy-validation:
+    post:
+      operationId: validatePolicy
+      tags: [policies]
+      summary: Check a named policy, or the inline policy of a new API key, without storing it
+      description: |
+        Says whether the put would take the document, as a document, every fault of it, located, and what
+        each of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A document that
+        is refused is answered 200 with `valid: false` and its faults - never 400; the faults are those the
+        put of the same document is refused with. A put of a valid document can still be refused for what
+        is not in the document: a name that is built in, a policy that exists already, a key made by a key
+        that has a policy of its own, say.
+
+        It is authorized as the put is: `admin:PutPolicy` on `policy/<name>`, or on `policy` when no `name`
+        is given; with `key_owner` the document is the inline policy of a new API key of that user, and the
+        request needs `admin:CreateAPIKey` on `user/<key_owner>` instead - and is refused with 403, audited,
+        when it is made with an API key that has an inline policy of its own, as `createAPIKey` refuses it.
+        Whoever may store the document may check it, and nobody else.
+
+        `Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and
+        `unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives
+        `document` twice, in any case, is refused with 400.
+      x-cactusfs-action: admin:PutPolicy
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyValidationRequest'
+      responses:
+        '200':
+          description: What the document is, and what each of its statements does.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyValidation'
+        '400':
+          description: |
+            The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `document`,
+            `document` given twice, both `name` and `key_owner`, a name that is not a name. A refused document
+            is not this: it is a 200.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        default:
+          $ref: '#/components/responses/Problem'
+  /access/explain:
+    get:
+      operationId: explainAccess
+      tags: [policies]
+      summary: Who may do this? What the authorizer decides for a subject, and why
+      description: |
+        What the authorizer would decide for one subject - a user, as a console session of theirs; an API
+        key, as its owner bounded by its inline policy; or a caller without credentials - asking one action
+        on one resource, and why (ADR-0032). The decision is the authorizer's own, at this node's time:
+        there is no simulation at another time. Nothing is changed but the audit trail.
+
+        **Who may ask.** The caller needs `admin:ExplainAccess` on the subject: `user/<name>` for a user, the
+        owner of the key for a key, `anonymous` for a caller without credentials. An answer about an `s3:`
+        action on a bucket tells what the bucket's policy says, so it also needs `s3:GetBucketPolicy` on the
+        bucket; one whose key or listing prefix could lie in a sub-bucket also needs `s3:GetSubBucketPolicy`
+        on it. Without them - or when such a policy cannot be read - the request is refused as a whole with
+        403, and the refusal is written to the audit trail.
+
+        **What is told.** A statement that had a say is named - policy, document, statement, Sid - only
+        where the caller may read the policy it is in; otherwise it keeps its source and effect, and
+        `readable` is false. The verdict and its source are always given. A disabled user, a key whose owner
+        is disabled and an expired key would not authenticate: the answer says so, and gives no decision.
+        The ownership of a version is not considered (`not_considered`).
+
+        **Recorded.** Every answer after authorization - 200, 400 and 404 alike - is written to the audit
+        trail before it is given, never with a policy document. When it cannot be written the answer is not
+        given: 503, or 500 when the store cannot say whether it was. A GET needs no CSRF token.
+      x-cactusfs-action: admin:ExplainAccess
+      parameters:
+        - name: user
+          in: query
+          description: The user asked about, as a console session of theirs. One of `user`, `access_key_id` and `anonymous`.
+          schema:
+            $ref: '#/components/schemas/Name'
+        - name: access_key_id
+          in: query
+          description: The API key asked about - its owner, bounded by its inline policy. One of `user`, `access_key_id` and `anonymous`.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: anonymous
+          in: query
+          description: A caller without credentials, when `true`; only `true` names it. One of `user`, `access_key_id` and `anonymous`.
+          schema:
+            type: boolean
+        - name: action
+          in: query
+          required: true
+          description: An action of the catalogue (`getPolicyCatalogue`), without a wildcard.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: bucket
+          in: query
+          description: The bucket, for an `s3:` action but `s3:ListAllMyBuckets`.
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 63
+        - name: key
+          in: query
+          description: The key of the object, for an action on objects.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        - name: admin_resource
+          in: query
+          description: The administrative resource, for an `admin:` action - `<kind>` or `<kind>/<name>`, as the templates of the catalogue.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        - name: list_prefix
+          in: query
+          description: The prefix of a listing, for the listing actions only. It decides whether a sub-bucket's policy has a say.
+          schema:
+            type: string
+            minLength: 0
+            maxLength: 1024
+        - name: source_ip
+          in: query
+          description: |
+            The address the request would come from, IPv4 or IPv6 without a zone. Without it the address is
+            unknown, and a condition on `aws:SourceIp` is decided against the request.
+          schema:
+            type: string
+        - name: secure_transport
+          in: query
+          description: Whether the request would arrive over TLS.
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: The decision and why, as far as the caller may read it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessExplanation'
+        '400':
+          description: |
+            The request is not one (`code` is `InvalidArgument`): no subject or more than one, an action that
+            is not in the catalogue or has a wildcard, a resource that is not of a template of the action, a
+            `list_prefix` for an action that lists nothing, a `source_ip` that is no address.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: |
+            The caller may not ask about the subject, may not read a policy the answer depends on, or such a
+            policy cannot be read (`code` is `AccessDenied`). The refusal is written to the audit trail.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: The user or the key is not there (`code` is `NoSuchEntity`); told only after authorization.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            The answer could not be written to the audit trail, and is not given (`code` is
+            `ServiceUnavailable`).
+          headers:
+            Retry-After:
+              description: After how many seconds to send the request again.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         default:
           $ref: '#/components/responses/Problem'
   /cluster:
@@ -3021,6 +3346,16 @@ components:
           description: A stable name for the kind of problem, for programs.
         request_id:
           type: string
+        faults:
+          type: array
+          maxItems: 100
+          description: |
+            Every fault of the policy document the request sent, located, the first first - present only on
+            a 400 that refuses a policy document: `InvalidPolicy` from `putBucketPolicy` and `putSubBucket`,
+            `InvalidArgument` from `createPolicy`, `updatePolicy` and `createAPIKey`. They are the faults its
+            validation gives (ADR-0032).
+          items:
+            $ref: '#/components/schemas/PolicyFault'
     PreviewKind:
       type: string
       description: |
@@ -4434,6 +4769,385 @@ components:
       properties:
         document:
           $ref: '#/components/schemas/PolicyDocument'
+    PolicyValidationRequest:
+      type: object
+      description: A named policy, or the inline policy of a new API key, to validate.
+      required: [document]
+      properties:
+        document:
+          $ref: '#/components/schemas/PolicyDocument'
+        name:
+          $ref: '#/components/schemas/Name'
+        key_owner:
+          $ref: '#/components/schemas/Name'
+    SubBucketPolicyValidationRequest:
+      type: object
+      description: |
+        The policy of a sub-bucket to validate: the body of `putSubBucket`, with `policy` required.
+      required: [policy]
+      properties:
+        policy:
+          $ref: '#/components/schemas/PolicyDocument'
+    PolicyFault:
+      type: object
+      description: One thing wrong with a policy document, and where it is.
+      required: [pointer, reason]
+      properties:
+        pointer:
+          type: string
+          description: |
+            Where in the document as sent, as an RFC 6901 JSON pointer; `""` is the whole document. A field
+            that may be one string or a list (`Action`, `Resource`, a `Principal`'s `AWS`, a condition's
+            values) is pointed at without an index when it is a single string (`/Statement/0/Action`) and with
+            one when it is a list (`/Statement/0/Action/1`). A field that is missing is pointed at by the
+            object it is missing from.
+        statement:
+          type: integer
+          minimum: 0
+          description: The index of the statement the fault is in, from 0; absent outside a statement.
+        reason:
+          type: string
+          description: |
+            What is wrong, as text for a person to read, in the words of the parser - the first fault's is the
+            text the put's error has, its leading words included. It is not for programs to parse: its wording
+            may change between releases; `pointer` and `statement` say where the fault is.
+    PolicyValidation:
+      type: object
+      description: |
+        What a validation says of a document. `valid` is true exactly when `faults` is empty: the put would
+        take the document, as a document; it may still refuse for what is not in it.
+      required: [valid, faults, truncated, statements]
+      properties:
+        valid:
+          type: boolean
+        faults:
+          type: array
+          maxItems: 100
+          description: Every fault found, the first first.
+          items:
+            $ref: '#/components/schemas/PolicyFault'
+        truncated:
+          type: boolean
+          description: The document had more than 100 faults; the first 100 are given.
+        statements:
+          type: array
+          maxItems: 64
+          description: What each statement does, in order; empty when the document is not valid.
+          items:
+            $ref: '#/components/schemas/StatementAnalysis'
+    StatementAnalysis:
+      type: object
+      description: |
+        What one statement of a valid document does. It classifies and decides nothing: conditions and
+        other statements are not weighed.
+      required: [index, effect, actions, anonymous_actions, never_anonymous, unmatched_patterns]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: The statement's index in the document, from 0.
+        sid:
+          type: string
+          description: Its Sid, when it has one.
+        effect:
+          type: string
+          description: Values are only ever added to.
+          enum: [Allow, Deny]
+        actions:
+          type: array
+          description: |
+            The actions of the answering node's catalogue its action patterns cover. An action that no
+            wildcard grants is covered by an `Allow` only when the `Allow` names it.
+          items:
+            type: string
+        open_to_anyone:
+          type: boolean
+          description: A bucket's or a sub-bucket's policy only - an `Allow` whose principals include `*`.
+        anonymous_actions:
+          type: array
+          description: |
+            Of `actions`, those a caller without credentials could be let in to by the statement, before its
+            conditions; empty but in an open statement of a bucket's policy.
+          items:
+            type: string
+        never_anonymous:
+          type: array
+          description: |
+            Of `actions`, those the statement names for anyone that are never allowed without credentials:
+            it allows them to every user, and to nobody who has not authenticated.
+          items:
+            type: string
+        unmatched_patterns:
+          type: array
+          description: |
+            The statement's action patterns, as written, that cover no action of the answering node's
+            catalogue - a misspelling, or an action of another release. The parser takes them.
+          items:
+            type: string
+    PolicyCatalogue:
+      type: object
+      description: What a policy can say, as the answering node understands it.
+      required: [version, actions, condition_keys, resources, limits, bucket_policy_principals]
+      properties:
+        version:
+          type: string
+          description: The one `Version` a document may have, `2012-10-17`.
+        actions:
+          type: array
+          description: Every action a policy can grant.
+          items:
+            $ref: '#/components/schemas/CatalogueAction'
+        condition_keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogueConditionKey'
+        resources:
+          type: array
+          description: The kinds of resource a policy can name, and their templates.
+          items:
+            $ref: '#/components/schemas/CatalogueResource'
+        limits:
+          $ref: '#/components/schemas/PolicyLimits'
+        bucket_policy_principals:
+          $ref: '#/components/schemas/PolicyPrincipalForms'
+    CatalogueAction:
+      type: object
+      description: One action a policy can grant.
+      required: [name, group, description, resources, read, by_name_only, in_bucket_policy, anonymous, in_sub_bucket_policy]
+      properties:
+        name:
+          type: string
+          description: The action as a policy names it, `s3:GetObject`.
+        group:
+          type: string
+          description: The part of the product it belongs to, as a title. Groups are only ever added.
+        description:
+          type: string
+          description: What the action allows, in a sentence.
+        resources:
+          type: array
+          description: |
+            The templates of the resources it is asked on, such as `arn:aws:s3:::{bucket}/{key}` or
+            `arn:cactusfs:admin:::user/{name}`.
+          items:
+            type: string
+        read:
+          type: boolean
+          description: It changes nothing; it reads.
+        by_name_only:
+          type: boolean
+          description: |
+            No wildcard of an `Allow` grants it: a statement allows it only by naming it, and no bucket policy
+            allows it. A `Deny` covers it however it is written.
+        in_bucket_policy:
+          type: boolean
+          description: A bucket policy may allow it.
+        anonymous:
+          type: boolean
+          description: A bucket policy can open it to a caller who has not authenticated.
+        in_sub_bucket_policy:
+          type: boolean
+          description: The policy of a sub-bucket may name it, by its full name.
+    CatalogueConditionKey:
+      type: object
+      description: One condition key of the language.
+      required: [key, operators, value_kind, when_unknown]
+      properties:
+        key:
+          type: string
+          description: The key as a policy names it, `aws:SourceIp`.
+        operators:
+          type: array
+          description: The operators that may test it, and no others.
+          items:
+            type: string
+        value_kind:
+          type: string
+          description: The kind of the values it is compared with. Values are only ever added to.
+          enum: [ip_prefix, bool, date_time, string]
+        when_unknown:
+          type: string
+          description: What the condition does when the request does not tell the key's value.
+    CatalogueResource:
+      type: object
+      description: One kind of resource a policy can name.
+      required: [kind, template, description]
+      properties:
+        kind:
+          type: string
+          description: The kind, `bucket` or `user`.
+        template:
+          type: string
+          description: The resource as a policy writes it, with placeholders in braces, `arn:aws:s3:::{bucket}`.
+        description:
+          type: string
+    PolicyLimits:
+      type: object
+      description: The bounds of a policy document.
+      required: [max_bytes, max_statements, max_values, max_depth]
+      properties:
+        max_bytes:
+          type: integer
+          description: The largest document, in bytes as sent.
+        max_statements:
+          type: integer
+          description: The most statements a document may have.
+        max_values:
+          type: integer
+          description: The most actions, resources, principals or values of one condition a statement may have.
+        max_depth:
+          type: integer
+          description: How many levels below the document a value may be nested.
+    PolicyPrincipalForms:
+      type: object
+      description: The forms the `Principal` of a statement of a bucket's policy may take.
+      required: [anyone, user_arn_prefix]
+      properties:
+        anyone:
+          type: array
+          description: The forms, as JSON text, that name every caller, anonymous ones included.
+          items:
+            type: string
+        user_arn_prefix:
+          type: string
+          description: |
+            The beginning of the name of a user of this deployment, `arn:aws:iam:::user/`: a principal
+            `{"AWS": "<prefix><name>"}`, or a list of these and `*` under `AWS`.
+    AccessExplanation:
+      type: object
+      description: |
+        The answer to "Who may do this?". When `authenticates` is false the subject would not
+        authenticate, and `allowed`, `source`, `rule`, `statements`, `key_policy` and `unknown_address` are
+        absent.
+      required: [subject, request, authenticates, assumed, not_considered]
+      properties:
+        subject:
+          $ref: '#/components/schemas/ExplainedSubject'
+        request:
+          $ref: '#/components/schemas/ExplainedRequest'
+        authenticates:
+          type: boolean
+        not_authenticated:
+          type: string
+          description: Why the subject would not authenticate. Values are only ever added to.
+          enum: [user_disabled, key_expired]
+        allowed:
+          type: boolean
+          description: The decision.
+        source:
+          $ref: '#/components/schemas/DecisionSource'
+        rule:
+          type: string
+          description: The rule that answered, when `source` is `rule`. Values are only ever added to.
+          enum: [root, anonymous, service, node, locked_session, no_user]
+        statements:
+          type: array
+          description: The statements that matched, of every source.
+          items:
+            $ref: '#/components/schemas/CitedStatement'
+        key_policy:
+          $ref: '#/components/schemas/KeyPolicyVerdict'
+        unknown_address:
+          type: array
+          description: The statements whose condition on `aws:SourceIp` was decided without an address.
+          items:
+            $ref: '#/components/schemas/CitedStatement'
+        assumed:
+          $ref: '#/components/schemas/ExplanationAssumptions'
+        not_considered:
+          type: array
+          description: |
+            What the answer leaves out: `object_ownership` when, and only when, the action is
+            `admin:PreviewObject`, the one action that asks who made a version. Values are only ever added to.
+          items:
+            type: string
+            enum: [object_ownership]
+    ExplainedSubject:
+      type: object
+      description: Whom an explanation is about.
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          description: Values are only ever added to.
+          enum: [user, access_key, anonymous]
+        user:
+          type: string
+          description: The user, or the owner of the key.
+        access_key_id:
+          type: string
+          description: The key asked about.
+    ExplainedRequest:
+      type: object
+      description: What was decided.
+      required: [action, resource]
+      properties:
+        action:
+          type: string
+        resource:
+          type: string
+          description: The resource, as its ARN.
+        list_prefix:
+          type: string
+    DecisionSource:
+      type: string
+      description: |
+        Where a decision, or a statement, came from. `owner` is not given while the ownership of a version
+        is not considered. Values are only ever added to.
+      enum: [none, rule, identity-policy, bucket-policy, sub-bucket-policy, api-key-policy, owner]
+    CitedStatement:
+      type: object
+      description: |
+        A statement that had a say. Where `readable` is false the caller may not read the policy it is in,
+        and only its source and effect are given: "a policy you may not read".
+      required: [source, effect, readable]
+      properties:
+        source:
+          $ref: '#/components/schemas/DecisionSource'
+        effect:
+          type: string
+          description: Values are only ever added to.
+          enum: [Allow, Deny]
+        readable:
+          type: boolean
+        policy:
+          type: string
+          description: The name of a named policy; absent for a bucket's, a sub-bucket's or a key's.
+        document_index:
+          type: integer
+          minimum: 0
+          description: The index of the document in its source, from 0.
+        statement_index:
+          type: integer
+          minimum: 0
+          description: The index of the statement in its document, from 0.
+        sid:
+          type: string
+    KeyPolicyVerdict:
+      type: object
+      description: What the inline policy of an API key said, for a key that has one.
+      required: [allowed, statements]
+      properties:
+        allowed:
+          type: boolean
+        statements:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitedStatement'
+    ExplanationAssumptions:
+      type: object
+      description: What a decision was made with.
+      required: [time, secure_transport]
+      properties:
+        time:
+          type: string
+          format: date-time
+          description: The answering node's time.
+        source_ip:
+          type: string
+          description: The address of the request; absent, it was unknown.
+        secure_transport:
+          type: boolean
     APIKey:
       type: object
       required: [access_key_id, owner, description, created_at]

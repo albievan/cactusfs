@@ -122,6 +122,24 @@ type fixture struct {
 	// leader is the node that leads, as the use case of targets asks it
 	// how delivery stands; a test says what it does.
 	leader *scriptedLeader
+	// explainTrail is where the explanation of access appends its
+	// records; a test can make it fail.
+	explainTrail *switchedTrail
+}
+
+// switchedTrail is an audit trail whose appends a test can make fail, with
+// an error that does or does not say whether the record was appended.
+type switchedTrail struct {
+	ports.AuditLog
+	fail atomic.Pointer[error]
+}
+
+// AppendAudit implements ports.AuditLog.
+func (s *switchedTrail) AppendAudit(ctx context.Context, record audit.Record) error {
+	if err := s.fail.Load(); err != nil {
+		return *err
+	}
+	return s.AuditLog.AppendAudit(ctx, record)
 }
 
 // scriptedLeader is the node that leads the metadata group, as a node that
@@ -295,6 +313,14 @@ func newFixtureOf(t *testing.T, updates func(*fixture) *app.UpdateService, tune 
 			f.seen = append(f.seen, o)
 		},
 	}
+	// The policy builder (ADR-0032): the explanation appends its records
+	// to a trail a test can make fail, as a node's appends them to its own.
+	f.explainTrail = &switchedTrail{AuditLog: f.store}
+	config.PolicyTools = app.NewPolicyToolsService(authz, f.auditor)
+	config.Explain = app.NewExplainService(app.ExplainServiceConfig{
+		Store: f.store, Trail: f.explainTrail, Authz: authz, Explainer: app.NewExplainer(authz), Auditor: f.auditor,
+		Clock: f.clock, Logger: logger,
+	})
 	if tune != nil {
 		tune(&config)
 	}
@@ -595,10 +621,13 @@ func TestEveryRequestIsAuthenticated(t *testing.T) {
 			if strings.Contains(path, "/object") && !strings.HasSuffix(path, "/objects") {
 				concrete += "?key=k"
 			}
-			if path == "/search" {
+			switch path {
+			case "/search":
 				// As for a key: a request without what the contract
 				// requires is turned away before anybody asks who sent it.
 				concrete += "?q=k"
+			case "/access/explain":
+				concrete += "?action=s3:GetObject"
 			}
 			c := call{method: strings.ToUpper(method), path: concrete}
 			if method == "post" || method == "put" {

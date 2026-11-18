@@ -42,6 +42,9 @@ func requiredFields() map[string][]string {
 		"PUT " + BasePath + "/targets/{name}":                 {"kind", "buckets"},
 		"POST " + BasePath + "/tag-definitions":               {"key"},
 		"PUT " + BasePath + "/tag-definitions/{key}":          {"description", "values"},
+		patternValidatePolicy:                                 {"document"},
+		patternValidateBucketPolicy:                           {"document"},
+		patternValidateSubBucketPolicy:                        {"policy"},
 	}
 }
 
@@ -71,7 +74,9 @@ func requiredItemFields() map[string]map[string][]string {
 // generated decoder, though, matches the body's own keys without regard to
 // case and keeps the last of two, so a body that gives the field twice -
 // "document" and "Document" - would be judged by one document while a
-// reader of the request saw the other. Such a body is refused.
+// reader of the request saw the other. Such a body is refused. The
+// validations of a policy (ADR-0032) are held to it as their puts are, so
+// that what is validated is what would be put.
 func policyFields() map[string]string {
 	return map[string]string{
 		"PUT " + BasePath + "/buckets/{bucket}/policy":            "document",
@@ -79,6 +84,9 @@ func policyFields() map[string]string {
 		"POST " + BasePath + "/policies":                          "document",
 		"PUT " + BasePath + "/policies/{name}":                    "document",
 		"POST " + BasePath + "/users/{name}/keys":                 "inline_policy",
+		patternValidatePolicy:                                     "document",
+		patternValidateBucketPolicy:                               "document",
+		patternValidateSubBucketPolicy:                            "policy",
 	}
 }
 

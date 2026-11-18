@@ -633,6 +633,9 @@ func TestPolicyFieldsAreTheContracts(t *testing.T) {
 // cases or with a letter escaped, and a policy that is not a JSON object;
 // the 20 KiB limit is that of the bytes sent, on every route; and a
 // bucket's policy is answered with its keys in the order they were set.
+// The three validations of a policy (ADR-0032) read it as their puts do:
+// they answer valid false with the parser's faults where the put answers
+// 400 for the document, and refuse a policy field given twice.
 func TestPolicyDocumentsAreReadAsSent(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -740,6 +743,67 @@ func TestPolicyDocumentsAreReadAsSent(t *testing.T) {
 	f.must(http.StatusNotFound, call{method: "GET", path: "/policies/spaced"})
 	if r := f.must(http.StatusOK, call{method: "GET", path: "/users/dora/keys"}); strings.Contains(string(r.body), "access_key_id") {
 		t.Errorf("a key was made with a refused policy: %s", r.body)
+	}
+
+	// The validations read the document as its put does (ADR-0032): what
+	// the put refuses 400 for its document they answer 200, valid false,
+	// with the parser's faults; a body that gives the field twice they
+	// refuse 400, as the put does, before anything is judged.
+	validations := []struct {
+		path, field string
+		identity    bool
+		extra       string
+	}{
+		{"/buckets/some-bucket/policy/validation", "document", false, ""},
+		{"/buckets/some-bucket/subbuckets/reports/policy/validation", "policy", false, ""},
+		{"/policy-validation", "document", true, ""},
+		{"/policy-validation", "document", true, `"key_owner":"dora",`},
+	}
+	refusedWith := func(t *testing.T, path, body, reason string) {
+		t.Helper()
+		var v struct {
+			Valid  bool `json:"valid"`
+			Faults []struct {
+				Reason string `json:"reason"`
+			} `json:"faults"`
+		}
+		r := f.must(http.StatusOK, call{method: "POST", path: path, raw: []byte(body), headers: media})
+		r.decode(t, &v)
+		if v.Valid || len(v.Faults) == 0 || !strings.Contains(v.Faults[0].Reason, reason) {
+			t.Errorf("POST %s: %s", path, r.body)
+		}
+	}
+	for _, route := range validations {
+		for _, document := range []string{effectTwice, conditionTwice} {
+			if route.identity {
+				document = identity(document)
+			}
+			refusedWith(t, route.path, `{`+route.extra+`"`+route.field+`":`+document+`}`, "")
+		}
+		document := string(mustJSON(t, aDocument))
+		if route.identity {
+			document = identity(document)
+		}
+		escaped := `\u00` + strconv.FormatInt(int64(route.field[0]), 16) + route.field[1:]
+		for name, second := range map[string]string{"in two cases": strings.ToUpper(route.field), "escaped": escaped} {
+			body := `{` + route.extra + `"` + route.field + `":{"Version":"2012-10-17","Statement":[]},"` + second + `":` + document + `}`
+			r := f.must(http.StatusBadRequest, call{method: "POST", path: route.path, raw: []byte(body), headers: media})
+			if p := r.problem(t); p["code"] != "InvalidArgument" || p["faults"] != nil {
+				t.Errorf("POST %s with the field twice, %s: problem = %s", route.path, name, r.body)
+			}
+		}
+		for _, document := range []string{`"x"`, `[]`, `5`} {
+			refusedWith(t, route.path, `{`+route.extra+`"`+route.field+`":`+document+`}`, "policy: ")
+		}
+		var spacedDocument any = aDocument
+		if route.identity {
+			spacedDocument = identityDocument
+		}
+		spaced, err := json.MarshalIndent(spacedDocument, "", strings.Repeat(" ", 2000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refusedWith(t, route.path, `{`+route.extra+`"`+route.field+`":`+string(spaced)+`}`, fmt.Sprintf("larger than %d bytes", iam.MaxPolicyBytes))
 	}
 
 	// As it was set: the keys in the order the client gave them.

@@ -132,6 +132,28 @@ const patternUnlock = "POST " + BasePath + "/session/unlock"
 // upgrade is never started from a stored answer (ADR-0029).
 const patternUpgrade = "POST " + BasePath + "/upgrade"
 
+// The operations that validate a policy without storing it (ADR-0032): a
+// named policy or a key's inline policy, a bucket's, a sub-bucket's.
+const (
+	patternValidatePolicy          = "POST " + BasePath + "/policy-validation"
+	patternValidateBucketPolicy    = "POST " + BasePath + "/buckets/{bucket}/policy/validation"
+	patternValidateSubBucketPolicy = "POST " + BasePath + "/buckets/{bucket}/subbuckets/{name}/policy/validation"
+)
+
+// keyIgnored are the operations that take Idempotency-Key and do nothing
+// with it, as signing in does: unlocking a session and starting an upgrade,
+// whose bodies hold a password (patternUnlock, patternUpgrade), and the
+// validations of a policy, which change nothing and so have nothing to
+// keep an answer of (ADR-0032). Each is carried out again whatever key it
+// comes with, and nothing of it is reserved.
+func keyIgnored(pattern string) bool {
+	switch pattern {
+	case patternUnlock, patternUpgrade, patternValidatePolicy, patternValidateBucketPolicy, patternValidateSubBucketPolicy:
+		return true
+	}
+	return false
+}
+
 // Identities resolves API keys. It is implemented by app.IdentityService.
 type Identities interface {
 	// SecretFor returns the secret of an access key and the principal it
@@ -196,7 +218,16 @@ type Config struct {
 	// Counter has the usage of a bucket counted again when asked
 	// (ADR-0023). It may be nil on a node that was not given the use case:
 	// the recount then answers 501.
-	Counter     *app.UsageCounter
+	Counter *app.UsageCounter
+	// PolicyTools answers the catalogue of the policy language and
+	// validates a policy before it is put (ADR-0032). It may be nil on a
+	// node that was not given the use case: its operations then answer
+	// 501.
+	PolicyTools *app.PolicyToolsService
+	// Explain answers "Who may do this?" (ADR-0032). It may be nil on a
+	// node that was not given the use case: the operation then answers
+	// 501.
+	Explain     *app.ExplainService
 	Idempotency *app.IdempotencyService
 	Identities  Identities
 	Clock       ports.Clock
@@ -433,13 +464,14 @@ func (h *Handler) pipeline(next http.Handler) http.Handler {
 			defer h.cfg.Sessions.UploadBegun(ctx, info.token)()
 		}
 		key := r.Header.Get(headerIdempotency)
-		if key == "" || public || !httpsession.Mutating(r) || r.Pattern == patternUnlock || r.Pattern == patternUpgrade {
+		if key == "" || public || !httpsession.Mutating(r) || keyIgnored(r.Pattern) {
 			// Unlocking takes the header and does nothing with it, as
 			// signing in does: its body holds a password, of which not
 			// even a hash is kept, and its answer holds a session, which
 			// is never given twice. Starting an upgrade is the same: its
 			// body holds a password, and its password is judged again
-			// every time it is sent.
+			// every time it is sent. A validation changes nothing: it is
+			// carried out again, and authorized again, every time.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -712,6 +744,9 @@ type problem struct {
 	code   string
 	title  string
 	detail string
+	// faults are the located faults of the policy document the request
+	// sent, on the 400 that refuses it (ADR-0032).
+	faults []iam.PolicyFault
 }
 
 // problemOf maps an error of the use cases to an answer. This is the only
@@ -915,8 +950,26 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 		p.detail = detailReleaseNotVerified
 	default:
 		p.detail = publicDetail(err)
+		p.faults = refusedFaults(p, err)
 	}
 	h.problem(w, r, p)
+}
+
+// refusedFaults are the faults a 400 that refuses a policy document gives
+// with it (ADR-0032): InvalidPolicy for a bucket's or a sub-bucket's policy,
+// InvalidArgument for a named policy or the inline policy of an API key.
+// They are what the use case's parse of the document the caller sent found
+// (app.PolicyFaults), and never those of a document already stored; none
+// for any other answer.
+func refusedFaults(p problem, err error) []iam.PolicyFault {
+	if p.status != http.StatusBadRequest || (p.code != "InvalidPolicy" && p.code != "InvalidArgument") {
+		return nil
+	}
+	refused, ok := app.PolicyFaults(err)
+	if !ok {
+		return nil
+	}
+	return refused.Faults()
 }
 
 // maxDetail bounds the detail of a problem, in bytes.
@@ -978,6 +1031,10 @@ func (h *Handler) problem(w http.ResponseWriter, r *http.Request, p problem) {
 	}
 	if info.id != "" {
 		body.RequestId = &info.id
+	}
+	if len(p.faults) > 0 {
+		faults := faultsOf(p.faults)
+		body.Faults = &faults
 	}
 	instance := r.URL.Path
 	body.Instance = &instance

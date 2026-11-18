@@ -934,6 +934,298 @@ func (o *operations) DeletePolicy(ctx context.Context, request api.DeletePolicyR
 	return api.DeletePolicy204Response{}, nil
 }
 
+// --- the policy builder: catalogue, validation, explanation (ADR-0032) ---
+//
+// What the language can say, whether a document would be taken and what the
+// authorizer decides are the use cases' to say (PolicyToolsService,
+// ExplainService): each asks the single authorizer and records what it
+// must. These carry their answers to the contract, and the documents of
+// requests to them as they were sent.
+
+// policyTools is the use case of the catalogue and of validation, or the
+// answer of a node that was not given it.
+func (o *operations) policyTools() (*app.PolicyToolsService, error) {
+	if o.h.cfg.PolicyTools == nil {
+		return nil, notYet("policy tools")
+	}
+	return o.h.cfg.PolicyTools, nil
+}
+
+// explainer is the use case of "Who may do this?", or the answer of a node
+// that was not given it.
+func (o *operations) explainer() (*app.ExplainService, error) {
+	if o.h.cfg.Explain == nil {
+		return nil, notYet("explain")
+	}
+	return o.h.cfg.Explain, nil
+}
+
+// actionNames are actions as the contract carries them; never nil, so that
+// a list the contract requires is an empty list and not null.
+func actionNames(actions []iam.Action) []string {
+	out := make([]string, len(actions))
+	for i, a := range actions {
+		out[i] = string(a)
+	}
+	return out
+}
+
+// listOf is a list the contract requires: empty, never null.
+func listOf(list []string) []string {
+	if list == nil {
+		return []string{}
+	}
+	return list
+}
+
+// catalogueOf maps the catalogue of the policy language to the contract.
+func catalogueOf(c app.PolicyCatalogue) api.PolicyCatalogue {
+	out := api.PolicyCatalogue{
+		Version:       c.Version,
+		Actions:       make([]api.CatalogueAction, len(c.Actions)),
+		ConditionKeys: make([]api.CatalogueConditionKey, len(c.ConditionKeys)),
+		Resources:     make([]api.CatalogueResource, len(c.Resources)),
+		Limits: api.PolicyLimits{
+			MaxBytes: c.Limits.MaxBytes, MaxStatements: c.Limits.MaxStatements, MaxValues: c.Limits.MaxValues, MaxDepth: c.Limits.MaxDepth,
+		},
+		BucketPolicyPrincipals: api.PolicyPrincipalForms{
+			Anyone: listOf(c.BucketPolicyPrincipals.Anyone), UserArnPrefix: c.BucketPolicyPrincipals.UserARNPrefix,
+		},
+	}
+	for i, a := range c.Actions {
+		out.Actions[i] = api.CatalogueAction{
+			Name: string(a.Name), Group: a.Group, Description: a.Description, Resources: listOf(a.Resources),
+			Read: a.Read, ByNameOnly: a.ByNameOnly, InBucketPolicy: a.InBucketPolicy, Anonymous: a.Anonymous,
+			InSubBucketPolicy: a.InSubBucketPolicy,
+		}
+	}
+	for i, k := range c.ConditionKeys {
+		out.ConditionKeys[i] = api.CatalogueConditionKey{
+			Key: k.Key, Operators: listOf(k.Operators), ValueKind: api.CatalogueConditionKeyValueKind(k.ValueKind), WhenUnknown: k.WhenUnknown,
+		}
+	}
+	for i, r := range c.Resources {
+		out.Resources[i] = api.CatalogueResource{Kind: r.Kind, Template: r.Template, Description: r.Description}
+	}
+	return out
+}
+
+// faultsOf maps the located faults of a document to the contract. A fault
+// outside any statement has no statement; the byte offset of a fault of
+// JSON syntax has no field: such a fault cannot arrive through this API,
+// whose bodies are JSON with the document in them.
+func faultsOf(faults []iam.PolicyFault) []api.PolicyFault {
+	out := make([]api.PolicyFault, len(faults))
+	for i, f := range faults {
+		out[i] = api.PolicyFault{Pointer: f.Pointer, Reason: f.Reason}
+		if f.Statement != iam.NoStatement {
+			statement := f.Statement
+			out[i].Statement = &statement
+		}
+	}
+	return out
+}
+
+// validationOf maps a validation to the contract. open_to_anyone is said of
+// the statements of a bucket's or a sub-bucket's policy only (forBuckets).
+func validationOf(v app.PolicyValidation, forBuckets bool) api.PolicyValidation {
+	out := api.PolicyValidation{
+		Valid: v.Valid, Faults: faultsOf(v.Faults), Truncated: v.Truncated,
+		Statements: make([]api.StatementAnalysis, len(v.Statements)),
+	}
+	for i, s := range v.Statements {
+		out.Statements[i] = api.StatementAnalysis{
+			Index: s.Index, Sid: stringOrNil(s.Sid), Effect: api.StatementAnalysisEffect(s.Effect),
+			Actions: actionNames(s.Actions), AnonymousActions: actionNames(s.AnonymousActions),
+			NeverAnonymous: actionNames(s.NeverAnonymous), UnmatchedPatterns: listOf(s.UnmatchedPatterns),
+		}
+		if forBuckets {
+			open := s.OpenToAnyone
+			out.Statements[i].OpenToAnyone = &open
+		}
+	}
+	return out
+}
+
+// citationsOf maps cited statements to the contract: a statement in a
+// policy the caller may not read keeps its source and effect, and nothing
+// more.
+func citationsOf(citations []app.Citation) []api.CitedStatement {
+	out := make([]api.CitedStatement, len(citations))
+	for i, c := range citations {
+		out[i] = api.CitedStatement{Source: api.DecisionSource(c.Source), Effect: api.CitedStatementEffect(c.Effect), Readable: c.Readable}
+		if c.Readable {
+			document, statement := c.Document, c.Statement
+			out[i].Policy, out[i].DocumentIndex, out[i].StatementIndex, out[i].Sid = stringOrNil(c.Policy), &document, &statement, stringOrNil(c.Sid)
+		}
+	}
+	return out
+}
+
+// explanationOf maps an explanation to the contract. A subject that would
+// not authenticate is given no decision.
+func explanationOf(e app.AccessExplanation) api.AccessExplanation {
+	out := api.AccessExplanation{
+		Subject: api.ExplainedSubject{
+			Kind: api.ExplainedSubjectKind(e.Subject.Kind), User: stringOrNil(e.Subject.User), AccessKeyId: stringOrNil(e.Subject.AccessKeyID),
+		},
+		Request:       api.ExplainedRequest{Action: string(e.Action), Resource: e.Resource, ListPrefix: stringOrNil(e.ListPrefix)},
+		Authenticates: e.Authenticates,
+		Assumed:       api.ExplanationAssumptions{Time: e.Assumed.Time, SecureTransport: e.Assumed.SecureTransport},
+		NotConsidered: make([]api.AccessExplanationNotConsidered, len(e.NotConsidered)),
+	}
+	if e.Assumed.SourceIP.IsValid() {
+		out.Assumed.SourceIp = stringOrNil(e.Assumed.SourceIP.String())
+	}
+	for i, n := range e.NotConsidered {
+		out.NotConsidered[i] = api.AccessExplanationNotConsidered(n)
+	}
+	if !e.Authenticates {
+		if e.NotAuthenticated != "" {
+			why := api.AccessExplanationNotAuthenticated(e.NotAuthenticated)
+			out.NotAuthenticated = &why
+		}
+		return out
+	}
+	allowed, source := e.Allowed, api.DecisionSource(e.Source)
+	statements, unknown := citationsOf(e.Statements), citationsOf(e.UnknownAddress)
+	out.Allowed, out.Source, out.Statements, out.UnknownAddress = &allowed, &source, &statements, &unknown
+	if e.Rule != "" {
+		rule := api.AccessExplanationRule(e.Rule)
+		out.Rule = &rule
+	}
+	if e.KeyPolicy != nil {
+		out.KeyPolicy = &api.KeyPolicyVerdict{Allowed: e.KeyPolicy.Allowed, Statements: citationsOf(e.KeyPolicy.Statements)}
+	}
+	return out
+}
+
+// GetPolicyCatalogue implements api.StrictServerInterface.
+func (o *operations) GetPolicyCatalogue(ctx context.Context, _ api.GetPolicyCatalogueRequestObject) (api.GetPolicyCatalogueResponseObject, error) {
+	tools, err := o.policyTools()
+	if err != nil {
+		return nil, err
+	}
+	catalogue, err := tools.Catalogue(ctx, who(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return api.GetPolicyCatalogue200JSONResponse(catalogueOf(catalogue)), nil
+}
+
+// given is an optional field of a request whose contract bounds it below by
+// 1 character: "" when it is absent, and an error wrapping
+// domain.ErrInvalidArgument when it is given empty - an empty name is no
+// name, and is not taken for no name at all. Nothing of the request but the
+// field's name is in the error.
+func given(field string, value *string) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	if *value == "" {
+		return "", fmt.Errorf("%w: %q is given and empty", domain.ErrInvalidArgument, field)
+	}
+	return *value, nil
+}
+
+// ValidatePolicy implements api.StrictServerInterface: a named policy, or
+// with key_owner the inline policy of a new API key, judged as its put
+// would judge it. A refused document is an answer, not an error.
+func (o *operations) ValidatePolicy(ctx context.Context, request api.ValidatePolicyRequestObject) (api.ValidatePolicyResponseObject, error) {
+	tools, err := o.policyTools()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	name, err := given("name", request.Body.Name)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := given("key_owner", request.Body.KeyOwner)
+	if err != nil {
+		return nil, err
+	}
+	validation, err := tools.ValidateIdentity(ctx, who(ctx), app.IdentityPolicyValidation{
+		Document: policyBytes(request.Body.Document), Name: name, KeyOwner: owner,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return api.ValidatePolicy200JSONResponse(validationOf(validation, false)), nil
+}
+
+// ValidateBucketPolicy implements api.StrictServerInterface.
+func (o *operations) ValidateBucketPolicy(ctx context.Context, request api.ValidateBucketPolicyRequestObject) (api.ValidateBucketPolicyResponseObject, error) {
+	tools, err := o.policyTools()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	validation, err := tools.ValidateBucket(ctx, who(ctx), request.Bucket, policyBytes(request.Body.Document))
+	if err != nil {
+		return nil, err
+	}
+	return api.ValidateBucketPolicy200JSONResponse(validationOf(validation, true)), nil
+}
+
+// ValidateSubBucketPolicy implements api.StrictServerInterface.
+func (o *operations) ValidateSubBucketPolicy(ctx context.Context, request api.ValidateSubBucketPolicyRequestObject) (api.ValidateSubBucketPolicyResponseObject, error) {
+	tools, err := o.policyTools()
+	if err != nil {
+		return nil, err
+	}
+	if request.Body == nil {
+		return nil, fmt.Errorf("%w: no body", domain.ErrInvalidArgument)
+	}
+	validation, err := tools.ValidateSubBucket(ctx, who(ctx), request.Bucket, request.Name, policyBytes(request.Body.Policy))
+	if err != nil {
+		return nil, err
+	}
+	return api.ValidateSubBucketPolicy200JSONResponse(validationOf(validation, true)), nil
+}
+
+// ExplainAccess implements api.StrictServerInterface. Its errors are the
+// use case's, whose texts are fixed: a refusal is answered 403 with no
+// detail, as every refusal is, and a record that could not be appended 503
+// or 500 with none either (Handler.fail).
+func (o *operations) ExplainAccess(ctx context.Context, request api.ExplainAccessRequestObject) (api.ExplainAccessResponseObject, error) {
+	explain, err := o.explainer()
+	if err != nil {
+		return nil, err
+	}
+	q := request.Params
+	in := app.ExplainRequest{
+		Anonymous: optional(q.Anonymous), Action: iam.Action(q.Action), ListPrefix: optional(q.ListPrefix),
+		SourceIP: optional(q.SourceIp), SecureTransport: q.SecureTransport,
+	}
+	// The fields the contract bounds below by 1 character: one given
+	// empty is refused, not taken for one not given.
+	for _, field := range []struct {
+		name  string
+		value *string
+		into  *string
+	}{
+		{"user", q.User, &in.User},
+		{"access_key_id", q.AccessKeyId, &in.AccessKeyID},
+		{"bucket", q.Bucket, &in.Bucket},
+		{"key", q.Key, &in.Key},
+		{"admin_resource", q.AdminResource, &in.AdminResource},
+	} {
+		if *field.into, err = given(field.name, field.value); err != nil {
+			return nil, err
+		}
+	}
+	answer, err := explain.Explain(ctx, who(ctx), in)
+	if err != nil {
+		return nil, err
+	}
+	return api.ExplainAccess200JSONResponse(explanationOf(answer)), nil
+}
+
 // --- cluster ---
 
 func stringOrNil(s string) *string {

@@ -208,6 +208,7 @@ func runServer(ctx context.Context, cfg serverConfig, logOutput, notice io.Write
 			Buckets: n.buckets, Objects: n.objects, Search: n.search, IAM: n.iam, Sessions: n.sessions, Cluster: n.cluster,
 			Settings: n.settings, SubBuckets: n.subBuckets, Targets: n.targets, TagDefinitions: n.tagDefinitions, Updates: n.updates,
 			Quotas: n.quotas, Counter: n.counter, Notifications: n.notifications, Replication: n.replication,
+			PolicyTools: n.policyTools, Explain: n.explain,
 			Idempotency: n.idempotency, Identities: n.identities,
 			Clock: n.clock, Logger: logger,
 			SpecYAML: openapi.AdminYAML(), SpecJSON: openapi.AdminJSON(), Observe: tel.ObserveAdmin,

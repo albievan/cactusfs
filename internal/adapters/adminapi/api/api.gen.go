@@ -23,6 +23,144 @@ const (
 	SessionScopes sessionContextKey = "session.Scopes"
 )
 
+// Defines values for AccessExplanationNotAuthenticated.
+const (
+	KeyExpired   AccessExplanationNotAuthenticated = "key_expired"
+	UserDisabled AccessExplanationNotAuthenticated = "user_disabled"
+)
+
+// Valid indicates whether the value is a known member of the AccessExplanationNotAuthenticated enum.
+func (e AccessExplanationNotAuthenticated) Valid() bool {
+	switch e {
+	case KeyExpired:
+		return true
+	case UserDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AccessExplanationNotConsidered.
+const (
+	ObjectOwnership AccessExplanationNotConsidered = "object_ownership"
+)
+
+// Valid indicates whether the value is a known member of the AccessExplanationNotConsidered enum.
+func (e AccessExplanationNotConsidered) Valid() bool {
+	switch e {
+	case ObjectOwnership:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AccessExplanationRule.
+const (
+	AccessExplanationRuleAnonymous     AccessExplanationRule = "anonymous"
+	AccessExplanationRuleLockedSession AccessExplanationRule = "locked_session"
+	AccessExplanationRuleNoUser        AccessExplanationRule = "no_user"
+	AccessExplanationRuleNode          AccessExplanationRule = "node"
+	AccessExplanationRuleRoot          AccessExplanationRule = "root"
+	AccessExplanationRuleService       AccessExplanationRule = "service"
+)
+
+// Valid indicates whether the value is a known member of the AccessExplanationRule enum.
+func (e AccessExplanationRule) Valid() bool {
+	switch e {
+	case AccessExplanationRuleAnonymous:
+		return true
+	case AccessExplanationRuleLockedSession:
+		return true
+	case AccessExplanationRuleNoUser:
+		return true
+	case AccessExplanationRuleNode:
+		return true
+	case AccessExplanationRuleRoot:
+		return true
+	case AccessExplanationRuleService:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CatalogueConditionKeyValueKind.
+const (
+	Bool     CatalogueConditionKeyValueKind = "bool"
+	DateTime CatalogueConditionKeyValueKind = "date_time"
+	IpPrefix CatalogueConditionKeyValueKind = "ip_prefix"
+	String   CatalogueConditionKeyValueKind = "string"
+)
+
+// Valid indicates whether the value is a known member of the CatalogueConditionKeyValueKind enum.
+func (e CatalogueConditionKeyValueKind) Valid() bool {
+	switch e {
+	case Bool:
+		return true
+	case DateTime:
+		return true
+	case IpPrefix:
+		return true
+	case String:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for CitedStatementEffect.
+const (
+	CitedStatementEffectAllow CitedStatementEffect = "Allow"
+	CitedStatementEffectDeny  CitedStatementEffect = "Deny"
+)
+
+// Valid indicates whether the value is a known member of the CitedStatementEffect enum.
+func (e CitedStatementEffect) Valid() bool {
+	switch e {
+	case CitedStatementEffectAllow:
+		return true
+	case CitedStatementEffectDeny:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DecisionSource.
+const (
+	DecisionSourceApiKeyPolicy    DecisionSource = "api-key-policy"
+	DecisionSourceBucketPolicy    DecisionSource = "bucket-policy"
+	DecisionSourceIdentityPolicy  DecisionSource = "identity-policy"
+	DecisionSourceNone            DecisionSource = "none"
+	DecisionSourceOwner           DecisionSource = "owner"
+	DecisionSourceRule            DecisionSource = "rule"
+	DecisionSourceSubBucketPolicy DecisionSource = "sub-bucket-policy"
+)
+
+// Valid indicates whether the value is a known member of the DecisionSource enum.
+func (e DecisionSource) Valid() bool {
+	switch e {
+	case DecisionSourceApiKeyPolicy:
+		return true
+	case DecisionSourceBucketPolicy:
+		return true
+	case DecisionSourceIdentityPolicy:
+		return true
+	case DecisionSourceNone:
+		return true
+	case DecisionSourceOwner:
+		return true
+	case DecisionSourceRule:
+		return true
+	case DecisionSourceSubBucketPolicy:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DriveState.
 const (
 	Offline DriveState = "offline"
@@ -35,6 +173,27 @@ func (e DriveState) Valid() bool {
 	case Offline:
 		return true
 	case Online:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ExplainedSubjectKind.
+const (
+	ExplainedSubjectKindAccessKey ExplainedSubjectKind = "access_key"
+	ExplainedSubjectKindAnonymous ExplainedSubjectKind = "anonymous"
+	ExplainedSubjectKindUser      ExplainedSubjectKind = "user"
+)
+
+// Valid indicates whether the value is a known member of the ExplainedSubjectKind enum.
+func (e ExplainedSubjectKind) Valid() bool {
+	switch e {
+	case ExplainedSubjectKindAccessKey:
+		return true
+	case ExplainedSubjectKindAnonymous:
+		return true
+	case ExplainedSubjectKindUser:
 		return true
 	default:
 		return false
@@ -284,6 +443,24 @@ func (e SearchResultsMatch) Valid() bool {
 	case Substring:
 		return true
 	case Wildcard:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for StatementAnalysisEffect.
+const (
+	StatementAnalysisEffectAllow StatementAnalysisEffect = "Allow"
+	StatementAnalysisEffectDeny  StatementAnalysisEffect = "Deny"
+)
+
+// Valid indicates whether the value is a known member of the StatementAnalysisEffect enum.
+func (e StatementAnalysisEffect) Valid() bool {
+	switch e {
+	case StatementAnalysisEffectAllow:
+		return true
+	case StatementAnalysisEffectDeny:
 		return true
 	default:
 		return false
@@ -577,6 +754,56 @@ type APIKeyCreated struct {
 	// SecretKey Shown once. It cannot be had again.
 	SecretKey string `json:"secret_key"`
 }
+
+// AccessExplanation The answer to "Who may do this?". When `authenticates` is false the subject would not
+// authenticate, and `allowed`, `source`, `rule`, `statements`, `key_policy` and `unknown_address` are
+// absent.
+type AccessExplanation struct {
+	// Allowed The decision.
+	Allowed *bool `json:"allowed,omitempty"`
+
+	// Assumed What a decision was made with.
+	Assumed       ExplanationAssumptions `json:"assumed"`
+	Authenticates bool                   `json:"authenticates"`
+
+	// KeyPolicy What the inline policy of an API key said, for a key that has one.
+	KeyPolicy *KeyPolicyVerdict `json:"key_policy,omitempty"`
+
+	// NotAuthenticated Why the subject would not authenticate. Values are only ever added to.
+	NotAuthenticated *AccessExplanationNotAuthenticated `json:"not_authenticated,omitempty"`
+
+	// NotConsidered What the answer leaves out: `object_ownership` when, and only when, the action is
+	// `admin:PreviewObject`, the one action that asks who made a version. Values are only ever added to.
+	NotConsidered []AccessExplanationNotConsidered `json:"not_considered"`
+
+	// Request What was decided.
+	Request ExplainedRequest `json:"request"`
+
+	// Rule The rule that answered, when `source` is `rule`. Values are only ever added to.
+	Rule *AccessExplanationRule `json:"rule,omitempty"`
+
+	// Source Where a decision, or a statement, came from. `owner` is not given while the ownership of a version
+	// is not considered. Values are only ever added to.
+	Source *DecisionSource `json:"source,omitempty"`
+
+	// Statements The statements that matched, of every source.
+	Statements *[]CitedStatement `json:"statements,omitempty"`
+
+	// Subject Whom an explanation is about.
+	Subject ExplainedSubject `json:"subject"`
+
+	// UnknownAddress The statements whose condition on `aws:SourceIp` was decided without an address.
+	UnknownAddress *[]CitedStatement `json:"unknown_address,omitempty"`
+}
+
+// AccessExplanationNotAuthenticated Why the subject would not authenticate. Values are only ever added to.
+type AccessExplanationNotAuthenticated string
+
+// AccessExplanationNotConsidered defines model for AccessExplanation.NotConsidered.
+type AccessExplanationNotConsidered string
+
+// AccessExplanationRule The rule that answered, when `source` is `rule`. Values are only ever added to.
+type AccessExplanationRule string
 
 // AuditPage defines model for AuditPage.
 type AuditPage struct {
@@ -905,6 +1132,92 @@ type BucketUsage struct {
 	Versions *int64 `json:"versions,omitempty"`
 }
 
+// CatalogueAction One action a policy can grant.
+type CatalogueAction struct {
+	// Anonymous A bucket policy can open it to a caller who has not authenticated.
+	Anonymous bool `json:"anonymous"`
+
+	// ByNameOnly No wildcard of an `Allow` grants it: a statement allows it only by naming it, and no bucket policy
+	// allows it. A `Deny` covers it however it is written.
+	ByNameOnly bool `json:"by_name_only"`
+
+	// Description What the action allows, in a sentence.
+	Description string `json:"description"`
+
+	// Group The part of the product it belongs to, as a title. Groups are only ever added.
+	Group string `json:"group"`
+
+	// InBucketPolicy A bucket policy may allow it.
+	InBucketPolicy bool `json:"in_bucket_policy"`
+
+	// InSubBucketPolicy The policy of a sub-bucket may name it, by its full name.
+	InSubBucketPolicy bool `json:"in_sub_bucket_policy"`
+
+	// Name The action as a policy names it, `s3:GetObject`.
+	Name string `json:"name"`
+
+	// Read It changes nothing; it reads.
+	Read bool `json:"read"`
+
+	// Resources The templates of the resources it is asked on, such as `arn:aws:s3:::{bucket}/{key}` or
+	// `arn:cactusfs:admin:::user/{name}`.
+	Resources []string `json:"resources"`
+}
+
+// CatalogueConditionKey One condition key of the language.
+type CatalogueConditionKey struct {
+	// Key The key as a policy names it, `aws:SourceIp`.
+	Key string `json:"key"`
+
+	// Operators The operators that may test it, and no others.
+	Operators []string `json:"operators"`
+
+	// ValueKind The kind of the values it is compared with. Values are only ever added to.
+	ValueKind CatalogueConditionKeyValueKind `json:"value_kind"`
+
+	// WhenUnknown What the condition does when the request does not tell the key's value.
+	WhenUnknown string `json:"when_unknown"`
+}
+
+// CatalogueConditionKeyValueKind The kind of the values it is compared with. Values are only ever added to.
+type CatalogueConditionKeyValueKind string
+
+// CatalogueResource One kind of resource a policy can name.
+type CatalogueResource struct {
+	Description string `json:"description"`
+
+	// Kind The kind, `bucket` or `user`.
+	Kind string `json:"kind"`
+
+	// Template The resource as a policy writes it, with placeholders in braces, `arn:aws:s3:::{bucket}`.
+	Template string `json:"template"`
+}
+
+// CitedStatement A statement that had a say. Where `readable` is false the caller may not read the policy it is in,
+// and only its source and effect are given: "a policy you may not read".
+type CitedStatement struct {
+	// DocumentIndex The index of the document in its source, from 0.
+	DocumentIndex *int `json:"document_index,omitempty"`
+
+	// Effect Values are only ever added to.
+	Effect CitedStatementEffect `json:"effect"`
+
+	// Policy The name of a named policy; absent for a bucket's, a sub-bucket's or a key's.
+	Policy   *string `json:"policy,omitempty"`
+	Readable bool    `json:"readable"`
+	Sid      *string `json:"sid,omitempty"`
+
+	// Source Where a decision, or a statement, came from. `owner` is not given while the ownership of a version
+	// is not considered. Values are only ever added to.
+	Source DecisionSource `json:"source"`
+
+	// StatementIndex The index of the statement in its document, from 0.
+	StatementIndex *int `json:"statement_index,omitempty"`
+}
+
+// CitedStatementEffect Values are only ever added to.
+type CitedStatementEffect string
+
 // ClusterStatus defines model for ClusterStatus.
 type ClusterStatus struct {
 	// AnsweredBy The node that answered. `server` is its build; the builds of the other nodes are not known to it:
@@ -934,6 +1247,10 @@ type CollectionStatus struct {
 	// Shards Shards looked at in the last pass.
 	Shards int64 `json:"shards"`
 }
+
+// DecisionSource Where a decision, or a statement, came from. `owner` is not given while the ownership of a version
+// is not considered. Values are only ever added to.
+type DecisionSource string
 
 // Drive defines model for Drive.
 type Drive struct {
@@ -970,6 +1287,41 @@ type DriveSettings struct {
 type ErasureSet struct {
 	Drives []Drive `json:"drives"`
 	Index  int     `json:"index"`
+}
+
+// ExplainedRequest What was decided.
+type ExplainedRequest struct {
+	Action     string  `json:"action"`
+	ListPrefix *string `json:"list_prefix,omitempty"`
+
+	// Resource The resource, as its ARN.
+	Resource string `json:"resource"`
+}
+
+// ExplainedSubject Whom an explanation is about.
+type ExplainedSubject struct {
+	// AccessKeyId The key asked about.
+	AccessKeyId *string `json:"access_key_id,omitempty"`
+
+	// Kind Values are only ever added to.
+	Kind ExplainedSubjectKind `json:"kind"`
+
+	// User The user, or the owner of the key.
+	User *string `json:"user,omitempty"`
+}
+
+// ExplainedSubjectKind Values are only ever added to.
+type ExplainedSubjectKind string
+
+// ExplanationAssumptions What a decision was made with.
+type ExplanationAssumptions struct {
+	SecureTransport bool `json:"secure_transport"`
+
+	// SourceIp The address of the request; absent, it was unknown.
+	SourceIp *string `json:"source_ip,omitempty"`
+
+	// Time The answering node's time.
+	Time time.Time `json:"time"`
 }
 
 // Group defines model for Group.
@@ -1037,6 +1389,12 @@ type IdentityKind string
 
 // IdentityVia defines model for Identity.Via.
 type IdentityVia string
+
+// KeyPolicyVerdict What the inline policy of an API key said, for a key that has one.
+type KeyPolicyVerdict struct {
+	Allowed    bool             `json:"allowed"`
+	Statements []CitedStatement `json:"statements"`
+}
 
 // MaintenanceStatus defines model for MaintenanceStatus.
 type MaintenanceStatus struct {
@@ -1307,6 +1665,25 @@ type Policy struct {
 	Name Name `json:"name"`
 }
 
+// PolicyCatalogue What a policy can say, as the answering node understands it.
+type PolicyCatalogue struct {
+	// Actions Every action a policy can grant.
+	Actions []CatalogueAction `json:"actions"`
+
+	// BucketPolicyPrincipals The forms the `Principal` of a statement of a bucket's policy may take.
+	BucketPolicyPrincipals PolicyPrincipalForms    `json:"bucket_policy_principals"`
+	ConditionKeys          []CatalogueConditionKey `json:"condition_keys"`
+
+	// Limits The bounds of a policy document.
+	Limits PolicyLimits `json:"limits"`
+
+	// Resources The kinds of resource a policy can name, and their templates.
+	Resources []CatalogueResource `json:"resources"`
+
+	// Version The one `Version` a document may have, `2012-10-17`.
+	Version string `json:"version"`
+}
+
 // PolicyCreate defines model for PolicyCreate.
 type PolicyCreate struct {
 	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
@@ -1323,6 +1700,49 @@ type PolicyCreate struct {
 // is larger than 20 KiB as sent, is refused.
 type PolicyDocument = json.RawMessage
 
+// PolicyFault One thing wrong with a policy document, and where it is.
+type PolicyFault struct {
+	// Pointer Where in the document as sent, as an RFC 6901 JSON pointer; `""` is the whole document. A field
+	// that may be one string or a list (`Action`, `Resource`, a `Principal`'s `AWS`, a condition's
+	// values) is pointed at without an index when it is a single string (`/Statement/0/Action`) and with
+	// one when it is a list (`/Statement/0/Action/1`). A field that is missing is pointed at by the
+	// object it is missing from.
+	Pointer string `json:"pointer"`
+
+	// Reason What is wrong, as text for a person to read, in the words of the parser - the first fault's is the
+	// text the put's error has, its leading words included. It is not for programs to parse: its wording
+	// may change between releases; `pointer` and `statement` say where the fault is.
+	Reason string `json:"reason"`
+
+	// Statement The index of the statement the fault is in, from 0; absent outside a statement.
+	Statement *int `json:"statement,omitempty"`
+}
+
+// PolicyLimits The bounds of a policy document.
+type PolicyLimits struct {
+	// MaxBytes The largest document, in bytes as sent.
+	MaxBytes int `json:"max_bytes"`
+
+	// MaxDepth How many levels below the document a value may be nested.
+	MaxDepth int `json:"max_depth"`
+
+	// MaxStatements The most statements a document may have.
+	MaxStatements int `json:"max_statements"`
+
+	// MaxValues The most actions, resources, principals or values of one condition a statement may have.
+	MaxValues int `json:"max_values"`
+}
+
+// PolicyPrincipalForms The forms the `Principal` of a statement of a bucket's policy may take.
+type PolicyPrincipalForms struct {
+	// Anyone The forms, as JSON text, that name every caller, anonymous ones included.
+	Anyone []string `json:"anyone"`
+
+	// UserArnPrefix The beginning of the name of a user of this deployment, `arn:aws:iam:::user/`: a principal
+	// `{"AWS": "<prefix><name>"}`, or a list of these and `*` under `AWS`.
+	UserArnPrefix string `json:"user_arn_prefix"`
+}
+
 // PolicyUpdate defines model for PolicyUpdate.
 type PolicyUpdate struct {
 	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
@@ -1331,18 +1751,52 @@ type PolicyUpdate struct {
 	Document PolicyDocument `json:"document"`
 }
 
+// PolicyValidation What a validation says of a document. `valid` is true exactly when `faults` is empty: the put would
+// take the document, as a document; it may still refuse for what is not in it.
+type PolicyValidation struct {
+	// Faults Every fault found, the first first.
+	Faults []PolicyFault `json:"faults"`
+
+	// Statements What each statement does, in order; empty when the document is not valid.
+	Statements []StatementAnalysis `json:"statements"`
+
+	// Truncated The document had more than 100 faults; the first 100 are given.
+	Truncated bool `json:"truncated"`
+	Valid     bool `json:"valid"`
+}
+
+// PolicyValidationRequest A named policy, or the inline policy of a new API key, to validate.
+type PolicyValidationRequest struct {
+	// Document A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
+	Document PolicyDocument `json:"document"`
+
+	// KeyOwner The name of a user, group, role or policy.
+	KeyOwner *Name `json:"key_owner,omitempty"`
+
+	// Name The name of a user, group, role or policy.
+	Name *Name `json:"name,omitempty"`
+}
+
 // PreviewKind What an object is shown as by the console (`X-CactusFS-Preview-Kind`). Values are only ever added to.
 type PreviewKind string
 
 // Problem Problem details (RFC 9457).
 type Problem struct {
 	// Code A stable name for the kind of problem, for programs.
-	Code      string  `json:"code"`
-	Detail    *string `json:"detail,omitempty"`
-	Instance  *string `json:"instance,omitempty"`
-	RequestId *string `json:"request_id,omitempty"`
-	Status    int     `json:"status"`
-	Title     string  `json:"title"`
+	Code   string  `json:"code"`
+	Detail *string `json:"detail,omitempty"`
+
+	// Faults Every fault of the policy document the request sent, located, the first first - present only on
+	// a 400 that refuses a policy document: `InvalidPolicy` from `putBucketPolicy` and `putSubBucket`,
+	// `InvalidArgument` from `createPolicy`, `updatePolicy` and `createAPIKey`. They are the faults its
+	// validation gives (ADR-0032).
+	Faults    *[]PolicyFault `json:"faults,omitempty"`
+	Instance  *string        `json:"instance,omitempty"`
+	RequestId *string        `json:"request_id,omitempty"`
+	Status    int            `json:"status"`
+	Title     string         `json:"title"`
 
 	// Type A URI reference that identifies the kind of problem.
 	Type string `json:"type"`
@@ -1656,6 +2110,41 @@ type SignInRequest struct {
 	Username string `json:"username"`
 }
 
+// StatementAnalysis What one statement of a valid document does. It classifies and decides nothing: conditions and
+// other statements are not weighed.
+type StatementAnalysis struct {
+	// Actions The actions of the answering node's catalogue its action patterns cover. An action that no
+	// wildcard grants is covered by an `Allow` only when the `Allow` names it.
+	Actions []string `json:"actions"`
+
+	// AnonymousActions Of `actions`, those a caller without credentials could be let in to by the statement, before its
+	// conditions; empty but in an open statement of a bucket's policy.
+	AnonymousActions []string `json:"anonymous_actions"`
+
+	// Effect Values are only ever added to.
+	Effect StatementAnalysisEffect `json:"effect"`
+
+	// Index The statement's index in the document, from 0.
+	Index int `json:"index"`
+
+	// NeverAnonymous Of `actions`, those the statement names for anyone that are never allowed without credentials:
+	// it allows them to every user, and to nobody who has not authenticated.
+	NeverAnonymous []string `json:"never_anonymous"`
+
+	// OpenToAnyone A bucket's or a sub-bucket's policy only - an `Allow` whose principals include `*`.
+	OpenToAnyone *bool `json:"open_to_anyone,omitempty"`
+
+	// Sid Its Sid, when it has one.
+	Sid *string `json:"sid,omitempty"`
+
+	// UnmatchedPatterns The statement's action patterns, as written, that cover no action of the answering node's
+	// catalogue - a misspelling, or an action of another release. The parser takes them.
+	UnmatchedPatterns []string `json:"unmatched_patterns"`
+}
+
+// StatementAnalysisEffect Values are only ever added to.
+type StatementAnalysisEffect string
+
 // SubBucket A sub-bucket of a bucket and its policy. `policy` is absent when it has none of its own.
 type SubBucket struct {
 	// CreatedAt When the sub-bucket was registered; setting its policy does not change it.
@@ -1674,6 +2163,14 @@ type SubBucket struct {
 // SubBucketNameValue The name of a sub-bucket: 1 to 63 lower-case letters, digits and hyphens, beginning and ending with a
 // letter or digit. The first segment of the keys that belong to it.
 type SubBucketNameValue = string
+
+// SubBucketPolicyValidationRequest The policy of a sub-bucket to validate: the body of `putSubBucket`, with `policy` required.
+type SubBucketPolicyValidationRequest struct {
+	// Policy A policy in the IAM policy language (Version, Statement with Effect, Action, Resource, Condition). The
+	// server reads the document as it was sent, byte for byte: one that names a key twice in an object, or
+	// is larger than 20 KiB as sent, is refused.
+	Policy PolicyDocument `json:"policy"`
+}
 
 // SubBucketPut What a sub-bucket is to be. `policy` absent is a sub-bucket without a policy of its own.
 type SubBucketPut struct {
@@ -2145,6 +2642,40 @@ type apiKeyContextKey string
 // sessionContextKey is the context key for session security scheme
 type sessionContextKey string
 
+// ExplainAccessParams defines parameters for ExplainAccess.
+type ExplainAccessParams struct {
+	// User The user asked about, as a console session of theirs. One of `user`, `access_key_id` and `anonymous`.
+	User *Name `form:"user,omitempty" json:"user,omitempty"`
+
+	// AccessKeyId The API key asked about - its owner, bounded by its inline policy. One of `user`, `access_key_id` and `anonymous`.
+	AccessKeyId *string `form:"access_key_id,omitempty" json:"access_key_id,omitempty"`
+
+	// Anonymous A caller without credentials, when `true`; only `true` names it. One of `user`, `access_key_id` and `anonymous`.
+	Anonymous *bool `form:"anonymous,omitempty" json:"anonymous,omitempty"`
+
+	// Action An action of the catalogue (`getPolicyCatalogue`), without a wildcard.
+	Action string `form:"action" json:"action"`
+
+	// Bucket The bucket, for an `s3:` action but `s3:ListAllMyBuckets`.
+	Bucket *string `form:"bucket,omitempty" json:"bucket,omitempty"`
+
+	// Key The key of the object, for an action on objects.
+	Key *string `form:"key,omitempty" json:"key,omitempty"`
+
+	// AdminResource The administrative resource, for an `admin:` action - `<kind>` or `<kind>/<name>`, as the templates of the catalogue.
+	AdminResource *string `form:"admin_resource,omitempty" json:"admin_resource,omitempty"`
+
+	// ListPrefix The prefix of a listing, for the listing actions only. It decides whether a sub-bucket's policy has a say.
+	ListPrefix *string `form:"list_prefix,omitempty" json:"list_prefix,omitempty"`
+
+	// SourceIp The address the request would come from, IPv4 or IPv6 without a zone. Without it the address is
+	// unknown, and a condition on `aws:SourceIp` is decided against the request.
+	SourceIp *string `form:"source_ip,omitempty" json:"source_ip,omitempty"`
+
+	// SecureTransport Whether the request would arrive over TLS.
+	SecureTransport *bool `form:"secure_transport,omitempty" json:"secure_transport,omitempty"`
+}
+
 // ListAuditParams defines parameters for ListAudit.
 type ListAuditParams struct {
 	// After Return records with a sequence number greater than this.
@@ -2340,6 +2871,15 @@ type PutBucketPolicyParams struct {
 	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
 }
 
+// ValidateBucketPolicyParams defines parameters for ValidateBucketPolicy.
+type ValidateBucketPolicyParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
 // DeleteBucketQuotaParams defines parameters for DeleteBucketQuota.
 type DeleteBucketQuotaParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
@@ -2405,6 +2945,15 @@ type DeleteSubBucketParams struct {
 
 // PutSubBucketParams defines parameters for PutSubBucket.
 type PutSubBucketParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// ValidateSubBucketPolicyParams defines parameters for ValidateSubBucketPolicy.
+type ValidateSubBucketPolicyParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -2513,6 +3062,15 @@ type DeletePolicyParams struct {
 
 // UpdatePolicyParams defines parameters for UpdatePolicy.
 type UpdatePolicyParams struct {
+	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+
+	// XCSRFToken The CSRF token of the session. Required when the request is made with a session; ignored with an API key.
+	XCSRFToken *CSRFToken `json:"X-CSRF-Token,omitempty"`
+}
+
+// ValidatePolicyParams defines parameters for ValidatePolicy.
+type ValidatePolicyParams struct {
 	// IdempotencyKey Makes the request safe to repeat. Any string of 1 to 128 printable ASCII characters, unique per request.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 
@@ -2697,6 +3255,9 @@ type PutObjectTagsJSONRequestBody = ObjectTagsPut
 // PutBucketPolicyJSONRequestBody defines body for PutBucketPolicy for application/json ContentType.
 type PutBucketPolicyJSONRequestBody = BucketPolicyPut
 
+// ValidateBucketPolicyJSONRequestBody defines body for ValidateBucketPolicy for application/json ContentType.
+type ValidateBucketPolicyJSONRequestBody = BucketPolicyPut
+
 // PutBucketQuotaJSONRequestBody defines body for PutBucketQuota for application/json ContentType.
 type PutBucketQuotaJSONRequestBody = BucketQuotaPut
 
@@ -2708,6 +3269,9 @@ type PutBucketReplicationJSONRequestBody = BucketReplicationPut
 
 // PutSubBucketJSONRequestBody defines body for PutSubBucket for application/json ContentType.
 type PutSubBucketJSONRequestBody = SubBucketPut
+
+// ValidateSubBucketPolicyJSONRequestBody defines body for ValidateSubBucketPolicy for application/json ContentType.
+type ValidateSubBucketPolicyJSONRequestBody = SubBucketPolicyValidationRequest
 
 // PutBucketTagRulesJSONRequestBody defines body for PutBucketTagRules for application/json ContentType.
 type PutBucketTagRulesJSONRequestBody = TagRulesPut
@@ -2726,6 +3290,9 @@ type CreatePolicyJSONRequestBody = PolicyCreate
 
 // UpdatePolicyJSONRequestBody defines body for UpdatePolicy for application/json ContentType.
 type UpdatePolicyJSONRequestBody = PolicyUpdate
+
+// ValidatePolicyJSONRequestBody defines body for ValidatePolicy for application/json ContentType.
+type ValidatePolicyJSONRequestBody = PolicyValidationRequest
 
 // CreateRoleJSONRequestBody defines body for CreateRole for application/json ContentType.
 type CreateRoleJSONRequestBody = RoleCreate
@@ -2762,6 +3329,9 @@ type CreateAPIKeyJSONRequestBody = APIKeyCreate
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ExplainAccess Who may do this? What the authorizer decides for a subject, and why
+	// (GET /access/explain)
+	ExplainAccess(w http.ResponseWriter, r *http.Request, params ExplainAccessParams)
 	// ListAudit Read the audit trail
 	// (GET /audit)
 	ListAudit(w http.ResponseWriter, r *http.Request, params ListAuditParams)
@@ -2825,6 +3395,9 @@ type ServerInterface interface {
 	// PutBucketPolicy Set the policy of a bucket
 	// (PUT /buckets/{bucket}/policy)
 	PutBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params PutBucketPolicyParams)
+	// ValidateBucketPolicy Check a policy for a bucket without setting it
+	// (POST /buckets/{bucket}/policy/validation)
+	ValidateBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params ValidateBucketPolicyParams)
 	// DeleteBucketQuota Remove the quota of a bucket
 	// (DELETE /buckets/{bucket}/quota)
 	DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams)
@@ -2867,6 +3440,9 @@ type ServerInterface interface {
 	// PutSubBucket Create a sub-bucket, or set its policy
 	// (PUT /buckets/{bucket}/subbuckets/{name})
 	PutSubBucket(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params PutSubBucketParams)
+	// ValidateSubBucketPolicy Check a policy for a sub-bucket without setting it
+	// (POST /buckets/{bucket}/subbuckets/{name}/policy/validation)
+	ValidateSubBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params ValidateSubBucketPolicyParams)
 	// DeleteBucketTagRules Remove the tag rules of a bucket
 	// (DELETE /buckets/{bucket}/tag-rules)
 	DeleteBucketTagRules(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketTagRulesParams)
@@ -2930,6 +3506,12 @@ type ServerInterface interface {
 	// UpdatePolicy Change a policy
 	// (PUT /policies/{name})
 	UpdatePolicy(w http.ResponseWriter, r *http.Request, name EntityName, params UpdatePolicyParams)
+	// GetPolicyCatalogue What a policy can say
+	// (GET /policy-catalogue)
+	GetPolicyCatalogue(w http.ResponseWriter, r *http.Request)
+	// ValidatePolicy Check a named policy, or the inline policy of a new API key, without storing it
+	// (POST /policy-validation)
+	ValidatePolicy(w http.ResponseWriter, r *http.Request, params ValidatePolicyParams)
 	// ListRoles List roles
 	// (GET /roles)
 	ListRoles(w http.ResponseWriter, r *http.Request)
@@ -3036,6 +3618,163 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ExplainAccess operation middleware
+func (siw *ServerInterfaceWrapper) ExplainAccess(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ExplainAccessParams
+
+	// ------------- Optional query parameter "user" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "user", r.URL.Query(), &params.User, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "user"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "access_key_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "access_key_id", r.URL.Query(), &params.AccessKeyId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "access_key_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "access_key_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "anonymous" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "anonymous", r.URL.Query(), &params.Anonymous, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "anonymous"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "anonymous", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "action" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "action", r.URL.Query(), &params.Action, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "action"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "action", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "bucket" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "bucket", r.URL.Query(), &params.Bucket, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "bucket"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "key" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "key", r.URL.Query(), &params.Key, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "key"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "key", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "admin_resource" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "admin_resource", r.URL.Query(), &params.AdminResource, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "admin_resource"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "admin_resource", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "list_prefix" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "list_prefix", r.URL.Query(), &params.ListPrefix, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "list_prefix"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "list_prefix", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "source_ip" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "source_ip", r.URL.Query(), &params.SourceIp, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "source_ip"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "source_ip", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "secure_transport" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "secure_transport", r.URL.Query(), &params.SecureTransport, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "secure_transport"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "secure_transport", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ExplainAccess(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // ListAudit operation middleware
 func (siw *ServerInterfaceWrapper) ListAudit(w http.ResponseWriter, r *http.Request) {
@@ -4481,6 +5220,82 @@ func (siw *ServerInterfaceWrapper) PutBucketPolicy(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// ValidateBucketPolicy operation middleware
+func (siw *ServerInterfaceWrapper) ValidateBucketPolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ValidateBucketPolicyParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ValidateBucketPolicy(w, r, bucket, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DeleteBucketQuota operation middleware
 func (siw *ServerInterfaceWrapper) DeleteBucketQuota(w http.ResponseWriter, r *http.Request) {
 	var err error
@@ -5305,6 +6120,91 @@ func (siw *ServerInterfaceWrapper) PutSubBucket(w http.ResponseWriter, r *http.R
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutSubBucket(w, r, bucket, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ValidateSubBucketPolicy operation middleware
+func (siw *ServerInterfaceWrapper) ValidateSubBucketPolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	// ------------- Path parameter "bucket" -------------
+	var bucket BucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "bucket", r.PathValue("bucket"), &bucket, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "bucket", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "name" -------------
+	var name SubBucketName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ValidateSubBucketPolicyParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ValidateSubBucketPolicy(w, r, bucket, name, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6448,6 +7348,94 @@ func (siw *ServerInterfaceWrapper) UpdatePolicy(w http.ResponseWriter, r *http.R
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.UpdatePolicy(w, r, name, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetPolicyCatalogue operation middleware
+func (siw *ServerInterfaceWrapper) GetPolicyCatalogue(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetPolicyCatalogue(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ValidatePolicy operation middleware
+func (siw *ServerInterfaceWrapper) ValidatePolicy(w http.ResponseWriter, r *http.Request) {
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, ApiKeyScopes, []string{})
+
+	ctx = context.WithValue(ctx, SessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ValidatePolicyParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	// ------------- Optional header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CSRFToken
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = &XCSRFToken
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ValidatePolicy(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -8229,10 +9217,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.DeleteBucketPolicy)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.GetBucketPolicy)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/policy", wrapper.PutBucketPolicy)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets/{bucket}/policy/validation", wrapper.ValidateBucketPolicy)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/subbuckets", wrapper.ListSubBuckets)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.DeleteSubBucket)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.GetSubBucket)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}", wrapper.PutSubBucket)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/buckets/{bucket}/subbuckets/{name}/policy/validation", wrapper.ValidateSubBucketPolicy)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.DeleteBucketTags)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.GetBucketTags)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/buckets/{bucket}/tags", wrapper.PutBucketTags)
@@ -8288,6 +9278,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/policies/{name}", wrapper.DeletePolicy)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/policies/{name}", wrapper.GetPolicy)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/policies/{name}", wrapper.UpdatePolicy)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/policy-catalogue", wrapper.GetPolicyCatalogue)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/policy-validation", wrapper.ValidatePolicy)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/access/explain", wrapper.ExplainAccess)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster", wrapper.GetCluster)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/cluster/maintenance", wrapper.GetMaintenance)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
@@ -8306,6 +9299,105 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 }
 
 type ProblemApplicationProblemPlusJSONResponse Problem
+
+type ExplainAccessRequestObject struct {
+	Params ExplainAccessParams
+}
+
+type ExplainAccessResponseObject interface {
+	VisitExplainAccessResponse(w http.ResponseWriter) error
+}
+
+type ExplainAccess200JSONResponse AccessExplanation
+
+func (response ExplainAccess200JSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExplainAccess400ApplicationProblemPlusJSONResponse Problem
+
+func (response ExplainAccess400ApplicationProblemPlusJSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExplainAccess403ApplicationProblemPlusJSONResponse Problem
+
+func (response ExplainAccess403ApplicationProblemPlusJSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExplainAccess404ApplicationProblemPlusJSONResponse Problem
+
+func (response ExplainAccess404ApplicationProblemPlusJSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExplainAccess503ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type ExplainAccess503ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers ExplainAccess503ResponseHeaders
+}
+
+func (response ExplainAccess503ApplicationProblemPlusJSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(503)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ExplainAccessdefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ExplainAccessdefaultApplicationProblemPlusJSONResponse) VisitExplainAccessResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
 
 type ListAuditRequestObject struct {
 	Params ListAuditParams
@@ -9368,6 +10460,58 @@ func (response PutBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitPu
 	return err
 }
 
+type ValidateBucketPolicyRequestObject struct {
+	Bucket BucketName `json:"bucket"`
+	Params ValidateBucketPolicyParams
+	Body   *ValidateBucketPolicyJSONRequestBody
+}
+
+type ValidateBucketPolicyResponseObject interface {
+	VisitValidateBucketPolicyResponse(w http.ResponseWriter) error
+}
+
+type ValidateBucketPolicy200JSONResponse PolicyValidation
+
+func (response ValidateBucketPolicy200JSONResponse) VisitValidateBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidateBucketPolicy400ApplicationProblemPlusJSONResponse Problem
+
+func (response ValidateBucketPolicy400ApplicationProblemPlusJSONResponse) VisitValidateBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidateBucketPolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ValidateBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitValidateBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DeleteBucketQuotaRequestObject struct {
 	Bucket BucketName `json:"bucket"`
 	Params DeleteBucketQuotaParams
@@ -9964,6 +11108,59 @@ type PutSubBucketdefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response PutSubBucketdefaultApplicationProblemPlusJSONResponse) VisitPutSubBucketResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidateSubBucketPolicyRequestObject struct {
+	Bucket BucketName    `json:"bucket"`
+	Name   SubBucketName `json:"name"`
+	Params ValidateSubBucketPolicyParams
+	Body   *ValidateSubBucketPolicyJSONRequestBody
+}
+
+type ValidateSubBucketPolicyResponseObject interface {
+	VisitValidateSubBucketPolicyResponse(w http.ResponseWriter) error
+}
+
+type ValidateSubBucketPolicy200JSONResponse PolicyValidation
+
+func (response ValidateSubBucketPolicy200JSONResponse) VisitValidateSubBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidateSubBucketPolicy400ApplicationProblemPlusJSONResponse Problem
+
+func (response ValidateSubBucketPolicy400ApplicationProblemPlusJSONResponse) VisitValidateSubBucketPolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidateSubBucketPolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ValidateSubBucketPolicydefaultApplicationProblemPlusJSONResponse) VisitValidateSubBucketPolicyResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -10739,6 +11936,92 @@ type UpdatePolicydefaultApplicationProblemPlusJSONResponse struct {
 }
 
 func (response UpdatePolicydefaultApplicationProblemPlusJSONResponse) VisitUpdatePolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetPolicyCatalogueRequestObject struct{}
+
+type GetPolicyCatalogueResponseObject interface {
+	VisitGetPolicyCatalogueResponse(w http.ResponseWriter) error
+}
+
+type GetPolicyCatalogue200JSONResponse PolicyCatalogue
+
+func (response GetPolicyCatalogue200JSONResponse) VisitGetPolicyCatalogueResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetPolicyCataloguedefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response GetPolicyCataloguedefaultApplicationProblemPlusJSONResponse) VisitGetPolicyCatalogueResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidatePolicyRequestObject struct {
+	Params ValidatePolicyParams
+	Body   *ValidatePolicyJSONRequestBody
+}
+
+type ValidatePolicyResponseObject interface {
+	VisitValidatePolicyResponse(w http.ResponseWriter) error
+}
+
+type ValidatePolicy200JSONResponse PolicyValidation
+
+func (response ValidatePolicy200JSONResponse) VisitValidatePolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidatePolicy400ApplicationProblemPlusJSONResponse Problem
+
+func (response ValidatePolicy400ApplicationProblemPlusJSONResponse) VisitValidatePolicyResponse(w http.ResponseWriter) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ValidatePolicydefaultApplicationProblemPlusJSONResponse struct {
+	Body       Problem
+	StatusCode int
+}
+
+func (response ValidatePolicydefaultApplicationProblemPlusJSONResponse) VisitValidatePolicyResponse(w http.ResponseWriter) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
 		return err
@@ -12294,6 +13577,9 @@ func (response CreateAPIKeydefaultApplicationProblemPlusJSONResponse) VisitCreat
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// ExplainAccess Who may do this? What the authorizer decides for a subject, and why
+	// (GET /access/explain)
+	ExplainAccess(ctx context.Context, request ExplainAccessRequestObject) (ExplainAccessResponseObject, error)
 	// ListAudit Read the audit trail
 	// (GET /audit)
 	ListAudit(ctx context.Context, request ListAuditRequestObject) (ListAuditResponseObject, error)
@@ -12357,6 +13643,9 @@ type StrictServerInterface interface {
 	// PutBucketPolicy Set the policy of a bucket
 	// (PUT /buckets/{bucket}/policy)
 	PutBucketPolicy(ctx context.Context, request PutBucketPolicyRequestObject) (PutBucketPolicyResponseObject, error)
+	// ValidateBucketPolicy Check a policy for a bucket without setting it
+	// (POST /buckets/{bucket}/policy/validation)
+	ValidateBucketPolicy(ctx context.Context, request ValidateBucketPolicyRequestObject) (ValidateBucketPolicyResponseObject, error)
 	// DeleteBucketQuota Remove the quota of a bucket
 	// (DELETE /buckets/{bucket}/quota)
 	DeleteBucketQuota(ctx context.Context, request DeleteBucketQuotaRequestObject) (DeleteBucketQuotaResponseObject, error)
@@ -12399,6 +13688,9 @@ type StrictServerInterface interface {
 	// PutSubBucket Create a sub-bucket, or set its policy
 	// (PUT /buckets/{bucket}/subbuckets/{name})
 	PutSubBucket(ctx context.Context, request PutSubBucketRequestObject) (PutSubBucketResponseObject, error)
+	// ValidateSubBucketPolicy Check a policy for a sub-bucket without setting it
+	// (POST /buckets/{bucket}/subbuckets/{name}/policy/validation)
+	ValidateSubBucketPolicy(ctx context.Context, request ValidateSubBucketPolicyRequestObject) (ValidateSubBucketPolicyResponseObject, error)
 	// DeleteBucketTagRules Remove the tag rules of a bucket
 	// (DELETE /buckets/{bucket}/tag-rules)
 	DeleteBucketTagRules(ctx context.Context, request DeleteBucketTagRulesRequestObject) (DeleteBucketTagRulesResponseObject, error)
@@ -12462,6 +13754,12 @@ type StrictServerInterface interface {
 	// UpdatePolicy Change a policy
 	// (PUT /policies/{name})
 	UpdatePolicy(ctx context.Context, request UpdatePolicyRequestObject) (UpdatePolicyResponseObject, error)
+	// GetPolicyCatalogue What a policy can say
+	// (GET /policy-catalogue)
+	GetPolicyCatalogue(ctx context.Context, request GetPolicyCatalogueRequestObject) (GetPolicyCatalogueResponseObject, error)
+	// ValidatePolicy Check a named policy, or the inline policy of a new API key, without storing it
+	// (POST /policy-validation)
+	ValidatePolicy(ctx context.Context, request ValidatePolicyRequestObject) (ValidatePolicyResponseObject, error)
 	// ListRoles List roles
 	// (GET /roles)
 	ListRoles(ctx context.Context, request ListRolesRequestObject) (ListRolesResponseObject, error)
@@ -12599,6 +13897,32 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// ExplainAccess operation middleware
+func (sh *strictHandler) ExplainAccess(w http.ResponseWriter, r *http.Request, params ExplainAccessParams) {
+	var request ExplainAccessRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ExplainAccess(ctx, request.(ExplainAccessRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ExplainAccess")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ExplainAccessResponseObject); ok {
+		if err := validResponse.VisitExplainAccessResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // ListAudit operation middleware
@@ -13192,6 +14516,40 @@ func (sh *strictHandler) PutBucketPolicy(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// ValidateBucketPolicy operation middleware
+func (sh *strictHandler) ValidateBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, params ValidateBucketPolicyParams) {
+	var request ValidateBucketPolicyRequestObject
+
+	request.Bucket = bucket
+	request.Params = params
+
+	var body ValidateBucketPolicyJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ValidateBucketPolicy(ctx, request.(ValidateBucketPolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ValidateBucketPolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ValidateBucketPolicyResponseObject); ok {
+		if err := validResponse.VisitValidateBucketPolicyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // DeleteBucketQuota operation middleware
 func (sh *strictHandler) DeleteBucketQuota(w http.ResponseWriter, r *http.Request, bucket BucketName, params DeleteBucketQuotaParams) {
 	var request DeleteBucketQuotaRequestObject
@@ -13588,6 +14946,41 @@ func (sh *strictHandler) PutSubBucket(w http.ResponseWriter, r *http.Request, bu
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PutSubBucketResponseObject); ok {
 		if err := validResponse.VisitPutSubBucketResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ValidateSubBucketPolicy operation middleware
+func (sh *strictHandler) ValidateSubBucketPolicy(w http.ResponseWriter, r *http.Request, bucket BucketName, name SubBucketName, params ValidateSubBucketPolicyParams) {
+	var request ValidateSubBucketPolicyRequestObject
+
+	request.Bucket = bucket
+	request.Name = name
+	request.Params = params
+
+	var body ValidateSubBucketPolicyJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ValidateSubBucketPolicy(ctx, request.(ValidateSubBucketPolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ValidateSubBucketPolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ValidateSubBucketPolicyResponseObject); ok {
+		if err := validResponse.VisitValidateSubBucketPolicyResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -14178,6 +15571,63 @@ func (sh *strictHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request, na
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(UpdatePolicyResponseObject); ok {
 		if err := validResponse.VisitUpdatePolicyResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetPolicyCatalogue operation middleware
+func (sh *strictHandler) GetPolicyCatalogue(w http.ResponseWriter, r *http.Request) {
+	var request GetPolicyCatalogueRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetPolicyCatalogue(ctx, request.(GetPolicyCatalogueRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetPolicyCatalogue")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetPolicyCatalogueResponseObject); ok {
+		if err := validResponse.VisitGetPolicyCatalogueResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ValidatePolicy operation middleware
+func (sh *strictHandler) ValidatePolicy(w http.ResponseWriter, r *http.Request, params ValidatePolicyParams) {
+	var request ValidatePolicyRequestObject
+
+	request.Params = params
+
+	var body ValidatePolicyJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ValidatePolicy(ctx, request.(ValidatePolicyRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ValidatePolicy")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ValidatePolicyResponseObject); ok {
+		if err := validResponse.VisitValidatePolicyResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

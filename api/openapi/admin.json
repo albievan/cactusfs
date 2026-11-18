@@ -591,7 +591,7 @@
           "buckets"
         ],
         "summary": "Set the policy of a bucket",
-        "description": "Sets the bucket's policy, in place of the one it had: the document S3's `GetBucketPolicy` answers\nfrom then on. The language is that of identity policies with `Principal` (ADR-0011); every resource\nis the bucket or keys in it; no statement may allow `s3:BypassGovernanceRetention`, and nothing that\nwrites, deletes or configures is ever allowed to a caller who has not authenticated, whatever the\ndocument says. A document of more than 20 KiB, or one that does not keep to these rules, is refused\nwith 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept.\n",
+        "description": "Sets the bucket's policy, in place of the one it had: the document S3's `GetBucketPolicy` answers\nfrom then on. The language is that of identity policies with `Principal` (ADR-0011); every resource\nis the bucket or keys in it; no statement may allow `s3:BypassGovernanceRetention`, and nothing that\nwrites, deletes or configures is ever allowed to a caller who has not authenticated, whatever the\ndocument says. A document of more than 20 KiB, or one that does not keep to these rules, is refused\nwith 400 and the problem code `InvalidPolicy`, and the policy the bucket had is kept. The problem\nthen carries `faults`: every fault of the document, located, as `validateBucketPolicy` gives them.\n",
         "x-cactusfs-action": "s3:PutBucketPolicy",
         "parameters": [
           {
@@ -626,7 +626,7 @@
             }
           },
           "400": {
-            "description": "The document is not a bucket policy that can be kept (`code` is `InvalidPolicy`); `detail` says\nwhat is wrong with it.\n",
+            "description": "The document is not a bucket policy that can be kept (`code` is `InvalidPolicy`); `detail` says\nwhat is wrong with it first, and `faults` says every fault, where it is.\n",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -662,6 +662,63 @@
         "responses": {
           "204": {
             "description": "Removed, or there was none."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/policy/validation": {
+      "post": {
+        "operationId": "validateBucketPolicy",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Check a policy for a bucket without setting it",
+        "description": "Says whether `putBucketPolicy` would take the document, as a document, every fault of it, located,\nand what each of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A\ndocument that is refused is answered 200 with `valid: false` and its faults - never 400; the faults\nare those a `putBucketPolicy` of the same document is refused with. A put of a valid document can\nstill be refused for what is not in the document: a bucket that is not there, say.\n\nIt is authorized as the put is, `s3:PutBucketPolicy` on the bucket: whoever may set the policy may\ncheck one, and nobody else. Nothing is read beyond what the authorization of the put reads - the\nbucket's policy - so a bucket that is not there is no error: its name only confines the document.\n\n`Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and\n`unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives\n`document` twice, in any case, is refused with 400.\n",
+        "x-cactusfs-action": "s3:PutBucketPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BucketPolicyPut"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the document is, and what each of its statements does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyValidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `document`,\n`document` given twice, a name no bucket can have. A refused document is not this: it is a 200.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "default": {
             "$ref": "#/components/responses/Problem"
@@ -752,7 +809,7 @@
           "buckets"
         ],
         "summary": "Create a sub-bucket, or set its policy",
-        "description": "Registers a sub-bucket of the bucket with the policy in the body, or - when the bucket has one of\nthis name - sets its policy in place of the one it had; it keeps the time it was created. Without\n`policy` the sub-bucket has no policy of its own, and one it had is removed. Registering a sub-bucket\nover keys that exist adopts them: nothing is moved, copied or renamed.\n\nA bucket has at most 10 sub-buckets: an 11th is refused with 409 and the problem code\n`TooManySubBuckets`, decided when the change is committed. A name is 1 to 63 lower-case letters,\ndigits and hyphens, beginning and ending with a letter or digit; sub-buckets do not nest.\n\nThe policy is written in the language of bucket policies (ADR-0011) and confined to the sub-bucket:\nevery resource is its keys (`arn:aws:s3:::<bucket>/<name>/*`), or the bucket for listing; its actions\nare those on objects and listing. It cannot allow `s3:BypassGovernanceRetention`, cannot allow\nanything to a caller who has not authenticated, and cannot deny listing. A document that does not\nkeep to these rules, or is larger than 20 KiB, is refused with 400 and the problem code\n`InvalidPolicy`, and nothing is changed.\n\nThe authorizer judges a request on a key of the sub-bucket by the caller's own policies, the\nbucket's policy and this one together: a deny in any refuses, an allow in any allows. Having this\naction is worth what `s3:PutBucketPolicy` is, for the sub-bucket's keys.\n",
+        "description": "Registers a sub-bucket of the bucket with the policy in the body, or - when the bucket has one of\nthis name - sets its policy in place of the one it had; it keeps the time it was created. Without\n`policy` the sub-bucket has no policy of its own, and one it had is removed. Registering a sub-bucket\nover keys that exist adopts them: nothing is moved, copied or renamed.\n\nA bucket has at most 10 sub-buckets: an 11th is refused with 409 and the problem code\n`TooManySubBuckets`, decided when the change is committed. A name is 1 to 63 lower-case letters,\ndigits and hyphens, beginning and ending with a letter or digit; sub-buckets do not nest.\n\nThe policy is written in the language of bucket policies (ADR-0011) and confined to the sub-bucket:\nevery resource is its keys (`arn:aws:s3:::<bucket>/<name>/*`), or the bucket for listing; its actions\nare those on objects and listing. It cannot allow `s3:BypassGovernanceRetention`, cannot allow\nanything to a caller who has not authenticated, and cannot deny listing. A document that does not\nkeep to these rules, or is larger than 20 KiB, is refused with 400 and the problem code\n`InvalidPolicy`, and nothing is changed. The problem then carries `faults`: every fault of the\ndocument, located, as `validateSubBucketPolicy` gives them.\n\nThe authorizer judges a request on a key of the sub-bucket by the caller's own policies, the\nbucket's policy and this one together: a deny in any refuses, an allow in any allows. Having this\naction is worth what `s3:PutBucketPolicy` is, for the sub-bucket's keys.\n",
         "x-cactusfs-action": "s3:PutSubBucket",
         "parameters": [
           {
@@ -790,7 +847,7 @@
             }
           },
           "400": {
-            "description": "The policy is not one a sub-bucket can have (`code` is `InvalidPolicy`; `detail` says what is\nwrong with it), or the name is not one a sub-bucket can have (`code` is `InvalidArgument`).\n",
+            "description": "The policy is not one a sub-bucket can have (`code` is `InvalidPolicy`; `detail` says what is\nwrong with it first, and `faults` every fault, where it is), or the name is not one a sub-bucket\ncan have (`code` is `InvalidArgument`).\n",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -852,6 +909,66 @@
           },
           "409": {
             "description": "The bucket holds keys under the sub-bucket's name (`code` is `SubBucketNotEmpty`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/buckets/{bucket}/subbuckets/{name}/policy/validation": {
+      "post": {
+        "operationId": "validateSubBucketPolicy",
+        "tags": [
+          "buckets"
+        ],
+        "summary": "Check a policy for a sub-bucket without setting it",
+        "description": "Says whether `putSubBucket` would take the policy, as a document, every fault of it, located, and\nwhat each of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A policy\nthat is refused is answered 200 with `valid: false` and its faults - never 400; the faults are those\na `putSubBucket` with the same policy is refused with. A put of a valid policy can still be refused\nfor what is not in it: a bucket that is not there, or an 11th sub-bucket, say.\n\nThe body is the put's own, with `policy` required: a sub-bucket without a policy has nothing to\nvalidate. It is authorized as the put is, `s3:PutSubBucket` on the bucket, and neither the bucket\nnor the sub-bucket is looked up: their names only confine the document.\n\n`Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and\n`unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives\n`policy` twice, in any case, is refused with 400.\n",
+        "x-cactusfs-action": "s3:PutSubBucket",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BucketName"
+          },
+          {
+            "$ref": "#/components/parameters/SubBucketName"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubBucketPolicyValidationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the policy is, and what each of its statements does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyValidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `policy`,\n`policy` given twice, a name no bucket or sub-bucket can have. A refused policy is not this: it\nis a 200.\n",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2719,7 +2836,7 @@
           "keys"
         ],
         "summary": "Create an API key for a user",
-        "description": "The key acts as the user and can never do more than the user can. An inline policy narrows it further.\nThe secret key is returned once.\n",
+        "description": "The key acts as the user and can never do more than the user can. An inline policy narrows it further.\nThe secret key is returned once.\n\nAn inline policy that is not one is refused with 400 and the problem code `InvalidArgument`; the\nproblem then carries `faults`: every fault of the document, located, as `validatePolicy` with\n`key_owner` gives them.\n",
         "x-cactusfs-action": "admin:CreateAPIKey",
         "parameters": [
           {
@@ -3170,7 +3287,7 @@
           "policies"
         ],
         "summary": "Create a policy",
-        "description": "A policy document in the IAM policy language. Anything in it that is not understood is refused.\n",
+        "description": "A policy document in the IAM policy language. Anything in it that is not understood is refused.\n\nA document that is not one is refused with 400 and the problem code `InvalidArgument`; the problem\nthen carries `faults`: every fault of the document, located, as `validatePolicy` gives them.\n",
         "x-cactusfs-action": "admin:PutPolicy",
         "parameters": [
           {
@@ -3242,6 +3359,7 @@
           "policies"
         ],
         "summary": "Change a policy",
+        "description": "Sets the document of the policy, in place of the one it had. A document that is not one is refused\nwith 400 and the problem code `InvalidArgument`; the problem then carries `faults`: every fault of\nthe document, located, as `validatePolicy` gives them.\n",
         "x-cactusfs-action": "admin:PutPolicy",
         "parameters": [
           {
@@ -3301,6 +3419,257 @@
         "responses": {
           "204": {
             "description": "Deleted."
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/policy-catalogue": {
+      "get": {
+        "operationId": "getPolicyCatalogue",
+        "tags": [
+          "policies"
+        ],
+        "summary": "What a policy can say",
+        "description": "The catalogue of the policy language, as this node understands it (ADR-0032): every action a policy\ncan grant, with what it allows, the resources it is asked on and how policies may grant it; the\ncondition keys and their operators; the kinds of resource; the limits of a document; and the forms\nof a bucket policy's `Principal`. It is a property of the release of the node asked: in a deployment\nbeing upgraded, two nodes may answer two catalogues, and each validates by its own.\n\nA caller without `admin:GetPolicyCatalogue` is refused with 403 (`code` is `AccessDenied`). A node\nof a release without the catalogue answers 404 with the code `NotFound`.\n",
+        "x-cactusfs-action": "admin:GetPolicyCatalogue",
+        "responses": {
+          "200": {
+            "description": "The catalogue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyCatalogue"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/policy-validation": {
+      "post": {
+        "operationId": "validatePolicy",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Check a named policy, or the inline policy of a new API key, without storing it",
+        "description": "Says whether the put would take the document, as a document, every fault of it, located, and what\neach of its statements does (ADR-0032). Nothing is stored, and nothing is changed. A document that\nis refused is answered 200 with `valid: false` and its faults - never 400; the faults are those the\nput of the same document is refused with. A put of a valid document can still be refused for what\nis not in the document: a name that is built in, a policy that exists already, a key made by a key\nthat has a policy of its own, say.\n\nIt is authorized as the put is: `admin:PutPolicy` on `policy/<name>`, or on `policy` when no `name`\nis given; with `key_owner` the document is the inline policy of a new API key of that user, and the\nrequest needs `admin:CreateAPIKey` on `user/<key_owner>` instead - and is refused with 403, audited,\nwhen it is made with an API key that has an inline policy of its own, as `createAPIKey` refuses it.\nWhoever may store the document may check it, and nobody else.\n\n`Idempotency-Key` is accepted and has no effect, since nothing is changed, as for `signIn` and\n`unlockSession`. With a session the CSRF token is required, as for every POST. A body that gives\n`document` twice, in any case, is refused with 400.\n",
+        "x-cactusfs-action": "admin:PutPolicy",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CSRFToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyValidationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the document is, and what each of its statements does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyValidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not one (`code` is `InvalidArgument`): a body that is not JSON, no `document`,\n`document` given twice, both `name` and `key_owner`, a name that is not a name. A refused document\nis not this: it is a 200.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Problem"
+          }
+        }
+      }
+    },
+    "/access/explain": {
+      "get": {
+        "operationId": "explainAccess",
+        "tags": [
+          "policies"
+        ],
+        "summary": "Who may do this? What the authorizer decides for a subject, and why",
+        "description": "What the authorizer would decide for one subject - a user, as a console session of theirs; an API\nkey, as its owner bounded by its inline policy; or a caller without credentials - asking one action\non one resource, and why (ADR-0032). The decision is the authorizer's own, at this node's time:\nthere is no simulation at another time. Nothing is changed but the audit trail.\n\n**Who may ask.** The caller needs `admin:ExplainAccess` on the subject: `user/<name>` for a user, the\nowner of the key for a key, `anonymous` for a caller without credentials. An answer about an `s3:`\naction on a bucket tells what the bucket's policy says, so it also needs `s3:GetBucketPolicy` on the\nbucket; one whose key or listing prefix could lie in a sub-bucket also needs `s3:GetSubBucketPolicy`\non it. Without them - or when such a policy cannot be read - the request is refused as a whole with\n403, and the refusal is written to the audit trail.\n\n**What is told.** A statement that had a say is named - policy, document, statement, Sid - only\nwhere the caller may read the policy it is in; otherwise it keeps its source and effect, and\n`readable` is false. The verdict and its source are always given. A disabled user, a key whose owner\nis disabled and an expired key would not authenticate: the answer says so, and gives no decision.\nThe ownership of a version is not considered (`not_considered`).\n\n**Recorded.** Every answer after authorization - 200, 400 and 404 alike - is written to the audit\ntrail before it is given, never with a policy document. When it cannot be written the answer is not\ngiven: 503, or 500 when the store cannot say whether it was. A GET needs no CSRF token.\n",
+        "x-cactusfs-action": "admin:ExplainAccess",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "query",
+            "description": "The user asked about, as a console session of theirs. One of `user`, `access_key_id` and `anonymous`.",
+            "schema": {
+              "$ref": "#/components/schemas/Name"
+            }
+          },
+          {
+            "name": "access_key_id",
+            "in": "query",
+            "description": "The API key asked about - its owner, bounded by its inline policy. One of `user`, `access_key_id` and `anonymous`.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "anonymous",
+            "in": "query",
+            "description": "A caller without credentials, when `true`; only `true` names it. One of `user`, `access_key_id` and `anonymous`.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": true,
+            "description": "An action of the catalogue (`getPolicyCatalogue`), without a wildcard.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "bucket",
+            "in": "query",
+            "description": "The bucket, for an `s3:` action but `s3:ListAllMyBuckets`.",
+            "schema": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 63
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "description": "The key of the object, for an action on objects.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "admin_resource",
+            "in": "query",
+            "description": "The administrative resource, for an `admin:` action - `<kind>` or `<kind>/<name>`, as the templates of the catalogue.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "list_prefix",
+            "in": "query",
+            "description": "The prefix of a listing, for the listing actions only. It decides whether a sub-bucket's policy has a say.",
+            "schema": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "source_ip",
+            "in": "query",
+            "description": "The address the request would come from, IPv4 or IPv6 without a zone. Without it the address is\nunknown, and a condition on `aws:SourceIp` is decided against the request.\n",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secure_transport",
+            "in": "query",
+            "description": "Whether the request would arrive over TLS.",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The decision and why, as far as the caller may read it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessExplanation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not one (`code` is `InvalidArgument`): no subject or more than one, an action that\nis not in the catalogue or has a wildcard, a resource that is not of a template of the action, a\n`list_prefix` for an action that lists nothing, a `source_ip` that is no address.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not ask about the subject, may not read a policy the answer depends on, or such a\npolicy cannot be read (`code` is `AccessDenied`). The refusal is written to the audit trail.\n",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The user or the key is not there (`code` is `NoSuchEntity`); told only after authorization.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The answer could not be written to the audit trail, and is not given (`code` is\n`ServiceUnavailable`).\n",
+            "headers": {
+              "Retry-After": {
+                "description": "After how many seconds to send the request again.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "default": {
             "$ref": "#/components/responses/Problem"
@@ -4092,6 +4461,14 @@
           },
           "request_id": {
             "type": "string"
+          },
+          "faults": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Every fault of the policy document the request sent, located, the first first - present only on\na 400 that refuses a policy document: `InvalidPolicy` from `putBucketPolicy` and `putSubBucket`,\n`InvalidArgument` from `createPolicy`, `updatePolicy` and `createAPIKey`. They are the faults its\nvalidation gives (ADR-0032).\n",
+            "items": {
+              "$ref": "#/components/schemas/PolicyFault"
+            }
           }
         }
       },
@@ -6020,6 +6397,586 @@
         "properties": {
           "document": {
             "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "PolicyValidationRequest": {
+        "type": "object",
+        "description": "A named policy, or the inline policy of a new API key, to validate.",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          },
+          "name": {
+            "$ref": "#/components/schemas/Name"
+          },
+          "key_owner": {
+            "$ref": "#/components/schemas/Name"
+          }
+        }
+      },
+      "SubBucketPolicyValidationRequest": {
+        "type": "object",
+        "description": "The policy of a sub-bucket to validate: the body of `putSubBucket`, with `policy` required.\n",
+        "required": [
+          "policy"
+        ],
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/PolicyDocument"
+          }
+        }
+      },
+      "PolicyFault": {
+        "type": "object",
+        "description": "One thing wrong with a policy document, and where it is.",
+        "required": [
+          "pointer",
+          "reason"
+        ],
+        "properties": {
+          "pointer": {
+            "type": "string",
+            "description": "Where in the document as sent, as an RFC 6901 JSON pointer; `\"\"` is the whole document. A field\nthat may be one string or a list (`Action`, `Resource`, a `Principal`'s `AWS`, a condition's\nvalues) is pointed at without an index when it is a single string (`/Statement/0/Action`) and with\none when it is a list (`/Statement/0/Action/1`). A field that is missing is pointed at by the\nobject it is missing from.\n"
+          },
+          "statement": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The index of the statement the fault is in, from 0; absent outside a statement."
+          },
+          "reason": {
+            "type": "string",
+            "description": "What is wrong, as text for a person to read, in the words of the parser - the first fault's is the\ntext the put's error has, its leading words included. It is not for programs to parse: its wording\nmay change between releases; `pointer` and `statement` say where the fault is.\n"
+          }
+        }
+      },
+      "PolicyValidation": {
+        "type": "object",
+        "description": "What a validation says of a document. `valid` is true exactly when `faults` is empty: the put would\ntake the document, as a document; it may still refuse for what is not in it.\n",
+        "required": [
+          "valid",
+          "faults",
+          "truncated",
+          "statements"
+        ],
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "faults": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Every fault found, the first first.",
+            "items": {
+              "$ref": "#/components/schemas/PolicyFault"
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The document had more than 100 faults; the first 100 are given."
+          },
+          "statements": {
+            "type": "array",
+            "maxItems": 64,
+            "description": "What each statement does, in order; empty when the document is not valid.",
+            "items": {
+              "$ref": "#/components/schemas/StatementAnalysis"
+            }
+          }
+        }
+      },
+      "StatementAnalysis": {
+        "type": "object",
+        "description": "What one statement of a valid document does. It classifies and decides nothing: conditions and\nother statements are not weighed.\n",
+        "required": [
+          "index",
+          "effect",
+          "actions",
+          "anonymous_actions",
+          "never_anonymous",
+          "unmatched_patterns"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The statement's index in the document, from 0."
+          },
+          "sid": {
+            "type": "string",
+            "description": "Its Sid, when it has one."
+          },
+          "effect": {
+            "type": "string",
+            "description": "Values are only ever added to.",
+            "enum": [
+              "Allow",
+              "Deny"
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "description": "The actions of the answering node's catalogue its action patterns cover. An action that no\nwildcard grants is covered by an `Allow` only when the `Allow` names it.\n",
+            "items": {
+              "type": "string"
+            }
+          },
+          "open_to_anyone": {
+            "type": "boolean",
+            "description": "A bucket's or a sub-bucket's policy only - an `Allow` whose principals include `*`."
+          },
+          "anonymous_actions": {
+            "type": "array",
+            "description": "Of `actions`, those a caller without credentials could be let in to by the statement, before its\nconditions; empty but in an open statement of a bucket's policy.\n",
+            "items": {
+              "type": "string"
+            }
+          },
+          "never_anonymous": {
+            "type": "array",
+            "description": "Of `actions`, those the statement names for anyone that are never allowed without credentials:\nit allows them to every user, and to nobody who has not authenticated.\n",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unmatched_patterns": {
+            "type": "array",
+            "description": "The statement's action patterns, as written, that cover no action of the answering node's\ncatalogue - a misspelling, or an action of another release. The parser takes them.\n",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PolicyCatalogue": {
+        "type": "object",
+        "description": "What a policy can say, as the answering node understands it.",
+        "required": [
+          "version",
+          "actions",
+          "condition_keys",
+          "resources",
+          "limits",
+          "bucket_policy_principals"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The one `Version` a document may have, `2012-10-17`."
+          },
+          "actions": {
+            "type": "array",
+            "description": "Every action a policy can grant.",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueAction"
+            }
+          },
+          "condition_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueConditionKey"
+            }
+          },
+          "resources": {
+            "type": "array",
+            "description": "The kinds of resource a policy can name, and their templates.",
+            "items": {
+              "$ref": "#/components/schemas/CatalogueResource"
+            }
+          },
+          "limits": {
+            "$ref": "#/components/schemas/PolicyLimits"
+          },
+          "bucket_policy_principals": {
+            "$ref": "#/components/schemas/PolicyPrincipalForms"
+          }
+        }
+      },
+      "CatalogueAction": {
+        "type": "object",
+        "description": "One action a policy can grant.",
+        "required": [
+          "name",
+          "group",
+          "description",
+          "resources",
+          "read",
+          "by_name_only",
+          "in_bucket_policy",
+          "anonymous",
+          "in_sub_bucket_policy"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The action as a policy names it, `s3:GetObject`."
+          },
+          "group": {
+            "type": "string",
+            "description": "The part of the product it belongs to, as a title. Groups are only ever added."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the action allows, in a sentence."
+          },
+          "resources": {
+            "type": "array",
+            "description": "The templates of the resources it is asked on, such as `arn:aws:s3:::{bucket}/{key}` or\n`arn:cactusfs:admin:::user/{name}`.\n",
+            "items": {
+              "type": "string"
+            }
+          },
+          "read": {
+            "type": "boolean",
+            "description": "It changes nothing; it reads."
+          },
+          "by_name_only": {
+            "type": "boolean",
+            "description": "No wildcard of an `Allow` grants it: a statement allows it only by naming it, and no bucket policy\nallows it. A `Deny` covers it however it is written.\n"
+          },
+          "in_bucket_policy": {
+            "type": "boolean",
+            "description": "A bucket policy may allow it."
+          },
+          "anonymous": {
+            "type": "boolean",
+            "description": "A bucket policy can open it to a caller who has not authenticated."
+          },
+          "in_sub_bucket_policy": {
+            "type": "boolean",
+            "description": "The policy of a sub-bucket may name it, by its full name."
+          }
+        }
+      },
+      "CatalogueConditionKey": {
+        "type": "object",
+        "description": "One condition key of the language.",
+        "required": [
+          "key",
+          "operators",
+          "value_kind",
+          "when_unknown"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The key as a policy names it, `aws:SourceIp`."
+          },
+          "operators": {
+            "type": "array",
+            "description": "The operators that may test it, and no others.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "value_kind": {
+            "type": "string",
+            "description": "The kind of the values it is compared with. Values are only ever added to.",
+            "enum": [
+              "ip_prefix",
+              "bool",
+              "date_time",
+              "string"
+            ]
+          },
+          "when_unknown": {
+            "type": "string",
+            "description": "What the condition does when the request does not tell the key's value."
+          }
+        }
+      },
+      "CatalogueResource": {
+        "type": "object",
+        "description": "One kind of resource a policy can name.",
+        "required": [
+          "kind",
+          "template",
+          "description"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The kind, `bucket` or `user`."
+          },
+          "template": {
+            "type": "string",
+            "description": "The resource as a policy writes it, with placeholders in braces, `arn:aws:s3:::{bucket}`."
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyLimits": {
+        "type": "object",
+        "description": "The bounds of a policy document.",
+        "required": [
+          "max_bytes",
+          "max_statements",
+          "max_values",
+          "max_depth"
+        ],
+        "properties": {
+          "max_bytes": {
+            "type": "integer",
+            "description": "The largest document, in bytes as sent."
+          },
+          "max_statements": {
+            "type": "integer",
+            "description": "The most statements a document may have."
+          },
+          "max_values": {
+            "type": "integer",
+            "description": "The most actions, resources, principals or values of one condition a statement may have."
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "How many levels below the document a value may be nested."
+          }
+        }
+      },
+      "PolicyPrincipalForms": {
+        "type": "object",
+        "description": "The forms the `Principal` of a statement of a bucket's policy may take.",
+        "required": [
+          "anyone",
+          "user_arn_prefix"
+        ],
+        "properties": {
+          "anyone": {
+            "type": "array",
+            "description": "The forms, as JSON text, that name every caller, anonymous ones included.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user_arn_prefix": {
+            "type": "string",
+            "description": "The beginning of the name of a user of this deployment, `arn:aws:iam:::user/`: a principal\n`{\"AWS\": \"<prefix><name>\"}`, or a list of these and `*` under `AWS`.\n"
+          }
+        }
+      },
+      "AccessExplanation": {
+        "type": "object",
+        "description": "The answer to \"Who may do this?\". When `authenticates` is false the subject would not\nauthenticate, and `allowed`, `source`, `rule`, `statements`, `key_policy` and `unknown_address` are\nabsent.\n",
+        "required": [
+          "subject",
+          "request",
+          "authenticates",
+          "assumed",
+          "not_considered"
+        ],
+        "properties": {
+          "subject": {
+            "$ref": "#/components/schemas/ExplainedSubject"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ExplainedRequest"
+          },
+          "authenticates": {
+            "type": "boolean"
+          },
+          "not_authenticated": {
+            "type": "string",
+            "description": "Why the subject would not authenticate. Values are only ever added to.",
+            "enum": [
+              "user_disabled",
+              "key_expired"
+            ]
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "The decision."
+          },
+          "source": {
+            "$ref": "#/components/schemas/DecisionSource"
+          },
+          "rule": {
+            "type": "string",
+            "description": "The rule that answered, when `source` is `rule`. Values are only ever added to.",
+            "enum": [
+              "root",
+              "anonymous",
+              "service",
+              "node",
+              "locked_session",
+              "no_user"
+            ]
+          },
+          "statements": {
+            "type": "array",
+            "description": "The statements that matched, of every source.",
+            "items": {
+              "$ref": "#/components/schemas/CitedStatement"
+            }
+          },
+          "key_policy": {
+            "$ref": "#/components/schemas/KeyPolicyVerdict"
+          },
+          "unknown_address": {
+            "type": "array",
+            "description": "The statements whose condition on `aws:SourceIp` was decided without an address.",
+            "items": {
+              "$ref": "#/components/schemas/CitedStatement"
+            }
+          },
+          "assumed": {
+            "$ref": "#/components/schemas/ExplanationAssumptions"
+          },
+          "not_considered": {
+            "type": "array",
+            "description": "What the answer leaves out: `object_ownership` when, and only when, the action is\n`admin:PreviewObject`, the one action that asks who made a version. Values are only ever added to.\n",
+            "items": {
+              "type": "string",
+              "enum": [
+                "object_ownership"
+              ]
+            }
+          }
+        }
+      },
+      "ExplainedSubject": {
+        "type": "object",
+        "description": "Whom an explanation is about.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Values are only ever added to.",
+            "enum": [
+              "user",
+              "access_key",
+              "anonymous"
+            ]
+          },
+          "user": {
+            "type": "string",
+            "description": "The user, or the owner of the key."
+          },
+          "access_key_id": {
+            "type": "string",
+            "description": "The key asked about."
+          }
+        }
+      },
+      "ExplainedRequest": {
+        "type": "object",
+        "description": "What was decided.",
+        "required": [
+          "action",
+          "resource"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string",
+            "description": "The resource, as its ARN."
+          },
+          "list_prefix": {
+            "type": "string"
+          }
+        }
+      },
+      "DecisionSource": {
+        "type": "string",
+        "description": "Where a decision, or a statement, came from. `owner` is not given while the ownership of a version\nis not considered. Values are only ever added to.\n",
+        "enum": [
+          "none",
+          "rule",
+          "identity-policy",
+          "bucket-policy",
+          "sub-bucket-policy",
+          "api-key-policy",
+          "owner"
+        ]
+      },
+      "CitedStatement": {
+        "type": "object",
+        "description": "A statement that had a say. Where `readable` is false the caller may not read the policy it is in,\nand only its source and effect are given: \"a policy you may not read\".\n",
+        "required": [
+          "source",
+          "effect",
+          "readable"
+        ],
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/DecisionSource"
+          },
+          "effect": {
+            "type": "string",
+            "description": "Values are only ever added to.",
+            "enum": [
+              "Allow",
+              "Deny"
+            ]
+          },
+          "readable": {
+            "type": "boolean"
+          },
+          "policy": {
+            "type": "string",
+            "description": "The name of a named policy; absent for a bucket's, a sub-bucket's or a key's."
+          },
+          "document_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The index of the document in its source, from 0."
+          },
+          "statement_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The index of the statement in its document, from 0."
+          },
+          "sid": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyPolicyVerdict": {
+        "type": "object",
+        "description": "What the inline policy of an API key said, for a key that has one.",
+        "required": [
+          "allowed",
+          "statements"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CitedStatement"
+            }
+          }
+        }
+      },
+      "ExplanationAssumptions": {
+        "type": "object",
+        "description": "What a decision was made with.",
+        "required": [
+          "time",
+          "secure_transport"
+        ],
+        "properties": {
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The answering node's time."
+          },
+          "source_ip": {
+            "type": "string",
+            "description": "The address of the request; absent, it was unknown."
+          },
+          "secure_transport": {
+            "type": "boolean"
           }
         }
       },
