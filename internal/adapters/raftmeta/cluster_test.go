@@ -812,6 +812,11 @@ func TestJoinAndLeave(t *testing.T) {
 	}
 	c.stop("m1")
 	c.stop("m2")
+	// The three voters left elect a leader among them - one of the two
+	// stopped may have led - before the write: a write while there is none
+	// is answered as unavailable, which is the store's answer, not this
+	// test's question.
+	c.leader()
 	if err := c.store("g4").CreateBucket(ctx, bucket.Bucket{Name: "with-three-of-five"}); err != nil {
 		t.Fatalf("write with three of five voters: %v", err)
 	}
@@ -828,6 +833,7 @@ func TestJoinAndLeave(t *testing.T) {
 		return err == nil && len(members) == 4
 	})
 	c.stop("m3")
+	c.leader()
 	if err := c.store("g4").CreateBucket(ctx, bucket.Bucket{Name: "with-two-of-three"}); err != nil {
 		t.Fatalf("write after the removal, with two of three voters: %v", err)
 	}
