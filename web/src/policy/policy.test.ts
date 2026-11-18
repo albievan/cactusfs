@@ -189,6 +189,22 @@ describe('the reader', () => {
     expect(reading).toMatchObject({ status: 'kept', reason, pointer });
   });
 
+  it('nests no deeper than the catalogue it is given says, and 8 without one', () => {
+    const nested = '{"Id":[[[[[[[[[]]]]]]]]]}';
+    expect(read(nested)).toMatchObject({ status: 'kept', reason: 'nested too deeply' });
+    const view = (depth: number): PolicyCatalogueView => ({ version: '2012-10-17', actions: [], condition_keys: [], limits: { max_depth: depth } });
+    expect(read(nested, 'identity', view(10))).toMatchObject({ status: 'kept', reason: 'unknown field "Id"' });
+    expect(read('{"Id":[[[]]]}', 'identity', view(2))).toMatchObject({ status: 'kept', reason: 'nested too deeply', pointer: '/Id/0/0' });
+    expect(read(identity(allow), 'identity', view(3))).toMatchObject({ status: 'read' });
+  });
+
+  it('nests no deeper than 64 whatever a catalogue says', () => {
+    const view: PolicyCatalogueView = { version: '2012-10-17', actions: [], condition_keys: [], limits: { max_depth: 1_000_000 } };
+    const nested = (n: number): string => `{"Id":${'['.repeat(n)}${']'.repeat(n)}}`;
+    expect(read(nested(64), 'identity', view)).toMatchObject({ status: 'kept', reason: 'unknown field "Id"' });
+    expect(read(nested(65), 'identity', view)).toMatchObject({ status: 'kept', reason: 'nested too deeply' });
+  });
+
   it('says where a text that is not JSON stops being JSON', () => {
     expect(read('{"Version" "x"}')).toEqual({ status: 'kept', reason: 'not JSON: unexpected "\\"" at character 11', pointer: '', offset: 11 });
   });

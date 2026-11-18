@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 
 import { api, unwrap, type Policy } from '../api/client';
+import { canonicalPolicy } from '../policy/read';
 import { ConfirmButton } from '../ui/ConfirmButton';
 import {
   formatPolicyDocument,
@@ -13,6 +14,14 @@ import {
 } from '../ui/format';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
+import { PolicyBuilder } from '../ui/PolicyBuilder';
+import {
+  requireValid,
+  usePolicyTools,
+  usePolicyValidation,
+  useRefusal,
+  type PolicyTools,
+} from '../ui/policyHooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
 
 function loadPolicies() {
@@ -20,18 +29,27 @@ function loadPolicies() {
 }
 
 /**
- * The policies. A policy document is edited as JSON text; the console checks
- * that it is JSON and leaves the rest to the API, to which it is sent as
- * typed (`typedPolicy`): a key typed twice reaches the API, which refuses it,
- * rather than JavaScript keeping its last value. Built-in policies are only
- * shown.
+ * The policies. A policy document is made with the policy builder beside its
+ * JSON, or typed as JSON; the JSON is what is sent, as typed
+ * (`typedPolicy`): a key typed twice reaches the API, which refuses it,
+ * rather than JavaScript keeping its last value. While the builder is there
+ * the node checks the document as it is typed, and a document it finds a
+ * fault in is not sent. Built-in policies are only shown.
  */
 export function PoliciesScreen() {
   const policies = useLoad(loadPolicies);
   const action = useAction();
+  const tools = usePolicyTools();
   const [name, setName] = useState('');
   const [document, setDocument] = useState('');
   const [open, setOpen] = useState<string | null>(null);
+  const refusal = useRefusal();
+  // An empty document is not checked: the form is only being opened.
+  const validation = usePolicyValidation(
+    document,
+    { name: name === '' ? undefined : name },
+    tools.catalogue.status !== 'unavailable',
+  );
 
   const create = (event: FormEvent) => {
     event.preventDefault();
@@ -43,9 +61,15 @@ export function PoliciesScreen() {
       return;
     }
     void action.run(async () => {
-      await unwrap(
-        api.POST('/policies', { body: { name, document: typed.document }, bodySerializer: () => typed.body }),
-      );
+      await requireValid(validation);
+      try {
+        await unwrap(
+          api.POST('/policies', { body: { name, document: typed.document }, bodySerializer: () => typed.body }),
+        );
+      } catch (error) {
+        refusal.keep(document, error);
+        throw error;
+      }
       setName('');
       setDocument('');
       policies.reload();
@@ -84,24 +108,19 @@ export function PoliciesScreen() {
               }}
             />
           </label>
-          <label className="field field-full">
-            <span>Policy document as JSON</span>
-            <textarea
-              className="form-control"
-              name="document"
-              required
-              rows={10}
-              spellCheck={false}
-              aria-describedby="create-policy-size"
-              value={document}
-              onChange={(event) => {
-                setDocument(event.target.value);
-              }}
-            />
-          </label>
-          <p id="create-policy-size" className="form-hint field-full">
-            {POLICY_SIZE_HINT}
-          </p>
+          <PolicyBuilder
+            id="create-policy"
+            label="Policy document as JSON"
+            name="document"
+            required
+            rows={10}
+            text={document}
+            onChange={setDocument}
+            tools={tools}
+            validation={validation}
+            refused={refusal.faultsFor(document)}
+            hint={POLICY_SIZE_HINT}
+          />
           <div className="form-actions d-flex flex-wrap gap-2">
             <button type="submit" className="btn btn-primary" disabled={action.busy} title="Create this policy">
               <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Create policy</span>
@@ -116,6 +135,7 @@ export function PoliciesScreen() {
           key={`${opened.name}\n${formatPolicyDocument(opened.document)}`}
           policy={opened}
           action={action}
+          tools={tools}
           onSaved={policies.reload}
           onClose={() => {
             setOpen(null);
@@ -182,6 +202,8 @@ export function PoliciesScreen() {
 interface PolicyEditorProps {
   policy: Policy;
   action: Action;
+  /** The node's catalogue and buckets, read once for the screen. */
+  tools: PolicyTools;
   onSaved: () => void;
   /** Closes the editor; without it the editor has no Close button. */
   onClose?: () => void;
@@ -189,17 +211,33 @@ interface PolicyEditorProps {
 
 /**
  * Shows a policy document and, unless the policy is built in, lets it be
- * changed. The document is sent as typed; a stored one that indented would
- * be larger than the API takes is shown compact.
+ * changed, with the policy builder beside its JSON. The document is sent as
+ * typed, and only when it says something other than the stored one; a
+ * stored one that indented would be larger than the API takes is shown
+ * compact. While the builder is there, a document the node finds a fault in
+ * is not sent.
  */
-export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorProps) {
+export function PolicyEditor({ policy, action, tools, onSaved, onClose }: PolicyEditorProps) {
   const heading = `edit-policy-${policy.name}`;
-  const hint = `edit-policy-${policy.name}-size`;
   const [layout] = useState(() => policyLayout(policy.document));
   const [text, setText] = useState(layout.text);
+  const [unchanged, setUnchanged] = useState(false);
+  const refusal = useRefusal();
+  // The stored document is not checked as it is opened: only once it is
+  // changed. Checking it asks for admin:PutPolicy, which a reader may not
+  // hold - and a refusal would be audited for a change nobody asked for.
+  const changed = canonicalPolicy(text) !== canonicalPolicy(layout.text);
+  const validation = usePolicyValidation(
+    text,
+    { name: policy.name },
+    !policy.built_in && changed && tools.catalogue.status !== 'unavailable',
+  );
 
   const save = (event: FormEvent) => {
     event.preventDefault();
+    if (policy.built_in) {
+      return;
+    }
     let typed: TypedPolicy;
     try {
       typed = typedPolicy('document', text);
@@ -207,14 +245,26 @@ export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorP
       action.fail(error);
       return;
     }
+    // The same document, laid out otherwise or not at all, is not sent (ADR-0032).
+    const same = canonicalPolicy(text);
+    if (same !== undefined && same === canonicalPolicy(layout.text)) {
+      setUnchanged(true);
+      return;
+    }
     void action.run(async () => {
-      await unwrap(
-        api.PUT('/policies/{name}', {
-          params: { path: { name: policy.name } },
-          body: { document: typed.document },
-          bodySerializer: () => typed.body,
-        }),
-      );
+      await requireValid(validation);
+      try {
+        await unwrap(
+          api.PUT('/policies/{name}', {
+            params: { path: { name: policy.name } },
+            body: { document: typed.document },
+            bodySerializer: () => typed.body,
+          }),
+        );
+      } catch (error) {
+        refusal.keep(text, error);
+        throw error;
+      }
       onSaved();
     });
   };
@@ -226,28 +276,29 @@ export function PolicyEditor({ policy, action, onSaved, onClose }: PolicyEditorP
         {policy.built_in ? ' (built-in, read-only)' : ''}
       </h2>
       <form className="form-grid" onSubmit={save}>
-        <label className="field field-full">
-          <span>Policy document of {policy.name} as JSON</span>
-          <textarea
-            className="form-control"
-            name="document"
-            required
-            rows={14}
-            spellCheck={false}
-            readOnly={policy.built_in}
-            aria-describedby={policy.built_in ? undefined : hint}
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value);
-            }}
-          />
-        </label>
-        {policy.built_in ? null : (
-          <p id={hint} className="form-hint field-full">
-            {layout.compact ? `${POLICY_COMPACT_HINT} ` : ''}
-            {POLICY_SIZE_HINT}
-          </p>
-        )}
+        <PolicyBuilder
+          id={heading}
+          label={`Policy document of ${policy.name} as JSON`}
+          name="document"
+          required
+          rows={14}
+          text={text}
+          onChange={
+            policy.built_in
+              ? undefined
+              : (changed) => {
+                  setText(changed);
+                  setUnchanged(false);
+                }
+          }
+          tools={tools}
+          validation={policy.built_in ? undefined : validation}
+          refused={refusal.faultsFor(text)}
+          hint={policy.built_in ? undefined : `${layout.compact ? `${POLICY_COMPACT_HINT} ` : ''}${POLICY_SIZE_HINT}`}
+        />
+        <p className="form-hint field-full" role="status">
+          {unchanged ? 'Nothing has changed, so there is nothing to save.' : ''}
+        </p>
         <div className="form-actions d-flex flex-wrap gap-2">
           {policy.built_in ? null : (
             <button type="submit" className="btn btn-primary" disabled={action.busy} title="Save this policy document">

@@ -41,9 +41,18 @@ type Json =
 /**
  * How deeply a document may nest, as the API's parsers count it
  * (`maxPolicyDepth` in internal/domain/iam/policy.go): a value nested deeper
- * is refused there, and is not read here.
+ * is refused there, and is not read here. A catalogue that gives its own
+ * bound (`limits.max_depth`) is read by that instead: it is the bound of the
+ * node that answered it.
  */
 const MOST_DEPTH = 8;
+
+/**
+ * The deepest a catalogue may make the reader go, whatever it says: the
+ * reader descends by recursion, and a node's answer is not to choose how
+ * deep the console's stack goes.
+ */
+export const DEEPEST = 64;
 
 /** Why a text is kept as it is. */
 class Unreadable extends Error {
@@ -86,9 +95,11 @@ const ESCAPES: Readonly<Record<string, string>> = {
 class Scanner {
   private at = 0;
   private readonly text: string;
+  private readonly mostDepth: number;
 
-  constructor(text: string) {
+  constructor(text: string, mostDepth: number = MOST_DEPTH) {
     this.text = text;
+    this.mostDepth = mostDepth;
   }
 
   /** Reads the text as one JSON value, with nothing after it but white space. */
@@ -124,7 +135,7 @@ class Scanner {
 
   private value(pointer: string, depth: number): Json {
     this.space();
-    if (depth > MOST_DEPTH) {
+    if (depth > this.mostDepth) {
       throw new Unreadable('nested too deeply', pointer);
     }
     const c = this.text.charAt(this.at);
@@ -504,7 +515,8 @@ function kept(cause: unknown): PolicyKept {
 export function readPolicy(text: string, kind: PolicyKind, catalogue?: PolicyCatalogueView): PolicyReading {
   let policy: PolicyModel;
   try {
-    policy = policyOf(new Scanner(text).document(), kind);
+    const depth = Math.min(catalogue?.limits?.max_depth ?? MOST_DEPTH, DEEPEST);
+    policy = policyOf(new Scanner(text, depth).document(), kind);
   } catch (cause) {
     return kept(cause);
   }

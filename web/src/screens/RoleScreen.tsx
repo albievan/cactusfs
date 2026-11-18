@@ -7,6 +7,7 @@ import { formatPolicyDocument, formatTime, joinNames } from '../ui/format';
 import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { NamesEditor } from '../ui/NamesEditor';
+import { usePolicyTools, type PolicyTools } from '../ui/policyHooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
 import { PolicyEditor } from './PoliciesScreen';
 
@@ -24,6 +25,7 @@ export function RoleScreen({ name }: RoleScreenProps) {
   const loadRole = useCallback(() => unwrap(api.GET('/roles/{name}', { params: { path: { name } } })), [name]);
   const role = useLoad(loadRole);
   const action = useAction();
+  const tools = usePolicyTools();
   const [editing, setEditing] = useState(false);
 
   const save = (names: string[]) => {
@@ -112,7 +114,7 @@ export function RoleScreen({ name }: RoleScreenProps) {
       </section>
 
       {attached.map((policyName) => (
-        <RolePolicy key={policyName} name={policyName} action={action} />
+        <RolePolicy key={policyName} name={policyName} action={action} tools={tools} />
       ))}
     </>
   );
@@ -122,7 +124,7 @@ export function RoleScreen({ name }: RoleScreenProps) {
  * One policy of the role, fetched by its name: whoever may read this policy
  * sees it, whatever else they may not list.
  */
-function RolePolicy({ name, action }: { name: string; action: Action }) {
+function RolePolicy({ name, action, tools }: { name: string; action: Action; tools: PolicyTools }) {
   const load = useCallback(() => unwrap(api.GET('/policies/{name}', { params: { path: { name } } })), [name]);
   const policy = useLoad(load);
 
@@ -155,6 +157,7 @@ function RolePolicy({ name, action }: { name: string; action: Action }) {
         key={`${name}\n${formatPolicyDocument(policy.data.document)}`}
         policy={policy.data}
         action={action}
+        tools={tools}
         onSaved={policy.reload}
       />
     </>

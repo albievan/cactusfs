@@ -5,6 +5,8 @@ import { ConfirmButton } from '../ui/ConfirmButton';
 import { formatPolicyDocument, formatTime, POLICY_SIZE_HINT, typedPolicy } from '../ui/format';
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
+import { PolicyBuilder } from '../ui/PolicyBuilder';
+import { requireValid, usePolicyTools, usePolicyValidation, useRefusal } from '../ui/policyHooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
 
 interface ApiKeysProps {
@@ -15,7 +17,10 @@ interface ApiKeysProps {
 /**
  * The API keys of one user: list, create, revoke. The secret of a new key is
  * in the answer to its creation and nowhere else, so it is held in the state
- * of this component only until the reader says it has been copied.
+ * of this component only until the reader says it has been copied. The
+ * inline policy of a new key is made with the policy builder beside its
+ * JSON, or typed as JSON; while the builder is there the node checks it as
+ * it is typed, and a key whose policy it finds a fault in is not asked for.
  */
 export function ApiKeys({ user }: ApiKeysProps) {
   const load = useCallback(
@@ -28,6 +33,10 @@ export function ApiKeys({ user }: ApiKeysProps) {
   const [expires, setExpires] = useState('');
   const [policy, setPolicy] = useState('');
   const [created, setCreated] = useState<APIKeyCreated | null>(null);
+  const refusal = useRefusal();
+  const tools = usePolicyTools();
+  // An empty inline policy is no policy, and is never checked.
+  const validation = usePolicyValidation(policy, { keyOwner: user }, tools.catalogue.status !== 'unavailable');
 
   const create = (event: FormEvent) => {
     event.preventDefault();
@@ -55,13 +64,22 @@ export function ApiKeys({ user }: ApiKeysProps) {
       return;
     }
     void action.run(async () => {
-      const answer = await unwrap(
-        api.POST('/users/{name}/keys', {
-          params: { path: { name: user } },
-          body: { ...body, inline_policy: inlinePolicy },
-          bodySerializer: () => sent,
-        }),
-      );
+      if (inlinePolicy !== undefined) {
+        await requireValid(validation);
+      }
+      let answer: APIKeyCreated;
+      try {
+        answer = await unwrap(
+          api.POST('/users/{name}/keys', {
+            params: { path: { name: user } },
+            body: { ...body, inline_policy: inlinePolicy },
+            bodySerializer: () => sent,
+          }),
+        );
+      } catch (error) {
+        refusal.keep(policy, error);
+        throw error;
+      }
       setCreated(answer);
       setDescription('');
       setExpires('');
@@ -118,23 +136,18 @@ export function ApiKeys({ user }: ApiKeysProps) {
             }}
           />
         </label>
-        <label className="field field-full">
-          <span>Inline policy as JSON (optional; narrows what the key may do)</span>
-          <textarea
-            className="form-control"
-            name="policy"
-            rows={6}
-            spellCheck={false}
-            aria-describedby="api-key-policy-size"
-            value={policy}
-            onChange={(event) => {
-              setPolicy(event.target.value);
-            }}
-          />
-        </label>
-        <p id="api-key-policy-size" className="form-hint field-full">
-          {POLICY_SIZE_HINT}
-        </p>
+        <PolicyBuilder
+          id="api-key-policy"
+          label="Inline policy as JSON (optional; narrows what the key may do)"
+          name="policy"
+          rows={6}
+          text={policy}
+          onChange={setPolicy}
+          tools={tools}
+          validation={validation}
+          refused={refusal.faultsFor(policy)}
+          hint={POLICY_SIZE_HINT}
+        />
         <div className="form-actions d-flex flex-wrap gap-2">
           <button
             type="submit"

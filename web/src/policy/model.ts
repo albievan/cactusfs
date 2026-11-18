@@ -82,6 +82,8 @@ export interface PolicyCatalogueView {
   condition_keys: readonly { key: string; operators: readonly string[] }[];
   /** The forms of a bucket policy's Principal: `anyone` as JSON text, and how a user is named. */
   bucket_policy_principals?: { anyone: readonly string[]; user_arn_prefix: string };
+  /** The bounds of a document; the reader nests no deeper than `max_depth`. */
+  limits?: { max_depth: number };
 }
 
 /** What a mark is about. */

@@ -3314,3 +3314,276 @@ details[open] > summary .node-card-mark {
     min-height: 44px;
   }
 }
+
+/* The policy builder (ADR-0032, PLAN 9.8): the builder and the JSON it comes
+   to side by side on a wide screen, the builder first; one above the other
+   below that, and on a phone every row of a picker is one column and every
+   control one a finger can hit. Without the catalogue the JSON is alone. */
+.policy-editor {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.policy-builder,
+.policy-alone {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (min-width: 62rem) {
+  .policy-builder {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+
+  .policy-builder .policy-json {
+    position: sticky;
+    top: 1rem;
+  }
+}
+
+.policy-json {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.policy-json .form-hint {
+  margin: 0;
+}
+
+.policy-notice,
+.policy-kept {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  color: var(--night-green);
+  background: var(--sand);
+  border-left: 4px solid var(--dune);
+  border-radius: 0.5rem;
+}
+
+.policy-kept {
+  border-left-color: var(--danger);
+}
+
+.policy-pane {
+  min-width: 0;
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.policy-pane-title,
+.policy-statement-title {
+  float: none;
+  width: auto;
+  margin: 0 0 0.5rem;
+  padding: 0 0.25rem;
+  color: var(--night-green);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.policy-version {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+}
+
+.policy-statement {
+  min-width: 0;
+  margin: 0 0 0.75rem;
+  padding: 0.75rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--saguaro);
+  border-radius: 0.6rem;
+}
+
+.policy-row,
+.policy-add {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.policy-add-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.policy-field {
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+.policy-field-title {
+  margin: 0 0 0.35rem;
+  color: var(--night-green);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.policy-picker {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.policy-empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.policy-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-chip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.1rem 0.2rem 0.1rem 0.5rem;
+  overflow-wrap: anywhere;
+  background: var(--sand);
+  border: 1px solid var(--dune);
+  border-radius: 1rem;
+}
+
+.policy-chip code {
+  color: var(--night-green);
+}
+
+.policy-chip-flagged {
+  border-color: var(--danger);
+}
+
+.policy-chip-flag {
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
+.policy-chip-remove {
+  padding: 0.1rem 0.35rem;
+  color: var(--night-green);
+}
+
+.policy-group > summary,
+.policy-covers > summary {
+  color: var(--night-green);
+  font-weight: 600;
+}
+
+.policy-action-list,
+.policy-covers-list {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-action-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.4rem;
+  padding: 0.15rem 0;
+}
+
+.policy-action-what {
+  flex-basis: 100%;
+  padding-left: 1.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.policy-covers-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+}
+
+.policy-notes {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-fault {
+  color: var(--danger);
+}
+
+.policy-mark {
+  color: var(--muted);
+}
+
+.policy-json-faults {
+  padding: 0.5rem 0.75rem;
+  background: var(--danger-soft);
+  border-radius: 0.5rem;
+}
+
+.policy-json-faults .policy-fault {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem;
+}
+
+/* The live region is never hidden: one that is not shown is not heard. */
+.policy-check {
+  margin: 0;
+  color: var(--muted);
+}
+
+.policy-statement-actions {
+  margin-top: 0.75rem;
+}
+
+@media (max-width: 575.98px) {
+  .policy-builder,
+  .policy-row,
+  .policy-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .policy-pane,
+  .policy-statement {
+    padding: 0.5rem;
+  }
+
+  .policy-add .btn,
+  .policy-statement-actions .btn,
+  .policy-pane > .btn,
+  .policy-json-faults .btn,
+  .policy-chip-remove {
+    min-height: 44px;
+  }
+
+  .policy-chip-remove {
+    min-width: 44px;
+  }
+
+  .policy-group > summary,
+  .policy-covers > summary,
+  .policy-action-list li {
+    min-height: 44px;
+    padding-top: 0.6rem;
+  }
+
+  .policy-action-what {
+    padding-left: 0;
+  }
+}

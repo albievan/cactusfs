@@ -65,6 +65,20 @@ export type Role = Schemas['Role'];
 export type Policy = Schemas['Policy'];
 /** A policy document in the IAM policy language. */
 export type PolicyDocument = Schemas['PolicyDocument'];
+/** What a policy can say, as the answering node understands it (ADR-0032). */
+export type PolicyCatalogue = Schemas['PolicyCatalogue'];
+/** One action a policy can grant, as the catalogue gives it. */
+export type CatalogueAction = Schemas['CatalogueAction'];
+/** One condition key of the policy language, as the catalogue gives it. */
+export type CatalogueConditionKey = Schemas['CatalogueConditionKey'];
+/** One kind of resource a policy can name, and its template. */
+export type CatalogueResource = Schemas['CatalogueResource'];
+/** What a validation says of a policy document: its faults, and what each statement does. */
+export type PolicyValidation = Schemas['PolicyValidation'];
+/** One thing wrong with a policy document, and where it is. */
+export type PolicyFault = Schemas['PolicyFault'];
+/** What one statement of a valid document does, as the node classifies it. */
+export type StatementAnalysis = Schemas['StatementAnalysis'];
 /** An API key, without its secret. */
 export type APIKey = Schemas['APIKey'];
 /** A new API key together with its secret, which is returned once. */
