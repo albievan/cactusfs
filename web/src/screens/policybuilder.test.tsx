@@ -5,7 +5,17 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, expect, it } from 'vitest';
 
 import type { PolicyCatalogue, PolicyFault, PolicyValidation, StatementAnalysis } from '../api/client';
-import { CSRF_TOKEN, fakeApi, json, refusal, signedIn, type Call, type FakeApi, type Handler } from '../test/fakeApi';
+import {
+  CSRF_TOKEN,
+  fakeApi,
+  holdRequests,
+  json,
+  refusal,
+  signedIn,
+  type Call,
+  type FakeApi,
+  type Handler,
+} from '../test/fakeApi';
 import {
   CATALOGUE_FAILED_NOTICE,
   CATALOGUE_REFUSED_NOTICE,
@@ -107,8 +117,28 @@ function document(label = JSON_LABEL): unknown {
   return JSON.parse(jsonBox(label).value);
 }
 
-/** The builder (of the editor in `within`, if given), once the catalogue is there. */
+/**
+ * Asks for the builder as a user does, with "Open the policy builder" (of an
+ * editor in `within` if it has one, else of the screen, whose editors share
+ * one catalogue): the catalogue is asked for then, never as a screen is
+ * shown or a policy focused.
+ */
+async function touch(within_: HTMLElement = window.document.body): Promise<void> {
+  // The JSON of an editor is in the page once the screen has read what it shows.
+  await waitFor(() => {
+    expect(within_.querySelector('.policy-editor textarea')).not.toBeNull();
+  });
+  const open =
+    within(within_).queryAllByRole('button', { name: 'Open the policy builder' })[0] ??
+    screen.queryAllByRole('button', { name: 'Open the policy builder' })[0];
+  if (open !== undefined) {
+    fireEvent.click(open);
+  }
+}
+
+/** The builder (of the editor in `within`, if given), once a policy was touched and the catalogue is there. */
 async function builder(within_: HTMLElement = window.document.body): Promise<HTMLElement> {
+  await touch(within_);
   return within(within_).findByRole('group', { name: 'Policy builder' });
 }
 
@@ -148,6 +178,10 @@ describe('the catalogue', () => {
     });
     render(<PoliciesScreen />);
 
+    // Shown, the screen asks nothing of the catalogue; touched, it does.
+    await screen.findByLabelText(JSON_LABEL);
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(0);
+    await touch();
     expect(await screen.findByText(notice)).toBeDefined();
     expect(screen.queryByRole('group', { name: 'Policy builder' })).toBeNull();
     fireEvent.change(screen.getByLabelText('Policy name'), { target: { value: 'p' } });
@@ -172,6 +206,7 @@ describe('the catalogue', () => {
     });
     render(<ApiKeys user="bob" />);
 
+    await touch();
     expect(await screen.findByText(OLDER_NODE_NOTICE)).toBeDefined();
     typeInto(jsonBox('Inline policy as JSON (optional; narrows what the key may do)'), typed);
     fireEvent.click(screen.getByRole('button', { name: 'Create API key' }));
@@ -619,6 +654,83 @@ describe('saving', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
     expect(await screen.findByText('Nothing has changed, so there is nothing to save.')).toBeDefined();
     expect(api.callsTo('PUT', '/policies/get-only')).toHaveLength(0);
+  });
+
+  it.each([
+    ['the Policies screen', () => <PoliciesScreen />, JSON_LABEL],
+    ['the API keys of a user', () => <ApiKeys user="bob" />, 'Inline policy as JSON (optional; narrows what the key may do)'],
+    ['a role', () => <RoleScreen name="uploader" />, 'Policy document of put-only as JSON'],
+  ])('asks nothing of the catalogue when %s is only viewed, and asks once when a policy is first edited', async (_, screenOf, label) => {
+    const api = builderNode(() => json(200, verdict()), {
+      'GET /roles/uploader': () => json(200, { name: 'uploader', policies: ['put-only'], built_in: false, created_at: CREATED }),
+      'GET /policies/put-only': () => json(200, { name: 'put-only', document: ONE, built_in: false, created_at: CREATED }),
+    });
+    render(screenOf());
+    const box = await screen.findByLabelText(label);
+    // Viewing is not touching: a caller without admin:GetPolicyCatalogue is refused nothing, and nothing is audited.
+    await new Promise((resolve) => setTimeout(resolve, VALIDATION_DELAY_MS * 2));
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(0);
+    expect(screen.queryByRole('group', { name: 'Policy builder' })).toBeNull();
+
+    typeInto(box, JSON.stringify(ONE));
+    typeInto(box, JSON.stringify({ ...ONE, Statement: [] }));
+    expect(await screen.findByRole('group', { name: 'Policy builder' })).toBeDefined();
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(1);
+  });
+
+  it('asks nothing of the catalogue when an editor or a read-only built-in policy is focused', async () => {
+    const builtIn = {
+      name: 'read-only',
+      document: { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: ['s3:Get*'], Resource: '*' }] },
+      built_in: true,
+      created_at: CREATED,
+    };
+    const api = builderNode(() => json(200, verdict()), { 'GET /policies': () => json(200, [builtIn]) });
+    render(<PoliciesScreen />);
+    fireEvent.click(await screen.findByRole('button', { name: 'View policy read-only' }));
+    const readOnly = jsonBox('Policy document of read-only as JSON');
+    expect(readOnly.readOnly).toBe(true);
+    // A reader tabbing through: nothing is asked, and a read-only policy offers no builder to open.
+    fireEvent.focus(readOnly);
+    fireEvent.focus(jsonBox());
+    await new Promise((resolve) => setTimeout(resolve, VALIDATION_DELAY_MS * 2));
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(0);
+    expect(within(panelOf('read-only')).queryByRole('button', { name: 'Open the policy builder' })).toBeNull();
+    // Typing into a read-only box changes nothing, and asks nothing.
+    fireEvent.change(readOnly, { target: { value: '{}' } });
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(0);
+
+    // The first edit of an editable policy asks, once.
+    typeInto(jsonBox(), JSON.stringify(ONE));
+    expect(await screen.findAllByRole('group', { name: 'Policy builder' })).toHaveLength(2);
+    expect(api.callsTo('GET', '/policy-catalogue')).toHaveLength(1);
+  });
+
+  it('checks a save made while the catalogue is still loading, once, with the bytes it sends', async () => {
+    let answerCatalogue: (() => void) | undefined;
+    const api = builderNode(() => json(200, verdict()), {
+      'POST /policies': () => json(201, { name: 'p', document: {}, built_in: false, created_at: CREATED }),
+    });
+    holdRequests('/policy-catalogue', (release) => {
+      answerCatalogue = release;
+    });
+    render(<PoliciesScreen />);
+    fireEvent.change(screen.getByLabelText('Policy name'), { target: { value: 'p' } });
+    const typed = JSON.stringify(ONE);
+    typeInto(jsonBox(), typed);
+    fireEvent.click(screen.getByRole('button', { name: 'Create policy' }));
+    // The save waits for the catalogue: nothing is sent unchecked.
+    await new Promise((resolve) => setTimeout(resolve, VALIDATION_DELAY_MS));
+    expect(api.callsTo('POST', '/policies')).toHaveLength(0);
+    expect(api.callsTo('POST', '/policy-validation')).toHaveLength(0);
+
+    answerCatalogue?.();
+    await waitFor(() => {
+      expect(api.callsTo('POST', '/policies')).toHaveLength(1);
+    });
+    const checks = api.callsTo('POST', '/policy-validation');
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.body).toBe(api.callsTo('POST', '/policies')[0]?.body);
   });
 
   it('edits the policies of a role with the builder, one catalogue for them all', async () => {

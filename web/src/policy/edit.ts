@@ -1,4 +1,4 @@
-import type { ConditionBlock, PolicyModel, Statement, Strings, Text } from './model';
+import type { ConditionBlock, PolicyModel, Principal, Statement, Strings, Text } from './model';
 import { valuesOf } from './model';
 
 // The changes the builder makes to a policy's model (ADR-0032, PLAN 9.8):
@@ -143,4 +143,47 @@ export function fillTemplate(template: string, values: readonly string[]): strin
 /** The number of placeholders of a template. */
 export function placeholdersOf(template: string): number {
   return template.match(/\{[^{}]+\}/g)?.length ?? 0;
+}
+
+/**
+ * The names of a Principal, in the order written: the string itself, or the
+ * values of its AWS. None when it is not written, or has no AWS.
+ */
+export function principalValues(principal: Principal | undefined): Text[] {
+  if (principal === undefined) {
+    return [];
+  }
+  if (principal.form === 'string') {
+    return [principal.value];
+  }
+  return principal.aws === undefined ? [] : valuesOf(principal.aws);
+}
+
+/**
+ * A Principal with one more name under AWS: one not written becomes
+ * `{"AWS": [name]}`, the string `"*"` becomes `{"AWS": ["*", name]}`. A name
+ * that is there already is not added again, and what is there keeps its
+ * form.
+ */
+export function withPrincipal(principal: Principal | undefined, name: string): Principal {
+  if (principal === undefined) {
+    return { form: 'object', aws: { form: 'list', values: [name] } };
+  }
+  if (principal.form === 'string') {
+    return principal.value === name
+      ? principal
+      : { form: 'object', aws: { form: 'list', values: [principal.value, name] } };
+  }
+  return { form: 'object', aws: withValue(principal.aws, name) };
+}
+
+/**
+ * A Principal without its i-th name: a string Principal is then not written
+ * at all (undefined); what is left under AWS is a list.
+ */
+export function withoutPrincipal(principal: Principal, index: number): Principal | undefined {
+  if (principal.form === 'string') {
+    return undefined;
+  }
+  return { form: 'object', aws: withoutValue(principal.aws ?? { form: 'list', values: [] }, index) };
 }

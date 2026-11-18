@@ -5,11 +5,14 @@ import {
   fillTemplate,
   namesAction,
   placeholdersOf,
+  principalValues,
   removeStatement,
   withCondition,
   withoutAction,
   withoutCondition,
+  withoutPrincipal,
   withoutValue,
+  withPrincipal,
   withValue,
 } from './edit';
 import { lineOf, locatePointer, pointerTokens } from './locate';
@@ -139,5 +142,51 @@ describe('the changes the builder makes', () => {
     expect(fillTemplate('arn:aws:s3:::{bucket}', ['a', 'b'])).toBeUndefined();
     expect(placeholdersOf('arn:aws:s3:::{bucket}/{key}')).toBe(2);
     expect(placeholdersOf('arn:cactusfs:admin:::audit')).toBe(0);
+  });
+
+  it.each([
+    ['not written', undefined, 'arn:aws:iam:::user/alice', { AWS: ['arn:aws:iam:::user/alice'] }],
+    ['"*"', { form: 'string', value: '*' }, 'arn:aws:iam:::user/alice', { AWS: ['*', 'arn:aws:iam:::user/alice'] }],
+    ['"*" given "*" again', { form: 'string', value: '*' }, '*', '*'],
+    ['{"AWS": "*"}', { form: 'object', aws: { form: 'one', value: '*' } }, '*', { AWS: '*' }],
+    [
+      '{"AWS": "user"}',
+      { form: 'object', aws: { form: 'one', value: 'arn:aws:iam:::user/bob' } },
+      '*',
+      { AWS: ['arn:aws:iam:::user/bob', '*'] },
+    ],
+    ['{} without AWS', { form: 'object' }, '*', { AWS: ['*'] }],
+  ] as const)('adds a principal to one %s, keeping what is there in its form', (_, principal, name, want) => {
+    const added = withPrincipal(principal, name);
+    const policy: PolicyModel = { kind: 'bucket', statements: [{ principal: added }] };
+    expect((JSON.parse(writePolicy(policy).text) as { Statement: { Principal: unknown }[] }).Statement[0]?.Principal).toEqual(want);
+  });
+
+  it('lists the names of a principal in the order written, and removes one', () => {
+    expect(principalValues(undefined)).toEqual([]);
+    expect(principalValues({ form: 'object' })).toEqual([]);
+    expect(principalValues({ form: 'string', value: '*' })).toEqual(['*']);
+    const both = withPrincipal({ form: 'object', aws: { form: 'one', value: 'a' } }, 'b');
+    expect(principalValues(both)).toEqual(['a', 'b']);
+    expect(principalValues(withoutPrincipal(both, 0))).toEqual(['b']);
+    // A string principal removed is no Principal at all.
+    expect(withoutPrincipal({ form: 'string', value: '*' }, 0)).toBeUndefined();
+    expect(withoutPrincipal({ form: 'object' }, 0)).toEqual({ form: 'object', aws: { form: 'list', values: [] } });
+  });
+
+  it('reads a bucket policy with every principal form and writes it back as written', () => {
+    const text = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [
+        { Effect: 'Allow', Principal: '*', Action: 's3:GetObject', Resource: '*' },
+        { Effect: 'Allow', Principal: { AWS: '*' }, Action: 's3:GetObject', Resource: '*' },
+        { Effect: 'Allow', Principal: { AWS: ['arn:aws:iam:::user/a', '*'] }, Action: 's3:GetObject', Resource: '*' },
+      ],
+    });
+    const reading = readPolicy(text, 'bucket');
+    expect(reading.status).toBe('read');
+    if (reading.status === 'read') {
+      expect(JSON.parse(writePolicy(reading.policy).text)).toEqual(JSON.parse(text));
+    }
   });
 });

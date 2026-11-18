@@ -14,18 +14,30 @@ import {
   fillTemplate,
   namesAction,
   placeholdersOf,
+  principalValues,
   removeStatement,
   sidOf,
   withCondition,
   withoutAction,
   withoutCondition,
+  withoutPrincipal,
   withoutValue,
+  withPrincipal,
   withValue,
 } from '../policy/edit';
 import { lineOf, locatePointer, pointerTokens } from '../policy/locate';
-import type { PolicyMark, PolicyModel, PolicyReading, Statement, Strings } from '../policy/model';
+import type {
+  PolicyKind,
+  PolicyMark,
+  PolicyModel,
+  PolicyReading,
+  Principal,
+  Statement,
+  Strings,
+  Text,
+} from '../policy/model';
 import { valuesOf } from '../policy/model';
-import { readPolicy } from '../policy/read';
+import { canonicalPolicy, readPolicy } from '../policy/read';
 import { writePolicy } from '../policy/write';
 import { NO_VALIDATION_NOTICE, type PolicyTools, type Validation } from './policyHooks';
 import { reasonOf } from './reason';
@@ -41,9 +53,26 @@ import { reasonOf } from './reason';
 // the catalogue - a node of an older release, a caller refused it - the JSON
 // editor works alone, as before.
 
+/**
+ * Where the document is kept, which decides what the builder offers: an
+ * identity policy (a named policy, an API key's inline policy) is about its
+ * holder; a bucket's or a sub-bucket's says whom each statement is about,
+ * and names only that bucket. What is offered for a bucket is what the
+ * catalogue says a bucket policy may allow (`in_bucket_policy`), and for a
+ * sub-bucket what its policy may name (`in_sub_bucket_policy`).
+ */
+export type PolicyScope =
+  | { kind: 'identity' }
+  | { kind: 'bucket'; bucket: string }
+  | { kind: 'sub-bucket'; bucket: string; subBucket: string };
+
+const IDENTITY: PolicyScope = { kind: 'identity' };
+
 interface PolicyBuilderProps {
   /** Begins the ids of the editor's elements: unique on the page. */
   id: string;
+  /** Where the document is kept; an identity policy when not given. */
+  scope?: PolicyScope;
   /** The label of the JSON text box. */
   label: string;
   /** The name of the JSON text box in its form. */
@@ -66,11 +95,12 @@ interface PolicyBuilderProps {
 }
 
 /** What a field of a statement a fault or a mark is at, by its pointer. */
-type Field = 'sid' | 'effect' | 'action' | 'resource' | 'condition' | 'statement';
+type Field = 'sid' | 'effect' | 'principal' | 'action' | 'resource' | 'condition' | 'statement';
 
 const FIELDS: Readonly<Record<string, Field>> = {
   Sid: 'sid',
   Effect: 'effect',
+  Principal: 'principal',
   Action: 'action',
   Resource: 'resource',
   Condition: 'condition',
@@ -148,20 +178,22 @@ function announcement(validation: Validation | undefined, faults: readonly Polic
 }
 
 /** The document as the builder reads it: an empty text is a document of nothing yet. */
-function readingOf(text: string, catalogue: PolicyCatalogue | undefined): PolicyReading {
+function readingOf(text: string, kind: PolicyKind, catalogue: PolicyCatalogue | undefined): PolicyReading {
   if (text.trim() === '') {
-    return { status: 'read', policy: { kind: 'identity' }, marks: [] };
+    return { status: 'read', policy: { kind }, marks: [] };
   }
-  return readPolicy(text, 'identity', catalogue);
+  return readPolicy(text, kind, catalogue);
 }
 
 /**
  * A policy document edited as JSON and, when the answering node has a
- * catalogue for the caller, with the builder beside it. Built for a named
- * policy and an API key's inline policy: identity policies.
+ * catalogue for the caller, with the builder beside it: for a named policy
+ * and an API key's inline policy (identity policies), and for the policy of
+ * a bucket or a sub-bucket (`scope`).
  */
 export function PolicyBuilder({
   id,
+  scope = IDENTITY,
   label,
   name,
   text,
@@ -175,7 +207,7 @@ export function PolicyBuilder({
 }: PolicyBuilderProps) {
   const json = useRef<HTMLTextAreaElement>(null);
   const catalogue = tools.catalogue.status === 'ready' ? tools.catalogue.catalogue : undefined;
-  const reading = useMemo(() => readingOf(text, catalogue), [text, catalogue]);
+  const reading = useMemo(() => readingOf(text, scope.kind, catalogue), [text, scope.kind, catalogue]);
   const faults = faultsNow(validation, refused);
   const hintId = `${id}-size`;
   const faultsId = `${id}-faults`;
@@ -185,7 +217,22 @@ export function PolicyBuilder({
   const said = announcement(validation, faults);
 
   return (
+    // The catalogue is asked for only when an editable policy is first
+    // changed, or the builder is asked for - never as a policy is shown or
+    // focused, so that a reader is refused nothing and nothing is audited.
     <div className="policy-editor field-full">
+      {tools.catalogue.status === 'idle' && onChange !== undefined ? (
+        <p className="policy-open">
+          <button
+            type="button"
+            className="btn btn-outline-secondary btn-sm"
+            title="Read the catalogue of actions from the node, and show the policy builder beside the JSON"
+            onClick={tools.want}
+          >
+            <i className="bi bi-ui-checks" aria-hidden="true" /> <span className="btn-text">Open the policy builder</span>
+          </button>
+        </p>
+      ) : null}
       {tools.catalogue.status === 'unavailable' ? (
         <p className="policy-notice" role="status">
           <i className="bi bi-info-circle" aria-hidden="true" /> {tools.catalogue.notice}
@@ -200,6 +247,7 @@ export function PolicyBuilder({
         {catalogue === undefined ? null : (
           <BuilderPane
             id={id}
+            scope={scope}
             reading={reading}
             catalogue={catalogue}
             buckets={tools.buckets}
@@ -229,7 +277,10 @@ export function PolicyBuilder({
               aria-invalid={faults.length > 0 ? true : undefined}
               value={text}
               onChange={(event) => {
-                onChange?.(event.target.value);
+                if (onChange !== undefined) {
+                  tools.want();
+                  onChange(event.target.value);
+                }
               }}
             />
           </label>
@@ -311,6 +362,7 @@ function JsonFaults({
 
 interface PaneProps {
   id: string;
+  scope: PolicyScope;
   reading: PolicyReading;
   catalogue: PolicyCatalogue;
   buckets: string[] | undefined;
@@ -321,7 +373,7 @@ interface PaneProps {
 }
 
 /** The builder: the statements of the document, or why the JSON cannot be shown so. */
-function BuilderPane({ id, reading, catalogue, buckets, faults, analysis, onChange }: PaneProps) {
+function BuilderPane({ id, scope, reading, catalogue, buckets, faults, analysis, onChange }: PaneProps) {
   const [added, setAdded] = useState<number | null>(null);
   // Counts removals: the statements are known by their place, so after one
   // is removed every statement is drawn anew, and what was being typed into
@@ -370,6 +422,7 @@ function BuilderPane({ id, reading, catalogue, buckets, faults, analysis, onChan
           // A statement is known by its place (the JSON gives it no other name) and the removals before.
           key={`${String(removals)}-${String(i)}`}
           id={`${id}-s${String(i)}`}
+          scope={scope}
           index={i}
           statement={statement}
           catalogue={catalogue}
@@ -439,6 +492,7 @@ function shown(value: string | null): string {
 
 interface StatementProps {
   id: string;
+  scope: PolicyScope;
   index: number;
   statement: Statement;
   catalogue: PolicyCatalogue;
@@ -451,12 +505,49 @@ interface StatementProps {
   onRemove?: () => void;
 }
 
-function StatementEditor({ id, index, statement, catalogue, buckets, notes, analysis, focusOnShow, onChange, onRemove }: StatementProps) {
+/**
+ * The actions of the catalogue offered to a statement of a policy of a kind:
+ * for a bucket's Allow, those a bucket policy may allow (`in_bucket_policy`),
+ * and for its Deny every `s3:` action, since a bucket policy may deny what it
+ * could never allow; for a sub-bucket's, those its policy may name
+ * (`in_sub_bucket_policy`). This narrows only what is offered: what is
+ * typed in the JSON is kept, and the node's validation is the judge.
+ */
+function offeredActions(
+  actions: readonly CatalogueAction[],
+  kind: PolicyKind,
+  deny: boolean,
+): readonly CatalogueAction[] {
+  switch (kind) {
+    case 'bucket':
+      return actions.filter((action) => (deny ? action.name.startsWith('s3:') : action.in_bucket_policy));
+    case 'sub-bucket':
+      return actions.filter((action) => action.in_sub_bucket_policy);
+    default:
+      return actions;
+  }
+}
+
+function StatementEditor({
+  id,
+  scope,
+  index,
+  statement,
+  catalogue,
+  buckets,
+  notes,
+  analysis,
+  focusOnShow,
+  onChange,
+  onRemove,
+}: StatementProps) {
   const n = String(index + 1);
   const at = (field: Field) => notes.filter((note) => fieldOf(note.pointer) === field);
   const effect = statement.effect;
   const notesId = (field: Field) => (at(field).length === 0 ? undefined : `${id}-${field}-notes`);
   const sid = statement.sid;
+  const deny = effect === 'Deny';
+  const actions = useMemo(() => offeredActions(catalogue.actions, scope.kind, deny), [catalogue.actions, scope.kind, deny]);
 
   return (
     <fieldset className="policy-statement">
@@ -517,11 +608,36 @@ function StatementEditor({ id, index, statement, catalogue, buckets, notes, anal
       <Notes notes={at('effect')} id={notesId('effect')} />
       <Notes notes={at('sid')} id={notesId('sid')} />
 
+      {scope.kind === 'identity' ? null : (
+        <PrincipalsField
+          id={`${id}-principals`}
+          n={n}
+          statement={statement}
+          forms={catalogue.bucket_policy_principals}
+          // A sub-bucket's policy never allows anything to anyone (the
+          // contract's putSubBucket): anyone is offered only to a Deny of one.
+          // Like the other sub-bucket rules here (no patterns, keys under
+          // "<sub>/"), this is a console constant that only narrows what is
+          // offered: the node's validation and put are authoritative, and
+          // what is typed in the JSON is sent for them to judge.
+          offerAnyone={scope.kind === 'bucket' || effect === 'Deny'}
+          notes={at('principal')}
+          analysis={analysis}
+          onChange={
+            onChange === undefined
+              ? undefined
+              : (principal) => {
+                  onChange((s) => ({ ...s, principal }));
+                }
+          }
+        />
+      )}
       <ActionsField
         id={`${id}-actions`}
         n={n}
         actions={statement.action}
-        catalogue={catalogue.actions}
+        catalogue={actions}
+        patterns={scope.kind !== 'sub-bucket'}
         notes={at('action')}
         analysis={analysis}
         onChange={
@@ -535,6 +651,7 @@ function StatementEditor({ id, index, statement, catalogue, buckets, notes, anal
       <ResourcesField
         id={`${id}-resources`}
         n={n}
+        scope={scope}
         resources={statement.resource}
         templates={catalogue.resources}
         buckets={buckets}
@@ -569,6 +686,143 @@ function StatementEditor({ id, index, statement, catalogue, buckets, notes, anal
         </div>
       )}
     </fieldset>
+  );
+}
+
+/** The name under AWS that is every caller, anonymous ones included. */
+const ANYONE = '*';
+
+interface PrincipalsProps {
+  id: string;
+  n: string;
+  statement: Statement;
+  /** The forms of a Principal, as the catalogue gives them. */
+  forms: PolicyCatalogue['bucket_policy_principals'];
+  /** Whether anyone is offered as a principal of this statement. */
+  offerAnyone: boolean;
+  notes: readonly Note[];
+  analysis: StatementAnalysis | undefined;
+  onChange?: (principal: Principal | undefined) => void;
+}
+
+/**
+ * Whom a statement of a bucket's or a sub-bucket's policy is about: users of
+ * this deployment, by name, or anyone. Each is kept in the form it is
+ * written - `"*"`, `{"AWS": "*"}` or a list under AWS. Whether the
+ * statement is open to anyone is the node's to say, and it is said here
+ * as the node says it.
+ */
+function PrincipalsField({ id, n, statement, forms, offerAnyone, notes, analysis, onChange }: PrincipalsProps) {
+  const [user, setUser] = useState('');
+  const titleId = `${id}-title`;
+  const notesId = notes.length === 0 ? undefined : `${id}-notes`;
+  const principal = statement.principal;
+  const names = principalValues(principal);
+  // The forms of anyone are JSON text: compared as documents, as the reader compares them.
+  const anyone = useMemo(() => new Set(forms.anyone.map((form) => canonicalPolicy(form))), [forms.anyone]);
+  const isAnyone = (name: Text): boolean =>
+    name !== null &&
+    anyone.has(canonicalPolicy(JSON.stringify(principal?.form === 'string' ? name : { AWS: name })));
+  const hasAnyone = names.some(isAnyone);
+
+  const addUser = () => {
+    const typed = user.trim();
+    if (typed === '' || onChange === undefined) {
+      return;
+    }
+    onChange(withPrincipal(principal, `${forms.user_arn_prefix}${typed}`));
+    setUser('');
+  };
+
+  return (
+    <div className="policy-field" role="group" aria-labelledby={titleId} aria-describedby={notesId}>
+      <p id={titleId} className="policy-field-title">
+        Principals of statement {n}
+      </p>
+      {names.length === 0 ? (
+        <p className="policy-empty">None yet: name the users the statement is about, or anyone.</p>
+      ) : (
+        <ul className="policy-chips">
+          {names.map((name, i) => {
+            const said = isAnyone(name)
+              ? 'anyone'
+              : name?.startsWith(forms.user_arn_prefix) === true
+                ? `user ${name.slice(forms.user_arn_prefix.length)}`
+                : undefined;
+            return (
+              <li key={`${String(i)}${shown(name)}`} className="policy-chip">
+                <code>{shown(name)}</code>
+                {said === undefined ? null : <span className="policy-chip-flag">{said}</span>}
+                {onChange === undefined || principal === undefined ? null : (
+                  <button
+                    type="button"
+                    className="btn btn-link btn-sm policy-chip-remove"
+                    aria-label={`Remove principal ${shown(name)} from statement ${n}`}
+                    title="Remove this principal"
+                    onClick={() => {
+                      onChange(withoutPrincipal(principal, i));
+                    }}
+                  >
+                    <i className="bi bi-x-lg" aria-hidden="true" />
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <Notes notes={notes} id={notesId} />
+      {analysis?.open_to_anyone === true ? (
+        <p className="policy-anyone">
+          <i className="bi bi-globe" aria-hidden="true" /> The node reads this statement as open to anyone.
+        </p>
+      ) : null}
+      {onChange === undefined ? null : (
+        <div className="policy-picker">
+          <div className="policy-add">
+            <label className="field">
+              <span>User name</span>
+              <input
+                className="form-control"
+                aria-label={`User name for statement ${n}`}
+                autoCapitalize="none"
+                autoComplete="off"
+                spellCheck={false}
+                value={user}
+                onKeyDown={onEnter(addUser)}
+                onChange={(event) => {
+                  setUser(event.target.value);
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn btn-outline-secondary"
+              aria-label={`Add user to statement ${n}`}
+              title={`Add the user, named ${forms.user_arn_prefix}<name>`}
+              disabled={user.trim() === ''}
+              onClick={addUser}
+            >
+              <i className="bi bi-person-plus" aria-hidden="true" /> <span className="btn-text">Add user</span>
+            </button>
+            {offerAnyone ? (
+              <button
+                type="button"
+                className="btn btn-outline-secondary"
+                aria-label={`Add anyone to statement ${n}`}
+                title="Add anyone: every caller, those who have not signed in included"
+                disabled={hasAnyone}
+                onClick={() => {
+                  onChange(withPrincipal(principal, ANYONE));
+                }}
+              >
+                <i className="bi bi-globe" aria-hidden="true" /> <span className="btn-text">Add anyone</span>
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -648,13 +902,16 @@ interface ActionsProps {
   id: string;
   n: string;
   actions: Strings | undefined;
+  /** The actions offered: those of the catalogue the policy may hold. */
   catalogue: readonly CatalogueAction[];
+  /** Whether a typed action or pattern is offered: a sub-bucket's policy names its actions in full. */
+  patterns: boolean;
   notes: readonly Note[];
   analysis: StatementAnalysis | undefined;
   onChange?: (actions: Strings) => void;
 }
 
-function ActionsField({ id, n, actions, catalogue, notes, analysis, onChange }: ActionsProps) {
+function ActionsField({ id, n, actions, catalogue, patterns, notes, analysis, onChange }: ActionsProps) {
   const [search, setSearch] = useState('');
   const [pattern, setPattern] = useState('');
   const titleId = `${id}-title`;
@@ -784,33 +1041,35 @@ function ActionsField({ id, n, actions, catalogue, notes, analysis, onChange }: 
           ) : (
             checks(found)
           )}
-          <div className="policy-add">
-            <label className="field">
-              <span>Action pattern</span>
-              <input
-                className="form-control"
-                aria-label={`Action pattern for statement ${n}`}
-                placeholder="s3:Get*"
-                autoCapitalize="none"
-                spellCheck={false}
-                value={pattern}
-                onKeyDown={onEnter(addPattern)}
-                onChange={(event) => {
-                  setPattern(event.target.value);
-                }}
-              />
-            </label>
-            <button
-              type="button"
-              className="btn btn-outline-secondary"
-              aria-label={`Add pattern to statement ${n}`}
-              title="Add the action or pattern as typed: what it covers is the node's to say"
-              disabled={pattern.trim() === ''}
-              onClick={addPattern}
-            >
-              <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Add pattern</span>
-            </button>
-          </div>
+          {patterns ? (
+            <div className="policy-add">
+              <label className="field">
+                <span>Action pattern</span>
+                <input
+                  className="form-control"
+                  aria-label={`Action pattern for statement ${n}`}
+                  placeholder="s3:Get*"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={pattern}
+                  onKeyDown={onEnter(addPattern)}
+                  onChange={(event) => {
+                    setPattern(event.target.value);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-outline-secondary"
+                aria-label={`Add pattern to statement ${n}`}
+                title="Add the action or pattern as typed: what it covers is the node's to say"
+                disabled={pattern.trim() === ''}
+                onClick={addPattern}
+              >
+                <i className="bi bi-plus-lg" aria-hidden="true" /> <span className="btn-text">Add pattern</span>
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </div>
@@ -823,6 +1082,7 @@ const ADMIN_PREFIX = 'arn:cactusfs:admin:::';
 interface ResourcesProps {
   id: string;
   n: string;
+  scope: PolicyScope;
   resources: Strings | undefined;
   templates: readonly CatalogueResource[];
   buckets: string[] | undefined;
@@ -830,10 +1090,30 @@ interface ResourcesProps {
   onChange?: (resources: Strings) => void;
 }
 
-function ResourcesField({ id, n, resources, templates, buckets, notes, onChange }: ResourcesProps) {
-  const [bucket, setBucket] = useState('');
+/**
+ * What the resources of a policy kept where `scope` says are made of: the
+ * bucket, when it is fixed; what the key of an object begins with (a
+ * sub-bucket's name and a slash); and whether administrative resources are
+ * offered (an identity policy's only).
+ */
+function resourceScope(scope: PolicyScope): { bucket?: string; keyPrefix: string; admin: boolean; named: boolean } {
+  switch (scope.kind) {
+    case 'bucket':
+      return { bucket: scope.bucket, keyPrefix: '', admin: false, named: true };
+    case 'sub-bucket':
+      // A sub-bucket not named yet (one being created) has no keys to offer.
+      return { bucket: scope.bucket, keyPrefix: `${scope.subBucket}/`, admin: false, named: scope.subBucket !== '' };
+    default:
+      return { keyPrefix: '', admin: true, named: true };
+  }
+}
+
+function ResourcesField({ id, n, scope, resources, templates, buckets, notes, onChange }: ResourcesProps) {
+  const fixed = resourceScope(scope);
+  const [typedBucket, setBucket] = useState('');
+  const bucket = fixed.bucket ?? typedBucket;
   const [prefix, setPrefix] = useState('');
-  const admin = templates.filter((resource) => resource.template.startsWith(ADMIN_PREFIX));
+  const admin = fixed.admin ? templates.filter((resource) => resource.template.startsWith(ADMIN_PREFIX)) : [];
   const [kind, setKind] = useState(admin[0]?.kind ?? '');
   const [adminName, setAdminName] = useState('');
   const [arn, setArn] = useState('');
@@ -858,7 +1138,11 @@ function ResourcesField({ id, n, resources, templates, buckets, notes, onChange 
     }
   };
   const addObjects = () => {
-    if (objectTemplate !== undefined && add(fillTemplate(objectTemplate.template, [bucket.trim(), `${prefix}*`]))) {
+    if (
+      fixed.named &&
+      objectTemplate !== undefined &&
+      add(fillTemplate(objectTemplate.template, [bucket.trim(), `${fixed.keyPrefix}${prefix}*`]))
+    ) {
       setPrefix('');
     }
   };
@@ -895,30 +1179,36 @@ function ResourcesField({ id, n, resources, templates, buckets, notes, onChange 
         <div className="policy-picker">
           {bucketTemplate === undefined && objectTemplate === undefined ? null : (
             <div className="policy-add">
+              {fixed.bucket === undefined ? (
+                <>
+                  <label className="field">
+                    <span>Bucket</span>
+                    <input
+                      className="form-control"
+                      aria-label={`Bucket for statement ${n}`}
+                      list={buckets === undefined ? undefined : listId}
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={bucket}
+                      onKeyDown={onEnter(addObjects)}
+                      onChange={(event) => {
+                        setBucket(event.target.value);
+                      }}
+                    />
+                  </label>
+                  {buckets === undefined ? null : (
+                    <datalist id={listId}>
+                      {buckets.map((name) => (
+                        <option key={name} value={name} />
+                      ))}
+                    </datalist>
+                  )}
+                </>
+              ) : null}
               <label className="field">
-                <span>Bucket</span>
-                <input
-                  className="form-control"
-                  aria-label={`Bucket for statement ${n}`}
-                  list={buckets === undefined ? undefined : listId}
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  value={bucket}
-                  onKeyDown={onEnter(addObjects)}
-                  onChange={(event) => {
-                    setBucket(event.target.value);
-                  }}
-                />
-              </label>
-              {buckets === undefined ? null : (
-                <datalist id={listId}>
-                  {buckets.map((name) => (
-                    <option key={name} value={name} />
-                  ))}
-                </datalist>
-              )}
-              <label className="field">
-                <span>Prefix (optional)</span>
+                <span>
+                  {fixed.keyPrefix === '' ? 'Prefix (optional)' : `Prefix after ${fixed.keyPrefix} (optional)`}
+                </span>
                 <input
                   className="form-control"
                   aria-label={`Prefix (optional) for statement ${n}`}
@@ -948,8 +1238,12 @@ function ResourcesField({ id, n, resources, templates, buckets, notes, onChange 
                   type="button"
                   className="btn btn-outline-secondary"
                   aria-label={`Add objects to statement ${n}`}
-                  title="Add the objects of the bucket whose keys begin with the prefix"
-                  disabled={bucket.trim() === ''}
+                  title={
+                    fixed.keyPrefix === ''
+                      ? 'Add the objects of the bucket whose keys begin with the prefix'
+                      : `Add the objects of the sub-bucket: keys that begin with ${fixed.keyPrefix} and the prefix`
+                  }
+                  disabled={bucket.trim() === '' || !fixed.named}
                   onClick={addObjects}
                 >
                   <i className="bi bi-files" aria-hidden="true" /> <span className="btn-text">Add objects</span>

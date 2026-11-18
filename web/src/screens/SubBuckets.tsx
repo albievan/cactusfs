@@ -4,23 +4,28 @@ import {
   api,
   unwrap,
   type PolicyDocument,
+  type PolicyFault,
   type SubBucket,
   type SubBucketSummary,
 } from '../api/client';
 import { ConfirmButton } from '../ui/ConfirmButton';
-import {
-  formatPolicyDocument,
-  formatTime,
-  POLICY_COMPACT_HINT,
-  POLICY_SIZE_HINT,
-  policyLayout,
-  typedPolicy,
-  type TypedPolicy,
-} from '../ui/format';
-import { useAction, useLoad, type Action } from '../ui/hooks';
+import { formatPolicyDocument, formatTime, POLICY_SIZE_HINT, typedPolicy, type TypedPolicy } from '../ui/format';
+import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
+import { PolicyBuilder } from '../ui/PolicyBuilder';
+import {
+  askAtSave,
+  CHANGED_WHILE_CHECKED,
+  checkingOf,
+  NOT_SAVED_NOTICE,
+  usePolicyValidation,
+  useRefusal,
+  useSharedPolicyTools,
+  type PolicyTools,
+} from '../ui/policyHooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
-import { firstOf, Fold, LoadFailure, olderNode, onCode, refused, type Explain } from '../ui/sections';
+import { firstOf, Fold, LoadFailure, olderNode, onCode, refused } from '../ui/sections';
+import { BucketPolicyEditor } from './BucketPolicyEditor';
 
 /** The rule of a sub-bucket's name, as the contract has it (`SubBucketNameValue`). */
 export const SUB_BUCKET_NAME_RULE =
@@ -32,104 +37,15 @@ const MOST_SUB_BUCKETS = 10;
 const SUB_BUCKETS_ON_AN_OLDER_NODE = olderNode('Sub-buckets are');
 const POLICIES_ON_AN_OLDER_NODE = olderNode('Bucket policies are');
 
-interface PolicyTextProps {
-  /** The label of the text: "Policy of bucket photos as JSON". */
-  label: string;
-  /** The document it begins with; undefined for an empty text. */
-  initial: PolicyDocument | undefined;
-  /** The field of the request body the document is sent in. */
-  field: string;
-  /** Carries the save and the removal out, and holds the error the editor shows. */
-  action: Action;
-  explain: Explain;
-  /** The hint of the save button. */
-  saveTitle: string;
-  /** Sends the document, as typed. */
-  onSave: (typed: TypedPolicy) => Promise<void>;
-  /** Removes the policy, once asked; absent when there is none to remove. */
-  remove?: { question: string; run: () => Promise<void> };
-  /** More buttons, after the editor's own. */
-  children?: ReactNode;
-}
-
-/**
- * A policy document edited as JSON text. The console checks only that it is
- * one JSON object and sends it as typed; whether it is a policy that can be
- * kept is the API's to say, and what it says is shown under the text. Sent as
- * typed, its spaces count against the API's bound: a stored document that
- * indented would pass it is shown compact.
- */
-function PolicyText({ label, initial, field, action, explain, saveTitle, onSave, remove, children }: PolicyTextProps) {
-  const hintId = useId();
-  const [layout] = useState(() => (initial === undefined ? { text: '', compact: false } : policyLayout(initial)));
-  const [text, setText] = useState(layout.text);
-
-  const save = (event: FormEvent) => {
-    event.preventDefault();
-    let typed: TypedPolicy;
-    try {
-      typed = typedPolicy(field, text);
-    } catch (error) {
-      action.fail(error);
-      return;
-    }
-    void action.run(() => onSave(typed));
-  };
-
-  return (
-    <form className="form-grid" onSubmit={save}>
-      <label className="field field-full">
-        <span>{label}</span>
-        <textarea
-          className="form-control"
-          name="policy"
-          required
-          rows={12}
-          spellCheck={false}
-          autoCapitalize="none"
-          aria-describedby={hintId}
-          value={text}
-          onChange={(event) => {
-            setText(event.target.value);
-          }}
-        />
-      </label>
-      <p id={hintId} className="form-hint field-full">
-        {layout.compact ? `${POLICY_COMPACT_HINT} ` : ''}
-        {POLICY_SIZE_HINT}
-      </p>
-      <div className="field-full">
-        <ProblemNotice error={action.error} explain={explain} />
-      </div>
-      <div className="form-actions d-flex flex-wrap gap-2">
-        <button type="submit" className="btn btn-primary" disabled={action.busy} title={saveTitle}>
-          <i className="bi bi-check-lg" aria-hidden="true" /> <span className="btn-text">Save policy</span>
-        </button>
-        {remove === undefined ? null : (
-          <ConfirmButton
-            label="Remove policy"
-            question={remove.question}
-            disabled={action.busy}
-            onConfirm={() => {
-              void action.run(remove.run);
-            }}
-          />
-        )}
-        {children}
-      </div>
-    </form>
-  );
-}
-
 /** The key that makes a fresh editor whenever the document it shows changes. */
 function editorKey(document: PolicyDocument | undefined): string {
   return document === undefined ? '-' : formatPolicyDocument(document);
 }
 
 /**
- * The policy of a bucket (ADR-0011), folded until it is asked for: shown as
- * indented JSON, changed, and removed after a question. What the caller may
- * read, set or remove is the API's to say.
+ * The policy of a bucket (ADR-0011), folded until it is asked for: made,
+ * changed and removed (after a question) with the policy builder beside its
+ * JSON. What the caller may read, set or remove is the API's to say.
  */
 export function BucketPolicySection({ bucket }: { bucket: string }) {
   return (
@@ -146,6 +62,8 @@ function BucketPolicyBody({ bucket }: { bucket: string }) {
   );
   const policy = useLoad(load);
   const action = useAction();
+  // The catalogue, read once for the page when a policy is first touched, never as it is shown.
+  const tools = useSharedPolicyTools();
 
   if (policy.data === undefined && policy.loading) {
     return <Loading />;
@@ -196,11 +114,12 @@ function BucketPolicyBody({ bucket }: { bucket: string }) {
           what="the policy of this bucket"
         />
       ) : null}
-      <PolicyText
+      <BucketPolicyEditor
         key={editorKey(document)}
+        place={{ kind: 'bucket', bucket }}
         label={`Policy of bucket ${bucket} as JSON`}
         initial={document}
-        field="document"
+        tools={tools}
         action={action}
         explain={POLICIES_ON_AN_OLDER_NODE}
         saveTitle="Set this policy in place of the one the bucket has"
@@ -242,6 +161,8 @@ function SubBucketsBody({ bucket }: { bucket: string }) {
   );
   const list = useLoad(load);
   const removal = useAction();
+  // The catalogue, read once for the page when a policy is first touched, never as it is shown.
+  const tools = useSharedPolicyTools();
   const [open, setOpen] = useState<string | null>(null);
   // What holds the list: where the keyboard goes back to from a closed panel.
   const listRef = useRef<HTMLDivElement>(null);
@@ -313,13 +234,14 @@ function SubBucketsBody({ bucket }: { bucket: string }) {
           key={open}
           bucket={bucket}
           name={open}
+          tools={tools}
           onClose={() => {
             close(open);
           }}
           onChanged={list.reload}
         />
       )}
-      <CreateSubBucket bucket={bucket} shown={shown} onCreated={list.reload} />
+      <CreateSubBucket bucket={bucket} shown={shown} tools={tools} onCreated={list.reload} />
     </>
   );
 }
@@ -422,6 +344,8 @@ function SubBucketList({ list, loading, error, onRetry, busy, onOpen, onDelete }
 interface SubBucketPanelProps {
   bucket: string;
   name: string;
+  /** The node's catalogue, read once for the section. */
+  tools: PolicyTools;
   onClose: () => void;
   /** Called once the sub-bucket changed, so that the list is read again. */
   onChanged: () => void;
@@ -432,7 +356,7 @@ interface SubBucketPanelProps {
  * removed. Opened, it takes the keyboard to its heading and is scrolled into
  * view.
  */
-function SubBucketPanel({ bucket, name, onClose, onChanged }: SubBucketPanelProps) {
+function SubBucketPanel({ bucket, name, tools, onClose, onChanged }: SubBucketPanelProps) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   // The sub-bucket a Save or a Remove made anew, when it had been deleted
@@ -521,11 +445,12 @@ function SubBucketPanel({ bucket, name, onClose, onChanged }: SubBucketPanelProp
         {sub.data !== undefined && sub.error !== null ? (
           <LoadFailure error={sub.error} explain={explain} onRetry={sub.reload} what={`sub-bucket ${name}`} />
         ) : null}
-        <PolicyText
+        <BucketPolicyEditor
           key={editorKey(policy)}
+          place={{ kind: 'sub-bucket', bucket, subBucket: name }}
           label={`Policy of sub-bucket ${name} as JSON`}
           initial={policy}
-          field="policy"
+          tools={tools}
           action={action}
           explain={explain}
           saveTitle="Set this policy in place of the one the sub-bucket has"
@@ -540,7 +465,7 @@ function SubBucketPanel({ bucket, name, onClose, onChanged }: SubBucketPanelProp
           }
         >
           {close}
-        </PolicyText>
+        </BucketPolicyEditor>
       </>
     );
   }
@@ -580,25 +505,52 @@ interface CreateSubBucketProps {
   bucket: string;
   /** The sub-buckets the list shows, when it was read. */
   shown: SubBucketSummary[] | undefined;
+  /** The node's catalogue, read once for the section. */
+  tools: PolicyTools;
   onCreated: () => void;
 }
 
-/** Creates a sub-bucket, with a policy of its own or without. */
-function CreateSubBucket({ bucket, shown, onCreated }: CreateSubBucketProps) {
+/** Whether a name can be carried by the address of a sub-bucket: not empty, "." or "..". */
+function addressable(name: string): boolean {
+  return name !== '' && name !== '.' && name !== '..';
+}
+
+/**
+ * Creates a sub-bucket, with a policy of its own - made with the policy
+ * builder beside its JSON - or without. A policy typed is checked as the
+ * policy of the sub-bucket named, once there is a name to check it for.
+ */
+function CreateSubBucket({ bucket, shown, tools, onCreated }: CreateSubBucketProps) {
   const headingId = useId();
   const ruleId = useId();
-  const sizeId = useId();
+  const policyId = useId();
   const action = useAction();
   const [name, setName] = useState('');
   const [text, setText] = useState('');
   // The name the last creation was of: what its error is said of.
   const [creating, setCreating] = useState('');
+  const refusal = useRefusal();
+  // The faults the check at creation found, with the text it checked.
+  const [checked, setChecked] = useState<{ text: string; faults: PolicyFault[] } | null>(null);
+  // The text as it is now, for a creation to see whether it was changed while it was checked.
+  const latest = useRef(text);
+  useEffect(() => {
+    latest.current = text;
+  }, [text]);
+  // Checked as typed with the builder; once, at creation, without it -
+  // unless the node is of an older release (catalogue 404), which has no
+  // validation. An empty policy is not checked: the form is only being opened.
+  const validation = usePolicyValidation(
+    text,
+    { kind: 'sub-bucket', bucket, subBucket: name },
+    addressable(name) && checkingOf(tools.catalogue) === 'as-typed',
+  );
 
   const create = (event: FormEvent) => {
     event.preventDefault();
     // What the address cannot carry is not sent: an empty name, "." or ".."
     // would make another path of it. Everything else is the API's to judge.
-    if (name === '' || name === '.' || name === '..') {
+    if (!addressable(name)) {
       action.fail(new Error(`Name the sub-bucket: ${SUB_BUCKET_NAME_RULE}`));
       return;
     }
@@ -618,14 +570,35 @@ function CreateSubBucket({ bucket, shown, onCreated }: CreateSubBucketProps) {
       }
     }
     setCreating(name);
+    const sent = text;
+    const created = name;
     void action.run(async () => {
-      await unwrap(
-        api.PUT('/buckets/{bucket}/subbuckets/{name}', {
-          params: { path: { bucket, name } },
-          body: typed === undefined ? {} : { policy: typed.document },
-          bodySerializer: () => (typed === undefined ? '{}' : typed.body),
-        }),
-      );
+      if (typed !== undefined) {
+        const asked = await askAtSave(checkingOf(await tools.settled()), validation, sent, {
+          kind: 'sub-bucket',
+          bucket,
+          subBucket: created,
+        });
+        if (latest.current !== sent) {
+          throw new Error(CHANGED_WHILE_CHECKED);
+        }
+        if (asked.status === 'checked' && !asked.result.valid) {
+          setChecked({ text: sent, faults: asked.result.faults });
+          throw new Error(NOT_SAVED_NOTICE);
+        }
+      }
+      try {
+        await unwrap(
+          api.PUT('/buckets/{bucket}/subbuckets/{name}', {
+            params: { path: { bucket, name } },
+            body: typed === undefined ? {} : { policy: typed.document },
+            bodySerializer: () => (typed === undefined ? '{}' : typed.body),
+          }),
+        );
+      } catch (error) {
+        refusal.keep(sent, error);
+        throw error;
+      }
       setName('');
       setText('');
       onCreated();
@@ -666,24 +639,19 @@ function CreateSubBucket({ bucket, shown, onCreated }: CreateSubBucketProps) {
         <p id={ruleId} className="form-hint field-full">
           {SUB_BUCKET_NAME_RULE}
         </p>
-        <label className="field field-full">
-          <span>Policy of the sub-bucket as JSON (optional)</span>
-          <textarea
-            className="form-control"
-            name="policy"
-            rows={8}
-            spellCheck={false}
-            autoCapitalize="none"
-            aria-describedby={sizeId}
-            value={text}
-            onChange={(event) => {
-              setText(event.target.value);
-            }}
-          />
-        </label>
-        <p id={sizeId} className="form-hint field-full">
-          {POLICY_SIZE_HINT}
-        </p>
+        <PolicyBuilder
+          id={policyId}
+          scope={{ kind: 'sub-bucket', bucket, subBucket: name }}
+          label="Policy of the sub-bucket as JSON (optional)"
+          name="policy"
+          rows={8}
+          text={text}
+          onChange={setText}
+          tools={tools}
+          validation={validation}
+          refused={refusal.faultsFor(text) ?? (checked?.text === text ? checked.faults : undefined)}
+          hint={POLICY_SIZE_HINT}
+        />
         <div className="field-full">
           <ProblemNotice error={action.error} explain={explain} />
         </div>

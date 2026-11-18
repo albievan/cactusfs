@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { CSRF_TOKEN, json, noContent, refusal, signedIn, type Call } from '../test/fakeApi';
+import { CSRF_TOKEN, json, noContent, refusal, signedIn as signedInNode, type Call, type Handler } from '../test/fakeApi';
 import { formatPolicyDocument, MOST_POLICY_BYTES, utf8Bytes } from '../ui/format';
 import { BucketDetails, type BucketFacts } from './BucketDetails';
 import { BucketPolicySection, SubBucketsSection } from './SubBuckets';
@@ -48,6 +48,24 @@ const NO_SUCH_ENDPOINT = () => refusal(404, 'NotFound', 'No such endpoint');
 
 const OLDER_NODE_SUB_BUCKETS = 'Sub-buckets are not available on the node that answered (an older release); try again.';
 const OLDER_NODE_POLICIES = 'Bucket policies are not available on the node that answered (an older release); try again.';
+
+/**
+ * A signed-in node without the policy builder, unless a test says otherwise:
+ * its catalogue answers 404 `NotFound`, as a node of a release before the
+ * builder does, so the editors here are the JSON editors they were. A
+ * bucket's policy is still checked once as it is saved; this node's check
+ * finds nothing to say (valid, no statement open), so a save goes on as it
+ * did. A sub-bucket's policy is not checked on such a node (none is
+ * registered: one asked would be answered 501 and fail the test). The
+ * builder, the checks and the questions are tested in bucketpolicy.test.tsx.
+ */
+function signedIn(routes: Record<string, Handler> = {}) {
+  return signedInNode({
+    'GET /policy-catalogue': NO_SUCH_ENDPOINT,
+    'POST /buckets/photos/policy/validation': () => json(200, { valid: true, faults: [], truncated: false, statements: [] }),
+    ...routes,
+  });
+}
 
 /** A refusal with its code and the detail the API gives. */
 function refusedWith(status: number, code: string, title: string, detail: string): Response {
@@ -325,7 +343,7 @@ describe('the policy of a bucket', () => {
     );
   });
 
-  it('opens compact when indented it would be larger than 20 KiB, and is saved unchanged as shown', async () => {
+  it('opens compact when indented it would be larger than 20 KiB, sends it unchanged never, and changed as shown', async () => {
     expect(utf8Bytes(formatPolicyDocument(LARGE_POLICY))).toBeGreaterThan(MOST_POLICY_BYTES);
     expect(utf8Bytes(JSON.stringify(LARGE_POLICY))).toBeLessThanOrEqual(MOST_POLICY_BYTES);
     const api = signedIn({
@@ -341,12 +359,20 @@ describe('the policy of a bucket', () => {
     expect(hintOf(BUCKET_POLICY_LABEL)).toContain('Shown without indentation: indented, it would be larger than 20 KiB.');
     expect(hintOf(BUCKET_POLICY_LABEL)).toContain('spaces and line breaks count towards the 20 KiB');
 
+    // Unchanged, it is not sent (ADR-0032 Decision 5).
+    fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
+    expect(await screen.findByText('Nothing has changed, so there is nothing to save.')).toBeDefined();
+    expect(api.callsTo('PUT', '/buckets/photos/policy')).toHaveLength(0);
+
+    // Changed, it is sent as shown: compact.
+    const changed = JSON.stringify(LARGE_POLICY).replace('"Sid":"s0"', '"Sid":"first"');
+    typeInto(BUCKET_POLICY_LABEL, changed);
     fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
     await waitFor(() => {
       expect(api.callsTo('PUT', '/buckets/photos/policy')).toHaveLength(1);
     });
     const [put] = api.callsTo('PUT', '/buckets/photos/policy');
-    expect(put?.body).toBe(`{"document":${JSON.stringify(LARGE_POLICY)}}`);
+    expect(put?.body).toBe(`{"document":${changed}}`);
     expect(utf8Bytes(put?.body ?? '')).toBeLessThan(MOST_POLICY_BYTES + '{"document":}'.length);
   });
 
@@ -362,13 +388,15 @@ describe('the policy of a bucket', () => {
     });
 
     api.on({ 'GET /buckets/photos/policy': UNAVAILABLE });
+    typeInto(BUCKET_POLICY_LABEL, TYPED);
     fireEvent.click(screen.getByRole('button', { name: 'Save policy' }));
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Temporarily unavailable');
+    expect(api.callsTo('PUT', '/buckets/photos/policy')).toHaveLength(1);
     const editor = screen.getByLabelText(BUCKET_POLICY_LABEL);
     expect(alert.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(textOf(BUCKET_POLICY_LABEL)).toBe(formatPolicyDocument(BUCKET_POLICY));
+    expect(textOf(BUCKET_POLICY_LABEL)).toBe(TYPED);
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 });
@@ -808,6 +836,7 @@ describe("a sub-bucket's policy", () => {
 
     // The list read after the save no longer has reports: someone else deleted it.
     api.on({ 'GET /buckets/photos/subbuckets': () => json(200, [sub('scans')]) });
+    typeInto(LABEL, TYPED);
     fireEvent.click(region.getByRole('button', { name: 'Save policy' }));
     await screen.findByRole('button', { name: 'Open sub-bucket scans' });
     expect(screen.queryByRole('button', { name: 'Open sub-bucket reports' })).toBeNull();

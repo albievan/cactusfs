@@ -16,7 +16,7 @@ import { useAction, useLoad, type Action } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { PolicyBuilder } from '../ui/PolicyBuilder';
 import {
-  requireValid,
+  requireValidAtSave,
   usePolicyTools,
   usePolicyValidation,
   useRefusal,
@@ -48,7 +48,7 @@ export function PoliciesScreen() {
   const validation = usePolicyValidation(
     document,
     { name: name === '' ? undefined : name },
-    tools.catalogue.status !== 'unavailable',
+    tools.catalogue.status === 'ready',
   );
 
   const create = (event: FormEvent) => {
@@ -60,8 +60,12 @@ export function PoliciesScreen() {
       action.fail(error);
       return;
     }
+    const named = name;
+    // The text as it is sent (a copy: the lint of ADR-0028 refuses another name for `document`).
+    const sent = `${document}`;
     void action.run(async () => {
-      await requireValid(validation);
+      // Checked as it is sent, once the catalogue has answered: a save made while it loads is checked too.
+      await requireValidAtSave(tools, validation, sent, { name: named === '' ? undefined : named });
       try {
         await unwrap(
           api.POST('/policies', { body: { name, document: typed.document }, bodySerializer: () => typed.body }),
@@ -230,7 +234,7 @@ export function PolicyEditor({ policy, action, tools, onSaved, onClose }: Policy
   const validation = usePolicyValidation(
     text,
     { name: policy.name },
-    !policy.built_in && changed && tools.catalogue.status !== 'unavailable',
+    !policy.built_in && changed && tools.catalogue.status === 'ready',
   );
 
   const save = (event: FormEvent) => {
@@ -251,8 +255,10 @@ export function PolicyEditor({ policy, action, tools, onSaved, onClose }: Policy
       setUnchanged(true);
       return;
     }
+    const checked = text;
     void action.run(async () => {
-      await requireValid(validation);
+      // Checked as it is sent, once the catalogue has answered: a save made while it loads is checked too.
+      await requireValidAtSave(tools, validation, checked, { name: policy.name });
       try {
         await unwrap(
           api.PUT('/policies/{name}', {

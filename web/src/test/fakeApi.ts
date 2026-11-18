@@ -159,6 +159,28 @@ export function fakeApi(routes: Record<string, Handler> = {}): FakeApi {
   };
 }
 
+/**
+ * Holds every request to `path` (below /api/v1, as `GET /policy-catalogue`
+ * is `/policy-catalogue`) until `onHeld`'s release is called - never, for a
+ * node that does not answer. A held request given up by the console (its
+ * signal aborted) fails as fetch does. Call it after the fake API is made.
+ */
+export function holdRequests(path: string, onHeld: (release: () => void) => void): void {
+  const inner = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (new URL(request.url).pathname.replace(/^\/api\/v1/, '') === path) {
+      await new Promise<void>((resolve, reject) => {
+        request.signal.addEventListener('abort', () => {
+          reject(new DOMException('The request was given up', 'AbortError'));
+        });
+        onHeld(resolve);
+      });
+    }
+    return inner(request);
+  });
+}
+
 /** The CSRF token of the session that signedIn starts. */
 export const CSRF_TOKEN = 'csrf-token-of-the-test';
 

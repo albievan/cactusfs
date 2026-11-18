@@ -6,7 +6,7 @@ import { formatPolicyDocument, formatTime, POLICY_SIZE_HINT, typedPolicy } from 
 import { useAction, useLoad } from '../ui/hooks';
 import { Loading } from '../ui/Loading';
 import { PolicyBuilder } from '../ui/PolicyBuilder';
-import { requireValid, usePolicyTools, usePolicyValidation, useRefusal } from '../ui/policyHooks';
+import { requireValidAtSave, usePolicyTools, usePolicyValidation, useRefusal } from '../ui/policyHooks';
 import { ProblemNotice } from '../ui/ProblemNotice';
 
 interface ApiKeysProps {
@@ -36,7 +36,8 @@ export function ApiKeys({ user }: ApiKeysProps) {
   const refusal = useRefusal();
   const tools = usePolicyTools();
   // An empty inline policy is no policy, and is never checked.
-  const validation = usePolicyValidation(policy, { keyOwner: user }, tools.catalogue.status !== 'unavailable');
+  // Checked as typed only with the builder: its catalogue is read once the policy is first touched.
+  const validation = usePolicyValidation(policy, { keyOwner: user }, tools.catalogue.status === 'ready');
 
   const create = (event: FormEvent) => {
     event.preventDefault();
@@ -63,9 +64,11 @@ export function ApiKeys({ user }: ApiKeysProps) {
       action.fail(error);
       return;
     }
+    const checked = policy;
     void action.run(async () => {
       if (inlinePolicy !== undefined) {
-        await requireValid(validation);
+        // Checked as it is sent, once the catalogue has answered: a save made while it loads is checked too.
+        await requireValidAtSave(tools, validation, checked, { keyOwner: user });
       }
       let answer: APIKeyCreated;
       try {

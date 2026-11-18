@@ -4,6 +4,7 @@ import { api, ApiError, unwrap, type Bucket, type BucketActivityEntry, type Buck
 import { useDeletions } from '../deletions/context';
 import { formatExactBytes, formatGigabytes, formatTime } from '../ui/format';
 import { useLoad, type Loaded } from '../ui/hooks';
+import { PolicyToolsContext, usePolicyTools } from '../ui/policyHooks';
 import { reasonOf } from '../ui/reason';
 import { useUploads } from '../uploads/context';
 import { BucketNotificationsSection } from './BucketNotifications';
@@ -115,6 +116,8 @@ export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: 
   const exact = usage.data?.exact === true ? usage.data : undefined;
   const bodyId = useId();
   const [folded, setFolded] = useState(readFolded);
+  // The policy editors of the page share one catalogue: none of them names another bucket.
+  const policyTools = usePolicyTools(false);
   const toggle = () => {
     const next = !folded;
     rememberFolded(next);
@@ -198,8 +201,11 @@ export function BucketDetails({ bucket: name, facts }: { bucket: string; facts: 
             {usage.data.complete ? '' : ', and the count stopped at its bound before it reached the end of the bucket'}.
           </p>
         ) : null}
-        <BucketPolicySection bucket={name} />
-        <SubBucketsSection bucket={name} />
+        {/* One catalogue for every policy of the page, read when one is first touched. */}
+        <PolicyToolsContext.Provider value={policyTools}>
+          <BucketPolicySection bucket={name} />
+          <SubBucketsSection bucket={name} />
+        </PolicyToolsContext.Provider>
         <BucketTagsSection bucket={name} />
         <TagRulesSection bucket={name} />
         <BucketNotificationsSection bucket={name} />

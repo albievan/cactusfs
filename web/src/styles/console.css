@@ -3552,6 +3552,40 @@ details[open] > summary .node-card-mark {
   margin-top: 0.75rem;
 }
 
+/* The button that asks for the catalogue and shows the builder. */
+.policy-open {
+  margin: 0;
+}
+
+/* What the node says of a statement open to anyone, beside its principals. */
+.policy-anyone {
+  margin: 0.25rem 0 0;
+  color: var(--night-green);
+}
+
+/* The question before a policy open to anyone is saved (PLAN 9.9). */
+.policy-anyone-warning {
+  padding: 0.75rem 1rem;
+  color: var(--night-green);
+  background: var(--sand);
+  border-left: 4px solid var(--danger);
+  border-radius: 0.5rem;
+}
+
+.policy-anyone-warning:focus {
+  outline: 2px solid var(--saguaro);
+  outline-offset: 2px;
+}
+
+.policy-anyone-warning ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.policy-anyone-warning p {
+  margin: 0 0 0.5rem;
+}
+
 @media (max-width: 575.98px) {
   .policy-builder,
   .policy-row,
@@ -3568,6 +3602,8 @@ details[open] > summary .node-card-mark {
   .policy-statement-actions .btn,
   .policy-pane > .btn,
   .policy-json-faults .btn,
+  .policy-anyone-warning .btn,
+  .policy-open .btn,
   .policy-chip-remove {
     min-height: 44px;
   }
