@@ -748,15 +748,20 @@ func TestPooledConnectionsAreReused(t *testing.T) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusNoContent)
 	})
-	const idle = 100 * time.Millisecond
+	// Long enough that a round trip on a loaded runner, under the race
+	// detector, is not a timeout of its own: a POST that fails here must be
+	// the connection's, and says whether it was reused.
+	const idle = 250 * time.Millisecond
 	policy := allowLoopback(ca)
 	policy.ResponseTimeout = idle
 	client, _ := newClient(t, policy)
 	url := "https://target.test:" + portOf(t, server.URL) + "/hook"
-	post := func(reused *atomic.Int64) error {
+	post := func(reused *atomic.Int64) (bool, error) {
+		var this atomic.Bool
 		trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 			if info.Reused {
 				reused.Add(1)
+				this.Store(true)
 			}
 		}}
 		r, err := http.NewRequestWithContext(httptrace.WithClientTrace(t.Context(), trace), http.MethodPost, url, noReplay("an event"))
@@ -768,21 +773,21 @@ func TestPooledConnectionsAreReused(t *testing.T) {
 		}
 		resp, err := client.Do(r)
 		if err != nil {
-			return err
+			return this.Load(), err
 		}
-		return Discard(resp)
+		return this.Load(), Discard(resp)
 	}
 	var reused atomic.Int64
 	failures := 0
 	for round := range 8 {
 		for _, pause := range []time.Duration{idle/2 - 10*time.Millisecond, idle / 2, idle/2 + 5*time.Millisecond, idle - 5*time.Millisecond, idle, idle + 5*time.Millisecond} {
-			if err := post(&reused); err != nil {
+			if _, err := post(&reused); err != nil {
 				t.Fatalf("round %d: the first POST: %v", round, err)
 			}
 			time.Sleep(pause)
-			if err := post(&reused); err != nil {
+			if again, err := post(&reused); err != nil {
 				failures++
-				t.Errorf("round %d: a POST %s after the last: %v", round, pause, err)
+				t.Errorf("round %d: a POST %s after the last (on a reused connection: %t): %v", round, pause, again, err)
 			}
 		}
 	}
