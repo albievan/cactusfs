@@ -1,16 +1,24 @@
 # ADR-0032: The visual policy builder - a catalogue, validation and an explanation from the node
 
-- **Status:** proposed (2026-11-17, PLAN 9.0). Nothing of it is built. Its contract
-  (below, "The contract") is what PLAN 9.6 writes into `api/openapi/admin.yaml`; the
-  domain, the ports and the use cases behind it are PLAN 9.1 to 9.5; the console PLAN
-  9.7 to 9.10. It becomes accepted at PLAN 9.12, with what was built said in it. The
-  points under "Open, for the owner" are not answered: their defaults are what is to
-  be built (the threat model, questions 60 to 70). Revised 2026-11-17 to the review of
-  PLAN 9.0: an explanation about a bucket also needs the right to read the policies it
-  depends on; `Explain` is a port of its own (`ports.AccessExplainer`); the validation
-  law is about the document; `unmatched_patterns`; the sub-bucket validation body; every
-  explanation recorded before it is answered
-- **Date:** 2026-11-17
+- **Status:** accepted (2026-11-18, PLAN 9.12): implemented as written below, with the
+  code of PLAN 9.1 to 9.10 and the gate of each - the catalogue, the located faults and
+  the analysis, the explanation in the domain (9.1 to 9.3, with 9.2a), the port
+  `ports.AccessExplainer` and the use cases `PolicyToolsService` and `ExplainService`
+  (9.4, 9.5), the contract and its handlers (9.6), and the console's reader and writer,
+  builder, bucket and sub-bucket editors and "Who may do this?" (9.7 to 9.10). No step
+  changed the Raft entry schema, the on-disk format or the crypto design. Where the
+  building went beyond or differed from the text below, the section
+  [As built](#as-built-plan-91-to-910) says so; the decisions are unchanged. The points
+  under "Open, for the owner" are not answered: their defaults are what is built (the
+  threat model, questions 60 to 70, each with what was built; question 71 was added by
+  the review of PLAN 9.5). The integration test on four nodes (PLAN 9.11) and the review
+  in a real browser (PLAN 9.13) are to come. It was proposed on 2026-11-17 (PLAN 9.0) and
+  revised that day to the review of PLAN 9.0: an explanation about a bucket also needs
+  the right to read the policies it depends on; `Explain` is a port of its own
+  (`ports.AccessExplainer`); the validation law is about the document;
+  `unmatched_patterns`; the sub-bucket validation body; every explanation recorded
+  before it is answered
+- **Date:** 2026-11-17; accepted 2026-11-18
 - **Builds on:** ADR-0006 (IAM: the policy language, strict parsing, `iam.Decide`, the
   built-in roles as part of the binary), ADR-0007 (the management API: problem+json,
   `Idempotency-Key`, CSRF), ADR-0011 (bucket policies and their principals), ADR-0017
@@ -535,6 +543,109 @@ from `putBucketPolicy` and `putSubBucket`, `InvalidArgument` from `createPolicy`
   a stolen key" (the warning, from the server's analysis); "A handler forgets an
   authorization check" (`Explain` is behind a port of its own that no gating use case
   holds, and a test holds that by type).
+
+The threat model has these rows since PLAN 9.12: the five new ones under "The visual
+policy builder (ADR-0032)", and the three changed rows where they were.
+
+## As built (PLAN 9.1 to 9.10)
+
+What was built is what the decisions above say. Where the building went further, or
+did a thing otherwise than the text above describes, it is listed here, with the PLAN
+row ("<step> as written") that has the detail. Nothing here changes a decision.
+
+- **Stricter checks at save in the bucket editors** (9.9). Decision 5 gives the plain
+  JSON editor where the builder is not there. The editors of a bucket's and a
+  sub-bucket's policy (`web/src/screens/BucketPolicyEditor.tsx`) still check at save
+  whenever the builder is not shown - the catalogue refused (403), failed or later than
+  10 s - with one validation of the bytes the put will send, authorized by the put's own
+  action, so a caller who may save causes no false audited refusal; nothing with faults
+  is sent. On a node of an older release the bucket's policy is checked the same way.
+  The identity-policy screens keep Decision 5's fallback. Validation is asked only for a
+  document that differs from the stored one, never as an editor opens (9.8), since a
+  reader without the put's action would otherwise be refused and audited for a change
+  nobody asked for.
+- **The "could not check" question** (9.9). When a bucket's policy cannot be checked -
+  validation answers 404 `NotFound`, whatever the catalogue answered - the save does not
+  take that for "not open": it asks "This node could not check the policy, so it cannot
+  say whether it opens *bucket* to anyone. Save it as it is?". A sub-bucket's policy is
+  not asked about on an older node: its put refuses every Allow to `*` (ADR-0017). The
+  "anyone" warning itself is titled "to anyone", or "to every user of this deployment"
+  when no open statement has `anonymous_actions`.
+- **The catalogue is read lazily** (the 9.9 amendment of 9.8, and 9.10). The console
+  reads `GET /policy-catalogue` only on the first edit of an editable policy or when
+  "Open the policy builder" is pressed - on "Who may do this?", on the first change of
+  its "Does what" fields or by "Load the list of actions" - never as a screen is shown
+  or a policy viewed or focused (a built-in policy included), and waits for it at most
+  10 s. A caller without `admin:GetPolicyCatalogue` (`read-write`, `read-only`) causes no
+  audited refusal by looking. A save waits for the catalogue's answer, then checks the
+  exact text it sends.
+- **A placeholder `{tag_key}`** (9.5). A tag key may hold `/` (`object.ValidateTagKey`),
+  so the template of a tag definition is `arn:cactusfs:admin:::tag-definition/{tag_key}`,
+  whose placeholder takes `/` and no wildcard; `tag-definition/team/x` is the definition
+  of the key `team/x`. The catalogue's templates have four placeholders, not three.
+- **Wildcards refused in `{bucket}` and `{name}`** (9.5, `iam.FitsTemplate`). A name is
+  one bucket or one entity, never a pattern: `{bucket}` and `{name}` hold no `/`, `*` or
+  `?`, so `arn:aws:s3:::*` is no bucket and `user/*` no user, and an explanation about
+  either is a 400. `{key}` takes any object key as it is, `*` and `?` included, since S3
+  keys may hold them and the object use cases ask about them literally.
+- **The explanation's record is detached** (2026-11-18, found by the review of 9.10).
+  Decision 3, step 7, appends the record before the answer. A closed connection ends the
+  request's context, and the replicated store takes nothing on an ended context, so a
+  question authorized and answered could have left no record. `ExplainService.record`
+  appends on `context.WithoutCancel` of the request's context, bounded by
+  `auditWriteTimeout`, as `Auditor.write` does
+  (`TestAnExplanationIsRecordedWhenItsCallerGoes`). The answer is still not given
+  without its record. The console never aborts a question it sent.
+- **The order of `ExplainService.Explain`** (9.5). Decision 3 lists authorization of
+  the subject, then of the policies, then the subject, then the request. As built the
+  steps run: the shape of the subject (a 400 before the gate, not recorded) → the gate,
+  `admin:ExplainAccess` on the subject → the request read against the catalogue (a 400
+  here is recorded) → the policies the answer depends on readable (403) → the subject
+  resolved (404, recorded) → the decision → citations filtered → the record. So a
+  request whose subject is not there and whose action is bad is answered 400, not 404,
+  and that 400 is recorded even when the caller lacks `s3:GetBucketPolicy`; it tells
+  nothing of a policy, since no decision is reached. What the code guarantees is no
+  answer without a record: a question that cannot be decided (store unavailable, caller
+  gone before the decision) gets neither.
+- **The explainer is separated by structure, not only by type** (9.4). Decision 3 has
+  `ports.AccessExplainer` implemented by `app.Authorizer`. The review found that a
+  type-based rule let holders through and that an adapter could assert its authorizer to
+  the port, so `app.Authorizer` has no method `Explain` and is no `AccessExplainer`: the
+  one production implementation is the unexported `explainer` made by
+  `app.NewExplainer(*Authorizer)` (`internal/app/explainer.go`; `porttest.Explainer`
+  serves use-case tests), which calls the authorizer's own `decide`. It is made in
+  one place, the `ExplainServiceConfig` of `cmd/cactusfs/node.go`.
+  `TestOnlyTheExplainUseCaseHoldsAnExplainer` covers the source of `internal/app`,
+  `internal/adapters` and `cmd/cactusfs`, not `internal/app` and the wiring alone: it
+  refuses any other reference to the port, to `app.NewExplainer`, to `decide`, or a call
+  of `Explain` on a type with the port's method set; `TestTheExplainerRuleSeesAHolder`
+  plants the escapes it must catch.
+
+Also, smaller: validation and explanation answer every refusal with one fixed text and
+never return, record or log what a store or parser said (9.5); `ExplainedSubject`,
+`ExplainedRequest`, `KeyPolicyVerdict`, `ExplanationAssumptions`, `PolicyLimits`,
+`PolicyPrincipalForms` and `DecisionSource` are named components of the contract where
+this record writes them inline, with the same wire shape (9.6); an empty optional field
+the contract bounds below by 1 is a 400, not taken as absent (9.6); the "Who may do
+this?" screen and the link "What may *name* do?" from a user's page (9.10).
+
+**Open, for later steps** (not decisions of the owner; none blocks this record):
+
+- The analysis has no resources field: the warning before a bucket is opened to anyone
+  quotes each statement's Resource as written. Giving the resources is a contract
+  addition.
+- The rules of what a sub-bucket's policy is offered - its actions, keys under
+  `<sub>/`, the bucket for listing, anyone only to a Deny - are constants of the console
+  that only narrow what is offered (the node's validation and put decide). They could
+  become a field of the catalogue (for instance `sub_bucket_policy_principals`, with the
+  effects allowed to anyone).
+- A link from a row of the API keys to "Who may do this?" with `?access_key_id=`, as
+  the user's page has `?user=`.
+- A check in a real browser, at desktop and phone width, and with a screen reader: the
+  console's accessibility is tested in jsdom only. That is PLAN 9.13's.
+- The integration test on four nodes is PLAN 9.11's.
+- Question 71 of the threat model: the authorizer and the admin API's 5xx path log a
+  damaged stored policy's parser text to the node's log (older than this record).
 
 ## Alternatives
 

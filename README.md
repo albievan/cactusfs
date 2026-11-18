@@ -11,13 +11,15 @@ control and a hash-chained audit trail.
 > Milestones 0 to 7 of [`PLAN.md`](PLAN.md) are done: the standalone store, erasure
 > coding, the cluster, identities and policies, the management API with its console, the
 > S3 depth listed below, and deployment hardening (the Helm chart, certificate rotation,
-> the observability pack, SBOMs, signatures and the release workflow). Milestone 8
-> (replication between sites, bucket notifications, quotas) is begun: its metadata
-> schema (entry schema 5) and its contracts exist, and its three features are built -
-> quotas on buckets, bucket notifications and replication between sites
-> ([Quotas](#quotas), [Notifications](#notifications),
+> the observability pack, SBOMs, signatures and the release workflow). Milestone 8 is
+> done too (PLAN 8.9, 2026-11-17): its metadata schema (entry schema 5) and its
+> contracts, and its three features - quotas on buckets, bucket notifications and
+> replication between sites ([Quotas](#quotas), [Notifications](#notifications),
 > [Replication between sites](#replication-between-sites)) - in no published release
-> yet.
+> yet. Milestone 9, the visual policy builder with "Who may do this?"
+> ([The policy builder, and "Who may do this?"](#the-policy-builder-and-who-may-do-this)),
+> is built up to PLAN 9.10, and is in no published release either: its test on four
+> nodes and its review in a browser are still to come.
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -105,7 +107,8 @@ control and a hash-chained audit trail.
   and what the console did; search; users, groups, roles, policies and API keys; the
   cluster; the settings of every node; the audit log. A bucket's page shows its details
   and can delete every object, after asking for your password. Its details hold, folded
-  until you open them, the bucket's policy - shown as JSON, edited, saved and removed - and
+  until you open them, the bucket's policy - shown as JSON, edited with the policy
+  builder or as JSON, saved and removed - and
   its sub-buckets: listed, created with or without a policy, each one's policy edited or
   removed, and an empty one deleted (ADR-0017) - and its tags and tag rules: lower case,
   the catalogue only, and the tags every object must carry (ADR-0018) - and its
@@ -115,8 +118,13 @@ control and a hash-chained audit trail.
   An object's tags are edited in its details, and the upload form takes tags, says which
   the bucket requires and begins with them. The **Tags** screen keeps the catalogue of
   tags users are offered; the **Targets** screen the places notifications and the audit
-  trail are sent to, with how delivery to each stands. A policy is sent as you typed it, and a
-  refused one shows the server's reason next to the editor. An object you may read and either uploaded
+  trail are sent to, with how delivery to each stands. Every kind of policy - a named
+  policy, the inline policy of a new API key, a bucket's and a sub-bucket's - is edited
+  in a **visual policy builder** beside the JSON it comes to, checked by the node as you
+  type, and sent as the JSON shows it; **Who may do this?** asks the node what it would
+  decide for a user, a key or anyone, and why
+  ([The policy builder, and "Who may do this?"](#the-policy-builder-and-who-may-do-this)).
+  An object you may read and either uploaded
   or may preview opens in a preview - images, text, CSV, JSON, PDF, DOCX and XLSX - drawn
   by the console itself, never served inline (ADR-0028). A session that times out
   while it uploads is locked, not ended, until your password unlocks it.
@@ -177,9 +185,13 @@ Said plainly, so that nobody finds out by trying:
   tenant or by number of objects, no soft quota, and no limit on the number of buckets;
   a bucket has no quota until one is set, and the quotas together may promise more than
   the drives hold.
-- **Planned, not built:** a visual builder of policies in the console (milestone 9). Today a policy is edited as JSON
-  text - an identity policy under Policies, a bucket's and a sub-bucket's in the bucket's
-  details - and the server alone judges it.
+- **The policy builder writes only what the policy language has.** A bucket policy's
+  principals are users and anyone - no groups or roles; `NotAction`, `NotResource` and
+  `NotPrincipal` are refused, in the builder and in the JSON alike; there is no
+  simulation at another time than the node's. The warning before a bucket is opened to
+  anyone quotes each statement's Resource as written: the node's analysis says which
+  actions a statement opens, not which keys. The builder and "Who may do this?" are in
+  no published release yet, and have been tested in a simulated browser only.
 - **Growing a cluster.** The voters and the storage of a cluster are fixed when it
   forms: storage nodes and drives cannot be added afterwards, and a node cannot be given
   a vote later. Gateways can join.
@@ -875,6 +887,9 @@ What the API has, under `/api/v1` (the contract is
 | `/search` | buckets by name and objects by key |
 | `/users`, `/users/{name}`, `/users/{name}/keys`, `/keys/{access_key_id}` | users and their API keys |
 | `/groups`, `/roles`, `/policies` (and `/{name}` of each) | groups, roles, policies |
+| `/policy-catalogue` | what a policy can say on this node: every action a policy can grant, with its group, what it allows, the resources it is asked on and where it may be used; the condition keys and their operators; the resource kinds, the limits and the principals of a bucket policy (`admin:GetPolicyCatalogue`: `cluster-admin`, `bucket-admin`, `auditor`) |
+| `/policy-validation`, `/buckets/{bucket}/policy/validation`, `/buckets/{bucket}/subbuckets/{name}/policy/validation` | check a named policy or a new key's inline policy, a bucket's policy, a sub-bucket's policy, without storing it: every fault with where it is, and what each statement covers and whether it opens the bucket to anyone. Allowed to whoever may save that document there ([below](#the-policy-builder-and-who-may-do-this)) |
+| `/access/explain` | "Who may do this?": what the authorizer would decide for a user, an API key or anyone, an action and a resource, and by which statements (`admin:ExplainAccess`, which, of the built-in roles, only `cluster-admin` holds); every answer is in the audit trail |
 | `/cluster`, `/cluster/maintenance` | nodes, drives and erasure sets; healing, scrubbing and collection |
 | `/settings` | the settings of every node |
 | `/audit` | the audit trail |
@@ -886,7 +901,7 @@ What the API has, under `/api/v1` (the contract is
 
 The console has a screen for each: **Buckets** (a grid), the object browser of a
 bucket, **Search** (the field at the top of the navigation), **Users** (with a user's
-API keys), **Groups**, **Roles**, **Policies**, **Tags** (the catalogue of tags),
+API keys), **Groups**, **Roles**, **Policies**, **Who may do this?**, **Tags** (the catalogue of tags),
 **Targets** (where notifications and the audit trail are sent, and how delivery to each
 stands), **Cluster**, **Settings** and **Audit log**; a bucket's replication, resync and
 replica mode are in its details, and the object browser shows the replication status of
@@ -1061,6 +1076,104 @@ before you set them:
 - Changes to an object's tags are not in the audit trail (changes to a bucket's tags,
   its rules and the catalogue are). Tags, rules and the catalogue are stored unencrypted
   in the metadata, like keys and user metadata, and are never logged.
+
+### The policy builder, and "Who may do this?"
+
+The console edits all four kinds of policy with one builder
+([ADR-0032](docs/adr/0032-policy-builder.md)): a named policy on the **Policies** screen
+(and from a role's page; a built-in policy is shown, not edited), the inline policy of a
+new API key on a user's page, a bucket's policy in its details, and a sub-bucket's - when
+it is made and afterwards. A policy is made by choosing: each statement's effect; its
+actions, from the node's list by group with a search, or as a pattern you type; its
+resources, by bucket and prefix or by kind and name of an administrative resource, or as
+an ARN you type; its conditions, by key, operator and value; and for a bucket's policy,
+its principals - users, or anyone. The JSON beside it follows every change, and a change
+you make to the JSON is read back into the builder. **The JSON is what is sent**, as
+shown; an unchanged policy is never sent. What the builder cannot read - a key given
+twice, an unknown field - turns it off with the reason, and leaves the text alone; an
+action or condition the node does not list is kept and marked, never dropped.
+
+- **The list of actions** comes from the node (`GET /api/v1/policy-catalogue`), which
+  answers what its own release knows. The console asks for it only when you first change
+  a policy, or press "Open the policy builder" - never because you looked at one. Reading
+  it needs `admin:GetPolicyCatalogue`, which `cluster-admin`, `bucket-admin` and
+  `auditor` hold and `read-write` and `read-only` do not. Without it, or on a node of an
+  older release, you get the JSON editor as before, with a line that says why.
+- **Checked as you type.** When you stop typing the node checks the policy - with the
+  same parser a save goes through - and each fault is shown at its field and in a list
+  under the JSON, with its line and "Show in the JSON". With the builder, a save first
+  checks the exact text it will send, and sends nothing that has a fault; a bucket's or
+  sub-bucket's policy is checked at save even without it. A check is allowed to whoever
+  may save that policy there, and to nobody else: `admin:PutPolicy` for a named policy,
+  `admin:CreateAPIKey` on the owner for a new key's inline policy (refused to an API key
+  that has an inline policy of its own, as making the key is), `s3:PutBucketPolicy` and
+  `s3:PutSubBucket` on the bucket. A check stores nothing and reads nothing a save would
+  not, so it tells you nothing a save would not. A refused check is in the audit trail
+  like every refusal; an allowed check is not recorded, by design (ADR-0032,
+  Alternatives): it stores and changes nothing; a save is recorded. The check is a
+  convenience: the node parses every save again and refuses what it refused before, now
+  with every fault in the problem's `faults`.
+- **A bucket opened to anyone is asked about first.** When the node's check says a
+  statement of a bucket's policy allows `*`, the save stops and asks: "This policy
+  opens *bucket* to anyone" - or "to every user of this deployment", when nothing in it
+  can be done without signing in. For each such statement it gives its number and Sid,
+  its Resource as written, the actions anyone could do without signing in (only reads,
+  as ever), and the actions it names for anyone that still need a user - and says that
+  its conditions were not weighed. Everything it says comes from the node; the console
+  reckons none of it. On a node that cannot check (an older release) a save of a
+  bucket's policy asks instead: "This node could not check the policy, so it cannot say
+  whether it opens *bucket* to anyone. Save it as it is?". A bucket's policy is checked
+  at its save even where the builder is not shown. A sub-bucket's policy cannot allow
+  anyone at all (ADR-0017): its builder offers anyone only to a Deny.
+
+**Who may do this?** is a screen of its own, and "What may *name* do?" on a user's page
+opens it for that user. Name a user, an API key or anyone; an action, from the node's
+list or typed; the bucket and key, or the administrative resource; and if you like a
+listing prefix, the address the request would come from and whether it would arrive over
+TLS. "Explain" asks the node (`GET /api/v1/access/explain`), which asks its own
+authorizer - the same decision a real request would get, at the node's own time - and
+the screen shows the answer as given: allowed or not; whether a policy decided it or a
+rule did, or nothing allowed it (denied by default); the statements that matched, each
+with its effect and where it is; what the key's own inline policy said; statements whose
+condition on the source address was decided without one; what was assumed; and what was
+not considered (who made a version, for `admin:PreviewObject`). A disabled user or an
+expired key is answered "would not authenticate", with no decision. Asking changes
+nothing and is never a permission to do what is asked about.
+
+- **Who may ask.** It needs `admin:ExplainAccess` on the user asked about (for a key,
+  its owner; for anyone, `arn:cactusfs:admin:::anonymous`), which of the built-in roles
+  only `cluster-admin` holds. An answer about an S3 action on a bucket
+  also needs `s3:GetBucketPolicy` on it, and one whose key or listing prefix could lie in
+  a sub-bucket `s3:GetSubBucketPolicy`, since the answer would tell what those policies
+  say; without them, or when such a policy cannot be read, the answer is `403`. A cited
+  statement is named - its policy, its place, its Sid - only where you may read that
+  policy; otherwise it says "a policy you may not read", with its effect.
+- **Every answer is in the audit trail.** Every answer the node gives once a question
+  is allowed - a decision, "would not authenticate", a `400` or a `404` alike - is
+  recorded before it is given, with who asked, about whom, the action, the resource and
+  the answer, never a policy's text. An answer the node has given is recorded even if
+  you have left the page; one whose record cannot be written is not given (`503`, or
+  `500` when the node cannot tell whether it was written). A question that cannot be
+  decided - the store unavailable, or you gone before the decision - gets neither an
+  answer nor a record. A refusal (`403`) is recorded as every refusal is; a request
+  turned away as malformed before it is authorized (no subject, two subjects, a user
+  name or key ID that cannot be one, or a parameter the contract refuses) is a `400`
+  and is not recorded.
+- **Grants that gain it on upgrade.** A policy you wrote before this release that allows
+  `admin:*` - or another wildcard that matches `admin:ExplainAccess` - on any resource
+  pattern that matches `arn:cactusfs:admin:::user/<name>` or
+  `arn:cactusfs:admin:::anonymous` now grants it, without anybody granting it. In a
+  pattern `*` also spans `/`, so that includes `*`, `arn:cactusfs:admin:::*`,
+  `arn:cactusfs:admin:::user/*`, `arn:cactusfs:admin:::user/<prefix>*` and
+  `arn:cactusfs:admin:::user/<name>`; `*` and `arn:cactusfs:admin:::*` also cover asking
+  about anyone (anonymous). Those who hold it can ask what the users it covers may do
+  with admin actions, and with S3 actions on the buckets whose policies they may also
+  read (`s3:GetBucketPolicy`, and `s3:GetSubBucketPolicy` where a sub-bucket could hold
+  the key). Look for such grants before you upgrade, and narrow them if that is not
+  meant (threat model, question 70). Likewise a wildcard such as `admin:Get*` or
+  `admin:*` on a resource that matches `arn:cactusfs:admin:::policy-catalogue` now
+  includes `admin:GetPolicyCatalogue`, which tells nothing that this page and the
+  contract do not.
 
 ### Quotas
 
@@ -1557,8 +1670,10 @@ ten in five minutes, then `429`. Behind a balancer that opens its own connection
 user has the balancer's address and shares that count
 ([load balancing](docs/load-balancing.md#the-source-address-the-nodes-see)).
 
-Every change to identities, every refusal and every failed sign-in is written to a
-hash-chained audit trail (`GET /api/v1/audit`, the console's Audit log);
+Every change to identities, every refusal, every failed sign-in, and every answer of
+"Who may do this?" and every refusal of it is written to a hash-chained audit trail
+(`GET /api/v1/audit`, the console's Audit log) - a request to it that is malformed
+before it is authorized is answered `400` and not recorded;
 `--audit-export` also writes each record to standard output as a JSON line, and a
 target defined with `audit: true` is sent each record, in sequence, as the same line
 ([Notifications](#notifications)).

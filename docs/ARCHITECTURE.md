@@ -1067,7 +1067,7 @@ four at a time.
   written before the node closes. What was dropped before a node came to lead was the
   former leader's to tell, and the count is in every record.
 
-## 6. APIs **(implemented: the S3 API with the depth of milestone 6, bucket notifications and replication, the management API, node RPC and events with NATS and webhook delivery to targets)**
+## 6. APIs **(implemented: the S3 API with the depth of milestone 6, bucket notifications and replication, the management API with the policy builder's catalogue, validation and explanations, node RPC and events with NATS and webhook delivery to targets)**
 
 - **S3 data API.** Defined by AWS's S3 API reference: path-style and virtual-hosted-style
   addressing; SigV4 header, presigned and streaming signatures; XML errors. Its contract
@@ -1187,7 +1187,10 @@ four at a time.
   `/buckets/{bucket}/object/access` (who uploaded and who downloaded) and
   `/buckets/{bucket}/object/preview` (an object's bytes for the console to show, below); `/search`;
   `/users`, `/users/{name}`, `/users/{name}/keys` and `/keys/{access_key_id}`; `/groups`,
-  `/roles` and `/policies`, each with `/{name}`; `/cluster` and `/cluster/maintenance`;
+  `/roles` and `/policies`, each with `/{name}`; `/policy-catalogue`,
+  `/policy-validation`, `/buckets/{bucket}/policy/validation`,
+  `/buckets/{bucket}/subbuckets/{name}/policy/validation` and `/access/explain` (the
+  policy builder, below); `/cluster` and `/cluster/maintenance`;
   `/settings`; `/audit`. The paths of milestone 8 are in the contract; those of quotas
   (`/buckets/{bucket}/quota`, `/buckets/{bucket}/usage/recount`; PLAN 8A, "Usage and
   quotas" in section 5), of targets (`/targets`, `/targets/{name}`; PLAN 8.0.13) and
@@ -1413,6 +1416,123 @@ four at a time.
   entry schema 3, so a version from before has no owner and is previewed by assignment
   only. A node of the release before answers the path 404 `NotFound`. The threats and
   their tests are in the threat model ("Previews of objects").
+- **The policy builder: the catalogue, validation and "Who may do this?" (implemented,
+  ADR-0032; PLAN 9.1 to 9.10).** The console builds policies by choosing, and asks the
+  node every question a builder needs answered, so that nothing about the policy
+  language is known or reckoned in React. No entry, command, stored record, on-disk
+  format or crypto design changed for it.
+  - **The catalogue is the one source** of what a policy can say:
+    `internal/domain/iam/catalogue.go` - `Catalogue()` (every `s3:` and `admin:` action a
+    policy can grant, and nothing else: no `cluster:` action and no `auth:` or `system:`
+    name of the audit trail; each with its group, a sentence, the resource templates it
+    is asked on and five flags), `ConditionKeys()`, `ResourceKinds()`, `PolicyLimits()`
+    and `BucketPolicyPrincipals()`. The flags `by_name_only`, `in_bucket_policy`,
+    `anonymous` and `in_sub_bucket_policy` are the predicates `Decide` and the parsers use,
+    computed and not restated. Templates have four placeholders (`iam.FitsTemplate`):
+    `{bucket}` and `{name}` hold one or more characters without `/`, `*` or `?` - a
+    name is one bucket or entity, never a pattern; `{tag_key}` the same with `/`
+    allowed, as a tag key may hold one; `{key}` any object key as it is. Tests tie it to
+    the code both ways: `TestCatalogueHoldsEveryAction` (go/parser: every action constant
+    is in it, nothing else is), `TestCatalogueAgreesWithDecide`,
+    `TestConditionKeysAgreeWithTheParser`, `TestUseCasesAskWhatTheCatalogueSays` (every
+    question every use case asks the authorizer fits a template of its action, and every
+    action is asked - `admin:GetMetrics` by the telemetry adapter, held by its own test)
+    and `TestContractActionsAreInTheCatalogue` (every
+    `x-cactusfs-action` of the contract). It is a property of the binary: two nodes of
+    different releases may answer two catalogues, and each validates by its own.
+    `PolicyToolsService.Catalogue` serves it (`admin:GetPolicyCatalogue` on
+    `policy-catalogue`; `bucket-admin` names it, `auditor` and `cluster-admin` hold it by
+    wildcard).
+  - **Validation authorizes by the put's own action and stores nothing.**
+    `PolicyToolsService.ValidateIdentity`, `ValidateBucket` and `ValidateSubBucket`
+    (`internal/app/policytools.go`) authorize exactly as the put that would store the
+    document: `admin:PutPolicy` on `policy/<name>` (or `policy`); with `key_owner`,
+    `admin:CreateAPIKey` on `user/<owner>`, after refusing - and auditing - a principal
+    bound by its key's inline policy, as `CreateAPIKey` does; `s3:PutBucketPolicy` and
+    `s3:PutSubBucket` on the bucket. They read nothing beyond what that authorization
+    reads (the authorizer reads the bucket's policy), so they say nothing a put would
+    not; a bucket or sub-bucket that is not there is no error. They run the parsers the
+    puts run, which collect every fault as `iam.PolicyFault` - an RFC 6901 pointer into
+    the document as sent, its statement, a reason - at most 100, in an error
+    (`iam.PolicyError`) that wraps the sentinels of before and reads as the first fault,
+    word for word (`FuzzPolicyFaults`: accepted exactly when no fault, for all three
+    parsers). A valid document also gets the analysis (`iam.AnalysePolicy`,
+    `AnalyseBucketPolicy`, `AnalyseSubBucketPolicy`): per statement, the catalogue's
+    actions its patterns cover (a by-name-only action never by an Allow's wildcard),
+    whether it is open to anyone, which actions a caller without credentials could be
+    let in to and which it names for anyone that are never anonymous, before conditions,
+    and the patterns that cover no action of this node's catalogue. The analysis
+    classifies and decides nothing (`TestAnalysisAgreesWithDecide`). The four puts give
+    the same faults with their 400, in `Problem.faults`, through `app.PolicyFaults` -
+    never from an error that wraps `ErrIntegrity`. The three POSTs take
+    `Idempotency-Key` and ignore it, need the CSRF token, and refuse a repeated policy
+    field (`refuseRepeatedPolicy`).
+  - **The explanation path.** The one evaluation is the unexported `iam.evaluate`;
+    `Decide`, `Evaluate` and `Explain(req)` are its three views
+    (`FuzzExplainAgreesWithDecide`; `TestDecideAllocations` holds `Decide`'s allocations
+    to those before). It is reached through
+    `ports.AccessExplainer` (`internal/ports/system.go`), **which is never a gate**: its
+    one production implementation is the unexported `explainer` made by
+    `app.NewExplainer(*Authorizer)` (`internal/app/explainer.go`; `porttest.Explainer`
+    serves use-case tests), which calls the
+    authorizer's own `decide` with an explanation to fill and logs and audits nothing.
+    `app.Authorizer` has no method `Explain`, so neither it nor any `ports.Authorizer` can
+    be asserted to the port. `cmd/cactusfs/node.go` makes one, in one place, for
+    `ExplainService` - the only holder. `TestOnlyTheExplainUseCaseHoldsAnExplainer`
+    (go/types over the source of `internal/app`, `internal/adapters` and `cmd/cactusfs`)
+    refuses any other reference to the port, to `app.NewExplainer`, to `decide` or to a
+    call of `Explain`; `TestTheExplainerRuleSeesAHolder` plants the escapes it must catch.
+    `ExplainService.Explain` (`internal/app/explain.go`): checks the request's shape;
+    resolves an access key first, so that it authorizes `admin:ExplainAccess` on
+    `user/<owner>` (`user` for a key not there, as `DeleteAPIKey` does), `user/<name>` or
+    `anonymous`; reads the action and resource against the catalogue (a catalogue name
+    without a wildcard; a resource of one of its templates; a 400 here is recorded);
+    then **the probing
+    defence** - an answer about an `s3:` action on a bucket also needs
+    `s3:GetBucketPolicy` on it, and one whose key or listing prefix could lie in a
+    sub-bucket `s3:GetSubBucketPolicy`, asked with `Allowed` whether or not such a
+    sub-bucket is registered; a "no", or a policy that cannot be read (`ErrIntegrity`),
+    is a 403 audited as a refusal of `admin:ExplainAccess`; resolves the subject (404
+    `NoSuchEntity`; a disabled user or an expired key "would not authenticate", no
+    decision); asks the explainer at the node's time; **filters the citations** - a cited
+    statement keeps its policy name, indexes and Sid only where the caller is `Allowed`
+    `admin:GetPolicy`, `s3:GetBucketPolicy`, `s3:GetSubBucketPolicy` or
+    `admin:ListAPIKeys` on the key's owner, otherwise it is "a policy you may not read"
+    with its source and effect; and **records the answer synchronously** - one record
+    (subject, action, resource, the answer; never a document) through
+    `ports.AuditLog.AppendAudit`, not the background queue of `Auditor.Succeeded`, on a
+    context detached from the request's (`context.WithoutCancel`, bounded by
+    `auditWriteTimeout`): a question the node has answered is recorded even if its
+    caller has gone (`TestAnExplanationIsRecordedWhenItsCallerGoes`); one that cannot be
+    decided (store unavailable, caller gone before the decision) gets neither an answer
+    nor a record. The 400 of the request's reading and the 404 of the subject are
+    recorded the same way; a request refused as malformed before the gate (no subject or
+    two, a name or key ID that cannot be one, the contract's binding) is a 400 that is
+    not. No record, no answer: 503, or 500 for `ErrOutcomeUnknown`. Every refusal carries one fixed text; nothing a store or parser
+    said is returned, recorded or logged (a damaged policy is logged with the names of
+    its bucket and sub-bucket only). Not considered: who made a version, so an answer
+    about `admin:PreviewObject` says `object_ownership`.
+  - **The console reads the catalogue lazily.** `usePolicyTools`
+    (`web/src/ui/policyHooks.ts`) asks for it only on the first edit of an editable
+    policy or when "Open the policy builder" is pressed - on the "Who may do this?"
+    screen, on the first change of its "Does what" fields or when "Load the list of
+    actions" is pressed - never as a screen is shown or a policy viewed or focused - so
+    a caller without
+    `admin:GetPolicyCatalogue` causes no audited refusal by looking; once per screen,
+    shared on a bucket's page (`PolicyToolsContext`), waited for at most 10 s
+    (`CATALOGUE_WAIT_MS`). 404 (an older node), 403 or a failure leave the JSON editor
+    with a notice. The reader and writer (`web/src/policy/{read,write}.ts`) keep
+    `canonical(write(read(t))) = canonical(t)`, held against a corpus the Go parsers
+    write (`web/policycorpus_test.go`, `TestBuilderCorpusIsCurrent`); what the reader
+    cannot take is kept as it is and the builder disabled with the reason. The JSON is
+    sent as shown and an unchanged document is never sent. Validation runs as typed
+    (debounced) only once a document differs from the stored one, and every save checks
+    the exact bytes it sends; the bucket and sub-bucket editors check at save even when
+    the builder is not there (`BucketPolicyEditor.tsx`), and before a bucket's policy that
+    the analysis marks open to anyone - or that a node of an older release could not
+    check - is sent, they ask. "Who may do this?" (`web/src/screens/AccessScreen.tsx`,
+    `#/access`) asks `GET /access/explain` only on Explain, never aborts a request, and
+    shows the answer as given.
 - **Console (implemented, ADR-0007).** `web/`, embedded with `-tags console` and served
   at `/` by nodes with the console role. It calls only the admin API, through the client
   generated from the contract. Uploads belong to the console, not to a screen: they go
@@ -1420,7 +1540,10 @@ four at a time.
   notices of what the console did (kept for the visit, not stored). An object's details
   open in its own row of the object browser. A bucket's details hold its policy, its
   sub-buckets, its tags, its tag rules and its notification rules, each folded and
-  asked for only once opened.
+  asked for only once opened. Every policy - on the Policies screen, a role's page, the
+  form of a new API key, a bucket's and a sub-bucket's - is edited with the policy
+  builder beside its JSON (`web/src/ui/PolicyBuilder.tsx`), and the **Who may do this?**
+  screen asks the node for an explanation ("The policy builder", above).
   Tags (ADR-0018, PLAN D.6; `web/src/screens/{TagSections,ObjectTags,UploadTags,TagsScreen}.tsx`,
   `web/src/ui/{tags.ts,TagRows.tsx}`) are edited as rows of a key and a value and sent
   as the list typed, in its order - a key given twice and an empty key included, for
@@ -1542,7 +1665,9 @@ four at a time.
   deletes them, audited; the management API serves it (PLAN C.6), and the console
   shows a bucket's policy and its sub-buckets in the bucket's details, folded until
   opened (`web/src/screens/SubBuckets.tsx`, PLAN C.8, C.8b): a policy is edited as
-  JSON text and sent as typed (as on the Policies screen and in the API-key form), a
+  JSON text - and since PLAN 9.9 with the policy builder beside it
+  (`web/src/screens/BucketPolicyEditor.tsx`, "The policy builder" below) - and sent as
+  typed (as on the Policies screen and in the API-key form), a
   stored one shown compact when indented it would pass the 20 KiB the API measures as
   sent, the server's problem shown next to the editor, a 403 on the list said as "you
   may not see", and a 404 `NotFound` worded as a node of an older release. A Save or a
@@ -1591,12 +1716,32 @@ The full analysis is in `docs/threat-model.md`. In brief:
   its owner and every policy that applies are resolved in one consistent read when a
   request is authenticated. The probe endpoints are the one exception and disclose
   nothing.
+- The policy builder adds no second authorizer **(implemented, ADR-0032; section 6, "The
+  policy builder")**. The actions, condition keys and resource templates it offers are
+  the domain's catalogue, tied to the action constants and to `Decide` by tests; the
+  console reckons no decision, no wildcard's coverage and no "open to anyone" - the node
+  answers each. Validation is authorized by the action of the put it stands for, stores
+  nothing and reads nothing that put's authorization does not, so it is no oracle beyond
+  the put. "Who may do this?" reaches the authorizer's `decide` through
+  `ports.AccessExplainer`, which is never a gate and which only `ExplainService` holds -
+  enforced by type (`TestOnlyTheExplainUseCaseHoldsAnExplainer`), and the authorizer
+  cannot be asserted to it. An explanation discloses what another identity may do, so
+  `admin:ExplainAccess` is held by `cluster-admin` alone among the built-in roles; an
+  answer about a bucket also needs the right to read the bucket's policy (and a
+  sub-bucket's, when the request could fall in one), so it cannot probe a policy its
+  caller may not read, and a damaged policy is answered as that refusal; a cited
+  statement is named only where its caller may read its policy; and every answer is
+  recorded synchronously in the audit trail, on a context detached from the request,
+  before it is given - no record, no answer. A question the node has answered is
+  recorded even if its caller has gone; one that cannot be decided (store unavailable,
+  caller gone before the decision) gets neither an answer nor a record.
 - No default API key. A new deployment has one default console user, `admin` with the
   password `admin`, made once (ADR-0014): change it first. API key secrets are envelope-encrypted, shown once, compared
   in constant time **(implemented)**. Keys expire, can be narrowed by an inline policy
   and are revoked for every node at once.
 - Hash-chained, append-only audit trail **(implemented)**: changes to identities are
-  recorded in the same Raft entry as the change; refusals in the background.
+  recorded in the same Raft entry as the change; refusals in the background; every
+  answer of "Who may do this?" synchronously, before it is given.
   `--audit-export` writes the records to the log stream as JSON lines; a target defined
   with `audit: true` is sent the same lines, every record in sequence, at least once
   (PLAN 8.2.8; section 5, "Delivery to targets").

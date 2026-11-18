@@ -67,8 +67,10 @@ An accepted ADR is never edited to change its meaning; it is superseded by a new
 | [0029](0029-updates-and-upgrades.md) | Checking for the latest release, and upgrading from the console | accepted, pending Albie's review (the defaults of Goal P's questions taken 2026-11-09); implemented, off by default (PLAN P.1 to P.11; `make test-k8s` of the Kubernetes mode still to run); amends 0023 for the update client |
 | [0030](0030-node-revocation-and-schema-6.md) | A node that leaves is revoked - and entry schema 6 | accepted; implemented (`MetadataVersion` 6, its bytes frozen); **not implemented:** an operator's command to remove another node, and taking a node off the record |
 | [0031](0031-local-kms-wrapped-key-v2.md) | Wrapped keys of the local KMS, version 2 - a key of its own for every data key | accepted; implemented (audit L34); version 1 is still read; rolling a development cluster on the local KMS across it is open for Albie |
-| [0032](0032-policy-builder.md) | The visual policy builder - a catalogue, validation and an explanation from the node | proposed (PLAN 9.0, revised to its review); not implemented (PLAN 9.1 to 9.11); its open points are the threat model's questions 60 to 70, with their defaults |
+| [0032](0032-policy-builder.md) | The visual policy builder - a catalogue, validation and an explanation from the node | accepted (2026-11-18, PLAN 9.12); implemented (PLAN 9.1 to 9.10): the catalogue, located faults and the analysis, the explanation behind `ports.AccessExplainer`, the use cases, the contract and the console's builder and "Who may do this?"; what went beyond the text is in its "As built"; the four-node test (9.11) and the review in a browser (9.13) are to come; its open points are the threat model's questions 60 to 70, with their defaults |
 
-"Implemented" is the state of the code on 2026-10-16; `PLAN.md` has the step behind each.
+"Implemented" is the state of the code when the row was last changed - each row names
+the PLAN step, or the date, it was written at (0001 to 0028 on 2026-10-16); `PLAN.md`
+has the step behind each.
 The ADRs of 0007 and later write their title as `ADR-NNNN: Title` and their status in a
 list at the top; the format above is that of the first six.
