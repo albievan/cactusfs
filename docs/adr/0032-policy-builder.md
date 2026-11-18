@@ -11,8 +11,9 @@
   [As built](#as-built-plan-91-to-910) says so; the decisions are unchanged. The points
   under "Open, for the owner" are not answered: their defaults are what is built (the
   threat model, questions 60 to 70, each with what was built; question 71 was added by
-  the review of PLAN 9.5). The integration test on four nodes (PLAN 9.11) and the review
-  in a real browser (PLAN 9.13) are to come. It was proposed on 2026-11-17 (PLAN 9.0) and
+  the review of PLAN 9.5). The integration test on four nodes (PLAN 9.11,
+  `test/integration/policybuilder_test.go`) is done; the review in a real browser (PLAN
+  9.13) is to come. It was proposed on 2026-11-17 (PLAN 9.0) and
   revised that day to the review of PLAN 9.0: an explanation about a bucket also needs
   the right to read the policies it depends on; `Explain` is a port of its own
   (`ports.AccessExplainer`); the validation law is about the document;
@@ -643,7 +644,13 @@ this?" screen and the link "What may *name* do?" from a user's page (9.10).
   the user's page has `?user=`.
 - A check in a real browser, at desktop and phone width, and with a screen reader: the
   console's accessibility is tested in jsdom only. That is PLAN 9.13's.
-- The integration test on four nodes is PLAN 9.11's.
+- A test that ties the console's use of the catalogue's resource kinds (`bucket`,
+  `object`) and the order of their placeholders to `iam.ResourceKinds()`: the console's
+  tests use catalogues written by hand (the review of milestone 9).
+- A grant of `admin:ExplainAccess` on the bare `arn:cactusfs:admin:::user` - a template
+  the catalogue lists for the action - tells its holder an access key that is there
+  (403) from one that is not (404), as `DeleteAPIKey`'s gate does; key IDs are random,
+  so it confirms a known ID and lists none (the review of milestone 9).
 - Question 71 of the threat model: the authorizer and the admin API's 5xx path log a
   damaged stored policy's parser text to the node's log (older than this record).
 

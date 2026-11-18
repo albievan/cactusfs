@@ -751,7 +751,7 @@ question; none of them is answered by the owner, and each stays open:
 67. **`NotAction`, `NotResource` and `NotPrincipal` stay refused** (ADR-0006,
     ADR-0011): each turns a list of what is meant into a list of what is not, which a
     new action silently joins. Default: yes; neither the builder nor the JSON can write
-    them. *As built:* so; the parsers are unchanged in what they accept.
+    them. *As built:* so; the parsers accept nothing they did not, and since PLAN 9.2a they refuse a document followed by anything but white space - a trailing closing bracket that v0.7.0 stored is now a 400 (ADR-0032, Decision 2).
 68. **The builder edits all four kinds of policy** - named policies, the inline policy
     of a new API key, a bucket's and a sub-bucket's - not only the two the first cut
     named. Default: yes. *As built (PLAN 9.8, 9.9):* so - the Policies screen and a

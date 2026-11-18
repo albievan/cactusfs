@@ -43,9 +43,8 @@ import (
 //     app.NewExplainService, or a field of an app.ExplainServiceConfig
 //     literal.
 //
-// It holds today, when there is no ExplainService and nothing wires an
-// explainer, and it holds unchanged once 9.5 adds them. Tests are not held
-// to it. Files the default build of this platform leaves out - another
+// It holds with the explanation use case and its one wiring in node.go.
+// Tests are not held to it. Files the default build of this platform leaves out - another
 // operating system's, another build tag's - cannot be type-checked here;
 // they are read with go/parser and must not name NewExplainer,
 // AccessExplainer or decide, nor select a field or method called Explain.
