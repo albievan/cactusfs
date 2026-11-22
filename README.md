@@ -1877,6 +1877,7 @@ Suites outside `make check`:
 | `make test-chaos` | fault injection: against the built binary (corruption, lost shards, replaced drives, kill during writes) and against a cluster of four containers (nodes killed during writes, the leader killed, the network partitioned, two nodes away, shards corrupted and deleted on other nodes) |
 | `make test-rolling` | a rolling upgrade with the binaries themselves: three voters of the release before this entry schema, built from the history of the repository (so not possible in a clean export), and a fourth node of this tree, upgraded one at a time. From schema 4 to 5 when told nothing; `ROLLING_FROM_COMMIT=0b7d825 ROLLING_TEST=TestRollingUpgradeFromSchema3ToSchema4` runs the one from schema 3 to 4. `ROLLING_TEST` is taken as the beginning of a test's name, so the second also runs the case of a locked console session with nodes of the release before (`TestRollingUpgradeFromSchema3ToSchema4SessionLock`) |
 | `make test-k8s` | the chart installed on k3s in one container, with the image this tree builds, under the `restricted` Pod Security Standard: an S3 round trip, a pod away, the NetworkPolicy enforced. Needs a privileged container |
+| `make test-deploy` | `deploy/deploy.sh` against this host's engine (`ENGINE=docker` or `podman`), standalone: an install, an object of 5 MiB put and read back over TLS with SigV4, the secrets' volumes readable by the node's user, a port in use refused, an upgrade, `--status`, an uninstall that keeps the volumes, a reinstall and a purge (`test/deploy/lifecycle.sh`). It builds the image for this host first, unless `LIFECYCLE_IMAGE` names one, and removes what it made |
 
 Everything else:
 
@@ -1898,8 +1899,8 @@ Everything else:
 | `make remote-<target>` | the same target on another machine, below |
 
 CI (`.github/workflows/ci.yml`) runs `make check`, `make test-chaos`, `make test-rolling`
-(both upgrades) and `make test-k8s` as jobs of their own, and the unit tests on Linux, macOS and
-Windows.
+(both upgrades), `make test-k8s` and `make test-deploy` (with Docker and with Podman) as jobs
+of their own, and the unit tests on Linux, macOS and Windows.
 
 **On another machine.** When the machine you work on must not run containers,
 `make remote-<target>` copies the tree as it is - the commit that is checked out and

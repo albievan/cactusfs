@@ -417,7 +417,7 @@ func installed(t *testing.T, r *rig, env string) *rig {
 	t.Helper()
 	base := secretsRig(t, r.fresh(t))
 	base.rules(dockerRules(t, devInitOutput(), nil)...)
-	base.guarded(env, installDD...).want(t, 3, "not built yet (PLAN 10.5)")
+	base.guarded(env, installDD...).want(t, 3, "not built yet (PLAN 10.4)")
 	return base
 }
 
@@ -484,7 +484,7 @@ func TestSecretsAreMadeOnce(t *testing.T) {
 		mu.Lock()
 		made = append(made, filesUnder(t, filepath.Join(state, "secrets")))
 		mu.Unlock()
-		res.want(t, 3, "not built yet (PLAN 10.5)", "engine ID: "+engineID, "made the root credentials", "made the KMS passphrase", "made "+state+"/config")
+		res.want(t, 3, "not built yet (PLAN 10.4)", "engine ID: "+engineID, "made the root credentials", "made the KMS passphrase", "made "+state+"/config")
 		if !strings.Contains(res.stderr, "+ ") {
 			t.Fatalf("the run was not traced:\n%s", res.stderr)
 		}
@@ -597,7 +597,7 @@ func TestSecretsAreMadeOnce(t *testing.T) {
 		r.trace = true
 		res = r.guarded(env, installDD...)
 		r.trace = false
-		res.want(t, 3, "not built yet (PLAN 10.5)", "hold the same secrets")
+		res.want(t, 3, "not built yet (PLAN 10.4)", "hold the same secrets")
 		if after := tree(t, state); !equalTrees(before, after) {
 			t.Errorf("the second install changed the entry:\nbefore %v\nafter  %v", before, after)
 		}
@@ -1191,6 +1191,10 @@ func TestSecretsRefused(t *testing.T) {
 			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
 			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "someone\n"},
 		}, "a container named cactusfs-dev-init is there without the label"},
+		{"a dev-init container of another target", "", nil, []rule{
+			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
+			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs|podman\n"},
+		}, "the container cactusfs-dev-init is the deployment's on the target 'podman', not dd"},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
@@ -1234,7 +1238,7 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			r := secretsRig(t, r.fresh(t))
 			r.rules(engineRules(t, "podman", "host:/var/lib/containers", devInitOutput(), nil)...)
 			res := r.guardedRun([]string{"--env", r.envFile("site.env", "KMS=local\n"), "--docker", "podman", "--install"}, "XDG_RUNTIME_DIR=/run/user/1000")
-			res.want(t, 3, "not built yet (PLAN 10.5)")
+			res.want(t, 3, "not built yet (PLAN 10.4)")
 			if len(callsOf(res, "docker")) != 0 {
 				t.Error("docker was run for podman")
 			}
@@ -1290,9 +1294,11 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			// needed - the helpers are made from IMAGE, as dev-init runs in it.
 			remove(t, filepath.Join(r.repo, "Dockerfile"))
 			const image = "registry.example.test/cactusfs:0.7.0"
-			r.rules(dockerRules(t, devInitOutput(), nil)...)
+			// With the image given, the install goes on to the node (PLAN
+			// 10.5), which /readyz says is ready.
+			r.rules(append([]rule{{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "200"}}, dockerRules(t, devInitOutput(), nil)...)...)
 			res := r.guarded("KMS=local\nIMAGE_SOURCE=image\nIMAGE="+image+"\n", installDD...)
-			res.want(t, 3, "not built yet (PLAN 10.5)")
+			res.want(t, 0, "ready: cactusfs runs "+image)
 			helpers := callsOf(res, "docker", "create", "--name", "cactusfs-volumes")
 			if len(helpers) != 1 || !containsRun(helpers[0].Args, []string{image, "true"}) {
 				t.Errorf("the helper of the volumes is not made from IMAGE: %v", helpers)
@@ -1341,8 +1347,26 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			before := tree(t, r.dir)
 			res := r.guarded("KMS=local\n", "--docker", "dd", "--install", "--dry-run")
 			res.want(t, 3, "secrets: kept in "+r.stateOf("dd-default"), "is made once")
-			if len(res.calls) != 0 {
-				t.Errorf("a dry run asked %v", res.calls)
+			// Of the secrets a dry run asks nothing; what is asked is exactly
+			// what an install asks first (PLAN 10.5) - the node's container,
+			// a container an unfinished upgrade kept, the volumes, what
+			// publishes which port, and a probe of each port - and nothing is
+			// changed.
+			noChange(t, res)
+			var asked [][]string
+			for _, c := range res.calls {
+				asked = append(asked, append([]string{c.Tool}, sub(c)...))
+			}
+			want := [][]string{
+				{"docker", "ps", "-a", "--filter", "name=cactusfs", "--format", "{{.Names}}"},
+				{"docker", "ps", "-a", "--filter", "name=cactusfs-previous", "--format", "{{.Names}}"},
+				{"docker", "volume", "ls", "--filter", "name=cactusfs-", "--format", "{{.Name}}"},
+				{"docker", "ps", "--format", "{{.Names}}|{{.Ports}}"},
+				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9000/"},
+				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9001/"},
+			}
+			if !slices.EqualFunc(asked, want, slices.Equal[[]string]) {
+				t.Errorf("a dry run asked\n%q\nwant\n%q", asked, want)
 			}
 			if after := tree(t, r.dir); !equalTrees(before, after) {
 				t.Errorf("a dry run wrote files")
@@ -1402,7 +1426,7 @@ func TestSecretsLeaveNoHelper(t *testing.T) {
 		r = secretsRig(t, r)
 		r.rules(append([]rule{
 			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
-			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs\n"},
+			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs|dd\n"},
 		}, dockerRules(t, devInitOutput(), nil)...)...)
 		res := r.guarded("KMS=local\n", installDD...)
 		res.want(t, 3)

@@ -27,9 +27,15 @@ func (r *rig) withEnv(content string, args ...string) result {
 	return r.run(append([]string{"--env", path}, args...))
 }
 
-// statusDD is the arguments of a run that gets as far as its stub: a dry
-// run of --status on Docker Desktop.
+// statusDD is the arguments of a run that gets as far as its action: a dry
+// run of --status on Docker Desktop. Built since PLAN 10.5, it asks the
+// engine by the deployment's label only, and with nothing there - what the
+// fakes answer unless told otherwise - says so and exits statusDone.
 var statusDD = []string{"--docker", "dd", "--status", "--dry-run"}
+
+// statusDone is the exit status of --status when the deployment is not
+// installed (or is ready).
+const statusDone = 0
 
 // TestHelpListsEveryFlag: --help names every flag the script parses, and
 // every flag of PLAN row 10.1.
@@ -99,7 +105,7 @@ func TestValuesAreTakenLiterally(t *testing.T) {
 						t.Fatalf("the refusal repeats the value:\n%s", res.output())
 					}
 				} else {
-					res.want(t, 3, "not built yet")
+					res.want(t, statusDone, "is not installed")
 					if want := []string{"CACTUSFS_S3_DOMAIN=" + text}; !slices.Equal(res.node, want) {
 						t.Fatalf("passed to the nodes %q, want %q", res.node, want)
 					}
@@ -129,7 +135,7 @@ func TestValuesAreTakenLiterally(t *testing.T) {
 				t.Fatal(err)
 			}
 			res := r.withEnv("KMS=local\nTLS_CERT_FILE=~/$(touch "+mark+")\nTLS_KEY_FILE="+key+"\n", statusDD...)
-			res.want(t, 3)
+			res.want(t, statusDone)
 			res.setting(t, "TLS_CERT_FILE", r.home+"/$(touch "+mark+")", "file")
 			if _, err := os.Stat(mark); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("the path ran: %s exists", mark)
@@ -215,7 +221,7 @@ func TestRefusedLines(t *testing.T) {
 func TestFileForm(t *testing.T) {
 	eachShell(t, func(t *testing.T, r *rig) {
 		res := r.withEnv("\n  \t \n# DEPLOY_NAME=commented\n#DEPLOY_NAME=commented\n  # DEPLOY_NAME=indented\n\t#DEPLOY_MODE=tab\n \t # lower=case\nKMS=local\nCACTUSFS_EGRESS_ALLOW=a=b==c \nDEPLOY_MODE=\nDEPLOY_NAME=last", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "DEPLOY_NAME", "last", "file")
 		res.setting(t, "DEPLOY_MODE", "standalone", "default")
 		if want := []string{"CACTUSFS_EGRESS_ALLOW=a=b==c "}; !slices.Equal(res.node, want) {
@@ -237,16 +243,16 @@ func TestPrecedence(t *testing.T) {
 		value string
 		from  string
 	}{
-		{name: "default", env: "KMS=local\n", args: statusDD, code: 3, key: "DEPLOY_NAME", value: "cactusfs", from: "default"},
-		{name: "file over default", env: "KMS=local\nDEPLOY_NAME=site\n", args: statusDD, code: 3, key: "DEPLOY_NAME", value: "site", from: "file"},
-		{name: "flag over file", env: "KMS=local\nDEPLOY_TARGET=podman\n", args: statusDD, code: 3, key: "DEPLOY_TARGET", value: "dd", from: "flag"},
+		{name: "default", env: "KMS=local\n", args: statusDD, code: statusDone, key: "DEPLOY_NAME", value: "cactusfs", from: "default"},
+		{name: "file over default", env: "KMS=local\nDEPLOY_NAME=site\n", args: statusDD, code: statusDone, key: "DEPLOY_NAME", value: "site", from: "file"},
+		{name: "flag over file", env: "KMS=local\nDEPLOY_TARGET=podman\n", args: statusDD, code: statusDone, key: "DEPLOY_TARGET", value: "dd", from: "flag"},
 		{
 			name: "from-source over file", env: "KMS=local\nIMAGE_SOURCE=image\nIMAGE=registry.example.test/cactusfs:1\n",
 			args: []string{"--docker", "dd", "--install", "--from-source", "--dry-run"}, code: 3,
 			key: "IMAGE_SOURCE", value: "source", from: "flag",
 		},
 		{
-			name: "not the environment", env: "KMS=local\n", args: statusDD, code: 3,
+			name: "not the environment", env: "KMS=local\n", args: statusDD, code: statusDone,
 			vars: []string{"DEPLOY_NAME=fromenv", "DEPLOY_MODE=cluster", "IMAGE_SOURCE=image", "SETTINGS=DEPLOY_NAME=x", "FILE_SETTINGS=DEPLOY_NAME=y", "FLAG_SETTINGS=DEPLOY_NAME=z", "PASSED=CACTUSFS_DATA=/x"},
 			key:  "DEPLOY_NAME", value: "cactusfs", from: "default",
 		},
@@ -288,7 +294,7 @@ func TestEnvFileChoice(t *testing.T) {
 			t.Fatal(err)
 		}
 		res := r.run(statusDD)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "DEPLOY_NAME", "local", "file")
 		// --env wins, and deploy/.env is not read at all: its line would
 		// be refused.
@@ -296,7 +302,7 @@ func TestEnvFileChoice(t *testing.T) {
 			t.Fatal(err)
 		}
 		res = r.withEnv("KMS=local\nDEPLOY_NAME=chosen\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "DEPLOY_NAME", "chosen", "file")
 		r.run(append([]string{"--env", filepath.Join(r.dir, "missing.env")}, statusDD...)).want(t, 2, "no file")
 	})
@@ -324,7 +330,7 @@ func TestKMSMustBeStated(t *testing.T) {
 		res.want(t, 3, "not built yet (PLAN 10.8)")
 		token := r.envFile("token", "t")
 		res = r.withEnv("KMS=vault\nVAULT_ADDR=https://vault.example.test:8200\nVAULT_KEY=cactusfs\nVAULT_TOKEN_FILE="+token+"\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "KMS", "vault", "file")
 	})
 }
@@ -335,7 +341,7 @@ func TestKMSMustBeStated(t *testing.T) {
 func TestPaths(t *testing.T) {
 	eachShell(t, func(t *testing.T, r *rig) {
 		res := r.withEnv("KMS=local\nRELEASE_DIR=~/rel\nNODE_CA_FILE=certs/ca.crt\nCACTUSFS_S3_DOMAIN=~/x\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "RELEASE_DIR", r.home+"/rel", "file")
 		res.setting(t, "NODE_CA_FILE", r.repo+"/certs/ca.crt", "file")
 		res.setting(t, "STATE_DIR", r.home+"/.local/state/cactusfs-deploy", "default")
@@ -344,7 +350,7 @@ func TestPaths(t *testing.T) {
 			t.Fatalf("passed to the nodes %q, want %q", res.node, want)
 		}
 		res = r.run(append([]string{"--env", r.envFile("site.env", "KMS=local\n")}, statusDD...), "XDG_STATE_HOME="+r.dir+"/xdg")
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "STATE_DIR", r.dir+"/xdg/cactusfs-deploy", "default")
 
 		for _, c := range []struct{ name, env, want string }{
@@ -371,7 +377,7 @@ func TestPaths(t *testing.T) {
 		}
 		for _, dir := range []string{r.dir + "/out-link/state", r.dir + "/outside/a/b", r.dir + "/repository-sibling/state", r.dir + "/rep"} {
 			res := r.withEnv("KMS=local\nSTATE_DIR="+dir+"\n", statusDD...)
-			res.want(t, 3)
+			res.want(t, statusDone)
 			res.setting(t, "STATE_DIR", dir, "file")
 		}
 		// The directory the rig was made in, as it was named: on macOS the
@@ -393,7 +399,7 @@ func TestPaths(t *testing.T) {
 			r.repoAs = ""
 			res.want(t, 2, "STATE_DIR="+r.repo+"/state: is inside the repository")
 		} else {
-			res.want(t, 3)
+			res.want(t, statusDone)
 			res.setting(t, "STATE_DIR", upper+"/state", "file")
 		}
 
@@ -409,10 +415,10 @@ func TestPaths(t *testing.T) {
 		}
 		for _, dir := range []string{"~/Documents/cactusfs", "~/Desktop/s", "~/Library/Mobile Documents/x", "/data/Dropbox/s", "/x/OneDrive - Example/s"} {
 			res := r.withEnv("KMS=local\nSTATE_DIR="+dir+"\n", statusDD...)
-			res.want(t, 3, "a sync service may copy")
+			res.want(t, statusDone, "a sync service may copy")
 		}
 		res = r.withEnv("KMS=local\nSTATE_DIR=/srv/cactusfs-state\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		if strings.Contains(res.output(), "sync service") {
 			t.Fatalf("warned of a directory no sync service copies:\n%s", res.output())
 		}
@@ -463,7 +469,7 @@ func TestStateDirUnderTmp(t *testing.T) {
 				r.withEnv("KMS=local\nSTATE_DIR="+dir+"\n", statusDD...).want(t, 2, "STATE_DIR="+dir+": is inside the repository ("+r.repo)
 			}
 			res := r.withEnv("KMS=local\nSTATE_DIR="+name+"/state\n", statusDD...)
-			res.want(t, 3)
+			res.want(t, statusDone)
 			res.setting(t, "STATE_DIR", name+"/state", "file")
 		}
 	})
@@ -554,7 +560,7 @@ func TestValidation(t *testing.T) {
 		kms := r.envFile("kms.json", "{}")
 		pass := r.envFile("pass", "p")
 		res := r.withEnv("KMS=local\nKMS_KEY_FILE="+kms+"\nKMS_PASSPHRASE_FILE="+pass+"\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		res.setting(t, "KMS_KEY_FILE", kms, "file")
 		r.withEnv("KMS=vault\nVAULT_ADDR=https://vault.example.test:8200\nVAULT_KEY=k\nVAULT_TOKEN_FILE="+pass+"\nKMS_KEY_FILE="+kms+"\nKMS_PASSPHRASE_FILE="+pass+"\n", statusDD...).want(t, 2, "KMS_KEY_FILE is the key file of KMS=local")
 		// BIND stays at its default in cluster mode.
@@ -604,7 +610,7 @@ func TestCactusfsSettings(t *testing.T) {
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		res := r.withEnv("KMS=local\nCACTUSFS_LOG_LEVEL=debug\nCACTUSFS_REGION=eu-test-1\nCACTUSFS_SCRUB_RATE_MIB=16\n", statusDD...)
-		res.want(t, 3)
+		res.want(t, statusDone)
 		if want := []string{"CACTUSFS_LOG_LEVEL=debug", "CACTUSFS_REGION=eu-test-1", "CACTUSFS_SCRUB_RATE_MIB=16"}; !slices.Equal(res.node, want) {
 			t.Fatalf("passed to the nodes %q, want %q", res.node, want)
 		}
@@ -649,19 +655,19 @@ func TestTarget(t *testing.T) {
 		code    int
 		want    []string
 	}{
-		{name: "flag", args: []string{"--docker", "podman"}, code: 3, want: []string{"target podman (from --docker)", "engine: podman (local)"}},
-		{name: "flag form with equals", args: []string{"--docker=ce"}, code: 3, want: []string{"target ce (from --docker)"}},
+		{name: "flag", args: []string{"--docker", "podman"}, code: statusDone, want: []string{"target podman (from --docker)", "engine: podman (local)"}},
+		{name: "flag form with equals", args: []string{"--docker=ce"}, code: statusDone, want: []string{"target ce (from --docker)"}},
 		{name: "file", env: "DEPLOY_TARGET=k3s\n", code: 3, want: []string{"target k3s (from DEPLOY_TARGET)"}},
-		{name: "flag over file", env: "DEPLOY_TARGET=k3s\n", args: []string{"--docker", "dd"}, code: 3, want: []string{"target dd (from --docker)"}},
+		{name: "flag over file", env: "DEPLOY_TARGET=k3s\n", args: []string{"--docker", "dd"}, code: statusDone, want: []string{"target dd (from --docker)"}},
 		{name: "bad flag", args: []string{"--docker", "swarm"}, code: 2, want: []string{"DEPLOY_TARGET=swarm: must be one of"}},
 		{name: "no value", args: []string{"--docker"}, code: 2, want: []string{"--docker needs a target"}},
 		{name: "empty value", args: []string{"--docker", ""}, code: 2, want: []string{"--docker needs a target"}},
 		{name: "empty value with equals", args: []string{"--docker="}, code: 2, want: []string{"--docker needs a target"}},
 		{name: "empty in the file probes", env: "DEPLOY_TARGET=\n", code: 2, want: []string{"no target: nothing named cactusfs runs here"}},
 		{name: "nothing runs", code: 2, want: []string{"no target: nothing named cactusfs runs here"}},
-		{name: "docker desktop runs", rules: []rule{ps("docker", "dd\ndd\n")}, code: 3, want: []string{"target dd (from what runs)", "engine: docker --context default"}},
+		{name: "docker desktop runs", rules: []rule{ps("docker", "dd\ndd\n")}, code: statusDone, want: []string{"target dd (from what runs)", "engine: docker --context default"}},
 		{name: "rancher with moby runs", rules: []rule{ps("docker", "rancher\n")}, code: 3, want: []string{"target rancher (from what runs)"}},
-		{name: "podman runs", rules: []rule{ps("podman", "podman\n")}, code: 3, want: []string{"target podman (from what runs)"}},
+		{name: "podman runs", rules: []rule{ps("podman", "podman\n")}, code: statusDone, want: []string{"target podman (from what runs)"}},
 		{name: "nerdctl runs", rules: []rule{ps("nerdctl", "0123abcd\n")}, code: 3, want: []string{"target rancher (from what runs)"}},
 		{
 			name: "a namespace of the context", env: "K8S_CONTEXT=prod\n",
@@ -794,7 +800,7 @@ func TestToolsSeeOnlyTheSettings(t *testing.T) {
 			}
 		}
 		res = r.withEnv("KMS=local\nENGINE_CONTEXT=colima\n", "--docker", "dd", "--status", "--dry-run")
-		res.want(t, 3, "engine: docker --context colima")
+		res.want(t, statusDone, "engine: docker --context colima")
 
 		// TOOL_ENV_PASS: every tool is given the variables it names that
 		// the caller's environment holds, with their values as they are,
@@ -1042,7 +1048,8 @@ func TestSecretsNeverInTheTrace(t *testing.T) {
 }
 
 // TestActions: one action a run, the flags that go with it, and each stub
-// names the step that builds it.
+// names the step that builds it. The actions built for a standalone
+// deployment on Docker (PLAN 10.5) are TestDockerActions'.
 func TestActions(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1058,11 +1065,6 @@ func TestActions(t *testing.T) {
 		{"purge confirm alone", "", []string{"--uninstall", "--purge-confirm", "cactusfs"}, 2, "--purge-confirm goes with --purge"},
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
-		// An install on a Docker engine, standalone, makes its secrets
-		// first (PLAN 10.3, secrets_test.go); a dry run reaches the stub.
-		{"dd install", "", []string{"--docker", "dd", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.5)"},
-		{"podman status", "", []string{"--docker", "podman", "--status"}, 3, "not built yet (PLAN 10.5)"},
-		{"ce here", "", []string{"--docker", "ce", "--uninstall"}, 3, "not built yet (PLAN 10.5)"},
 		{"ce over ssh", "CE_HOST=deploy@server.example.test\n", []string{"--docker", "ce", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.7)"},
 		{"rancher", "", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
 		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.10)"},
@@ -1070,13 +1072,11 @@ func TestActions(t *testing.T) {
 		{"k3s install", "K8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "k3s", "--install"}, 3, "not built yet (PLAN 10.10)"},
 		{"k3s install, S3 published to nobody named", "", []string{"--docker", "k3s", "--install"}, 2, "K8S_S3_ALLOW_FROM must say who may reach it"},
 		{"k3s purge", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs"}, 3, "not built yet (PLAN 10.11)"},
-		{"purge confirm with equals", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm=cactusfs"}, 3, "confirmed by --purge-confirm"},
 		{"purge confirm without its name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "--dry-run"}, 2, "--purge-confirm needs the deployment's name, not '--dry-run'"},
 		{"env without its file", "", []string{"--status", "--env"}, 2, "--env needs a file"},
 		{"print namespace", "K8S_CONTEXT=prod\n", []string{"--docker", "k8s", "--print-namespace"}, 0, "deploy.cactusfs.io/owner-uid: '"},
 		{"print namespace, docker", "", []string{"--docker", "dd", "--print-namespace"}, 2, "--print-namespace is for a Kubernetes target"},
 		{"print namespace and install", "", []string{"--print-namespace", "--install"}, 2, "one action a run"},
-		{"another target", "", []string{"--docker", "dd", "--status", "--another-target"}, 3, "not built yet (PLAN 10.5)"},
 		{"docker empty", "", []string{"--docker", "", "--status"}, 2, "--docker needs a target"},
 		{"docker empty with equals", "", []string{"--docker=", "--status"}, 2, "--docker needs a target"},
 		{"env empty", "", []string{"--env", "", "--status"}, 2, "--env needs a file"},
@@ -1107,28 +1107,58 @@ func TestActions(t *testing.T) {
 // is asked of any tool, and no file is written - not the state, not the
 // repository, not the home directory.
 func TestDryRunChangesNothing(t *testing.T) {
-	readOnly := map[string][]string{
-		"docker": {"ps"}, "podman": {"ps"}, "nerdctl": {"ps"}, "kubectl": {"get"}, "ssh": {"get"},
+	// The read-only questions, by tool: each is the words of one. An
+	// engine's subcommand is matched where it stands - its first words
+	// after the Docker CLI's "--context X" (sub, docker_test.go) - so a word
+	// that only appears among the arguments of another command does not
+	// pass. curl only probes a port or /readyz (PLAN 10.5): it sends nothing.
+	engines := map[string][][]string{
+		"docker":  {{"ps"}, {"volume", "ls"}, {"volume", "inspect"}, {"container", "inspect"}, {"info"}, {"image", "inspect"}},
+		"podman":  {{"ps"}},
+		"nerdctl": {{"ps"}},
+	}
+	others := map[string][]string{
+		"kubectl": {"get"},
+		"ssh":     {"get"},
+		"curl":    {"-o", "/dev/null"},
+	}
+	asked := func(c call) bool {
+		if words, ok := others[c.Tool]; ok {
+			return containsAll(c.Args, words) &&
+				!slices.Contains(c.Args, "-X") && !slices.Contains(c.Args, "-T") && !slices.Contains(c.Args, "-d")
+		}
+		s := sub(c)
+		for _, words := range engines[c.Tool] {
+			if len(s) >= len(words) && slices.Equal(s[:len(words)], words) {
+				return true
+			}
+		}
+		return false
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		r.rules(rule{Tool: "docker", Contains: []string{"ps"}, Stdout: "dd\n"})
 		path := r.envFile("site.env", "KMS=local\nSTATE_DIR="+filepath.Join(r.dir, "state")+"\n")
 		before := tree(t, r.dir)
-		for _, args := range [][]string{
-			{"--install", "--dry-run"},
-			{"--install", "--from-source", "--dry-run"},
-			{"--status", "--dry-run"},
-			{"--uninstall", "--dry-run"},
-			{"--uninstall", "--purge", "--purge-confirm", "cactusfs", "--dry-run"},
+		for _, run := range []struct {
+			args []string
+			code int
+		}{
+			// An install stops where the image is resolved (PLAN 10.4).
+			{[]string{"--install", "--dry-run"}, 3},
+			{[]string{"--install", "--from-source", "--dry-run"}, 3},
+			{[]string{"--status", "--dry-run"}, statusDone},
+			{[]string{"--uninstall", "--dry-run"}, 0},
+			// A purge with no record of the deployment is refused (PLAN 10.5).
+			{[]string{"--uninstall", "--purge", "--purge-confirm", "cactusfs", "--dry-run"}, 2},
 		} {
+			args := run.args
 			res := r.run(append([]string{"--env", path}, args...))
-			res.want(t, 3, "dry run: nothing that changes anything is run", "target dd (from what runs)")
+			res.want(t, run.code, "dry run: nothing that changes anything is run", "target dd (from what runs)")
 			if len(res.calls) == 0 {
 				t.Fatal("no tool was asked what runs, so this proves nothing")
 			}
 			for _, c := range res.calls {
-				words, ok := readOnly[c.Tool]
-				if !ok || !containsAll(c.Args, words) {
+				if !asked(c) {
 					t.Errorf("%v: %s %q is not a read-only question", args, c.Tool, c.Args)
 				}
 			}
@@ -1196,14 +1226,14 @@ func TestStateRecordsTheEngine(t *testing.T) {
 	eachShell(t, func(t *testing.T, r *rig) {
 		state := filepath.Join(r.home, ".local", "state", "cactusfs-deploy", "dd-default", "cactusfs")
 		res := r.withEnv("KMS=local\n", statusDD...)
-		res.want(t, 3, "state: "+state)
+		res.want(t, statusDone, "state: "+state)
 		if err := os.MkdirAll(state, 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(state, "target"), []byte("docker --context default\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		r.withEnv("KMS=local\n", statusDD...).want(t, 3)
+		r.withEnv("KMS=local\n", statusDD...).want(t, statusDone)
 		if err := os.WriteFile(filepath.Join(state, "target"), []byte("docker --context $(touch x)\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -1222,8 +1252,8 @@ func TestStateRecordsTheEngine(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.withEnv("KMS=local\n", statusDD...).want(t, 2, "recorded on another target (k8s-prod", "--another-target")
-		r.withEnv("KMS=local\n", append([]string{"--another-target"}, statusDD...)...).want(t, 3)
-		r.withEnv("KMS=local\nDEPLOY_NAME=second\n", statusDD...).want(t, 3)
+		r.withEnv("KMS=local\n", append([]string{"--another-target"}, statusDD...)...).want(t, statusDone)
+		r.withEnv("KMS=local\nDEPLOY_NAME=second\n", statusDD...).want(t, statusDone)
 		// A server over ssh is its own target: the destination is its ID.
 		res = r.withEnv("KMS=local\nCE_HOST=deploy@server.example.test\n", "--docker", "ce", "--status", "--dry-run", "--another-target")
 		res.want(t, 3, "state: "+filepath.Join(r.home, ".local", "state", "cactusfs-deploy", "ssh-deploy_server.example.test", "cactusfs"))
@@ -1397,7 +1427,7 @@ func TestEveryKeyIsReadAndExplained(t *testing.T) {
 	// And the example itself is an env file the script takes.
 	eachShell(t, func(t *testing.T, r *rig) {
 		res := r.run([]string{"--env", filepath.Join(r.repo, "deploy", ".env.example"), "--docker", "dd", "--status", "--dry-run"})
-		res.want(t, 3)
+		res.want(t, statusDone)
 		for key := range table {
 			if _, ok := res.settings[key]; !ok {
 				t.Errorf("--dry-run does not show %s", key)

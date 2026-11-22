@@ -1939,6 +1939,13 @@ each one fails on.
   console session among nodes of the release before as well
   (`TestRollingUpgradeFromSchema3ToSchema4SessionLock`, ADR-0027).
 
+- `make test-deploy` (`test/deploy/lifecycle.sh`) is outside `make check` and a CI job
+  of its own, with Docker and with rootless Podman: it runs on the host, as `make up`
+  does, against the engine there - a standalone deployment made by `deploy/deploy.sh`
+  installed, read and written over TLS, upgraded, uninstalled, reinstalled and purged
+  (PLAN 10.5). The script's logic is proven in `make check` by the harness of
+  `make deploy-check`, against recording fakes.
+
 - `make test-k8s` (`test/k8s`, build tag `k8s`) is outside `make check` and a CI job of
   its own, because k3s needs a privileged container: the chart installed on k3s with the
   image built here - pods admitted as `restricted` and ready, an S3 round trip, an object

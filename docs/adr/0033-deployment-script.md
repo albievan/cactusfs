@@ -269,6 +269,26 @@ opens once the keys are purged, and removing it is the cluster's administrator's
 purge must be confirmed by typing the deployment's name at a terminal, or with
 `--purge-confirm=<name>`; never from the env file.
 
+On a Docker engine, standalone (PLAN 10.5), a purge is refused unless the engine's ID
+is the one recorded for the deployment (an uninstall too); a deployment of which
+`STATE_DIR` holds no record is purged only with `--adopt`, which asks the engine's ID,
+and writes the record naming it once the container, the node an upgrade kept and the
+labelled volumes are found and checked, before the first is removed (so a purge cut
+short leaves it); an engine that holds nothing labelled with the name refuses it (the
+settings may reach another engine), and before anything is deleted a volume carrying the deployment's name with another target's
+label refuses it. Then: the node's container is stopped and removed; every volume
+labelled with the deployment's name but the two of its secrets is deleted; a listing
+by that label proves none of them is left; `<name>-secrets` and `<name>-config` are
+deleted; a second listing proves no volume of the deployment is left; and last
+`STATE_DIR/<target-id>/<name>/` is removed, with its parent only when that is left
+empty. A listing or an inspect that fails, or a volume of another target that
+appears in one, ends the run there with the entry kept (exit 1: something was deleted
+by then): nothing is taken for "no
+volume left" that the engine did not say (the review of 10.5 found a failed listing
+read as an empty one inside a command substitution; every function that can refuse
+or fail is now called plainly and answers in variables). Volumes are found by the
+label only, so an unlabelled volume of the same name is never touched.
+
 `dev-init` keeps no CA private key, so a development deployment's certificates cannot
 be renewed or reissued by the script: they are valid for `--validity` (a year by
 default), `--status` shows their expiry, and the names and addresses of the S3
@@ -289,9 +309,65 @@ unlabelled container or volume of the same name is refused, not taken over.
 The same commands then work with a remote daemon (`DOCKER_HOST=ssh://`), rootless
 Podman, `nerdctl`, SELinux (nothing to relabel) and Docker Desktop's file sharing
 (nothing to share). A node runs with `--read-only --cap-drop ALL --security-opt
-no-new-privileges --restart unless-stopped`; S3 is published on `BIND`, the admin port
+no-new-privileges` and a restart policy that survives a reboot (`unless-stopped` on Docker,
+`always` on Podman, below); S3 is published on `BIND`, the admin port
 on `ADMIN_BIND`, which is the loopback address by default; a port already in use is
 refused before anything changes.
+
+As built for a standalone deployment on Docker Desktop, Docker CE on the operator's
+machine and Podman (PLAN 10.5, `deploy/lib/docker.sh`): the node is one container named
+`<name>`, run from the image as `65532:65532` with `--pull never` and a stop timeout of
+40 s, with the labelled volumes `<name>-data1` to `<name>-data<DRIVES>` and
+`<name>-meta` mounted on the image's own directories (owned by 65532, so a new volume
+takes that owner), and `<name>-secrets` and `<name>-config` mounted read-only at
+`/var/lib/cactusfs/secrets` and `/var/lib/cactusfs/config`. Its environment names
+files only: `CACTUSFS_KMS_KEY_FILE` the config volume's `kms.json`, the passphrase or
+the Vault token and the root credentials by their `CACTUSFS_*_FILE`, the certificate
+and key by `CACTUSFS_TLS_CERT`/`_KEY`; the console's upgrade is off
+(`CACTUSFS_UPGRADE_MODE=off`: the script upgrades a container). Before anything
+changes, an install asks: a container or volume of the deployment's names without its
+two labels (name and target) is refused; once the node has run (its metadata volume
+is there) a number of drives other than `DRIVES` is refused, as is a drive beyond it;
+data volumes with no record in `STATE_DIR` need `--adopt`, and data volumes with
+neither copy of the key file are refused; a port is refused when another container
+of the engine publishes it, or when a connection to it on the bind address (the
+loopback address for `0.0.0.0` and `::`) is answered (curl's `%{num_connects}`,
+never through a proxy) - the node's own ports excepted on an upgrade, read from `port
+<name>` (one line a port), since `ps` groups consecutive ports into a range
+(`127.0.0.1:9000-9001->9000-9001/tcp`), which is read as a range for the other
+containers. The node listens inside on the port numbers it is published on
+(`CACTUSFS_S3_ADDR=:<S3_PORT>`, `CACTUSFS_ADMIN_ADDR=:<ADMIN_PORT>`), so each port has one
+number wherever it is read; the image's `EXPOSE` is metadata only and it has no
+`HEALTHCHECK`. What remains: a
+process listening on another address of the machine alone is not seen, and the
+engine's own refusal of the port then fails the run after the secrets are in place.
+`VAULT_CA_FILE` is refused on these targets for now: the volumes do not carry it.
+The image comes from one function, `docker_image_ref`, called in the script's own
+shell, never in a command substitution: when PLAN 10.4's `image_resolve` is there it
+runs, then `image_deliver`, and the image is what they leave in `RESOLVED_IMAGE`;
+without them `IMAGE_SOURCE=image` takes `IMAGE` as given, and another source stops as
+not built yet. Readiness is `/readyz` of the admin port, asked over TLS with the CA of
+`STATE_DIR` (by the name `localhost`, which dev-init's certificate holds, or the first
+DNS name of `TLS_HOSTS`), every 2 s until `WAIT_TIMEOUT` seconds have passed (by the
+clock, `date +%s`). Every install ends by saying that a new deployment has the
+console user `admin` with the password `admin` (ADR-0014) and that it must be changed
+or deleted before the admin port is reachable from beyond the machine, and warns
+when `ADMIN_BIND` is not a loopback address. A reboot: Docker starts a container of the
+policy `unless-stopped` again unless it was stopped, and the node has it. Podman starts
+containers after a reboot only through its `podman-restart` service, which runs
+`podman start --all --filter restart-policy=always` (its unit, Podman 5.4): a
+container of the policy `unless-stopped` is not among them, so on Podman the node runs
+with `--restart always`, and the install says how to enable the service
+(`systemctl --user enable podman-restart.service`, and `loginctl enable-linger` for a
+rootless user). During an upgrade the old node, stopped and renamed `<name>-previous`,
+would be started by that service at a reboot and hold the ports: its policy is set to
+`no` with `podman update --restart no` (an option of Podman 5.1 and later, in its
+release notes). An older Podman refuses the option: the run warns and goes on - the old
+node is removed as soon as the new one is ready, and when the new one is not, the run
+says that a reboot would start the old one. `--status` says the node's
+state, image and version, the volumes, where it is reached, the files of the CA and
+root credentials, the S3 certificate's `notAfter` (read from `STATE_DIR` with openssl
+when it is installed, else said to need it), and `/readyz`.
 
 ### 5. The image: binaries from `make image-binaries`
 
@@ -497,8 +573,12 @@ and CLAUDE.md asks Vault of a cluster in production.
 `--install` over a running deployment replaces one node at a time - the nodes that do
 not vote, then the voters, the leader last when the admin API names it - and waits for
 each to be Ready on the new image before the next; it stops at the first that is not,
-within `WAIT_TIMEOUT`, and exits non-zero. A standalone node is stopped, removed and run
-again with the same volumes. This is the chart's `OnDelete` order (ADR-0015; PLAN,
+within `WAIT_TIMEOUT`, and exits non-zero. A standalone node on Docker is stopped and kept, renamed
+`<name>-previous`, while the new one is run with the same volumes; the old one is removed
+only once the new one is ready, and when it is not the run says that the node is down and
+how to go back to the old one (rename it back and start it, or install its image again).
+A `<name>-previous` found by an install is an upgrade that did not finish, and is refused
+with both ways out. This is the chart's `OnDelete` order (ADR-0015; PLAN,
 Decisions, the review of the chart of 2026-10-11) and the roll-out rule recorded in
 PLAN's Decisions on 2026-11-21 from the roll-outs to the owner's k3s host (an image
 built from a fresh worktree, its `version` read before it is imported, one pod at a
@@ -564,7 +644,12 @@ PowerShell entry point, and Git Bash is not supported.
 `test/deploy` (tag `deployscript`) that runs the real script against recording fakes of
 `docker`, `podman`, `nerdctl`, `kubectl` and `ssh`, and kubeconform on the render of
 every profile. `make test-deploy` runs the lifecycle against a real engine (CI matrix of
-docker and podman), and the k3s lifecycle runs in `make test-k8s`. `shfmt` is a new build
+docker and podman), and the k3s lifecycle runs in `make test-k8s`. The lifecycle
+(`test/deploy/lifecycle.sh`, PLAN 10.5) also proves on the engine what the fakes
+cannot: that every file of `<name>-secrets` and `<name>-config`, and their roots, as
+PLAN 10.3's never-started helper fills them with `cp -a`, is readable by the node's
+user 65532 (the owner and mode of each entry as the engine reads them out), and that
+`kms.json` of `STATE_DIR` is the one the node uses. `shfmt` is a new build
 tool (BSD-3-Clause), pinned with a `tool` directive; ShellCheck is GPL-3.0 and outside
 the allow-list.
 

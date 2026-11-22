@@ -89,6 +89,7 @@ help:
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
 	@echo "  up / down      4-node compose cluster     test-chaos  fault injection"
 	@echo "  test-k8s       the Helm chart on k3s (a privileged container; not part of check)"
+	@echo "  test-deploy    deploy/deploy.sh's lifecycle on this host's engine, standalone (host; not part of check)"
 	@echo "  clean          remove build output"
 
 ifndef CACTUSFS_IN_BUILDER
@@ -217,6 +218,59 @@ up:
 #   $(ENGINE) compose -f deploy/compose/compose.yaml down --volumes
 down:
 	$(COMPOSE) down
+
+# The lifecycle of a standalone deployment made by deploy/deploy.sh, against
+# this host's engine (PLAN 10.5, test/deploy/lifecycle.sh): install, an
+# object put and read back over TLS, an upgrade, status, uninstall,
+# reinstall and purge. Host-side, as up and down are, and no part of `make
+# check` (the harness of `make deploy-check` covers the script's logic with
+# fakes). It builds the image of this host's architecture with the engine,
+# unless LIFECYCLE_IMAGE names one that is there:
+#   make test-deploy ENGINE=podman
+#   make test-deploy LIFECYCLE_IMAGE=cactusfs:0.7.0-348-amd64
+# What the lifecycle makes it removes again (the deployment by the script's
+# own purge); see the script for its other settings (LIFECYCLE_*). The image
+# this target builds, cactusfs-lifecycle:<version>-<build>, it removes when
+# the run ends - and refuses to start when that tag is there already, so it
+# never removes an image it did not build; with LIFECYCLE_KEEP=yes and a
+# failed run it is kept with the deployment that uses it.
+LIFECYCLE_IMAGE ?=
+LIFECYCLE_BUILD_TAG := cactusfs-lifecycle:$(VERSION)-$(BUILD)
+# The engine the image is built on, inspected and removed is the one
+# lifecycle.sh deploys to: Docker through LIFECYCLE_CONTEXT (default:
+# default), handed on to it, with the shell's DOCKER_HOST and DOCKER_CONTEXT
+# left out, as lifecycle.sh leaves them out; or Podman.
+LIFECYCLE_CONTEXT ?= default
+ifeq ($(ENGINE),podman)
+LIFECYCLE_ENGINE := podman
+else
+LIFECYCLE_ENGINE := env -u DOCKER_HOST -u DOCKER_CONTEXT docker --context $(LIFECYCLE_CONTEXT)
+endif
+LIFECYCLE_RUN := ENGINE=$(ENGINE) LIFECYCLE_CONTEXT=$(LIFECYCLE_CONTEXT)
+.PHONY: test-deploy
+test-deploy:
+ifeq ($(strip $(LIFECYCLE_IMAGE)),)
+	@if $(LIFECYCLE_ENGINE) image inspect $(LIFECYCLE_BUILD_TAG) >/dev/null 2>&1; then \
+		echo "test-deploy: FAIL - $(LIFECYCLE_BUILD_TAG) is there already, and this target removes only an image it built: remove it, or name it with LIFECYCLE_IMAGE" >&2; \
+		exit 1; \
+	fi
+	@echo "test-deploy: building $(LIFECYCLE_BUILD_TAG) for this host ($(ENGINE))"
+	@$(LIFECYCLE_ENGINE) build --quiet --build-arg VERSION=$(VERSION) --build-arg BUILD=$(BUILD) --build-arg COMMIT=$(COMMIT) \
+		-t $(LIFECYCLE_BUILD_TAG) . >/dev/null
+	@status=0; \
+	$(LIFECYCLE_RUN) LIFECYCLE_IMAGE=$(LIFECYCLE_BUILD_TAG) test/deploy/lifecycle.sh || status=$$?; \
+	if [ "$$status" != 0 ] && [ "$${LIFECYCLE_KEEP:-no}" = yes ]; then \
+		echo "test-deploy: LIFECYCLE_KEEP=yes: $(LIFECYCLE_BUILD_TAG) is kept"; \
+	elif $(LIFECYCLE_ENGINE) image rm $(LIFECYCLE_BUILD_TAG) >/dev/null; then \
+		echo "test-deploy: removed $(LIFECYCLE_BUILD_TAG), the image it built"; \
+	else \
+		echo "test-deploy: FAIL - could not remove $(LIFECYCLE_BUILD_TAG), the image it built" >&2; \
+		status=1; \
+	fi; \
+	exit $$status
+else
+	@$(LIFECYCLE_RUN) LIFECYCLE_IMAGE=$(LIFECYCLE_IMAGE) test/deploy/lifecycle.sh
+endif
 
 clean: builder
 	@$(BUILDER_RUN) $(BUILDER_IMAGE) rm -rf bin dist web/dist .cache

@@ -44,6 +44,10 @@ var hostTools = []string{
 	// runs from. The render (PLAN 10.9): copies, base64 of Secret values.
 	"tar", "cmp", "ln", "mv", "find", "rmdir", "sha256sum", "shasum",
 	"cp", "od", "base64",
+	// The Docker targets (PLAN 10.5): the wait for /readyz, and the
+	// certificate's expiry --status reads (openssl, where the system has
+	// it; the script says so where it has not).
+	"sleep", "openssl",
 }
 
 // systemDirs are where hostTools and the shells are looked for.
@@ -82,14 +86,37 @@ type call struct {
 // all among the arguments decides what it prints and its exit status. A
 // call that no rule matches prints nothing and succeeds. A rule with
 // SaveStdin also keeps what the call read, in that file of the rig's
-// directory (the last such call's).
+// directory (the last such call's). A rule with After holds only once an
+// earlier call of the run, of the same tool, held all those words: an
+// engine whose listing changes after a deletion (PLAN 10.5's purge).
 type rule struct {
 	Tool      string   `json:"tool"`
 	Contains  []string `json:"contains"`
+	After     []string `json:"after,omitempty"`
 	Stdout    string   `json:"stdout"`
 	Stderr    string   `json:"stderr,omitempty"`
 	Exit      int      `json:"exit"`
 	SaveStdin string   `json:"save_stdin,omitempty"`
+}
+
+// earlier is true when a call of the transcript before the last - the
+// fake's own, written first - is of the tool and holds every word.
+func earlier(rig *os.Root, tool string, words []string) (bool, error) {
+	data, err := rig.ReadFile(transcriptName)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines[:len(lines)-1] {
+		var c call
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			return false, err
+		}
+		if c.Tool == tool && containsAll(c.Args, words) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func TestMain(m *testing.M) {
@@ -154,6 +181,16 @@ func fake(name string, args []string) int {
 	for _, r := range rules {
 		if r.Tool != name || !containsAll(args, r.Contains) {
 			continue
+		}
+		if len(r.After) > 0 {
+			ok, err := earlier(rig, name, r.After)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fake %s: transcript: %v\n", name, err)
+				return 125
+			}
+			if !ok {
+				continue
+			}
 		}
 		if r.SaveStdin != "" {
 			if err := rig.WriteFile(r.SaveStdin, in, 0o600); err != nil {

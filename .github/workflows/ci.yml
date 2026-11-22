@@ -80,6 +80,25 @@ jobs:
           persist-credentials: false
       - run: make test-k8s
 
+  # The deployment script against a real engine: a standalone deployment
+  # made by deploy/deploy.sh on Docker and on rootless Podman - installed, an
+  # object put and read back over TLS, upgraded, uninstalled, reinstalled
+  # and purged (PLAN 10.5, test/deploy/lifecycle.sh). A job of its own, and
+  # no part of make check: it runs the engine of the runner, on the host.
+  deploy:
+    name: make test-deploy (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make test-deploy ENGINE=${{ matrix.engine }}
+
   # The Go-only path on every supported OS: no make, no container engine.
   unit:
     name: unit (${{ matrix.os }})

@@ -192,8 +192,9 @@ sha256_line() {
 # helper_clear <engine> <container>: a helper container left by a run that
 # stopped half way is removed - only one the script made. The engine's
 # listing, which must succeed, is matched by exact name (an error is never
-# taken for "not there"); one of that name without the deployment's label
-# is refused: the script never takes over what it did not make.
+# taken for "not there"); one of that name without the deployment's labels -
+# its name and this target - is refused: the script never takes over what it
+# did not make.
 helper_clear() {
 	_hc_out=$("$1" query ps -a --filter "name=$2" --format '{{.Names}}' </dev/null) ||
 		fail "could not list the containers of the engine (its message is above)"
@@ -202,11 +203,16 @@ helper_clear() {
 		[ "$_hc_name" != "$2" ] || _hc_found=1
 	done
 	[ -n "$_hc_found" ] || return 0
-	_hc_owner=$("$1" query container inspect --format "{{index .Config.Labels \"$LABEL_NAME\"}}" "$2" </dev/null) ||
+	_hc_owner=$("$1" query container inspect --format "{{index .Config.Labels \"$LABEL_NAME\"}}|{{index .Config.Labels \"$LABEL_TARGET\"}}" "$2" </dev/null) ||
 		fail "could not inspect the container $2 (the engine's message is above)"
 	_hc_owner=$(printf '%s' "$_hc_owner" | printable | tr -d '\n')
+	_hc_target=${_hc_owner#*|}
+	[ "$_hc_target" != "$_hc_owner" ] || _hc_target=
+	_hc_owner=${_hc_owner%%|*}
 	[ "$_hc_owner" = "$_s_name" ] ||
 		refuse "a container named $2 is there without the label $LABEL_NAME=$_s_name (its label says '$_hc_owner'): the script never takes over what it did not make; remove or rename it, or choose another DEPLOY_NAME"
+	[ "$_hc_target" = "$TARGET" ] ||
+		refuse "the container $2 is the deployment's on the target '$_hc_target', not $TARGET: the script never takes over what it did not make; run with --docker $_hc_target, or remove it"
 	"$1" run rm -f "$2" </dev/null
 }
 
@@ -447,6 +453,24 @@ secrets_install() {
 	say "secrets: $STATE and the volumes $_s_name-secrets and $_s_name-config hold the same secrets"
 }
 
+# engine_id_ask: _engine_id, the engine's own ID - "docker info"'s ID, or
+# for Podman its host and the root of its store - asked of the target's
+# engine, with only printable characters. An engine that cannot be asked,
+# or says nothing, fails the run. Shared by engine_id_check and the Docker
+# targets' purge (docker_engine_check, deploy/lib/docker.sh); called
+# plainly, never in a command substitution.
+engine_id_ask() {
+	if [ "$TARGET" = podman ]; then
+		_eia=$(target_engine query info --format '{{.Host.Hostname}}:{{.Store.GraphRoot}}' </dev/null) ||
+			fail "could not ask $(engine) who it is (its message is above)"
+	else
+		_eia=$(target_engine query info --format '{{.ID}}' </dev/null) ||
+			fail "could not ask $(engine) who it is (its message is above)"
+	fi
+	_engine_id=$(printf '%s' "$_eia" | printable | tr -d '\n')
+	[ -n "$_engine_id" ] || fail "$(engine) did not say its ID"
+}
+
 # engine_id_check: the engine's own ID - "docker info"'s ID, or for Podman
 # its host and the root of its store (a weak identifier: it tells another
 # store apart, not two machines of one name) - asked of the target's engine
@@ -457,15 +481,7 @@ secrets_install() {
 # factory reset - and this one takes its place: the record then names this
 # one (state_record). A KMS other than the one recorded is refused.
 engine_id_check() {
-	if [ "$TARGET" = podman ]; then
-		_eic=$(target_engine query info --format '{{.Host.Hostname}}:{{.Store.GraphRoot}}' </dev/null) ||
-			fail "could not ask $(engine) who it is (its message is above)"
-	else
-		_eic=$(target_engine query info --format '{{.ID}}' </dev/null) ||
-			fail "could not ask $(engine) who it is (its message is above)"
-	fi
-	_engine_id=$(printf '%s' "$_eic" | printable | tr -d '\n')
-	[ -n "$_engine_id" ] || fail "$(engine) did not say its ID"
+	engine_id_ask
 	say "engine ID: $_engine_id"
 	_engine_rerecord=
 	[ -f "$STATE/target" ] || return 0

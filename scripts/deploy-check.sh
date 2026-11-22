@@ -14,14 +14,19 @@
 # gate: it is never left out.
 set -eu
 
+# The lifecycle that `make test-deploy` runs against a real engine (PLAN
+# 10.5) is held to the same form, though only the host runs it.
+lifecycle=test/deploy/lifecycle.sh
 files=$(find deploy -type f -name '*.sh' | sort)
-if [ -z "$files" ]; then
-	echo "deploy-check: FAIL - no shell files in deploy/" >&2
+if [ -z "$files" ] || [ ! -f "$lifecycle" ]; then
+	echo "deploy-check: FAIL - no shell files in deploy/, or no $lifecycle" >&2
 	exit 1
 fi
+files="$files
+$lifecycle"
 
-go tool shfmt -ln=posix -d deploy/ || {
-	echo "deploy-check: FAIL - format deploy/ with: go tool shfmt -ln=posix -w deploy/" >&2
+go tool shfmt -ln=posix -d deploy/ "$lifecycle" || {
+	echo "deploy-check: FAIL - format deploy/ with: go tool shfmt -ln=posix -w deploy/ $lifecycle" >&2
 	exit 1
 }
 

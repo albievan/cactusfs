@@ -28,6 +28,8 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/secrets.sh"
 # shellcheck source=deploy/lib/k8s.sh
 . "$DEPLOY_DIR/lib/k8s.sh"
+# shellcheck source=deploy/lib/docker.sh
+. "$DEPLOY_DIR/lib/docker.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -67,7 +69,10 @@ Flags:
                   labelled volumes on the target into STATE_DIR when
                   STATE_DIR holds no record of the deployment (it was made
                   from another machine, or the record was lost); without
-                  it, that is refused (never a setting of the env file)
+                  it, that is refused (never a setting of the env file).
+                  With --uninstall --purge: record the engine reached as
+                  the deployment's, so that its labelled volumes may be
+                  purged though STATE_DIR holds no record of them
   --engine-replaced
                   with --install: the engine recorded for the deployment is
                   gone (a factory reset of Docker Desktop, say), and the one
@@ -84,7 +89,9 @@ A flag wins over the env file, the env file over the defaults; the
 environment of the shell is not read for settings.
 
 Exit status: 0 done, 1 a command failed, 2 refused (nothing changed),
-3 not built yet (what was done before is said above it).
+3 not built yet (what was done before is said above it). --status exits 0
+when the deployment is ready or is not installed, 1 when it is installed
+and not ready.
 USAGE
 }
 
@@ -179,7 +186,7 @@ done
 }
 [ "$PURGE" = 0 ] || [ "$ACTION" = --uninstall ] || refuse "--purge goes with --uninstall"
 [ -z "$PURGE_CONFIRM" ] || [ "$PURGE" = 1 ] || refuse "--purge-confirm goes with --purge"
-[ "$ADOPT" = 0 ] || [ "$ACTION" = --install ] || refuse "--adopt goes with --install"
+[ "$ADOPT" = 0 ] || [ "$ACTION" = --install ] || [ "$PURGE" = 1 ] || refuse "--adopt goes with --install, or with --uninstall --purge"
 [ "$ENGINE_REPLACED" = 0 ] || [ "$ACTION" = --install ] || refuse "--engine-replaced goes with --install"
 if lookup "$FLAG_SETTINGS" IMAGE_SOURCE >/dev/null && [ "$ACTION" != --install ]; then
 	refuse "--from-source goes with --install"
@@ -223,8 +230,11 @@ case $ACTION in
 esac
 
 # --- the actions ------------------------------------------------------------------
-# Stubs: each says what the step of PLAN milestone 10 that builds it will do,
-# and ends with "not built yet". Nothing here changes anything.
+# A standalone deployment on Docker Desktop, Docker CE on this machine or
+# Podman is built (PLAN 10.5, deploy/lib/docker.sh). The rest are stubs:
+# each says what the step of PLAN milestone 10 that builds it will do, and
+# ends with "not built yet"; a stub changes nothing but the secrets PLAN
+# 10.3 keeps.
 
 # docker_step: the step that builds the Docker-engine actions of this target.
 docker_step() {
@@ -263,6 +273,10 @@ kubernetes() {
 }
 
 do_install() {
+	if docker_standalone; then
+		docker_install
+		return 0
+	fi
 	case $(setting IMAGE_SOURCE) in
 	source) _image="built from this tree with the Dockerfile" ;;
 	binaries) _image="built from the binaries in $(setting RELEASE_DIR)" ;;
@@ -288,6 +302,10 @@ do_install() {
 }
 
 do_status() {
+	if docker_standalone; then
+		docker_status
+		return 0
+	fi
 	if on_kubernetes; then
 		not_built 10.11 "status: the pods, every address and /readyz of $(kubernetes)"
 	fi
@@ -295,6 +313,10 @@ do_status() {
 }
 
 do_uninstall() {
+	if docker_standalone; then
+		docker_uninstall
+		return 0
+	fi
 	if [ "$PURGE" = 1 ]; then
 		if [ -n "$PURGE_CONFIRM" ]; then
 			_what="the deployment and its data (confirmed by --purge-confirm)"
