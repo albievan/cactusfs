@@ -1,0 +1,37 @@
+#!/bin/sh
+# Deployment-script gate (PLAN 10.1): every shell file of deploy/ is
+# formatted as shfmt formats POSIX sh, parses under dash and under bash, and
+# the harness of test/deploy runs the real script against recording fakes.
+# Run through `make deploy-check`, which is part of `make check`.
+#
+# dash is Debian's /bin/sh and is in the builder image (an essential package
+# of its Debian base); bash is there too. A shell that is missing fails the
+# gate: it is never left out.
+set -eu
+
+files=$(find deploy -type f -name '*.sh' | sort)
+if [ -z "$files" ]; then
+	echo "deploy-check: FAIL - no shell files in deploy/" >&2
+	exit 1
+fi
+
+go tool shfmt -ln=posix -d deploy/ || {
+	echo "deploy-check: FAIL - format deploy/ with: go tool shfmt -ln=posix -w deploy/" >&2
+	exit 1
+}
+
+for shell in dash bash; do
+	command -v "$shell" >/dev/null 2>&1 || {
+		echo "deploy-check: FAIL - $shell is not installed (it is in the builder image: run make deploy-check)" >&2
+		exit 1
+	}
+	for f in $files; do
+		"$shell" -n "$f" || {
+			echo "deploy-check: FAIL - $shell cannot parse $f" >&2
+			exit 1
+		}
+	done
+done
+
+go test -count=1 -tags deployscript ./test/deploy/...
+echo "deploy-check: PASS ($(echo "$files" | wc -l | tr -d ' ') files)"

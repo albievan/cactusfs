@@ -55,7 +55,7 @@ ROLLING_TEST        ?= TestRollingUpgradeFromSchema4ToSchema5
 BUILDER_TARGETS := gen settings-docs fmt fmt-check lint vet test cover test-int s3-compat \
 	s3-compat-record test-chaos test-rolling test-k8s vuln contracts licences web-install web-lock web-check \
 	web-build build build-all image sbom sign-verify helm-lint observability-check verify-clone tidy \
-	trusted-root policy-corpus check
+	trusted-root policy-corpus deploy-check check
 
 .PHONY: help builder shell run up down clean release $(BUILDER_TARGETS)
 
@@ -76,6 +76,7 @@ help:
 	@echo "  sign-verify    sign, attest and verify against a throw-away registry; what must be refused, is"
 	@echo "  release        publish a release: the release workflow only, on a tag v<version>; refuses anywhere else"
 	@echo "  helm-lint      lint and render the Helm chart"
+	@echo "  deploy-check   deploy/deploy.sh: shfmt, dash -n, bash -n, and its harness against recording fakes"
 	@echo "  observability-check  alerting rules and their tests, dashboards, the chart's monitoring templates"
 	@echo "  verify-clone   prove a clean export builds with Go alone and with a container engine alone"
 	@echo "  gen            regenerate code from API contracts, and the settings documents"
@@ -221,7 +222,7 @@ builder:
 	@true
 
 check: fmt-check lint vet cover test-int s3-compat vuln contracts licences \
-	web-check build-all image sbom sign-verify helm-lint observability-check verify-clone
+	web-check build-all image sbom sign-verify helm-lint deploy-check observability-check verify-clone
 	@echo "make check: PASS"
 
 # The web client is generated with a package of web/, so those are installed.
@@ -266,7 +267,7 @@ lint: web-build
 # With the console tag the built console is embedded, so it must be built.
 vet: web-build
 	go vet ./...
-	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade,k8s ./...
+	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade,k8s,deployscript ./...
 	@echo "vet: PASS"
 
 test:
@@ -409,6 +410,14 @@ helm-lint:
 	@scripts/helm-lint.sh
 	@CACTUSFS_KMS_PASSPHRASE=only-to-render-the-file docker compose -f deploy/compose/compose.yaml config --quiet
 	@echo "compose: deploy/compose/compose.yaml is valid"
+
+# The deployment script, deploy/deploy.sh (PLAN 10.1): shfmt's POSIX format,
+# dash -n and bash -n on every shell file of deploy/, and the harness of
+# test/deploy, which runs the real script under dash and bash against
+# recording fakes of docker, podman, nerdctl, kubectl, ssh, k3s and curl - no
+# engine, cluster or network.
+deploy-check:
+	@scripts/deploy-check.sh
 
 # The observability pack of deploy/observability and the chart's templates for
 # the Prometheus Operator: promtool on the rules and their tests, the

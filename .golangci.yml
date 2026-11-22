@@ -14,6 +14,7 @@ run:
     - chaos
     - console
     - k8s
+    - deployscript
 
 linters:
   default: none
