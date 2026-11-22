@@ -469,7 +469,11 @@ describe("a bucket's policy with the builder", () => {
     fireEvent.click(within(warning).getByRole('button', { name: 'Cancel' }));
 
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Save policy' }));
+    // The question may be shown before the run that asked it has ended, while
+    // Save is still disabled: the keyboard goes to Save once it can take it.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Save policy' }));
+    });
     await pause();
     expect(api.callsTo('PUT', '/buckets/photos/policy')).toHaveLength(0);
 

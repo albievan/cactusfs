@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import type { PolicyDocument, PolicyFault, StatementAnalysis } from '../api/client';
 import { valuesOf, type PolicyKind, type Statement } from '../policy/model';
@@ -95,6 +95,17 @@ export function BucketPolicyEditor({
   const [saving, setSaving] = useState(false);
   const [asking, setAsking] = useState<Asking | null>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
+  // Cancel gives the keyboard back to Save. The question can be shown before the
+  // run that asked it has ended, while Save is still disabled and cannot take
+  // the keyboard, so it moves in the first commit that has Save enabled.
+  const backToSave = useRef(false);
+  useLayoutEffect(() => {
+    const button = saveButton.current;
+    if (backToSave.current && button !== null && !button.disabled) {
+      backToSave.current = false;
+      button.focus();
+    }
+  });
   const statusLine = useRef<HTMLParagraphElement>(null);
   // The text as it is now, for a save to see whether it was changed while it was checked.
   const latest = useRef(text);
@@ -191,7 +202,7 @@ export function BucketPolicyEditor({
   };
   const cancel = () => {
     setAsking(null);
-    saveButton.current?.focus();
+    backToSave.current = true;
   };
 
   return (
