@@ -20,14 +20,14 @@
 # Every base image is public and pinned by digest. To move a pin, change the
 # tag AND the digest together.
 
-ARG GO_IMAGE=golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9
-ARG NODE_IMAGE=node:24.21.0-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
+ARG GO_IMAGE=docker.io/library/golang:1.27.4-trixie@sha256:b54b2639de8c1bfe538ec5ffc45f29b1932235ac5f6d63c059853646677112d9
+ARG NODE_IMAGE=docker.io/library/node:24.21.0-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
-ARG GOLANGCI_LINT_IMAGE=golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f
-ARG HELM_IMAGE=alpine/helm:4.3.0@sha256:a6cf54599ccb99d90cf0712b30f03fdb3cab062e6b94e0418cc4db7e8a1464b2
-ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca
-ARG BUF_IMAGE=bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608
-ARG OASDIFF_IMAGE=tufin/oasdiff:v1.33.0@sha256:6263a96dd2ef0726c54e21fea9b8e1607eac4841add0079324b424c1f52b819c
+ARG GOLANGCI_LINT_IMAGE=docker.io/golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f
+ARG HELM_IMAGE=docker.io/alpine/helm:4.3.0@sha256:a6cf54599ccb99d90cf0712b30f03fdb3cab062e6b94e0418cc4db7e8a1464b2
+ARG DOCKER_CLI_IMAGE=docker.io/library/docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca
+ARG BUF_IMAGE=docker.io/bufbuild/buf:1.73.0@sha256:75d8f756f0919dcded71e67968a91adfe55fe4dd62c4900c57bbfcd7fe625608
+ARG OASDIFF_IMAGE=docker.io/tufin/oasdiff:v1.33.0@sha256:6263a96dd2ef0726c54e21fea9b8e1607eac4841add0079324b424c1f52b819c
 ARG PNPM_VERSION=12.9.1
 # Which build this is. VERSION is the release: internal/buildinfo/VERSION is
 # where it is set, and a test of that package holds this default to it. BUILD
@@ -40,7 +40,7 @@ ARG COMMIT=
 # for Go: the AWS CLI and the S3 tests of Ceph. They are test tools of the
 # builder image only; nothing of them is in the product. Each is pinned by
 # the checksum of what is downloaded.
-ARG PYTHON_IMAGE=python:3.13-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
+ARG PYTHON_IMAGE=docker.io/library/python:3.13-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
 ARG AWSCLI_VERSION=2.37.12
 ARG AWSCLI_SHA256_AMD64=e6d3c672fb36ed4b12c354c39a993eee2b34da1437cafb10bac4480840cfa83f
 ARG AWSCLI_SHA256_ARM64=829c76096e05f743267d75098bc7cc7cfae799fc7e568554ebaa6d78e6aba753
@@ -101,7 +101,11 @@ ARG COSIGN_SHA256_ARM64=56a16480bdd56ec789abaa65924402f6b92c0041f06885995853c055
 ARG SYFT_VERSION=1.54.1
 ARG SYFT_SHA256_AMD64=c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
 ARG SYFT_SHA256_ARM64=dfdf0537610113edbefe1f1fc6548bc957b2d77439636ec824fcf0e10d46d054
-ARG REGISTRY_IMAGE=registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+ARG REGISTRY_IMAGE=docker.io/library/registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+# The build platform, declared here for the FROM lines that use it: BuildKit
+# and buildah set it anyway; the classic build API of Podman's Docker API sets
+# nothing, and scripts/image-binaries.sh passes it then.
+ARG BUILDPLATFORM
 
 # --- node: Node.js and pnpm, on the build host's architecture -----------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS node
@@ -137,7 +141,7 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOTOOLCHAIN=local \
  # The directories a volume is mounted on. A volume takes the ownership of the
  # directory it is first mounted on, and the image runs as a user that is not
  # root, so they must exist in the image and belong to that user.
- && mkdir -p /out/var/data1 /out/var/data2 /out/var/data3 /out/var/data4 /out/var/meta /out/var/config \
+ && mkdir -p /out/var/data1 /out/var/data2 /out/var/data3 /out/var/data4 /out/var/meta /out/var/config /out/var/secrets \
  # What the binary was told it is, for the folder `make image-binaries` writes
  # (the image-binaries stage): the same build arguments as the flags above.
  && printf 'version=%s\nbuild=%s\ncommit=%s\npackaging=image\n' "${VERSION}" "${BUILD}" "${COMMIT}" >/out/BUILDINFO
@@ -340,14 +344,13 @@ FROM image-binaries AS binaries
 
 # --- volumes: the directories a volume is mounted on, for from-binaries ------
 # The tree of /out/var of the build stage, made without a RUN and without the
-# Go stage, so that an image made from binaries needs neither.
+# Go stage, so that an image made from binaries needs neither. It is a tar of
+# empty directories (deploy/image/volumes.tar, unpacked by ADD): WORKDIR in a
+# scratch stage makes the directories with BuildKit, but buildah (podman
+# build) keeps only the last one. Keep the tar and the mkdir of the build
+# stage in step; they are owned by 65532 when from-binaries copies them.
 FROM scratch AS volumes
-WORKDIR /var/data1
-WORKDIR /var/data2
-WORKDIR /var/data3
-WORKDIR /var/data4
-WORKDIR /var/meta
-WORKDIR /var/config
+ADD deploy/image/volumes.tar /
 
 # --- from-binaries: the product image, from a folder of binaries ---------------
 # The image of the final stage, made from the folder `make image-binaries`

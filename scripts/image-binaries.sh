@@ -29,7 +29,9 @@ VERSION=${VERSION:-$(sh "$(dirname "$0")/buildid.sh" version)}
 BUILD=${BUILD:-$(sh "$(dirname "$0")/buildid.sh" build)}
 COMMIT=${COMMIT-$(sh "$(dirname "$0")/buildid.sh" commit)}
 OUT=${IMAGE_BINARIES_DIR:-dist/image}
-ARCHES="amd64 arm64"
+# IMAGE_BINARIES_ARCHES narrows the architectures (for example to the engine's
+# own, where the engine cannot build for another); the default is both.
+ARCHES=${IMAGE_BINARIES_ARCHES:-amd64 arm64}
 
 fail() {
 	echo "image-binaries: FAIL - $*" >&2
@@ -50,6 +52,12 @@ if ! docker version >/dev/null 2>&1; then
 	fail "no container engine reachable; pass the engine socket (ENGINE_SOCKET=...)"
 fi
 native=$(docker version --format '{{.Server.Arch}}')
+for arch in $ARCHES; do
+	case $arch in
+	amd64 | arm64) ;;
+	*) fail "IMAGE_BINARIES_ARCHES may name amd64 and arm64 only, not '$arch'" ;;
+	esac
+done
 case " $ARCHES " in
 *" $native "*) ;;
 *) fail "the engine's architecture '$native' is not one of $ARCHES: no binary could be run to say it is packaged as an image" ;;
@@ -73,13 +81,37 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 want=$(printf 'version=%s\nbuild=%s\ncommit=%s\npackaging=image' "$VERSION" "$BUILD" "$COMMIT")
+
+# The classic build API (DOCKER_BUILDKIT=0, used against Podman's Docker API)
+# does not set the platform arguments the stages rely on; they are given here:
+# the engine's own platform as the build platform, the asked one as the target.
+platform_args=
+if [ "${DOCKER_BUILDKIT:-1}" = 0 ]; then
+	case $(docker info --format '{{.Architecture}}') in
+	x86_64 | amd64) build_arch=amd64 ;;
+	aarch64 | arm64) build_arch=arm64 ;;
+	*) fail "the engine runs on an architecture this build does not know" ;;
+	esac
+	platform_args=yes
+	for arch in $ARCHES; do
+		[ "$arch" = "$build_arch" ] ||
+			fail "linux/$arch on a linux/$build_arch engine through the classic build API (DOCKER_BUILDKIT=0, Podman's Docker API): it applies the target platform to every stage, so the build stages cannot run natively; build on BuildKit, or set IMAGE_BINARIES_ARCHES=$build_arch"
+	done
+fi
 mkdir "$work/out"
 for arch in $ARCHES; do
 	tag="cactusfs-$run:$arch"
 	echo "image-binaries: linux/$arch (commit ${COMMIT:-unknown})"
 	images="$images $tag"
-	docker build --quiet --platform "linux/$arch" --target image-binaries \
-		--build-arg "VERSION=$VERSION" --build-arg "BUILD=$BUILD" --build-arg "COMMIT=$COMMIT" -t "$tag" . >/dev/null
+	if [ -n "$platform_args" ]; then
+		docker build --quiet --platform "linux/$arch" --target image-binaries \
+			--build-arg "BUILDPLATFORM=linux/$build_arch" --build-arg "BUILDOS=linux" --build-arg "BUILDARCH=$build_arch" \
+			--build-arg "TARGETPLATFORM=linux/$arch" --build-arg "TARGETOS=linux" --build-arg "TARGETARCH=$arch" \
+			--build-arg "VERSION=$VERSION" --build-arg "BUILD=$BUILD" --build-arg "COMMIT=$COMMIT" -t "$tag" . >/dev/null
+	else
+		docker build --quiet --platform "linux/$arch" --target image-binaries \
+			--build-arg "VERSION=$VERSION" --build-arg "BUILD=$BUILD" --build-arg "COMMIT=$COMMIT" -t "$tag" . >/dev/null
+	fi
 
 	# Created, never started: the command is only what create asks for.
 	c=$(docker create --platform "linux/$arch" "$tag" "/linux-$arch/cactusfs")

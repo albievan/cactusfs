@@ -502,7 +502,9 @@ PASSED
 PURGE
 PURGE_CONFIRM
 REPO_ROOT
+RESOLVED_ARCH
 RESOLVED_IMAGE
+RESOLVED_NATIVE_IMAGE
 SECRETS_WORK
 SETTINGS
 SOURCES
@@ -633,7 +635,15 @@ k3s_import_words() {
 	fi
 	case ${1:-} in
 	-*) bad K3S_IMPORT "begins with '$1': the first word is the program, and only the words after it may begin with '-'" ;;
+	*=*) bad K3S_IMPORT "begins with '$1': the first word is the program, and a program's name holds no '=' (env would read it as a variable)" ;;
 	esac
+	# No word runs ssh - "sudo ssh ...", "env ssh ..." as well: a k3s
+	# server reached over ssh is K3S_SSH, whose host key the script checks.
+	for _w in "$@"; do
+		case ${_w##*/} in
+		ssh) bad K3S_IMPORT "runs '$_w': a k3s server reached over ssh is K3S_SSH, whose host key the script checks before it is used" ;;
+		esac
+	done
 	for _w in "$@"; do
 		printf '%s\n' "$_w"
 	done

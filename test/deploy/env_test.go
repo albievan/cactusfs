@@ -242,14 +242,21 @@ func TestPrecedence(t *testing.T) {
 		key   string
 		value string
 		from  string
+		// want is what the run says; rules are the answers of the fakes.
+		want  string
+		rules []rule
 	}{
 		{name: "default", env: "KMS=local\n", args: statusDD, code: statusDone, key: "DEPLOY_NAME", value: "cactusfs", from: "default"},
 		{name: "file over default", env: "KMS=local\nDEPLOY_NAME=site\n", args: statusDD, code: statusDone, key: "DEPLOY_NAME", value: "site", from: "file"},
 		{name: "flag over file", env: "KMS=local\nDEPLOY_TARGET=podman\n", args: statusDD, code: statusDone, key: "DEPLOY_TARGET", value: "dd", from: "flag"},
 		{
+			// The image is built from this tree, not IMAGE (PLAN 10.4): a
+			// dry run says so, and what it would build.
 			name: "from-source over file", env: "KMS=local\nIMAGE_SOURCE=image\nIMAGE=registry.example.test/cactusfs:1\n",
-			args: []string{"--docker", "dd", "--install", "--from-source", "--dry-run"}, code: 3,
+			args: []string{"--docker", "dd", "--install", "--from-source", "--dry-run"}, code: 0,
 			key: "IMAGE_SOURCE", value: "source", from: "flag",
+			want:  "image: built from ",
+			rules: append(gitRules(""), madeHere("docker", newImgFix(imgCommit))...),
 		},
 		{
 			name: "not the environment", env: "KMS=local\n", args: statusDD, code: statusDone,
@@ -270,9 +277,10 @@ func TestPrecedence(t *testing.T) {
 			t.Run(c.name, func(t *testing.T) {
 				t.Parallel()
 				r := r.fresh(t)
+				r.rules(c.rules...)
 				path := r.envFile("site.env", c.env)
 				res := r.run(append([]string{"--env", path}, c.args...), c.vars...)
-				res.want(t, c.code)
+				res.want(t, c.code, c.want)
 				if c.key != "" {
 					res.setting(t, c.key, c.value, c.from)
 				}
@@ -1112,17 +1120,26 @@ func TestDryRunChangesNothing(t *testing.T) {
 	// after the Docker CLI's "--context X" (sub, docker_test.go) - so a word
 	// that only appears among the arguments of another command does not
 	// pass. curl only probes a port or /readyz (PLAN 10.5): it sends nothing.
+	// git (PLAN 10.4: the commit an image is built from) is asked in the
+	// repository - "-C <repo>" - for its count of commits, its commit and
+	// its status.
 	engines := map[string][][]string{
-		"docker":  {{"ps"}, {"volume", "ls"}, {"volume", "inspect"}, {"container", "inspect"}, {"info"}, {"image", "inspect"}},
+		"docker":  {{"ps"}, {"volume", "ls"}, {"volume", "inspect"}, {"container", "inspect"}, {"info"}, {"image", "inspect"}, {"context", "inspect"}},
 		"podman":  {{"ps"}},
 		"nerdctl": {{"ps"}},
 	}
+	gitAsks := [][]string{{"rev-list", "--count", "HEAD"}, {"rev-parse", "--verify"}, {"--no-optional-locks", "status", "--porcelain"}}
 	others := map[string][]string{
 		"kubectl": {"get"},
 		"ssh":     {"get"},
 		"curl":    {"-o", "/dev/null"},
 	}
 	asked := func(c call) bool {
+		if c.Tool == "git" {
+			return len(c.Args) > 2 && c.Args[0] == "-C" && slices.ContainsFunc(gitAsks, func(w []string) bool {
+				return len(c.Args) >= 2+len(w) && slices.Equal(c.Args[2:2+len(w)], w)
+			})
+		}
 		if words, ok := others[c.Tool]; ok {
 			return containsAll(c.Args, words) &&
 				!slices.Contains(c.Args, "-X") && !slices.Contains(c.Args, "-T") && !slices.Contains(c.Args, "-d")
@@ -1136,16 +1153,20 @@ func TestDryRunChangesNothing(t *testing.T) {
 		return false
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
-		r.rules(rule{Tool: "docker", Contains: []string{"ps"}, Stdout: "dd\n"})
+		// The binaries of make image-binaries, a tree at imgCommit, and an
+		// engine here that answers what image_check asks.
+		r = secretsRig(t, r)
+		r.rules(append(append([]rule{{Tool: "docker", Contains: []string{"ps"}, Stdout: "dd\n"}}, gitRules("")...), madeHere("docker", newImgFix(imgCommit))...)...)
 		path := r.envFile("site.env", "KMS=local\nSTATE_DIR="+filepath.Join(r.dir, "state")+"\n")
 		before := tree(t, r.dir)
 		for _, run := range []struct {
 			args []string
 			code int
 		}{
-			// An install stops where the image is resolved (PLAN 10.4).
-			{[]string{"--install", "--dry-run"}, 3},
-			{[]string{"--install", "--from-source", "--dry-run"}, 3},
+			// An install checks the image, then says what it would build,
+			// put and run (PLAN 10.4, 10.5).
+			{[]string{"--install", "--dry-run"}, 0},
+			{[]string{"--install", "--from-source", "--dry-run"}, 0},
 			{[]string{"--status", "--dry-run"}, statusDone},
 			{[]string{"--uninstall", "--dry-run"}, 0},
 			// A purge with no record of the deployment is refused (PLAN 10.5).

@@ -342,11 +342,25 @@ number wherever it is read; the image's `EXPOSE` is metadata only and it has no
 process listening on another address of the machine alone is not seen, and the
 engine's own refusal of the port then fails the run after the secrets are in place.
 `VAULT_CA_FILE` is refused on these targets for now: the volumes do not carry it.
-The image comes from one function, `docker_image_ref`, called in the script's own
-shell, never in a command substitution: when PLAN 10.4's `image_resolve` is there it
-runs, then `image_deliver`, and the image is what they leave in `RESOLVED_IMAGE`;
-without them `IMAGE_SOURCE=image` takes `IMAGE` as given, and another source stops as
-not built yet. Readiness is `/readyz` of the admin port, asked over TLS with the CA of
+The image (PLAN 10.4, wired into this install): after the checks above, and still
+before anything changes, the install asks `image_check`, so its refusals change
+nothing; then the secrets' own checks (`secrets_check`: the files given, the engine's
+ID against the record, the secrets' volumes and their labels, and what dev-init needs
+- its container's name free, its image there), each a refusal before anything is
+built; then `image_make` builds or pulls the image and checks it on the engine it is
+made on; then the secrets are made and put (`secrets_install`, under `--from-source`
+with dev-init in `RESOLVED_NATIVE_IMAGE`, which `image_native` makes after
+`image_make` - the image of the run when it is of this machine's architecture on the
+engine here); then `docker_image_ref`, called in the script's own shell, never in a
+command substitution, runs `image_deliver` (a load on the target's engine for an image
+built on `BUILD_HOST`; nothing to move on the target's own engine) and takes
+`RESOLVED_IMAGE`; then the node's volumes, and the node, run from `RESOLVED_IMAGE` with
+`--pull never`. The image made before the secrets is not a change of the deployment;
+the refusals of the secrets that need the volumes' copies read (two copies that
+differ) come after it, as they came after the helper container already. A dry run
+asks what `image_check` asks and says what would be built and run. `RESOLVED_IMAGE`,
+`RESOLVED_ARCH` and `RESOLVED_NATIVE_IMAGE` are set by the script, never taken from
+its environment. Readiness is `/readyz` of the admin port, asked over TLS with the CA of
 `STATE_DIR` (by the name `localhost`, which dev-init's certificate holds, or the first
 DNS name of `TLS_HOSTS`), every 2 s until `WAIT_TIMEOUT` seconds have passed (by the
 clock, `date +%s`). Every install ends by saying that a new deployment has the
@@ -393,6 +407,89 @@ k8s.io images import -` over `K3S_SSH` or through `K3S_IMPORT`; or pushed to
 a cluster of more than one node (counted from the Nodes) the script refuses to deliver
 by import and requires `K8S_REGISTRY`, and says why; it does not import on every node
 or pin the pods to one. What of this reaches the network is in section 12.
+
+As built (PLAN 10.4, `deploy/lib/image.sh`, after its two reviews): an install calls
+`image_check` before its first change - the secrets included - which decides and
+refuses (exit 2) and only reads: the route to the target, the host keys, whether the
+target is on another machine, the target's platform, the folder or tree, a tree with
+changes, `OFFLINE` (the base image on the building engine for the platform built
+for; a given image there). Then `image_make`, which builds, pulls, tags and checks
+(a given image that had to be pulled is checked after the pull); `image_resolve` is
+the two. `image_deliver` moves the image and checks the copy. For dev-init under
+`--from-source`, PLAN 10.5 calls `image_native` after `image_make`: an image of the
+architecture of the engine here, on that engine (the image of the run when it is that
+one, else one made the same way for it), for `IMAGE_SOURCE=binaries` and `source`
+only - with `IMAGE_SOURCE=image` dev-init runs `IMAGE`. `RESOLVED_IMAGE` is the
+reference the target runs, `RESOLVED_ARCH` its architecture, `RESOLVED_NATIVE_IMAGE`
+dev-init's. The installs run it with `--pull never` on Docker, give the pods
+`imagePullPolicy: Never` on the routes import and local, and split `repo@digest` and
+`repo:tag` for the chart's values.
+
+The routes: on the engine that runs it (nothing moves; `BUILD_HOST` equal to `CE_HOST`
+is one); `save` there and `load` on the target's engine (`CE_HOST` through
+`DOCKER_HOST=ssh://`, Podman, a Docker context), the copy then compared there - its
+platform, labels, layers (`RootFS.Layers`) and configuration (user, entrypoint,
+command, environment, working directory, labels, ports, volumes), not its ID, which
+Docker's image store and its containerd store give differently; an import into k3s,
+the tar's layers (its configuration's `rootfs.diff_ids`) checked against the image's,
+built or given, and its configuration digest (its `manifest.json`) against the one
+built, before it is sent and, over `K3S_SSH` or here, against the node's image ID afterwards
+(`k3s crictl inspecti -q -o json`, `status.id`; `K3S_IMPORT`'s own words import on a
+node the script cannot ask, which is said); the Docker engine here for Rancher
+Desktop's Kubernetes and the contexts `docker-desktop` and `rancher-desktop`, whose
+API server must be on this machine (`https://` and a dotted-quad address of
+127.0.0.0/8, `[::1]`, `localhost`, or Docker Desktop's `kubernetes.docker.internal`;
+one node, as for an import); a push to `K8S_REGISTRY` (a repository: a registry's
+`host:port` alone is refused), the pods then running `<K8S_REGISTRY>@sha256:<digest>`
+(Docker's `RepoDigests`, `podman push --digestfile`); and for `IMAGE_SOURCE=image` on a
+cluster without a push or an import - or `IMAGE` already in `K8S_REGISTRY` - the nodes
+pulling `IMAGE`, which must be named `@sha256:<64 hex>` and is first present on the
+engine here (pulled there when absent) and checked there as any image is.
+`K8S_REGISTRY` and `K3S_IMPORT` together are refused, as are nodes of more than one
+architecture and a cluster none of the routes reaches.
+
+An image is looked up by its full ID from the moment it is made: Docker builds through
+BuildKit's builder named with `--builder` (the context's own, of the docker driver, or
+`default` on `BUILD_HOST`), so that no builder chosen in the user's configuration pulls
+or loads elsewhere; a stale build tag (`cactusfs:deploy-<name>-build-<arch>`) is
+removed first. buildx writes the configuration's digest to `--iidfile` (buildx's
+`getImageID`) and the manifest's to `--metadata-file` (`containerimage.digest`); the
+first is the image's ID in Docker's image store and in Podman, the second in Docker's
+containerd store (moby's `mobyexporter` and `exporter/wrapper.go`). The ID the engine
+finds of the two is taken - else the build tag's ID when it is one of them - and the
+build tag must name it; else the run fails before anything is tagged. The image is
+inspected, tagged, run and pushed by that ID. A saved image carries the name it was
+saved by, so the save is by its tag, which is checked to name that ID right before. A
+given image is inspected once (ID, labels, `RepoDigests`, layers, configuration) and
+tagged by its ID; moved as a tar stream it keeps no registry digest, so it is tagged
+`cactusfs:<its version label>-<12 hex of its ID>`. Its labels pass the same validation
+as `BUILDINFO` (its commit may be 7 to 40 hex digits), and its `RepoDigests` are
+matched with `docker.io/library/` and `docker.io/` taken off, as Podman writes them. An
+inspect of more than one line, or with a control character (a label holding one),
+fails the run. A tar stream goes through a file of a work directory of its own, under
+`TMPDIR` (a failed save is never loaded); the directory is removed by a trap of the
+subshell that uses it, whose path is expanded when it is set. That subshell runs in
+the foreground, so a Ctrl-C (an INT to the process group) or a TERM to the group
+reaches it and the tool it runs at once; a signal sent to the script's process alone
+is taken when the step it waits on ends (a shell runs a trap after its foreground
+command), and the run then ends the same way. The binary's `version` line is read in a
+container without network or privileges, only on an engine of the target's
+architecture.
+
+A target is on another machine - where a tree with changes, or of no known commit, is
+refused unless `ALLOW_DIRTY=yes` (a warning) - for `BUILD_HOST`, `CE_HOST`, a Docker
+context whose endpoint is not a `unix://` or `npipe://` socket (`docker context
+inspect`), a Podman whose service is remote (`podman info`'s `Host.ServiceIsRemote`,
+true for a Podman machine, as on macOS), `K3S_SSH`, `K3S_IMPORT` (its words may reach
+anywhere; a word that is `ssh` is refused: that is `K3S_SSH`), a push, and any cluster
+but a k3s here and the desktops' as above. "Uncommitted changes" counts files git does
+not track and does not ignore as well (they are in the build context). Without git, or
+outside a repository, a build from source is build 0 of no known commit: allowed for a
+target here, refused for one on another machine. An image made of binaries for a
+target on another machine takes the rest of the image from this tree's Dockerfile, so
+HEAD must be `BUILDINFO`'s commit and the Dockerfile without changes (`git status
+--porcelain -- Dockerfile`), else the same refusal. Rancher Desktop with
+`RANCHER_ENGINE` other than `moby` is PLAN 10.6's.
 
 ### 6. Kubernetes: render and apply, no Helm release
 
@@ -625,7 +722,20 @@ with `docker build --pull=false` or `podman build --pull=never` (the flags diffe
 engine), and `--from-source`, `IMAGE_SOURCE=image` for an image not present and
 `CE_INSTALL_DOCKER` are refused. A push to `K8S_REGISTRY` stays allowed: it is the
 operator's own registry, often the way into an air-gapped cluster. An air-gapped site
-sets it.
+sets it. As built (PLAN 10.4): the image is built with `docker buildx build
+--builder <name> --load` (BuildKit, as `make image-from-binaries` builds the same
+stage), so the flag is `docker buildx build --pull=false`; the base image of an image
+made of binaries (`RUNTIME_IMAGE`) is asked for with `image inspect` on the engine that
+builds, and an answer other than "no such image" fails the run rather than counting
+as absent; it must be there for the platform built for, because BuildKit resolves a
+base of another platform from the registry - Docker is asked with `image inspect
+--platform` when its CLI has it (an image store may hold several platforms), else the
+one platform shown must be it, and a cross-architecture OFFLINE build on a Docker
+that cannot be asked is refused with that reason. `IMAGE_SOURCE=image` for the nodes to pull is refused under `OFFLINE=yes`
+unless `IMAGE` is in `K8S_REGISTRY`, the operator's own registry: the cluster would
+otherwise fetch it from wherever `IMAGE` points, and an air-gapped cluster pulls only
+from the operator's registry. Either way it is present and checked on the engine here
+first.
 
 `CE_INSTALL_DOCKER=yes` installs Docker CE from Docker's own repository on Debian,
 Ubuntu and the RHEL family, and refuses an unknown distribution, a host that runs k3s
@@ -649,7 +759,11 @@ docker and podman), and the k3s lifecycle runs in `make test-k8s`. The lifecycle
 cannot: that every file of `<name>-secrets` and `<name>-config`, and their roots, as
 PLAN 10.3's never-started helper fills them with `cp -a`, is readable by the node's
 user 65532 (the owner and mode of each entry as the engine reads them out), and that
-`kms.json` of `STATE_DIR` is the one the node uses. `shfmt` is a new build
+`kms.json` of `STATE_DIR` is the one the node uses; with `LIFECYCLE_SOURCE=binaries` it
+deploys an image the script builds from `make image-binaries`, whose helper is the bare
+runtime image, so the roots are proven on that path too (on Podman the secrets'
+volumes are made owned by 65532, `--opt o=uid=65532,gid=65532`: Podman's `cp` into a
+never-started container sets no owner on a volume's root). `shfmt` is a new build
 tool (BSD-3-Clause), pinned with a `tool` directive; ShellCheck is GPL-3.0 and outside
 the allow-list.
 
@@ -697,7 +811,10 @@ ssh is never asked to run a value that is not plain. `K3S_IMPORT` is the one val
 is a command: it is split into words at spaces, without `eval`; every word must be
 plain except that words after the first may begin with `-`; a shell metacharacter
 anywhere refuses it; the words are run as they are, with the image as a tar stream on
-standard input.
+standard input. As built (PLAN 10.4): the first word may not hold `=` either - `env`,
+under which every tool runs, would take it for a variable to set - and no word may be
+`ssh` (by its last path component; `sudo ssh ...` too): a server reached over ssh is
+`K3S_SSH`, whose host key the script checks first.
 
 ## Consequences
 

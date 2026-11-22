@@ -30,6 +30,8 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/k8s.sh"
 # shellcheck source=deploy/lib/docker.sh
 . "$DEPLOY_DIR/lib/docker.sh"
+# shellcheck source=deploy/lib/image.sh
+. "$DEPLOY_DIR/lib/image.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -102,6 +104,11 @@ ANOTHER_TARGET=0
 ADOPT=0
 ENGINE_REPLACED=0
 DRY_RUN=0
+# The image of the run (PLAN 10.4): what image_make and image_native set,
+# never what the environment holds.
+RESOLVED_IMAGE=
+RESOLVED_ARCH=
+RESOLVED_NATIVE_IMAGE=
 env_file=
 
 # set_action <action>: one action a run.

@@ -130,11 +130,16 @@ comma := ,
 # for testcontainers. Rootless Podman: ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock
 SOCKET_MOUNT := $(if $(wildcard $(ENGINE_SOCKET)),-v $(ENGINE_SOCKET):/var/run/docker.sock)
 # Podman's Docker-compatible API has no BuildKit, so use the classic builder.
+# Podman applies SELinux labels where Docker does not: on an enforcing host the
+# builder could not read the bind-mounted tree. The builder is a throwaway
+# development container, so its labelling is turned off rather than the tree
+# relabelled (":z" would change the files' contexts on the host for good).
 ifeq ($(ENGINE),podman)
 BUILDKIT_ENV := -e DOCKER_BUILDKIT=0
+BUILDER_LABEL := --security-opt label=disable
 endif
 
-BUILDER_RUN = $(ENGINE) run --rm \
+BUILDER_RUN = $(ENGINE) run --rm $(BUILDER_LABEL) \
 	-v "$(CURDIR)":/src -w /src \
 	-v $(CACHE_VOLUME):/cache \
 	-v $(NODE_VOLUME):/src/web/node_modules \
@@ -159,7 +164,7 @@ $(BUILDER_TARGETS): builder
 # the check is part of `make check`.
 .PHONY: image-binaries image-from-binaries
 image-binaries: builder
-	@$(BUILDER_RUN) $(BUILDER_IMAGE) make $@
+	@$(BUILDER_RUN) $(BUILDER_IMAGE) make $@ $(if $(IMAGE_BINARIES_ARCHES),IMAGE_BINARIES_ARCHES="$(IMAGE_BINARIES_ARCHES)")
 
 # The check builds with a named build context, which Podman's Docker API -
 # all the builder can reach - does not have. With Podman it runs here, with
@@ -228,6 +233,8 @@ down:
 # unless LIFECYCLE_IMAGE names one that is there:
 #   make test-deploy ENGINE=podman
 #   make test-deploy LIFECYCLE_IMAGE=cactusfs:0.7.0-348-amd64
+#   make test-deploy LIFECYCLE_SOURCE=binaries   (make image-binaries, then
+#     the script builds the image from them: IMAGE_SOURCE=binaries)
 # What the lifecycle makes it removes again (the deployment by the script's
 # own purge); see the script for its other settings (LIFECYCLE_*). The image
 # this target builds, cactusfs-lifecycle:<version>-<build>, it removes when
@@ -249,7 +256,10 @@ endif
 LIFECYCLE_RUN := ENGINE=$(ENGINE) LIFECYCLE_CONTEXT=$(LIFECYCLE_CONTEXT)
 .PHONY: test-deploy
 test-deploy:
-ifeq ($(strip $(LIFECYCLE_IMAGE)),)
+ifeq ($(LIFECYCLE_SOURCE),binaries)
+	@$(MAKE) --no-print-directory image-binaries ENGINE=$(ENGINE) $(if $(filter podman,$(ENGINE)),IMAGE_BINARIES_ARCHES=$(HOST_GOARCH))
+	@$(LIFECYCLE_RUN) LIFECYCLE_SOURCE=binaries test/deploy/lifecycle.sh
+else ifeq ($(strip $(LIFECYCLE_IMAGE)),)
 	@if $(LIFECYCLE_ENGINE) image inspect $(LIFECYCLE_BUILD_TAG) >/dev/null 2>&1; then \
 		echo "test-deploy: FAIL - $(LIFECYCLE_BUILD_TAG) is there already, and this target removes only an image it built: remove it, or name it with LIFECYCLE_IMAGE" >&2; \
 		exit 1; \
@@ -475,7 +485,7 @@ image:
 # never those of build-all (ADR-0033 section 5). Any engine.
 .PHONY: image-binaries image-from-binaries
 image-binaries:
-	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image-binaries.sh
+	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) IMAGE_BINARIES_ARCHES="$(IMAGE_BINARIES_ARCHES)" scripts/image-binaries.sh
 
 # An image made of dist/image by the Dockerfile's from-binaries stage is the
 # product image that `make image` made (scripts/image-from-binaries.sh),

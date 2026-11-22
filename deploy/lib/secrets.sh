@@ -333,15 +333,17 @@ secrets_plan() {
 	say "secrets: what neither copy holds is made once - the root credentials and the passphrase from /dev/urandom, kms.json and the certificates by cactusfs dev-init in a container of this machine's architecture - and two copies that differ are refused"
 }
 
-# secrets_install: every secret of the deployment in both of its places,
-# before anything starts on the target. Run by --install on a target whose
-# copy secrets_where says this step keeps. Everything that refuses is asked
-# before STATE is written.
-secrets_install() {
-	if [ "$DRY_RUN" = 1 ]; then
-		secrets_plan
-		return 0
-	fi
+# secrets_check: what secrets_install asks before anything is written or
+# made - the files given, the engine's ID against the record, the volumes
+# of the target and their labels, the helper's image, and when dev-init
+# will run (_si_devinit) what it needs - each refusal (exit 2) before any
+# change. Asked once: docker_install asks it before PLAN 10.4's image_make,
+# so that it refuses before an image is built or pulled, and secrets_install
+# asks it again (nothing then). Under --from-source dev-init runs in the
+# image image_make makes: secrets_install asks devinit_check after it.
+secrets_check() {
+	[ -z "${_sc_done:-}" ] || return 0
+	_sc_done=1
 	umask 077
 	secrets_settings
 	_si_rotate=
@@ -388,14 +390,32 @@ secrets_install() {
 	image_ready target_engine "$_si_img"
 	# dev-init is asked for what it needs first when it will run: neither
 	# copy of the certificates is there, and no file gives all they hold.
+	_si_devinit=
 	case "$_si_have " in
 	*" config "*) ;;
 	*)
 		if [ ! -f "$STATE/config/ready" ] && [ "$(secrets_devinit)" = yes ]; then
-			devinit_check
+			_si_devinit=1
 		fi
 		;;
 	esac
+	[ -z "$_si_devinit" ] || [ "$_s_source" = source ] || devinit_check
+}
+
+# secrets_install: every secret of the deployment in both of its places,
+# before anything starts on the target. Run by --install on a target whose
+# copy secrets_where says this step keeps. Everything that refuses is asked
+# before STATE is written: first secrets_check, then what needs the copy of
+# the target read.
+secrets_install() {
+	if [ "$DRY_RUN" = 1 ]; then
+		secrets_plan
+		return 0
+	fi
+	secrets_check
+	# Under --from-source dev-init runs in the image PLAN 10.4's image_make
+	# made, so it is asked for what it needs only now.
+	[ -z "$_si_devinit" ] || devinit_check
 
 	secrets_begin
 	secrets_fetch "$_si_have"
@@ -574,7 +594,8 @@ secrets_fetch() {
 	# shellcheck disable=SC2086 # unit names, without spaces
 	io_container "$_sf_ctr" $1
 	for _sf_unit in $1; do
-		target_engine query cp "$_sf_ctr:/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
+		target_engine query cp "$_sf_ctr:/var/lib/cactusfs/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
+		[ "$TARGET" != podman ] || volume_root_check "$SECRETS_WORK/fetch.tar" "$_s_name-$_sf_unit"
 		tar -x -o -f "$SECRETS_WORK/fetch.tar" -C "$SECRETS_WORK/target"
 		rm -f "$SECRETS_WORK/fetch.tar"
 		[ -d "$SECRETS_WORK/target/$_sf_unit" ] || mkdir "$SECRETS_WORK/target/$_sf_unit"
@@ -583,17 +604,63 @@ secrets_fetch() {
 	only_plain "$SECRETS_WORK/target" "a volume of the deployment"
 }
 
+# volume_root_check <tar> <volume>: on Podman, the root of a secrets'
+# volume read out by the helper (the first entry of the tar stream, a
+# directory) must be owned by the nodes' user, 65532: a volume made before
+# secrets_volume_create gave it that owner kept the root root:root 0700
+# when the helper's image has no directory where it is mounted (Podman's cp
+# into a container never started gives the root no owner), and the node
+# cannot open it. Such a volume is refused, with the way back; it is not
+# changed (the helper runs as 65532, without the capability to chown). The
+# owner is read from the entry's ustar header (bytes 108-114, octal; the
+# type at byte 156), with od; a stream whose first entry is not a directory - an
+# extended header first - is not judged.
+volume_root_check() {
+	_vrc_type=$(od -A n -t c -j 156 -N 1 "$1" | tr -d ' \n') || _vrc_type=
+	[ "$_vrc_type" = 5 ] || return 0
+	# Seven octal digits; the eighth byte is their end (NUL or space).
+	_vrc_uid=$(od -A n -t c -j 108 -N 7 "$1" | tr -cd '0-7' | sed 's/^0*//')
+	[ "$_vrc_uid" != 177774 ] || return 0
+	refuse "the root of the volume $2 is owned by the user $(printf '%d' "0${_vrc_uid:-0}"), not by the nodes' user 65532 (a Podman volume made by an earlier run of this script, whose helper's copy gave its root no owner): the node cannot open it. To make it again: deploy/deploy.sh --uninstall, then podman volume rm $_s_name-secrets $_s_name-config, then deploy/deploy.sh --install, which puts the secrets back from $STATE - the data volumes are kept"
+}
+
+# secrets_volume_create <unit>: the volume <name>-<unit>, labelled with the
+# deployment's name and target. On Podman it is owned by the nodes' user from
+# its creation (--opt o=uid=65532,gid=65532: podman v5.4.0
+# pkg/domain/infra/abi/parse/parse.go VolumeOptions maps uid= and gid= to
+# WithVolumeUID/GID and WithVolumeNoChown, and libpod
+# runtime_volume_common.go chowns the volume's _data to them when it makes
+# it; volume_internal.go needsMount mounts nothing for those options alone):
+# the helper is never started, and Podman's "cp" into such a container sets
+# no owner on the volume's root, which stays root:root 0700 - the node, as
+# 65532, could not open it. On Docker the root takes the owner of the
+# helper's image directory when it has one (the copy-up into an empty
+# volume), and "cp -a"'s "." entry sets it otherwise.
+secrets_volume_create() {
+	if [ "$TARGET" = podman ]; then
+		target_engine run volume create --opt o=uid=65532,gid=65532 --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" "$_s_name-$1" </dev/null
+	else
+		target_engine run volume create --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" "$_s_name-$1" </dev/null
+	fi
+}
+
 # io_container <container> <unit>...: a helper container on the target that
-# mounts the volume of each unit at /<unit> - named volumes only, never a
-# path of a host - made from helper_image as the nodes' user and never
-# started: what is copied in with "cp -a" is owned by that user (65532).
+# mounts the volume of each unit at /var/lib/cactusfs/<unit> - named volumes
+# only, never a path of a host - made from helper_image as the nodes' user and
+# never started: what is copied in with "cp -a" is owned by that user (65532).
+# The product image (IMAGE_SOURCE=image) has those directories, owned by
+# 65532 (the Dockerfile's volumes stage): on Docker an empty volume first
+# mounted there takes their owner and mode. The runtime image, the helper's
+# for binaries and source, has none: Docker's "cp -a" gives the root to
+# 65532 from the stream's "." entry; Podman's does not, so on Podman the
+# volume is made owned by 65532 (secrets_volume_create).
 io_container() {
 	_io_ctr=$1
 	shift
 	helper_clear target_engine "$_io_ctr"
 	_io_mounts=
 	for _io_unit in "$@"; do
-		_io_mounts="$_io_mounts --mount type=volume,source=$_s_name-$_io_unit,target=/$_io_unit"
+		_io_mounts="$_io_mounts --mount type=volume,source=$_s_name-$_io_unit,target=/var/lib/cactusfs/$_io_unit"
 	done
 	# shellcheck disable=SC2086 # the mounts are words without spaces
 	target_engine run create --name "$_io_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
@@ -741,7 +808,8 @@ config_make() {
 # devinit_check: what dev-init needs, asked before anything is written: an
 # image to run it in of this machine's architecture - the binary of make
 # image-binaries, checked against SHA256SUMS and BUILDINFO, in the runtime
-# image, or IMAGE - on this machine's engine, and no container in the way
+# image, IMAGE, or under --from-source RESOLVED_NATIVE_IMAGE (image_native,
+# PLAN 10.4) - on this machine's engine, and no container in the way
 # of its own (one the script left, when a run stopped half way, is removed;
 # another is refused).
 devinit_check() {
@@ -760,7 +828,17 @@ devinit_check() {
 		_dc_img=$(runtime_image)
 		;;
 	image) _dc_img=$_s_image ;;
-	*) not_built 10.4 "the image of this machine's architecture that dev-init runs in, built from source" ;;
+	*)
+		# From source: an image of this machine's architecture, made by
+		# PLAN 10.4's image_native from the same tree, after image_make -
+		# which the install of a standalone deployment on a Docker engine
+		# runs (docker_install); a target whose install does not make the
+		# image yet stops here.
+		command -v image_native >/dev/null 2>&1 && [ -n "${RESOLVED_IMAGE:-}" ] ||
+			not_built 10.4 "the image of this machine's architecture that dev-init runs in, built from source"
+		[ -n "${RESOLVED_NATIVE_IMAGE:-}" ] || image_native
+		_dc_img=$RESOLVED_NATIVE_IMAGE
+		;;
 	esac
 	image_ready local_engine "$_dc_img" "linux/$_dc_arch"
 	helper_clear local_engine "$_s_name-dev-init"
@@ -768,7 +846,8 @@ devinit_check() {
 
 # devinit_run <directory>: "cactusfs dev-init" in a container of this
 # machine's architecture - the binary of make image-binaries in the runtime
-# image, or IMAGE - with the passphrase and the binary copied in as a tar
+# image, IMAGE, or under --from-source the image image_native made (PLAN
+# 10.4) - with the passphrase and the binary copied in as a tar
 # stream and its directory copied out as one; no path of this machine is
 # mounted. Given --nodes (the deployment's name, the standalone node's),
 # --hosts (TLS_HOSTS) and --validity (TLS_VALIDITY). What it prints is
@@ -791,8 +870,10 @@ devinit_run() {
 		_dr_img=$(runtime_image)
 		set -- "$_dr_img" /tmp/cactusfs
 	else
+		# IMAGE, or under --from-source the image of this machine's
+		# architecture image_native made: devinit_check's choice.
 		tar -c -f "$SECRETS_WORK/dev-init.tar" -C "$_dr_in" kms-passphrase
-		set -- --entrypoint /cactusfs "$_s_image"
+		set -- --entrypoint /cactusfs "$_dc_img"
 	fi
 	rm -f "$_dr_in/kms-passphrase"
 	set -- "$@" dev-init --dir /tmp/out --nodes "$_s_name" --validity "$_s_validity" --kms-passphrase-file /tmp/kms-passphrase
@@ -881,7 +962,7 @@ secrets_put() {
 	for _sp_unit in $_sp_units; do
 		case " $1 " in
 		*" $_sp_unit "*) ;;
-		*) target_engine run volume create --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" "$_s_name-$_sp_unit" </dev/null ;;
+		*) secrets_volume_create "$_sp_unit" ;;
 		esac
 	done
 	_sp_ctr=$_s_name-volumes
@@ -896,7 +977,7 @@ secrets_put() {
 		if [ -n "$_sp_list" ]; then
 			# shellcheck disable=SC2086 # names without spaces, the list is the point
 			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$STATE/$_sp_unit" $_sp_list
-			target_engine run cp -a - "$_sp_ctr:/$_sp_unit" <"$SECRETS_WORK/put.tar"
+			target_engine run cp -a - "$_sp_ctr:/var/lib/cactusfs/$_sp_unit" <"$SECRETS_WORK/put.tar"
 			rm -f "$SECRETS_WORK/put.tar"
 			say "secrets: put into the volume $_s_name-$_sp_unit what it lacked of $STATE/$_sp_unit: $(printf '%s' "$_sp_list" | grep -vx '\.' | tr '\n' ' ' | sed 's/ $//')"
 		fi
@@ -912,7 +993,7 @@ secrets_put() {
 		if [ -n "$_sp_names" ]; then
 			# shellcheck disable=SC2086 # names without spaces
 			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$_sp_stage" $_sp_names
-			target_engine run cp -a - "$_sp_ctr:/$_sp_unit" <"$SECRETS_WORK/put.tar"
+			target_engine run cp -a - "$_sp_ctr:/var/lib/cactusfs/$_sp_unit" <"$SECRETS_WORK/put.tar"
 			rm -rf "$SECRETS_WORK/put.tar" "$_sp_stage"
 			say "secrets: rotated in the volume $_s_name-$_sp_unit, from the files given:$_sp_names"
 		fi

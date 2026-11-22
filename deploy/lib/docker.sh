@@ -30,9 +30,12 @@
 # Install: everything that can refuse is asked first - an unlabelled
 # container or volume of the deployment's names, an upgrade left unfinished,
 # the drives of a deployment that has run, a port another holds - then the
-# secrets go to the volumes (secrets_install, PLAN 10.3), then the image
-# (docker_image_ref, PLAN 10.4), the volumes the node lacks, and the node,
-# ready within WAIT_TIMEOUT. Again on a deployment that is installed: an
+# image is checked (image_check, PLAN 10.4), still before any change; then
+# the image is made (image_make) and the secrets go to the volumes
+# (secrets_install, PLAN 10.3); then the image is delivered to the target's
+# engine (docker_image_ref), the volumes the node lacks are made, and the
+# node is run from RESOLVED_IMAGE with --pull never, ready within
+# WAIT_TIMEOUT. Again on a deployment that is installed: an
 # upgrade - the node is stopped and renamed <name>-previous, the new one is
 # run with the same volumes, and the old one is removed once the new one is
 # ready; if it is not, the run says the node is down and how to go back.
@@ -77,17 +80,16 @@ docker_settings() {
 
 # docker_image_ref: _dk_image, the reference of the image the node runs -
 # the only place the Docker targets take it from. Called plainly, never in
-# $(...): PLAN 10.4's image_resolve and image_deliver (deploy/lib/image.sh)
-# check host keys and set variables. When they are there, they resolve and
-# deliver the image to the engine and leave its reference in
-# RESOLVED_IMAGE; without them, IMAGE_SOURCE=image takes IMAGE as given, and
-# any other source stops the run as not built yet.
+# $(...): PLAN 10.4's functions (deploy/lib/image.sh) check host keys and
+# set variables. docker_install has run image_check (docker_image_check)
+# before its first change and image_make (docker_image_make) before the
+# secrets - dev-init may run in the image made; this delivers the image to
+# the target's engine (image_deliver) and takes the reference from
+# RESOLVED_IMAGE. Without image.sh, IMAGE_SOURCE=image takes IMAGE as
+# given, and any other source stops the run as not built yet.
 docker_image_ref() {
 	_dk_image=
-	if command -v image_resolve >/dev/null 2>&1; then
-		# What an earlier run or the environment left is never taken.
-		RESOLVED_IMAGE=
-		image_resolve
+	if command -v image_deliver >/dev/null 2>&1; then
 		image_deliver
 		_dk_image=${RESOLVED_IMAGE:-}
 	elif [ "$(setting IMAGE_SOURCE)" = image ]; then
@@ -534,6 +536,31 @@ docker_previous_norestart() {
 	fi
 }
 
+# docker_image_check: PLAN 10.4's image_check, before the install's first
+# change - its refusals (exit 2) are then true; nothing is built or pulled.
+docker_image_check() {
+	if command -v image_check >/dev/null 2>&1; then
+		# What an earlier run or the environment left is never taken.
+		RESOLVED_IMAGE=
+		RESOLVED_NATIVE_IMAGE=
+		image_check
+	fi
+}
+
+# docker_image_make: PLAN 10.4's image_make - the image built, pulled and
+# checked where it is made, nothing shipped - before the secrets, so that
+# dev-init can run in an image of this machine's architecture made from the
+# same source (image_native, asked by secrets.sh's devinit_check). The
+# secrets' own checks (secrets_check) are asked before it; an image made on
+# an engine is not a change of the deployment, so what the secrets refuse
+# after it (two copies that differ) still changes nothing of the
+# deployment.
+docker_image_make() {
+	if command -v image_make >/dev/null 2>&1; then
+		image_make
+	fi
+}
+
 # docker_install: --install of a standalone deployment on a Docker engine.
 docker_install() {
 	docker_settings
@@ -543,12 +570,20 @@ docker_install() {
 	docker_volumes
 	docker_drives_check
 	docker_ports_check
+	docker_image_check
 	if [ -n "$_dk_have_ctr" ]; then
 		say "installed: the container $_dk_ctr ($_dk_ctr_state, image $_dk_ctr_image); this run upgrades it, keeping its volumes"
 	fi
+	# What the secrets refuse is asked before the image is made (a dry run
+	# says what it would do instead, in secrets_install).
+	[ "$DRY_RUN" = 1 ] || secrets_check
 
-	# Nothing has been changed so far. The secrets first, before anything
-	# starts on the engine (PLAN 10.3).
+	# Nothing has been changed so far but the images the secrets need (the
+	# helper's, dev-init's) when the engine lacked them. The image is made
+	# where it is made - built or pulled, and checked; nothing of the
+	# deployment - then the secrets, before anything starts on the engine
+	# (PLAN 10.3).
+	docker_image_make
 	secrets_install
 	docker_image_ref
 	say "image: $_dk_image"

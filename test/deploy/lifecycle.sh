@@ -18,7 +18,20 @@
 # environment:
 #
 #   ENGINE              docker (default) or podman
-#   LIFECYCLE_IMAGE     the image to deploy, on the engine (required)
+#   LIFECYCLE_SOURCE    image (default): deploy LIFECYCLE_IMAGE; or binaries:
+#                       the script builds the image itself from the binaries
+#                       of make image-binaries (IMAGE_SOURCE=binaries) - the
+#                       helper of the secrets' volumes is then the runtime
+#                       image, which has no /var/lib/cactusfs, so step 4
+#                       proves the volumes' roots on that path too
+#   LIFECYCLE_IMAGE     the image to deploy, on the engine (required with
+#                       LIFECYCLE_SOURCE=image)
+#   LIFECYCLE_RELEASE_DIR
+#                       the binaries (default: dist/image of this tree)
+#   LIFECYCLE_ALLOW_DIRTY=yes
+#                       ALLOW_DIRTY=yes for the deployment: binaries of a
+#                       tree with changes, to an engine on another machine
+#                       (a Podman machine)
 #   LIFECYCLE_TARGET    the target: ce for docker (dd on Docker Desktop),
 #                       podman for podman
 #   LIFECYCLE_CONTEXT   the Docker context (default: default)
@@ -49,6 +62,9 @@ lc_deploy=$lc_repo/deploy/deploy.sh
 
 lc_engine=${ENGINE:-docker}
 lc_image=${LIFECYCLE_IMAGE:-}
+lc_source=${LIFECYCLE_SOURCE:-image}
+lc_rel=${LIFECYCLE_RELEASE_DIR:-$lc_repo/dist/image}
+lc_dirty=${LIFECYCLE_ALLOW_DIRTY:-no}
 lc_context=${LIFECYCLE_CONTEXT:-default}
 lc_name=${LIFECYCLE_NAME:-cfs-lifecycle}
 lc_s3=${LIFECYCLE_S3_PORT:-19000}
@@ -72,7 +88,11 @@ fail() {
 	exit 1
 }
 
-[ -n "$lc_image" ] || fail "LIFECYCLE_IMAGE is not set: the image to deploy (make test-deploy builds one)"
+case $lc_source in
+image) [ -n "$lc_image" ] || fail "LIFECYCLE_IMAGE is not set: the image to deploy (make test-deploy builds one)" ;;
+binaries) [ -f "$lc_rel/BUILDINFO" ] || fail "no $lc_rel/BUILDINFO: run make image-binaries (make test-deploy LIFECYCLE_SOURCE=binaries does)" ;;
+*) fail "LIFECYCLE_SOURCE=$lc_source: image or binaries" ;;
+esac
 for lc_tool in "$lc_engine" curl tar cmp awk; do
 	command -v "$lc_tool" >/dev/null 2>&1 || fail "$lc_tool is not installed"
 done
@@ -101,9 +121,14 @@ quoted() {
 	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-eng image inspect "$lc_image" >/dev/null 2>&1 || fail "the image $lc_image is not on $lc_engine"
-lc_version=$(eng image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$lc_image")
-[ -n "$lc_version" ] || fail "the image $lc_image has no label org.opencontainers.image.version"
+if [ "$lc_source" = binaries ]; then
+	lc_version=$(sed -n 's/^version=//p' "$lc_rel/BUILDINFO")-$(sed -n 's/^build=//p' "$lc_rel/BUILDINFO")
+	lc_image="the binaries of $lc_rel"
+else
+	eng image inspect "$lc_image" >/dev/null 2>&1 || fail "the image $lc_image is not on $lc_engine"
+	lc_version=$(eng image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$lc_image")
+fi
+[ "$lc_version" != - ] && [ -n "$lc_version" ] || fail "$lc_image has no version: no label org.opencontainers.image.version, or no version= and build= in BUILDINFO"
 lc_tag=cactusfs-lifecycle-upgrade:$lc_name
 
 # What the run makes must not be there before it: it removes only what it
@@ -123,6 +148,10 @@ printf '%s\n' "$lc_out" | grep -qx "$lc_name-sentinel" &&
 lc_out=$(listed images image ls --format '{{.Repository}}:{{.Tag}}') || exit 1
 printf '%s\n' "$lc_out" | grep -qxF -e "$lc_tag" -e "localhost/$lc_tag" &&
 	fail "an image $lc_tag is there already: this run would not have made it; remove it or set LIFECYCLE_NAME"
+# The images the script builds from the binaries are tagged
+# cactusfs:<version>-<build>-<12 hex of the ID>: those there before the run
+# are not the run's to remove.
+lc_before_images=$(printf '%s\n' "$lc_out" | sed 's|^localhost/||' | grep "^cactusfs:$lc_version-" || :)
 lc_out=$(listed containers ps -a --format '{{.Names}}') || exit 1
 for lc_n in "$lc_name" "$lc_name-previous" "$lc_name-other"; do
 	printf '%s\n' "$lc_out" | grep -qx "$lc_n" && fail "a container $lc_n is there already: remove it or set LIFECYCLE_NAME"
@@ -135,6 +164,10 @@ for lc_n in "$lc_name" "$lc_name-other"; do
 done
 
 lc_work=$(mktemp -d "${TMPDIR:-/tmp}/cactusfs-lifecycle.XXXXXX")
+# What the end of the run needs to remove only the image tags this run made:
+# the tags of that form there before it, and the version they carry.
+printf '%s\n' "$lc_before_images" >"$lc_work/images-before"
+printf '%s\n' "$lc_version" >"$lc_work/version"
 chmod 0700 "$lc_work"
 lc_state=$lc_work/state
 lc_done=$lc_work/done
@@ -145,11 +178,20 @@ lc_run=${lc_work##*/}
 # lifecycle_end <work> <done> <engine> <context> <name> <tag> <keep> <deploy>
 # <env file>: what the run made is removed - unless it failed and
 # LIFECYCLE_KEEP=yes - by the script's own purge (of the deployment recorded
-# in the run's own STATE_DIR), then the sentinel volume and the extra tag,
+# in the run's own STATE_DIR), then the image the script built from the
+# binaries (built-made), the sentinel volume and the extra tag,
 # each only when the work directory records that this run made it and the
 # engine still shows it as made (the volume's label, the tag's image ID),
 # and last the work directory. Its arguments are written into the trap
 # when it is set; its variables are its own (_le_*).
+# built_record <ref>: an image the script built from the binaries, recorded
+# ("<ref> <ID>" a line) so that the end of the run removes it - only when it
+# was not there before this run.
+built_record() {
+	printf '%s\n' "$lc_before_images" | grep -qxF "${1#localhost/}" && return 0
+	printf '%s %s\n' "$1" "$(eng image inspect --format '{{.Id}}' "$1")" >>"$lc_work/built-made"
+}
+
 lifecycle_end() {
 	_le_work=$1
 	_le_done=$2
@@ -191,9 +233,45 @@ lifecycle_end() {
 		[ "$("$@" volume inspect --format '{{index .Labels "io.cactusfs.lifecycle.run"}}' "$_le_name-sentinel" 2>/dev/null)" = "$(cat "$_le_work/sentinel-made")" ]; then
 		"$@" volume rm "$_le_name-sentinel" >/dev/null 2>&1 || :
 	fi
-	if [ -f "$_le_work/tag-made" ] &&
-		[ "$("$@" image inspect --format '{{.Id}}' "$_le_tag" 2>/dev/null)" = "$(cat "$_le_work/tag-made")" ]; then
-		"$@" image rm "$_le_tag" >/dev/null 2>&1 || :
+	if [ -f "$_le_work/built-made" ]; then
+		while read -r _le_built _le_built_id; do
+			if [ -n "$_le_built" ] && [ "$("$@" image inspect --format '{{.Id}}' "$_le_built" 2>/dev/null)" = "$_le_built_id" ]; then
+				"$@" image rm "$_le_built" >/dev/null 2>&1 || :
+			fi
+		done <"$_le_work/built-made"
+	fi
+	if [ -f "$_le_work/images-before" ] && [ -f "$_le_work/version" ]; then
+		# Every cactusfs:<version>-<12 hex of an ID> tag the script gave an
+		# image during this run (each build from the binaries and each
+		# given image is tagged so): removed by name, a tag only, unless it
+		# was there before the run.
+		_le_ver=$(cat "$_le_work/version")
+		for _le_ref in $("$@" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null); do
+			_le_short=${_le_ref#localhost/}
+			case $_le_short in
+			"cactusfs:$_le_ver-"*) ;;
+			*) continue ;;
+			esac
+			printf '%s\n' "${_le_short#"cactusfs:$_le_ver-"}" | grep -qxE '[0-9a-f]{12}' || continue
+			grep -qxF "$_le_short" "$_le_work/images-before" && continue
+			"$@" image rm "$_le_ref" >/dev/null 2>&1 || :
+		done
+	fi
+	if [ -f "$_le_work/tag-made" ]; then
+		# The tag the script gave that image, cactusfs:<version>-<build>-<12
+		# hex of its ID> (PLAN 10.4): removed by name, only while it still
+		# names this run's image - a tag, never the image under another name.
+		_le_id=$(sed 's/^sha256://' "$_le_work/tag-made")
+		for _le_ref in $("$@" images --no-trunc --format '{{.Repository}}:{{.Tag}}@{{.ID}}' 2>/dev/null); do
+			case $_le_ref in
+			cactusfs:*@sha256:"$_le_id" | localhost/cactusfs:*@sha256:"$_le_id" | cactusfs:*@"$_le_id" | localhost/cactusfs:*@"$_le_id")
+				"$@" image rm "${_le_ref%@*}" >/dev/null 2>&1 || :
+				;;
+			esac
+		done
+		if [ "$("$@" image inspect --format '{{.Id}}' "$_le_tag" 2>/dev/null)" = "$(cat "$_le_work/tag-made")" ]; then
+			"$@" image rm "$_le_tag" >/dev/null 2>&1 || :
+		fi
 	fi
 	case $_le_work in
 	*/cactusfs-lifecycle.*) rm -rf "$_le_work" ;;
@@ -213,8 +291,14 @@ settings() {
 		echo "DEPLOY_TARGET=$lc_target"
 		echo "DEPLOY_NAME=${2:-$lc_name}"
 		echo "STATE_DIR=$lc_state"
-		echo "IMAGE_SOURCE=image"
-		echo "IMAGE=$1"
+		if [ "$lc_source" = binaries ]; then
+			echo "IMAGE_SOURCE=binaries"
+			echo "RELEASE_DIR=$lc_rel"
+			echo "ALLOW_DIRTY=$lc_dirty"
+		else
+			echo "IMAGE_SOURCE=image"
+			echo "IMAGE=$1"
+		fi
 		echo "S3_PORT=$lc_s3"
 		echo "ADMIN_PORT=$lc_admin"
 		echo "WAIT_TIMEOUT=180"
@@ -241,6 +325,18 @@ lc_entry=$(find "$lc_state" -mindepth 2 -maxdepth 2 -type d -name "$lc_name")
 [ -n "$lc_entry" ] && [ -f "$lc_entry/target" ] || fail "no entry of $lc_name in $lc_state"
 lc_ca=$lc_entry/config/s3-ca.pem
 [ -f "$lc_ca" ] || fail "no CA in $lc_entry/config"
+# The image the script built from the binaries: the node's, recorded so
+# that the end of the run removes it when this run made it.
+lc_built=
+if [ "$lc_source" = binaries ]; then
+	lc_built=$(eng container inspect --format '{{.Config.Image}}' "$lc_name")
+	case ${lc_built#localhost/} in
+	"cactusfs:$lc_version-"*) ;;
+	*) fail "the node runs $lc_built, not an image the script built from the binaries (cactusfs:$lc_version-<ID>)" ;;
+	esac
+	built_record "$lc_built"
+	say "the script built $lc_built from $lc_rel"
+fi
 
 # 2. An object of 5 MiB, put and read back over TLS with SigV4. The root
 # credentials go to curl in a config file of the work directory (0600),
@@ -335,14 +431,28 @@ labelled "$lc_name-other" | grep -q . && fail "the refused deployment made volum
 say "a second deployment on port $lc_s3 is refused, and makes nothing"
 
 # 6. An upgrade to a new tag keeps the object, and leaves no previous node.
-eng tag "$lc_image" "$lc_tag"
-eng image inspect --format '{{.Id}}' "$lc_tag" >"$lc_work/tag-made"
-settings "$lc_tag" >"$lc_env"
-deploy --install
-case $(eng container inspect --format '{{.Config.Image}}' "$lc_name") in
-*"$lc_tag") ;;
-*) fail "after the upgrade the node does not run $lc_tag" ;;
-esac
+# From the binaries, the upgrade builds them again: the same content, the
+# same tag, a new node.
+if [ "$lc_source" = binaries ]; then
+	deploy --install
+	# A build is not byte for byte the same twice (times in the layers), so
+	# the upgrade may run another ID's tag: it must still be one the script
+	# built from these binaries.
+	lc_built2=$(eng container inspect --format '{{.Config.Image}}' "$lc_name")
+	case ${lc_built2#localhost/} in
+	"cactusfs:$lc_version-"*) built_record "$lc_built2" ;;
+	*) fail "after the upgrade the node runs $lc_built2, not an image the script built from the binaries" ;;
+	esac
+else
+	eng tag "$lc_image" "$lc_tag"
+	eng image inspect --format '{{.Id}}' "$lc_tag" >"$lc_work/tag-made"
+	settings "$lc_tag" >"$lc_env"
+	deploy --install
+	# The script runs a given image that no registry holds by a tag that
+	# names its ID (PLAN 10.4): the node must run that image, by its ID.
+	[ "$(eng container inspect --format '{{.Image}}' "$lc_name")" = "$(cat "$lc_work/tag-made")" ] ||
+		fail "after the upgrade the node does not run $lc_tag ($(cat "$lc_work/tag-made"))"
+fi
 eng ps -a --format '{{.Names}}' | grep -qx "$lc_name-previous" && fail "the upgrade left $lc_name-previous"
 read_back "upgrade"
 
@@ -381,4 +491,4 @@ eng volume inspect "$lc_name-sentinel" >/dev/null 2>&1 || fail "the purge delete
 say "the purge deleted the volumes of $lc_name and $lc_entry; the sentinel volume and entry stay"
 
 : >"$lc_done"
-say "PASS ($lc_engine, target $lc_target)"
+say "PASS ($lc_engine, target $lc_target, from $lc_source)"

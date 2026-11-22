@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -25,10 +26,14 @@ import (
 
 const (
 	// nodeImage and newImage are the images an install and an upgrade
-	// deploy (IMAGE_SOURCE=image: PLAN 10.4 resolves the others).
-	nodeImage = "registry.example.test/cactusfs:0.7.0-1"
-	newImage  = "registry.example.test/cactusfs:0.7.0-2"
+	// deploy (IMAGE_SOURCE=image), named by their digest: image_check finds
+	// each on the engine (givenHere) and the node runs it as given. PLAN
+	// 10.4 builds the others (madeHere).
+	nodeImage = "registry.example.test/cactusfs@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	newImage  = "registry.example.test/cactusfs@sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	imageEnv  = "KMS=local\nIMAGE_SOURCE=image\nIMAGE=" + nodeImage + "\n"
+	// imgDigest is a digest a push names an image by.
+	imgDigest = "3333333333333333333333333333333333333333333333333333333333333333"
 	// The format docker.sh inspects the data volumes with, and the one it
 	// reads their target with before a purge.
 	labelsFormat = `{{.Name}} {{index .Labels "io.cactusfs.deploy.name"}} {{index .Labels "io.cactusfs.deploy.target"}}`
@@ -119,7 +124,9 @@ func installedState(t *testing.T, e dockerEngine, state, image string) engineSta
 func (s engineState) rules(t *testing.T) []rule {
 	t.Helper()
 	tool := s.e.tool
-	var rules []rule
+	// The images given (nodeImage, newImage) are on the engine; one built
+	// is answered by engineRules (madeHere).
+	rules := append(givenHere(tool, newImgFix(imgCommit), "", nodeImage), givenHere(tool, newImgFix(imgCommit), "", newImage)...)
 	if s.ctr != "" {
 		rules = append(rules,
 			rule{Tool: tool, Contains: []string{"ps", "-a", "name=cactusfs"}, Stdout: "cactusfs\n"},
@@ -184,7 +191,8 @@ func sub(c call) []string {
 	return c.Args
 }
 
-// mutating is true for a call that changes the engine.
+// mutating is true for a call that changes the engine: a container, a
+// volume, or an image - built, loaded, pulled, tagged or removed.
 func mutating(c call) bool {
 	if c.Tool != "docker" && c.Tool != "podman" {
 		return false
@@ -194,8 +202,12 @@ func mutating(c call) bool {
 		return false
 	}
 	switch s[0] {
-	case "create", "run", "start", "stop", "rm", "rename", "update", "pull", "tag", "kill", "restart":
+	case "create", "run", "start", "stop", "rm", "rename", "update", "pull", "tag", "kill", "restart", "build", "load":
 		return true
+	case "buildx":
+		return len(s) > 1 && s[1] == "build"
+	case "image":
+		return len(s) > 1 && (s[1] == "tag" || s[1] == "rm" || s[1] == "load" || s[1] == "pull")
 	case "cp":
 		return slices.Contains(s, "-a")
 	case "volume":
@@ -215,8 +227,9 @@ func noChange(t *testing.T, res result) {
 }
 
 // steps is what the run did to the engine, in order, by a short name each:
-// the probes of a port and of /readyz, the volumes made, the puts, dev-init,
-// the node's container stopped, removed and run.
+// the probes of a port and of /readyz, the image's build, tag, load and
+// version line, the volumes made, the puts, dev-init, the node's container
+// stopped, removed and run.
 func steps(res result) []string {
 	var out []string
 	for _, c := range res.calls {
@@ -226,7 +239,16 @@ func steps(res result) []string {
 			out = append(out, "probe "+c.Args[len(c.Args)-1])
 		case c.Tool == "curl":
 			out = append(out, "readyz")
+		case c.Tool != "docker" && c.Tool != "podman":
 		case len(s) == 0:
+		case s[0] == "build" || (s[0] == "buildx" && len(s) > 1 && s[1] == "build"):
+			out = append(out, "build")
+		case s[0] == "image" && len(s) > 3 && s[1] == "tag":
+			out = append(out, "tag "+s[3])
+		case s[0] == "load":
+			out = append(out, "load")
+		case s[0] == "run" && isVersionCheck(s):
+			out = append(out, "version")
 		case s[0] == "volume" && s[1] == "create":
 			out = append(out, "volume "+s[len(s)-1])
 		case s[0] == "volume" && s[1] == "rm":
@@ -268,12 +290,13 @@ func before(t *testing.T, got []string, want ...string) {
 	}
 }
 
-// runOf is the node's container's run, the one there must be.
+// runOf is the node's container's run, the one there must be (the run of
+// the image's version line is not a node).
 func runOf(t *testing.T, res result) []string {
 	t.Helper()
 	var runs [][]string
 	for _, c := range res.calls {
-		if s := sub(c); (c.Tool == "docker" || c.Tool == "podman") && len(s) > 0 && s[0] == "run" {
+		if s := sub(c); (c.Tool == "docker" || c.Tool == "podman") && len(s) > 0 && s[0] == "run" && !isVersionCheck(s) {
 			runs = append(runs, s)
 		}
 	}
@@ -354,7 +377,7 @@ func TestDockerInstall(t *testing.T) {
 				got := steps(res)
 				before(t, got, "probe http://127.0.0.1:9000/", "probe http://127.0.0.1:9001/", "dev-init",
 					"volume cactusfs-secrets", "volume cactusfs-config",
-					"put cactusfs-volumes:/secrets", "put cactusfs-volumes:/config",
+					"put cactusfs-volumes:/var/lib/cactusfs/secrets", "put cactusfs-volumes:/var/lib/cactusfs/config",
 					"volume cactusfs-data1", "volume cactusfs-data2", "volume cactusfs-data3", "volume cactusfs-data4",
 					"volume cactusfs-meta", "run "+nodeImage, "readyz")
 				for _, c := range res.calls {
@@ -369,6 +392,19 @@ func TestDockerInstall(t *testing.T) {
 					if s := sub(c); mutating(c) && s[0] == "volume" && s[1] == "create" &&
 						!containsAll(s, []string{"io.cactusfs.deploy.name=cactusfs", "io.cactusfs.deploy.target=" + e.target}) {
 						t.Errorf("a volume without the deployment's labels: %q", c.Args)
+					}
+				}
+				// On Podman the secrets' volumes are owned by the nodes' user
+				// from their creation: the helper's copy does not set their
+				// root's owner there. Docker's are made plainly.
+				for _, unit := range []string{"cactusfs-secrets", "cactusfs-config"} {
+					made := callsOf(res, e.tool, "volume", "create", unit)
+					if len(made) != 1 {
+						t.Fatalf("the volume %s was made %d times", unit, len(made))
+					}
+					owned := containsRun(sub(made[0]), []string{"--opt", "o=uid=65532,gid=65532"})
+					if owned != (e.tool == "podman") || (e.tool != "podman" && slices.Contains(made[0].Args, "--opt")) {
+						t.Errorf("the volume %s is made with %q on %s", unit, made[0].Args, e.target)
 					}
 				}
 
@@ -1241,27 +1277,36 @@ func TestDockerPurge(t *testing.T) {
 
 // TestDockerActions: the actions of a standalone deployment on a Docker
 // engine are built - each asks the engine and changes nothing when there is
-// nothing to change (the fakes hold nothing); an install from binaries stops
-// where PLAN 10.4 resolves the image; a purge of a deployment STATE_DIR
-// holds no record of is refused before the engine is asked.
+// nothing to change (the fakes hold nothing); a dry run of an install from
+// binaries checks the image (PLAN 10.4) and says what it would build and
+// run, changing nothing; a purge of a deployment STATE_DIR holds no record
+// of is refused before the engine is asked.
 func TestDockerActions(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
 		code int
 		want string
+		// binaries: the rig has the binaries of make image-binaries, and its
+		// engine answers what image_check asks.
+		binaries bool
 	}{
-		{"dd install", []string{"--docker", "dd", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.4)"},
-		{"podman status", []string{"--docker", "podman", "--status"}, 0, "cactusfs is not installed on Podman"},
-		{"ce here", []string{"--docker", "ce", "--uninstall"}, 0, "no container cactusfs on Docker CE"},
-		{"another target", []string{"--docker", "dd", "--status", "--another-target"}, 0, "cactusfs is not installed on Docker Desktop"},
-		{"purge confirm with equals, no record", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm=cactusfs"}, 2, "holds no record of cactusfs"},
+		{"dd install", []string{"--docker", "dd", "--install", "--dry-run"}, 0, "dry run: once built, the image is checked and tagged cactusfs:0.7.0-412-<12 hex of its ID>", true},
+		{"podman status", []string{"--docker", "podman", "--status"}, 0, "cactusfs is not installed on Podman", false},
+		{"ce here", []string{"--docker", "ce", "--uninstall"}, 0, "no container cactusfs on Docker CE", false},
+		{"another target", []string{"--docker", "dd", "--status", "--another-target"}, 0, "cactusfs is not installed on Docker Desktop", false},
+		{"purge confirm with equals, no record", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm=cactusfs"}, 2, "holds no record of cactusfs", false},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
 				t.Parallel()
-				res := r.fresh(t).withEnv("KMS=local\n", c.args...)
+				r := r.fresh(t)
+				if c.binaries {
+					r = secretsRig(t, r)
+					r.rules(madeHere("docker", newImgFix(imgCommit))...)
+				}
+				res := r.withEnv("KMS=local\n", c.args...)
 				res.want(t, c.code, c.want)
 				if len(res.calls) == 0 && c.code != 2 {
 					t.Fatal("the engine was not asked")
@@ -1274,17 +1319,18 @@ func TestDockerActions(t *testing.T) {
 
 // TestDockerImageRef: the image of the node comes from docker_image_ref
 // alone, called plainly (never in a command substitution) and leaving the
-// reference in _dk_image: when PLAN 10.4's image_resolve is there it runs,
-// then image_deliver, in the script's own shell - the variables they set
-// are seen - whatever IMAGE_SOURCE says, and RESOLVED_IMAGE is the image;
-// without it, IMAGE with IMAGE_SOURCE=image; else the run stops as not
-// built yet, after the secrets and before the node or its volumes. A
-// reference that is empty or not one fails the run.
+// reference in _dk_image: when PLAN 10.4's image_deliver is there it runs
+// in the script's own shell - what it sets is seen - and RESOLVED_IMAGE,
+// which image_make left and image_deliver may name anew (a push), is the
+// image whatever IMAGE_SOURCE says; without it, IMAGE with
+// IMAGE_SOURCE=image; else the run stops as not built yet. A reference
+// that is empty or not one fails the run. An install from binaries runs the
+// image it built, by its tag, never pulled.
 func TestDockerImageRef(t *testing.T) {
 	t.Parallel()
 	const lib = `L=${1%/*}; . "$L/env.sh"; . "$L/docker.sh"; engine() { echo Docker Desktop; }; `
-	const resolve = `image_resolve() { echo resolving >&2; RESOLVED_IMAGE=registry.example.test/c:0.7.0-1-0123456789ab; RESOLVED_ARCH=amd64; }; ` +
-		`image_deliver() { echo "delivering $RESOLVED_IMAGE for $RESOLVED_ARCH" >&2; }; `
+	const deliver = `RESOLVED_IMAGE=registry.example.test/c:0.7.0-1-0123456789ab; ` +
+		`image_deliver() { echo "delivering $RESOLVED_IMAGE" >&2; RESOLVED_IMAGE=registry.example.test/c@sha256:` + imgDigest + `; }; `
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range []struct {
 			name, code string
@@ -1294,10 +1340,10 @@ func TestDockerImageRef(t *testing.T) {
 		}{
 			{"image", "SETTINGS='IMAGE_SOURCE=image\nIMAGE=registry.example.test/c:1\n'; docker_image_ref; echo \"ref=[$_dk_image]\"", 0, "ref=[registry.example.test/c:1]\n", ""},
 			{
-				"image_resolve", "SETTINGS='IMAGE_SOURCE=image\nIMAGE=registry.example.test/c:1\n'; " + resolve + "docker_image_ref; echo \"ref=[$_dk_image]\"", 0,
-				"ref=[registry.example.test/c:0.7.0-1-0123456789ab]\n", "delivering registry.example.test/c:0.7.0-1-0123456789ab for amd64",
+				"image_deliver", "SETTINGS='IMAGE_SOURCE=image\nIMAGE=registry.example.test/c:1\n'; " + deliver + "docker_image_ref; echo \"ref=[$_dk_image]\"", 0,
+				"ref=[registry.example.test/c@sha256:" + imgDigest + "]\n", "delivering registry.example.test/c:0.7.0-1-0123456789ab",
 			},
-			{"image_resolve, nothing resolved", "SETTINGS='IMAGE_SOURCE=binaries\nIMAGE=\n'; image_resolve() { :; }; image_deliver() { :; }; docker_image_ref; echo reached", 1, "", "the image reference for the node is not one: ''"},
+			{"image_deliver, nothing resolved", "SETTINGS='IMAGE_SOURCE=binaries\nIMAGE=\n'; RESOLVED_IMAGE=; image_deliver() { :; }; docker_image_ref; echo reached", 1, "", "the image reference for the node is not one: ''"},
 			{"not built", "SETTINGS='IMAGE_SOURCE=binaries\nIMAGE=\n'; docker_image_ref; echo reached", 3, "deploy: the image, binaries: built and put on Docker Desktop", "not built yet (PLAN 10.4)"},
 		} {
 			t.Run(c.name, func(t *testing.T) {
@@ -1312,18 +1358,205 @@ func TestDockerImageRef(t *testing.T) {
 		t.Run("install", func(t *testing.T) {
 			t.Parallel()
 			r := secretsRig(t, r.fresh(t))
-			r.rules(engineState{e: dockerEngines[0], devInit: devInitOutput(), ready: true}.rules(t)...)
+			f := newImgFix(imgCommit)
+			r.rules(append(madeHere("docker", f), engineState{e: dockerEngines[0], devInit: devInitOutput(), ready: true}.rules(t)...)...)
 			res := dockerRun(r, dockerEngines[0], "KMS=local\n", "--install")
-			res.want(t, 3, "not built yet (PLAN 10.4)", "hold the same secrets", "deploy: the image, binaries: built and put on Docker Desktop")
-			got := steps(res)
-			if index(got, "put cactusfs-volumes:/config") < 0 {
-				t.Errorf("the secrets were not put first: %q", got)
+			res.want(t, 0, "image: built "+f.hex, "image: "+f.ref()+"\n", "ready: cactusfs runs "+f.ref())
+			run := runOf(t, res)
+			holds(t, run, []string{"--pull", "never"})
+			if !slices.Equal(run[len(run)-2:], []string{f.ref(), "server"}) {
+				t.Errorf("the node does not run %s server: %q", f.ref(), run[len(run)-2:])
 			}
-			for _, st := range got {
-				if strings.HasPrefix(st, "run ") || st == "volume cactusfs-data1" || st == "volume cactusfs-meta" {
-					t.Errorf("the run did %q without an image", st)
-				}
-			}
+			noPullCommand(t, res)
 		})
+	})
+}
+
+// imageCheckReads are the questions image_check asks of an engine here, by
+// the words of each: its endpoint (a Docker context's), where its service
+// is (Podman's) and its platform.
+var imageCheckReads = [][]string{{"context", "inspect"}, {"{{.Host.ServiceIsRemote}}"}, {"info", "{{.OSType}}/{{.Architecture}}"}, {"info", "{{.Host.OS}}/{{.Host.Arch}}"}}
+
+// lineAt is where the first line of the output that holds the text is,
+// among the lines of standard output, or -1.
+func lineAt(res result, text string) int {
+	return slices.IndexFunc(strings.Split(res.stdout, "\n"), func(l string) bool { return strings.Contains(l, text) })
+}
+
+// TestDockerInstallOrder: an install wires PLAN 10.4 into PLAN 10.5's order.
+// image_check only reads, and does so after the ports are asked and before
+// anything changes; image_make builds, tags and reads the version line of
+// the image before dev-init and before any secret is put; image_deliver
+// gets it to the target's engine after the secrets and before the volumes
+// of the node and the node - on the target's own engine there is nothing
+// to move, and from BUILD_HOST it is saved there and loaded on the target;
+// the node runs RESOLVED_IMAGE, the image's tag, with --pull never.
+func TestDockerInstallOrder(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, env string
+		e         dockerEngine
+		// remote: the image is built on BUILD_HOST and loaded on the target.
+		remote bool
+	}{
+		{name: "docker desktop", e: dockerEngines[0]},
+		{name: "podman", e: dockerEngines[2]},
+		{name: "built on BUILD_HOST", e: dockerEngines[0], env: "BUILD_HOST=builder@build.example.test\n", remote: true},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := secretsRig(t, r.fresh(t))
+				f := newImgFix(imgCommit)
+				rules := append(gitRules(""), madeHere(c.e.tool, f)...)
+				rules = append(rules, rule{Tool: c.e.tool, Contains: []string{"save", f.ref()}, Stdout: f.tar})
+				r.rules(append(rules, engineState{e: c.e, devInit: devInitOutput(), ready: true}.rules(t)...)...)
+				res := dockerRun(r, c.e, "KMS=local\n"+c.env, "--install")
+				res.want(t, 0, "ready: cactusfs runs "+f.ref())
+
+				// image_check: what it asks - the engine's endpoint or where
+				// its service is, and the target's platform - is asked after
+				// the ports and before the build and the first change.
+				ports := slices.IndexFunc(res.calls, func(c call) bool {
+					return c.Tool == "curl" && slices.Contains(c.Args, "http://127.0.0.1:9001/")
+				})
+				build := slices.IndexFunc(res.calls, func(c call) bool { return slices.Contains(c.Args, "build") })
+				firstChange := slices.IndexFunc(res.calls, mutating)
+				if ports < 0 || build < 0 || firstChange < build {
+					t.Fatalf("the ports at %d, the build at %d, the first change at %d: %v", ports, build, firstChange, res.calls)
+				}
+				// Built on BUILD_HOST: its host key is checked before ssh
+				// reaches it, and the image is remote whatever the context.
+				where := []string{"context", "inspect"}
+				tool := c.e.tool
+				switch {
+				case c.remote:
+					where, tool = []string{"builder@build.example.test", "true"}, "ssh"
+					overSSH := slices.IndexFunc(res.calls, func(c call) bool { return c.Env["DOCKER_HOST"] != "" })
+					if i := callIndex(res, tool, where...); i < 0 || i > overSSH {
+						t.Errorf("the build host's key was checked at %d, and ssh first used at %d", i, overSSH)
+					}
+				case c.e.tool == "podman":
+					where = []string{"{{.Host.ServiceIsRemote}}"}
+				}
+				for _, asked := range []struct {
+					tool  string
+					words []string
+				}{{tool, where}, {c.e.tool, imageCheckReads[2]}, {c.e.tool, imageCheckReads[3]}} {
+					i := callIndex(res, asked.tool, asked.words...)
+					if asked.words[0] == "info" && i < 0 {
+						continue // the other engine's format
+					}
+					if i < ports || i > build {
+						t.Errorf("image_check asked %q at %d: the ports at %d, the build at %d", asked.words, i, ports, build)
+					}
+				}
+				if callIndex(res, c.e.tool, imageCheckReads[2]...) < 0 && callIndex(res, c.e.tool, imageCheckReads[3]...) < 0 {
+					t.Errorf("the target's platform was not asked: %v", res.calls)
+				}
+
+				// image_make before the secrets, image_deliver after them and
+				// before the node's volumes and the node.
+				got := steps(res)
+				order := []string{"build", "tag " + f.ref(), "version", "dev-init", "put cactusfs-volumes:/var/lib/cactusfs/secrets", "put cactusfs-volumes:/var/lib/cactusfs/config"}
+				if c.remote {
+					order = append(order, "load")
+				}
+				order = append(order, "volume cactusfs-data1", "volume cactusfs-meta", "run "+f.ref(), "readyz")
+				before(t, got, order...)
+				if n := len(builds(res)); n != 1 {
+					t.Fatalf("%d builds, want 1", n)
+				}
+				if b := builds(res)[0]; (b.Env["DOCKER_HOST"] != "") != c.remote {
+					t.Errorf("the build ran with DOCKER_HOST=%q", b.Env["DOCKER_HOST"])
+				}
+				delivered := "image: " + f.ref() + " is on the target's engine"
+				if c.remote {
+					delivered = "image: " + f.ref() + " loaded on docker --context default"
+				}
+				if at, secrets := lineAt(res, delivered), lineAt(res, "secrets: put into the volume cactusfs-config"); at < 0 || secrets < 0 || at < secrets || at > lineAt(res, "ready: ") {
+					t.Errorf("image_deliver said %q at line %d, the secrets were put at %d:\n%s", delivered, at, secrets, res.stdout)
+				}
+
+				// The node: RESOLVED_IMAGE, never pulled.
+				run := runOf(t, res)
+				holds(t, run, []string{"--pull", "never"})
+				if !slices.Equal(run[len(run)-2:], []string{f.ref(), "server"}) {
+					t.Errorf("the node does not run %s server: %q", f.ref(), run[len(run)-2:])
+				}
+				noPullCommand(t, res)
+			})
+		}
+	})
+}
+
+// TestDockerFromSourceDevInit: with --from-source, dev-init runs in
+// RESOLVED_NATIVE_IMAGE - the image of this tree image_make built, on the
+// engine here and of this machine's architecture, so built once - and the
+// node runs the same image; the binaries of make image-binaries are not
+// there, and not needed.
+func TestDockerFromSourceDevInit(t *testing.T) {
+	t.Parallel()
+	eachShell(t, func(t *testing.T, r *rig) {
+		r = secretsRig(t, r)
+		remove(t, filepath.Join(r.repo, "dist"))
+		f := newImgFix(imgCommit)
+		r.rules(append(append(gitRules(""), madeHere("docker", f)...), engineState{e: dockerEngines[0], devInit: devInitOutput(), ready: true}.rules(t)...)...)
+		res := dockerRun(r, dockerEngines[0], "KMS=local\n", "--install", "--from-source")
+		res.want(t, 0, "image: built from "+r.repo, "dev-init runs in "+f.ref()+", the image of this run", "ready: cactusfs runs "+f.ref())
+		if b := builds(res); len(b) != 1 || slices.Contains(b[0].Args, "from-binaries") || valueOf(b[0], "--platform") != "linux/"+runtime.GOARCH {
+			t.Fatalf("the builds are %v", b)
+		}
+		creates := callsOf(res, "docker", "create", "--name", "cactusfs-dev-init")
+		if len(creates) != 1 || !containsRun(creates[0].Args, []string{"--entrypoint", "/cactusfs", f.ref(), "dev-init"}) ||
+			!containsRun(creates[0].Args, []string{"--platform", "linux/" + runtime.GOARCH}) {
+			t.Fatalf("dev-init does not run in %s: %v", f.ref(), creates)
+		}
+		in := callsOf(res, "docker", "cp", "-a", "-", "cactusfs-dev-init:/tmp")
+		if len(in) != 1 {
+			t.Fatalf("dev-init's input: %v", in)
+		}
+		before(t, steps(res), "build", "tag "+f.ref(), "version", "dev-init", "put cactusfs-volumes:/var/lib/cactusfs/config", "run "+f.ref())
+		if run := runOf(t, res); run[len(run)-2] != f.ref() {
+			t.Errorf("the node does not run %s: %q", f.ref(), run)
+		}
+	})
+}
+
+// TestPodmanVolumeRoot: on Podman a secrets' volume whose root is not owned
+// by the nodes' user - made by an earlier run, whose helper's copy left it
+// root:root 0700 - is refused with the way back, and nothing is put into it
+// or run; on Docker the root is not judged (cp -a's "." entry, or the
+// copy-up, gives it its owner).
+func TestPodmanVolumeRoot(t *testing.T) {
+	t.Parallel()
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, e := range []dockerEngine{dockerEngines[0], dockerEngines[2]} {
+			base := dockerInstalled(t, r, e, imageEnv)
+			state := base.stateOf(e.targetID)
+			t.Run(e.target, func(t *testing.T) {
+				t.Parallel()
+				r := clone(t, base)
+				s := installedState(t, e, state, nodeImage)
+				keys := withTarget(t, state)
+				r.rules(append([]rule{{Tool: e.tool, Contains: []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/config", "-"}, Stdout: tarOwned(t, "config", keys["config"], 0)}}, s.rules(t)...)...)
+				res := dockerRun(r, e, imageEnv, "--install")
+				if e.tool != "podman" {
+					res.want(t, 0, "ready: cactusfs runs "+nodeImage)
+					return
+				}
+				res.want(t, 2, "the root of the volume cactusfs-config is owned by the user 0, not by the nodes' user 65532",
+					"deploy/deploy.sh --uninstall, then podman volume rm cactusfs-secrets cactusfs-config, then deploy/deploy.sh --install")
+				for _, words := range [][]string{{"cp", "-a"}, {"volume", "create"}, {"stop"}, {"rename"}} {
+					if c := callsOf(res, e.tool, words...); len(c) != 0 {
+						t.Errorf("a refused install ran %q", c[0].Args)
+					}
+				}
+				if runs := slices.DeleteFunc(callsOf(res, e.tool, "run"), func(c call) bool { return isVersionCheck(sub(c)) }); len(runs) != 0 {
+					t.Errorf("a refused install ran %q", runs[0].Args)
+				}
+			})
+		}
 	})
 }

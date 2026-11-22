@@ -18,12 +18,15 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
-// fakeTools are the programs the script may run that touch a machine: each
-// is this test binary under that name, and records what it was asked.
-var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "k3s", "curl", "helm"}
+// fakeTools are the programs the script may run that touch a machine - and
+// git, which says which commit an image is built from (PLAN 10.4): each is
+// this test binary under that name, and records what it was asked.
+var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "k3s", "curl", "helm", "git"}
 
 // optionalFakes are programs of the machine (hostTools) that a test may
 // put a fake in place of, to make it fail as the machine's would not
@@ -88,15 +91,34 @@ type call struct {
 // SaveStdin also keeps what the call read, in that file of the rig's
 // directory (the last such call's). A rule with After holds only once an
 // earlier call of the run, of the same tool, held all those words: an
-// engine whose listing changes after a deletion (PLAN 10.5's purge).
+// engine whose listing changes after a deletion (PLAN 10.5's purge). A rule with Files writes, for each
+// option it names, the content into the path that follows that option among
+// the arguments, as a program writes a file it is told to (--iidfile,
+// --metadata-file, --digestfile). A rule with TermParent sends SIGTERM to
+// the process that started the fake - the shell waiting on it - as a signal
+// would reach it mid-command. SleepMs keeps the fake running that long, as
+// a command that is slow to end (after what it keeps of its standard input,
+// with SaveStdin, which tells a test it has started).
 type rule struct {
-	Tool      string   `json:"tool"`
-	Contains  []string `json:"contains"`
-	After     []string `json:"after,omitempty"`
-	Stdout    string   `json:"stdout"`
-	Stderr    string   `json:"stderr,omitempty"`
-	Exit      int      `json:"exit"`
-	SaveStdin string   `json:"save_stdin,omitempty"`
+	Tool       string            `json:"tool"`
+	Contains   []string          `json:"contains"`
+	After      []string          `json:"after,omitempty"`
+	Stdout     string            `json:"stdout"`
+	Stderr     string            `json:"stderr,omitempty"`
+	Exit       int               `json:"exit"`
+	SaveStdin  string            `json:"save_stdin,omitempty"`
+	Files      map[string]string `json:"files,omitempty"`
+	TermParent bool              `json:"term_parent,omitempty"`
+	SleepMs    int               `json:"sleep_ms,omitempty"`
+}
+
+// terminate sends SIGTERM to the process.
+func terminate(pid int) error {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Signal(syscall.SIGTERM)
 }
 
 // earlier is true when a call of the transcript before the last - the
@@ -198,6 +220,30 @@ func fake(name string, args []string) int {
 				return 125
 			}
 		}
+		for option, content := range r.Files {
+			if i := slices.Index(args, option); i >= 0 && i+1 < len(args) {
+				// Written through a root opened on the file's directory, so
+				// the name the script gives cannot reach outside it.
+				dir, err := os.OpenRoot(filepath.Dir(args[i+1]))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "fake %s: write %s: %v\n", name, option, err)
+					return 125
+				}
+				err = dir.WriteFile(filepath.Base(args[i+1]), []byte(content), 0o600)
+				_ = dir.Close()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "fake %s: write %s: %v\n", name, option, err)
+					return 125
+				}
+			}
+		}
+		if r.TermParent {
+			if err := terminate(os.Getppid()); err != nil {
+				fmt.Fprintf(os.Stderr, "fake %s: signal the shell: %v\n", name, err)
+				return 125
+			}
+		}
+		time.Sleep(time.Duration(r.SleepMs) * time.Millisecond)
 		if _, err := io.WriteString(os.Stdout, r.Stdout); err != nil {
 			return 125
 		}
@@ -391,15 +437,17 @@ func readRepoFile(t *testing.T, rel string) []byte {
 }
 
 // deployFiles are the files of the repository the script reads, relative
-// to it: deploy/ itself and the Dockerfile (which pins the helm image). The
-// chart it renders is copied only into a rig that renders (rig.chart).
+// to it: deploy/ itself, the Dockerfile (which pins the helm and runtime
+// images, and builds the image) and internal/buildinfo/VERSION (the release
+// an image built from source is). The chart it renders is copied only into
+// a rig that renders (rig.chart).
 func deployFiles(t *testing.T) []string {
 	t.Helper()
 	libs, err := filepath.Glob(filepath.Join(repoRoot, "deploy", "lib", "*.sh"))
 	if err != nil || len(libs) == 0 {
 		t.Fatalf("no deploy/lib/*.sh: %v", err)
 	}
-	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example", "Dockerfile"}
+	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example", "Dockerfile", "internal/buildinfo/VERSION"}
 	for _, l := range libs {
 		files = append(files, filepath.ToSlash(filepath.Join("deploy", "lib", filepath.Base(l))))
 	}
@@ -509,6 +557,8 @@ type result struct {
 	calls    []call
 	settings map[string]setting
 	node     []string
+	// tmp is the TMPDIR the run was given (rig.image), or "".
+	tmp string
 }
 
 type setting struct {

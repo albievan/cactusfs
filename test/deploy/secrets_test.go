@@ -42,8 +42,10 @@ func secretsRig(t *testing.T, r *rig) *rig {
 	return r
 }
 
-// binaries writes dist/image of the rig's repository: the binary of this
-// machine's architecture, SHA256SUMS and BUILDINFO.
+// binaries writes dist/image of the rig's repository as make
+// image-binaries does: the binary of this machine's architecture,
+// executable, SHA256SUMS and BUILDINFO of the commit imgCommit, build 412 -
+// what the image the fakes build (madeHere) says it is.
 func (r *rig) binaries(binary []byte) {
 	r.t.Helper()
 	dir := filepath.Join(r.repo, "dist", "image")
@@ -51,13 +53,27 @@ func (r *rig) binaries(binary []byte) {
 	if err := os.MkdirAll(filepath.Join(dir, "linux-"+runtime.GOARCH), 0o700); err != nil {
 		r.t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), binary, 0o600); err != nil {
+	// Executable, as make image-binaries exports it: the mode of this test's
+	// own binary, which the system runs.
+	self, err := os.Executable()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	exe, err := os.Stat(self)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, binary, 0o600); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := os.Chmod(path, exe.Mode().Perm()); err != nil {
 		r.t.Fatal(err)
 	}
 	sum := sha256.Sum256(binary)
 	files := map[string]string{
 		"SHA256SUMS": hex.EncodeToString(sum[:]) + "  " + name + "\n",
-		"BUILDINFO":  "version=0.7.0\nbuild=1\ncommit=abc\npackaging=image\n",
+		"BUILDINFO":  "version=0.7.0\nbuild=412\ncommit=" + imgCommit + "\npackaging=image\n",
 	}
 	for f, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte(content), 0o600); err != nil {
@@ -118,8 +134,15 @@ func devInitOutput() map[string]string {
 }
 
 // tarOf is a tar stream as "docker cp <container>:<dir> -" writes one: the
-// directory under its own name, then what it holds.
+// directory under its own name, then what it holds - every entry owned by
+// the nodes' user, 65532.
 func tarOf(t *testing.T, top string, files map[string]string) string {
+	t.Helper()
+	return tarOwned(t, top, files, 65532)
+}
+
+// tarOwned is tarOf with the directory itself owned by the user root.
+func tarOwned(t *testing.T, top string, files map[string]string, root int) string {
 	t.Helper()
 	var b bytes.Buffer
 	w := tar.NewWriter(&b)
@@ -130,7 +153,11 @@ func tarOf(t *testing.T, top string, files map[string]string) string {
 		}
 	}
 	for _, d := range slices.Sorted(maps.Keys(dirs)) {
-		if err := w.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: d + "/", Mode: 0o700, Uid: 65532, Gid: 65532}); err != nil {
+		owner := 65532
+		if d == top {
+			owner = root
+		}
+		if err := w.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: d + "/", Mode: 0o700, Uid: owner, Gid: owner}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -208,18 +235,20 @@ func filesUnder(t *testing.T, dir string) map[string]string {
 	return out
 }
 
-// engineRules are the answers of an engine (docker or podman) that says its
-// ID is id, whose volumes of the deployment hold the units given (none:
-// there are no volumes), and whose dev-init writes devInit.
+// engineRules are the answers of an engine (docker or podman) here, of this
+// machine's architecture, that says its ID is id, on which the install's
+// image is built (madeHere, a new image each time), whose volumes of the
+// deployment hold the units given (none: there are no volumes), whose
+// dev-init writes devInit, and whose node answers /readyz with 200.
 func engineRules(t *testing.T, tool, id string, devInit map[string]string, volumes map[string]map[string]string) []rule {
 	t.Helper()
-	rules := []rule{
+	rules := append(madeHere(tool, newImgFix(imgCommit)), []rule{
 		// Putting a unit into a volume prints nothing; it must not match
 		// the rule that reads the volume, below.
 		{Tool: tool, Contains: []string{"cp", "-a"}},
 		{Tool: tool, Contains: []string{"info"}, Stdout: id + "\n"},
 		{Tool: tool, Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", devInit)},
-	}
+	}...)
 	// One listing names every volume there is (none: the fakes print
 	// nothing), one inspect gives each its label.
 	var listed, labels string
@@ -230,11 +259,12 @@ func engineRules(t *testing.T, tool, id string, devInit map[string]string, volum
 		}
 		listed += "cactusfs-" + unit + "\n"
 		labels += "cactusfs-" + unit + " cactusfs\n"
-		rules = append(rules, rule{Tool: tool, Contains: []string{"cp", "cactusfs-volumes:/" + unit, "-"}, Stdout: tarOf(t, unit, files)})
+		rules = append(rules, rule{Tool: tool, Contains: []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/" + unit, "-"}, Stdout: tarOf(t, unit, files)})
 	}
 	return append(rules,
 		rule{Tool: tool, Contains: []string{"volume", "ls", "name=cactusfs-"}, Stdout: listed},
-		rule{Tool: tool, Contains: []string{"volume", "inspect"}, Stdout: labels})
+		rule{Tool: tool, Contains: []string{"volume", "inspect"}, Stdout: labels},
+		rule{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "200"})
 }
 
 // dockerRules are the answers of a Docker engine with the ID engineID.
@@ -417,7 +447,7 @@ func installed(t *testing.T, r *rig, env string) *rig {
 	t.Helper()
 	base := secretsRig(t, r.fresh(t))
 	base.rules(dockerRules(t, devInitOutput(), nil)...)
-	base.guarded(env, installDD...).want(t, 3, "not built yet (PLAN 10.4)")
+	base.guarded(env, installDD...).want(t, 0, "ready: cactusfs runs cactusfs:0.7.0-412-")
 	return base
 }
 
@@ -484,7 +514,7 @@ func TestSecretsAreMadeOnce(t *testing.T) {
 		mu.Lock()
 		made = append(made, filesUnder(t, filepath.Join(state, "secrets")))
 		mu.Unlock()
-		res.want(t, 3, "not built yet (PLAN 10.4)", "engine ID: "+engineID, "made the root credentials", "made the KMS passphrase", "made "+state+"/config")
+		res.want(t, 0, "ready: cactusfs runs cactusfs:0.7.0-412-", "engine ID: "+engineID, "made the root credentials", "made the KMS passphrase", "made "+state+"/config")
 		if !strings.Contains(res.stderr, "+ ") {
 			t.Fatalf("the run was not traced:\n%s", res.stderr)
 		}
@@ -550,27 +580,39 @@ func TestSecretsAreMadeOnce(t *testing.T) {
 			t.Errorf("dev-init's input was not the binary and the passphrase as a tar stream: %v", in)
 		}
 
-		// The order: dev-init, then the volumes made and filled with what
-		// the entry holds - by name, nothing else; nothing else is started,
-		// no container is run, nothing is mounted from this machine.
+		// The order: the image built and its version line read (PLAN 10.4),
+		// dev-init, then the volumes made and filled with what the entry
+		// holds - by name, nothing else - and only then the node's volumes
+		// and the node (PLAN 10.5); nothing else is started or run, nothing
+		// is mounted from this machine.
 		var order []string
 		for _, c := range res.calls {
-			sub := c.Args[2:] // after --context default
+			if c.Tool != "docker" || len(sub(c)) == 0 {
+				continue
+			}
+			w := sub(c) // after --context default
 			switch {
-			case sub[0] == "run":
-				t.Errorf("a container was run: %q", c.Args)
-			case sub[0] == "start":
-				if !slices.Equal(sub, []string{"start", "-a", "cactusfs-dev-init"}) {
+			case w[0] == "buildx" && w[1] == "build":
+				order = append(order, "build")
+			case w[0] == "run" && isVersionCheck(w):
+				order = append(order, "version")
+			case w[0] == "run":
+				if !containsRun(w, []string{"run", "-d", "--name", "cactusfs"}) || w[len(w)-1] != "server" {
+					t.Errorf("a container other than the node was run: %q", c.Args)
+				}
+				order = append(order, "node")
+			case w[0] == "start":
+				if !slices.Equal(w, []string{"start", "-a", "cactusfs-dev-init"}) {
 					t.Errorf("something other than dev-init was started: %q", c.Args)
 				}
 				order = append(order, "dev-init")
-			case sub[0] == "volume" && sub[1] == "create":
-				if !containsAll(sub, []string{"--label", "io.cactusfs.deploy.name=cactusfs", "io.cactusfs.deploy.target=dd"}) {
+			case w[0] == "volume" && w[1] == "create":
+				if !containsAll(w, []string{"--label", "io.cactusfs.deploy.name=cactusfs", "io.cactusfs.deploy.target=dd"}) {
 					t.Errorf("a volume without the deployment's labels: %q", c.Args)
 				}
-				order = append(order, "volume "+sub[len(sub)-1])
-			case sub[0] == "cp" && sub[1] == "-a" && strings.HasPrefix(sub[3], "cactusfs-volumes:"):
-				order = append(order, "put "+sub[3]+" "+strings.Join(r.tarNames(c), ","))
+				order = append(order, "volume "+w[len(w)-1])
+			case w[0] == "cp" && w[1] == "-a" && strings.HasPrefix(w[3], "cactusfs-volumes:"):
+				order = append(order, "put "+w[3]+" "+strings.Join(r.tarNames(c), ","))
 			}
 			for i, a := range c.Args {
 				if a == "-v" || a == "--volume" || strings.HasPrefix(a, "--volume=") {
@@ -582,31 +624,36 @@ func TestSecretsAreMadeOnce(t *testing.T) {
 			}
 		}
 		want := []string{
+			"build", "version",
 			"dev-init", "volume cactusfs-secrets", "volume cactusfs-config",
-			"put cactusfs-volumes:/secrets .,kms-passphrase,root-access-key,root-secret-key",
-			"put cactusfs-volumes:/config .,kms.json,node-ca.pem,nodes,nodes/cactusfs.key,nodes/cactusfs.pem,ready,s3-ca.pem,s3.key,s3.pem",
+			"put cactusfs-volumes:/var/lib/cactusfs/secrets .,kms-passphrase,root-access-key,root-secret-key",
+			"put cactusfs-volumes:/var/lib/cactusfs/config .,kms.json,node-ca.pem,nodes,nodes/cactusfs.key,nodes/cactusfs.pem,ready,s3-ca.pem,s3.key,s3.pem",
+			"volume cactusfs-data1", "volume cactusfs-data2", "volume cactusfs-data3", "volume cactusfs-data4", "volume cactusfs-meta",
+			"node",
 		}
 		if !slices.Equal(order, want) {
 			t.Errorf("the order was\n%q\nwant\n%q", order, want)
 		}
 
-		// A second install: both copies are there and equal. Nothing is
-		// made, nothing is put, the entry is as it was - under -x too.
+		// A second install: both copies are there and equal. No secret is
+		// made, nothing is put, the entry is as it was - under -x too. (The
+		// engine of the fakes holds no node: the image and the node's
+		// volumes are made again.)
 		before := tree(t, state)
 		r.rules(dockerRules(t, devInitOutput(), withTarget(t, state))...)
 		r.trace = true
 		res = r.guarded(env, installDD...)
 		r.trace = false
-		res.want(t, 3, "not built yet (PLAN 10.4)", "hold the same secrets")
+		res.want(t, 0, "ready: cactusfs runs cactusfs:0.7.0-412-", "hold the same secrets")
 		if after := tree(t, state); !equalTrees(before, after) {
 			t.Errorf("the second install changed the entry:\nbefore %v\nafter  %v", before, after)
 		}
-		for _, words := range [][]string{{"create", "--name", "cactusfs-dev-init"}, {"volume", "create"}, {"cp", "-a"}, {"start"}} {
+		for _, words := range [][]string{{"create", "--name", "cactusfs-dev-init"}, {"volume", "create", "cactusfs-secrets"}, {"volume", "create", "cactusfs-config"}, {"cp", "-a"}, {"start"}} {
 			if c := callsOf(res, "docker", words...); len(c) != 0 {
 				t.Errorf("the second install ran %q", c[0].Args)
 			}
 		}
-		if strings.Contains(res.output(), "made ") {
+		if strings.Contains(res.output(), "secrets: made ") || strings.Contains(res.output(), "secrets: took ") {
 			t.Errorf("the second install says it made something:\n%s", res.output())
 		}
 		noSecretAnywhere(t, res, state)
@@ -622,8 +669,12 @@ type copyCase struct {
 	change func(t *testing.T, r *rig, state string) (map[string]map[string]string, string, []string)
 	// rules come before the engine's own.
 	rules []rule
-	code  int
-	want  []string
+	// afterImage: the run is refused, or fails, once the volumes' copies
+	// are read - after the image is made (PLAN 10.4). Any other run that
+	// does not finish is stopped by secrets_check, before any build.
+	afterImage bool
+	code       int
+	want       []string
 	// puts is the tar of each put, "<unit>:<names>", in order; restored:
 	// the entry is what the first install made.
 	puts     []string
@@ -678,22 +729,25 @@ func copyCases(t *testing.T, base *rig, env string, cases []copyCase) {
 			}
 			var puts []string
 			for _, call := range callsOf(res, "docker", "cp", "-a") {
-				puts = append(puts, strings.TrimPrefix(call.Args[len(call.Args)-1], "cactusfs-volumes:/")+":"+strings.Join(r.tarNames(call), ","))
+				puts = append(puts, strings.TrimPrefix(call.Args[len(call.Args)-1], "cactusfs-volumes:/var/lib/cactusfs/")+":"+strings.Join(r.tarNames(call), ","))
 			}
 			if !slices.Equal(puts, c.puts) {
 				t.Errorf("put %q into volumes, want %q", puts, c.puts)
 			}
-			if c.code != 3 && len(callsOf(res, "docker", "volume", "create")) != 0 {
+			if c.code != 0 && !c.afterImage && len(builds(res)) != 0 {
+				t.Errorf("a run stopped by secrets_check (exit %d) built the image first: %q", c.code, builds(res)[0].Args)
+			}
+			if c.code != 0 && len(callsOf(res, "docker", "volume", "create")) != 0 {
 				t.Error("a run that did not finish made a volume")
 			}
 			after := tree(t, state)
 			switch {
-			case c.code != 3 && !equalTrees(before, after):
+			case c.code != 0 && !equalTrees(before, after):
 				t.Errorf("a run that did not finish changed the entry:\nbefore %v\nafter  %v", before, after)
 			case c.restored && !equalTrees(first, after):
 				t.Errorf("the entry is not what the first install made:\nfirst %v\nafter %v", first, after)
 			}
-			if c.code == 3 {
+			if c.code == 0 {
 				modesAre(t, r.stateDir())
 			}
 			var given []string
@@ -753,7 +807,7 @@ func TestSecretsTwoCopies(t *testing.T) {
 		{
 			name:   "only the local copy",
 			change: local(),
-			code:   3, want: []string{"put into the volume cactusfs-secrets what it lacked of STATE/secrets: kms-passphrase root-access-key root-secret-key"},
+			code:   0, want: []string{"put into the volume cactusfs-secrets what it lacked of STATE/secrets: kms-passphrase root-access-key root-secret-key"},
 			puts: []string{
 				"secrets:.,kms-passphrase,root-access-key,root-secret-key",
 				"config:.,kms.json,node-ca.pem,nodes,nodes/cactusfs.key,nodes/cactusfs.pem,ready,s3-ca.pem,s3.key,s3.pem",
@@ -762,7 +816,7 @@ func TestSecretsTwoCopies(t *testing.T) {
 		},
 		{
 			name: "the local kms.json missing", change: without("config/kms.json"),
-			code: 3, want: []string{"the local copy STATE/config/kms.json was missing: copied back from the volume cactusfs-config"}, restored: true,
+			code: 0, want: []string{"the local copy STATE/config/kms.json was missing: copied back from the volume cactusfs-config"}, restored: true,
 		},
 		{
 			name: "the volume's kms.json and a node's files missing",
@@ -773,10 +827,10 @@ func TestSecretsTwoCopies(t *testing.T) {
 				delete(v["config"], "nodes/cactusfs.key")
 				return v, "", nil
 			},
-			code: 3, puts: []string{"config:kms.json,nodes,nodes/cactusfs.key,nodes/cactusfs.pem"}, restored: true,
+			code: 0, puts: []string{"config:kms.json,nodes,nodes/cactusfs.key,nodes/cactusfs.pem"}, restored: true,
 		},
 		{
-			name: "the passphrases differ",
+			name: "the passphrases differ", afterImage: true,
 			change: func(t *testing.T, _ *rig, state string) (map[string]map[string]string, string, []string) {
 				v := withTarget(t, state)
 				v["secrets"]["kms-passphrase"] = "another passphrase " + rand.Text()
@@ -785,19 +839,19 @@ func TestSecretsTwoCopies(t *testing.T) {
 			code: 2, want: []string{"STATE/secrets/kms-passphrase and kms-passphrase in the volume cactusfs-secrets differ", "never chooses"},
 		},
 		{
-			name: "the passphrase lost, the key file kept", change: local("secrets/kms-passphrase"),
+			name: "the passphrase lost, the key file kept", change: local("secrets/kms-passphrase"), afterImage: true,
 			code: 2, want: []string{"its passphrase is in neither", "KMS_PASSPHRASE_FILE"},
 		},
 		{
-			name: "half the root credentials", change: local("secrets/root-secret-key"),
+			name: "half the root credentials", change: local("secrets/root-secret-key"), afterImage: true,
 			code: 2, want: []string{"one of the root credentials is in", "ROOT_SECRET_KEY_FILE"},
 		},
 		{
-			name: "certificates not complete", change: local("config/ready"),
+			name: "certificates not complete", change: local("config/ready"), afterImage: true,
 			code: 2, want: []string{"are not complete (no 'ready'"},
 		},
 		{
-			name: "kms.json lost from both", change: local("config/kms.json"),
+			name: "kms.json lost from both", change: local("config/kms.json"), afterImage: true,
 			code: 2, want: []string{"kms.json is in neither", "KMS_KEY_FILE"},
 		},
 		{
@@ -810,7 +864,7 @@ func TestSecretsTwoCopies(t *testing.T) {
 				remove(t, filepath.Join(state, "config", "kms.json"))
 				return v, "KMS_KEY_FILE=" + key + "\nKMS_PASSPHRASE_FILE=" + phrase + "\n", nil
 			},
-			code: 3, want: []string{"took KMS_KEY_FILE into STATE/config/kms.json"}, puts: []string{"config:kms.json"}, restored: true,
+			code: 0, want: []string{"took KMS_KEY_FILE into STATE/config/kms.json"}, puts: []string{"config:kms.json"}, restored: true,
 		},
 		{
 			name: "a volume of the name the script did not make", change: local(),
@@ -823,15 +877,15 @@ func TestSecretsTwoCopies(t *testing.T) {
 		{
 			name: "a volume whose name is only part of another", change: local(),
 			rules: []rule{{Tool: "docker", Contains: []string{"volume", "ls", "name=cactusfs-"}, Stdout: "cactusfs-secrets-old\nx-cactusfs-secrets\ncactusfs-secretsx\n"}},
-			code:  3, puts: []string{
+			code:  0, puts: []string{
 				"secrets:.,kms-passphrase,root-access-key,root-secret-key",
 				"config:.,kms.json,node-ca.pem,nodes,nodes/cactusfs.key,nodes/cactusfs.pem,ready,s3-ca.pem,s3.key,s3.pem",
 			},
 			restored: true,
 		},
 		{
-			name: "a volume holding a link", change: keepTarget,
-			rules: []rule{{Tool: "docker", Contains: []string{"cp", "cactusfs-volumes:/secrets", "-"}, Stdout: tarWithLink(t, "secrets", "root-access-key")}},
+			name: "a volume holding a link", change: keepTarget, afterImage: true,
+			rules: []rule{{Tool: "docker", Contains: []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/secrets", "-"}, Stdout: tarWithLink(t, "secrets", "root-access-key")}},
 			code:  2, want: []string{"a volume of the deployment holds something that is neither a file nor a directory"},
 		},
 		{
@@ -854,11 +908,11 @@ func TestSecretsTwoCopies(t *testing.T) {
 				v, _, _ := without("target", "secrets", "config")(t, r, state)
 				return v, "", []string{"--adopt"}
 			},
-			code: 3, want: []string{"state: recorded", "the local copy STATE/secrets/root-access-key was missing"}, restored: true,
+			code: 0, want: []string{"state: recorded", "the local copy STATE/secrets/root-access-key was missing"}, restored: true,
 		},
 		{
 			name: "another engine behind the same settings", change: keepTarget,
-			rules: []rule{{Tool: "docker", Contains: []string{"info"}, Stdout: "ENGINE-TWO\n"}},
+			rules: []rule{{Tool: "docker", Contains: []string{"info", "{{.ID}}"}, Stdout: "ENGINE-TWO\n"}},
 			code:  2, want: []string{"made on the engine '" + engineID + "'", "now reach another, 'ENGINE-TWO'", "never given to a second engine", "--engine-replaced"},
 		},
 		{
@@ -868,7 +922,7 @@ func TestSecretsTwoCopies(t *testing.T) {
 			change: func(*testing.T, *rig, string) (map[string]map[string]string, string, []string) {
 				return nil, "", []string{"--another-target"}
 			},
-			rules: []rule{{Tool: "docker", Contains: []string{"info"}, Stdout: "ENGINE-TWO\n"}},
+			rules: []rule{{Tool: "docker", Contains: []string{"info", "{{.ID}}"}, Stdout: "ENGINE-TWO\n"}},
 			code:  2, want: []string{"now reach another, 'ENGINE-TWO'", "never given to a second engine"},
 		},
 		{
@@ -876,8 +930,8 @@ func TestSecretsTwoCopies(t *testing.T) {
 			change: func(*testing.T, *rig, string) (map[string]map[string]string, string, []string) {
 				return nil, "", []string{"--engine-replaced"}
 			},
-			rules: []rule{{Tool: "docker", Contains: []string{"info"}, Stdout: "ENGINE-TWO\n"}},
-			code:  3, want: []string{"the deployment made on the engine '" + engineID + "' is taken as gone", "now belong to the engine 'ENGINE-TWO'", "in place of the one it replaced"},
+			rules: []rule{{Tool: "docker", Contains: []string{"info", "{{.ID}}"}, Stdout: "ENGINE-TWO\n"}},
+			code:  0, want: []string{"the deployment made on the engine '" + engineID + "' is taken as gone", "now belong to the engine 'ENGINE-TWO'", "in place of the one it replaced"},
 			puts: []string{
 				"secrets:.,kms-passphrase,root-access-key,root-secret-key",
 				"config:.,kms.json,node-ca.pem,nodes,nodes/cactusfs.key,nodes/cactusfs.pem,ready,s3-ca.pem,s3.key,s3.pem",
@@ -888,8 +942,8 @@ func TestSecretsTwoCopies(t *testing.T) {
 				}
 				// A later run on the new engine needs no flag, and the old
 				// one is refused.
-				r.rules(append([]rule{{Tool: "docker", Contains: []string{"info"}, Stdout: "ENGINE-TWO\n"}}, dockerRules(t, devInitOutput(), withTarget(t, state))...)...)
-				r.guarded(content, installDD...).want(t, 3, "hold the same secrets")
+				r.rules(append([]rule{{Tool: "docker", Contains: []string{"info", "{{.ID}}"}, Stdout: "ENGINE-TWO\n"}}, dockerRules(t, devInitOutput(), withTarget(t, state))...)...)
+				r.guarded(content, installDD...).want(t, 0, "hold the same secrets")
 				r.rules(dockerRules(t, devInitOutput(), withTarget(t, state))...)
 				r.guarded(content, installDD...).want(t, 2, "made on the engine 'ENGINE-TWO'")
 			},
@@ -899,7 +953,7 @@ func TestSecretsTwoCopies(t *testing.T) {
 			change: func(t *testing.T, _ *rig, state string) (map[string]map[string]string, string, []string) {
 				return withTarget(t, state), "", []string{"--engine-replaced"}
 			},
-			code: 3, restored: true,
+			code: 0, restored: true,
 		},
 		{
 			name: "another KMS",
@@ -950,7 +1004,7 @@ func TestSecretsGivenFiles(t *testing.T) {
 		{"KMS_KEY_FILE", "config/kms.json"},
 	} {
 		cases = append(cases, copyCase{
-			name: k.key + " that differs from the local copy",
+			name: k.key + " that differs from the local copy", afterImage: true,
 			change: func(_ *testing.T, r *rig, state string) (map[string]map[string]string, string, []string) {
 				return nil, givenEqual(r, state, k.key), nil
 			},
@@ -959,7 +1013,7 @@ func TestSecretsGivenFiles(t *testing.T) {
 	}
 	// The volume's copy is compared the same way, whatever the key.
 	cases = append(cases, copyCase{
-		name: "KMS_KEY_FILE that differs from the volume's",
+		name: "KMS_KEY_FILE that differs from the volume's", afterImage: true,
 		change: func(t *testing.T, r *rig, state string) (map[string]map[string]string, string, []string) {
 			v := withTarget(t, state)
 			env := givenEqual(r, state, "KMS_KEY_FILE")
@@ -1003,16 +1057,16 @@ func TestSecretsGivenFiles(t *testing.T) {
 				}
 				return v, env, nil
 			},
-			code: code, want: want, puts: puts,
+			code: code, want: want, puts: puts, afterImage: code != 0,
 		}
 	}
 	rotated := []string{"rotated TLS_CERT_FILE: STATE/config/s3.pem replaced", "rotated TLS_KEY_FILE", "rotated TLS_CA_FILE"}
 	cases = append(cases,
-		rotation("certificates rotated in both copies", false, false, 3, rotated, []string{"config:s3.pem,s3.key,s3-ca.pem"}),
-		rotation("certificates rotated where the local copy is old", false, true, 3, rotated, nil),
+		rotation("certificates rotated in both copies", false, false, 0, rotated, []string{"config:s3.pem,s3.key,s3-ca.pem"}),
+		rotation("certificates rotated where the local copy is old", false, true, 0, rotated, nil),
 		rotation("certificates rotated where only the local copy is new", true, false, 2, []string{"STATE/config/s3-ca.pem and s3-ca.pem in the volume cactusfs-config differ"}, nil),
 		copyCase{
-			name: "a certificate rotated without its CA",
+			name: "a certificate rotated without its CA", afterImage: true,
 			change: func(t *testing.T, r *rig, state string) (map[string]map[string]string, string, []string) {
 				env, _ := tls(r, false)
 				return withTarget(t, state), env, nil
@@ -1062,7 +1116,7 @@ func TestSecretsGivenFiles(t *testing.T) {
 				}
 				r.rules(dockerRules(t, devInitOutput(), withTarget(t, state))...)
 				res := r.guarded(rot, installDD...)
-				res.want(t, 3, "rotated "+v.key+": "+state+"/"+v.file+" replaced, after the volume's copy")
+				res.want(t, 0, "rotated "+v.key+": "+state+"/"+v.file+" replaced, after the volume's copy")
 				for file, data := range given {
 					if got := fileOf(t, filepath.Join(state, file)); got != data {
 						t.Errorf("%s was not rotated", file)
@@ -1077,7 +1131,7 @@ func TestSecretsGivenFiles(t *testing.T) {
 				before := tree(t, state)
 				r.rules(dockerRules(t, devInitOutput(), withTarget(t, state))...)
 				res = r.guarded(rot, installDD...)
-				res.want(t, 3)
+				res.want(t, 0)
 				if len(callsOf(res, "docker", "cp", "-a")) != 0 || strings.Contains(res.output(), "rotated") {
 					t.Errorf("a second run rotated again:\n%s", res.output())
 				}
@@ -1114,7 +1168,7 @@ func TestSecretsGivenAsFiles(t *testing.T) {
 			}
 			r.rules(dockerRules(t, devInitOutput(), nil)...)
 			res := r.guarded(env, installDD...)
-			res.want(t, 3, "took ROOT_ACCESS_KEY_FILE into")
+			res.want(t, 0, "took ROOT_ACCESS_KEY_FILE into")
 			state := r.stateOf("dd-default")
 			got := filesUnder(t, state)
 			for key, name := range given {
@@ -1140,7 +1194,7 @@ func TestSecretsGivenAsFiles(t *testing.T) {
 			token := r.envFile("token", "hvs."+rand.Text()+"\n")
 			r.rules(dockerRules(t, devInitOutput(), nil)...)
 			res := r.guarded("KMS=vault\nVAULT_ADDR=https://vault.example.test:8200\nVAULT_KEY=cactusfs\nVAULT_TOKEN_FILE="+token+"\n", installDD...)
-			res.want(t, 3, "made "+r.stateOf("dd-default")+"/config (the certificates)")
+			res.want(t, 0, "made "+r.stateOf("dd-default")+"/config (the certificates)")
 			state := r.stateOf("dd-default")
 			got := filesUnder(t, state)
 			if got["secrets/vault-token"] != fileOf(t, token) {
@@ -1167,6 +1221,7 @@ func TestSecretsGivenAsFiles(t *testing.T) {
 // written - each with exit 2, no container made, no STATE_DIR.
 func TestSecretsRefused(t *testing.T) {
 	t.Parallel()
+	const ceHost = "CE_HOST=deploy@server.example.test\n"
 	binary := func(rel string, data string) func(t *testing.T, r *rig) {
 		return func(t *testing.T, r *rig) {
 			if err := os.WriteFile(filepath.Join(r.repo, "dist", "image", rel), []byte(data), 0o600); err != nil {
@@ -1183,10 +1238,12 @@ func TestSecretsRefused(t *testing.T) {
 	}{
 		{"no binaries", "", func(t *testing.T, r *rig) { remove(t, filepath.Join(r.repo, "dist")) }, nil, "run make image-binaries"},
 		{"a binary that is not the one summed", "", binary("linux-"+runtime.GOARCH+"/cactusfs", "another binary"), nil, "does not match"},
-		{"binaries of make build-all", "", binary("BUILDINFO", "packaging=binary\n"), nil, "does not say packaging=image"},
+		{"binaries of make build-all", "", binary("BUILDINFO", "packaging=binary\n"), nil, "these are not the binaries of make image-binaries"},
 		{"a cluster on one local key file", "DEPLOY_MODE=cluster\n", nil, nil, "KMS=local with DEPLOY_MODE=cluster"},
 		{"a certificate that is not there", "TLS_CERT_FILE=/nonexistent/s3.pem\n", nil, nil, "TLS_CERT_FILE=/nonexistent/s3.pem: is not a file that can be read"},
-		{"the runtime image absent, offline", "OFFLINE=yes\n", nil, []rule{{Tool: "docker", Contains: []string{"image", "inspect"}, Exit: 1}}, "is not on the engine and OFFLINE=yes"},
+		// The image is made of the binaries in the runtime image: image_check
+		// refuses first.
+		{"the runtime image absent, offline", "OFFLINE=yes\n", nil, []rule{{Tool: "docker", Contains: []string{"image", "inspect", runtimeImage(t)}, Stderr: noSuchImage("docker", runtimeImage(t)), Exit: 1}}, "OFFLINE=yes, and the base image " + runtimeImage(t) + " is not on docker --context default"},
 		{"a dev-init container the script did not make", "", nil, []rule{
 			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
 			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "someone\n"},
@@ -1195,6 +1252,14 @@ func TestSecretsRefused(t *testing.T) {
 			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
 			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs|podman\n"},
 		}, "the container cactusfs-dev-init is the deployment's on the target 'podman', not dd"},
+		// Docker CE on a server (PLAN 10.7, whose install does not make the
+		// image yet): secrets_check's own checks of the binaries dev-init
+		// runs from, and of the images the helpers need, are the ones that
+		// refuse there.
+		{"ce: no binaries", ceHost, func(t *testing.T, r *rig) { remove(t, filepath.Join(r.repo, "dist")) }, nil, "no binary for this machine in " + "RELEASE"},
+		{"ce: a binary that is not the one summed", ceHost, binary("linux-"+runtime.GOARCH+"/cactusfs", "another binary"), nil, "/cactusfs does not match "},
+		{"ce: binaries of make build-all", ceHost, binary("BUILDINFO", "packaging=binary\n"), nil, "/BUILDINFO does not say packaging=image"},
+		{"ce: the runtime image absent, offline", ceHost + "OFFLINE=yes\n", nil, []rule{{Tool: "docker", Contains: []string{"image", "inspect", runtimeImage(t)}, Exit: 1}}, "the image " + runtimeImage(t) + " is not on the engine and OFFLINE=yes"},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
@@ -1209,8 +1274,17 @@ func TestSecretsRefused(t *testing.T) {
 					env += "TLS_KEY_FILE=" + r.envFile("key", "a key") + "\n"
 				}
 				r.rules(append(slices.Clone(c.rules), dockerRules(t, devInitOutput(), nil)...)...)
-				res := r.guarded("KMS=local\n"+env, installDD...)
-				res.want(t, 2, c.want)
+				args := installDD
+				if strings.HasPrefix(env, ceHost) {
+					args = []string{"--docker", "ce", "--install"}
+				}
+				res := r.guarded("KMS=local\n"+env, args...)
+				res.want(t, 2, strings.Replace(c.want, "RELEASE", filepath.Join(r.repo, "dist", "image"), 1))
+				// image_check and secrets_check refuse before the image is
+				// made (PLAN 10.4).
+				if b := builds(res); len(b) != 0 {
+					t.Errorf("a refused install built the image: %q", b[0].Args)
+				}
 				for _, words := range [][]string{{"create"}, {"rm"}, {"pull"}, {"volume", "create"}} {
 					if calls := callsOf(res, "docker", words...); len(calls) != 0 {
 						t.Errorf("a refused install ran %q", calls[0].Args)
@@ -1238,11 +1312,11 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			r := secretsRig(t, r.fresh(t))
 			r.rules(engineRules(t, "podman", "host:/var/lib/containers", devInitOutput(), nil)...)
 			res := r.guardedRun([]string{"--env", r.envFile("site.env", "KMS=local\n"), "--docker", "podman", "--install"}, "XDG_RUNTIME_DIR=/run/user/1000")
-			res.want(t, 3, "not built yet (PLAN 10.4)")
+			res.want(t, 0, "ready: cactusfs runs cactusfs:0.7.0-412-")
 			if len(callsOf(res, "docker")) != 0 {
 				t.Error("docker was run for podman")
 			}
-			if len(callsOf(res, "podman", "start", "-a", "cactusfs-dev-init")) != 1 || len(callsOf(res, "podman", "cp", "-a", "-", "cactusfs-volumes:/config")) != 1 {
+			if len(callsOf(res, "podman", "start", "-a", "cactusfs-dev-init")) != 1 || len(callsOf(res, "podman", "cp", "-a", "-", "cactusfs-volumes:/var/lib/cactusfs/config")) != 1 {
 				t.Errorf("podman did not run dev-init and fill the volumes: %v", res.calls)
 			}
 			if got := filesUnder(t, r.stateOf("podman-default"))["target"]; got != "podman (local)\nengine-id=host:/var/lib/containers\nkms=local\n" {
@@ -1278,7 +1352,7 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 					t.Errorf("the target's engine was asked here, not on the server: %q", c.Args)
 				}
 			}
-			if len(callsOf(res, "docker", "cp", "-a", "-", "cactusfs-volumes:/secrets")) != 1 {
+			if len(callsOf(res, "docker", "cp", "-a", "-", "cactusfs-volumes:/var/lib/cactusfs/secrets")) != 1 {
 				t.Error("the server's volume was not filled")
 			}
 			state := r.stateOf("ssh-deploy_server.example.test")
@@ -1295,10 +1369,14 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			remove(t, filepath.Join(r.repo, "Dockerfile"))
 			const image = "registry.example.test/cactusfs:0.7.0"
 			// With the image given, the install goes on to the node (PLAN
-			// 10.5), which /readyz says is ready.
-			r.rules(append([]rule{{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "200"}}, dockerRules(t, devInitOutput(), nil)...)...)
+			// 10.5), which /readyz says is ready; the node runs it by the
+			// digest the engine knows it by (PLAN 10.4).
+			const digest = "registry.example.test/cactusfs@sha256:" + imgDigest
+			rules := append(givenHere("docker", newImgFix(imgCommit), digest, image),
+				rule{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "200"})
+			r.rules(append(rules, dockerRules(t, devInitOutput(), nil)...)...)
 			res := r.guarded("KMS=local\nIMAGE_SOURCE=image\nIMAGE="+image+"\n", installDD...)
-			res.want(t, 0, "ready: cactusfs runs "+image)
+			res.want(t, 0, "the target runs "+digest, "ready: cactusfs runs "+digest)
 			helpers := callsOf(res, "docker", "create", "--name", "cactusfs-volumes")
 			if len(helpers) != 1 || !containsRun(helpers[0].Args, []string{image, "true"}) {
 				t.Errorf("the helper of the volumes is not made from IMAGE: %v", helpers)
@@ -1324,9 +1402,9 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 		t.Run("the runtime image pulled", func(t *testing.T) {
 			t.Parallel()
 			r := secretsRig(t, r.fresh(t))
-			r.rules(append([]rule{{Tool: "docker", Contains: []string{"image", "inspect"}, Exit: 1}}, dockerRules(t, devInitOutput(), nil)...)...)
+			r.rules(append([]rule{{Tool: "docker", Contains: []string{"image", "inspect", runtimeImage(t)}, Stderr: noSuchImage("docker", runtimeImage(t)), Exit: 1}}, dockerRules(t, devInitOutput(), nil)...)...)
 			res := r.guarded("KMS=local\n", installDD...)
-			res.want(t, 3)
+			res.want(t, 0)
 			pulls := callsOf(res, "docker", "pull")
 			if len(pulls) != 2 || !containsRun(pulls[1].Args, []string{"--platform", "linux/" + runtime.GOARCH, runtimeImage(t)}) {
 				t.Errorf("pulls: %v", pulls)
@@ -1346,11 +1424,13 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			r.rules(dockerRules(t, devInitOutput(), nil)...)
 			before := tree(t, r.dir)
 			res := r.guarded("KMS=local\n", "--docker", "dd", "--install", "--dry-run")
-			res.want(t, 3, "secrets: kept in "+r.stateOf("dd-default"), "is made once")
+			res.want(t, 0, "secrets: kept in "+r.stateOf("dd-default"), "is made once")
 			// Of the secrets a dry run asks nothing; what is asked is exactly
 			// what an install asks first (PLAN 10.5) - the node's container,
 			// a container an unfinished upgrade kept, the volumes, what
-			// publishes which port, and a probe of each port - and nothing is
+			// publishes which port, and a probe of each port - then what
+			// image_check asks (PLAN 10.4) - the context's endpoint and the
+			// engine's platform - and whether a build tag is left; nothing is
 			// changed.
 			noChange(t, res)
 			var asked [][]string
@@ -1364,6 +1444,9 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 				{"docker", "ps", "--format", "{{.Names}}|{{.Ports}}"},
 				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9000/"},
 				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9001/"},
+				{"docker", "context", "inspect", "default", "--format", "{{.Endpoints.docker.Host}}"},
+				{"docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"},
+				{"docker", "image", "inspect", "--format", "{{.Id}}", workTag(runtime.GOARCH)},
 			}
 			if !slices.EqualFunc(asked, want, slices.Equal[[]string]) {
 				t.Errorf("a dry run asked\n%q\nwant\n%q", asked, want)
@@ -1402,7 +1485,7 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 			t.Parallel()
 			r := secretsRig(t, r.fresh(t))
 			volumes := map[string]map[string]string{"secrets": {"root-access-key": "x"}, "config": {"ready": "x"}}
-			r.rules(append([]rule{{Tool: "docker", Contains: []string{"cp", "cactusfs-volumes:/config", "-"}, Stdout: tarWithLink(t, "config", "kms.json")}},
+			r.rules(append([]rule{{Tool: "docker", Contains: []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/config", "-"}, Stdout: tarWithLink(t, "config", "kms.json")}},
 				dockerRules(t, devInitOutput(), volumes)...)...)
 			res := r.guarded("KMS=local\n", append(slices.Clone(installDD), "--adopt")...)
 			res.want(t, 2, "neither a file nor a directory")
@@ -1429,7 +1512,7 @@ func TestSecretsLeaveNoHelper(t *testing.T) {
 			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs|dd\n"},
 		}, dockerRules(t, devInitOutput(), nil)...)...)
 		res := r.guarded("KMS=local\n", installDD...)
-		res.want(t, 3)
+		res.want(t, 0)
 		if rm := callsOf(res, "docker", "rm", "-f", "cactusfs-dev-init"); len(rm) != 2 {
 			t.Errorf("the left helper was not removed before dev-init ran, and dev-init's after: %d", len(rm))
 		}
