@@ -473,6 +473,9 @@ func TestStateDirUnderTmp(t *testing.T) {
 func TestValidation(t *testing.T) {
 	cases := []struct{ name, env, want string }{
 		{"drives", "DRIVES=5", "DRIVES=5: must be a whole number from 1 to 4"},
+		{"validity in days", "TLS_VALIDITY=365d", "TLS_VALIDITY=365d: must be a number of hours"},
+		{"validity too long", "TLS_VALIDITY=100000h", "TLS_VALIDITY=100000h: must be from 24h to 87600h"},
+		{"validity too short", "TLS_VALIDITY=1h", "TLS_VALIDITY=1h: must be from 24h to 87600h"},
 		{"no drives", "DRIVES=0", "DRIVES=0"},
 		{"privileged port", "S3_PORT=80", "S3_PORT=80"},
 		{"same ports", "S3_PORT=9001", "the same port"},
@@ -1055,10 +1058,12 @@ func TestActions(t *testing.T) {
 		{"purge confirm alone", "", []string{"--uninstall", "--purge-confirm", "cactusfs"}, 2, "--purge-confirm goes with --purge"},
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
-		{"dd install", "", []string{"--docker", "dd", "--install"}, 3, "not built yet (PLAN 10.5)"},
+		// An install on a Docker engine, standalone, makes its secrets
+		// first (PLAN 10.3, secrets_test.go); a dry run reaches the stub.
+		{"dd install", "", []string{"--docker", "dd", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.5)"},
 		{"podman status", "", []string{"--docker", "podman", "--status"}, 3, "not built yet (PLAN 10.5)"},
 		{"ce here", "", []string{"--docker", "ce", "--uninstall"}, 3, "not built yet (PLAN 10.5)"},
-		{"ce over ssh", "CE_HOST=deploy@server.example.test\n", []string{"--docker", "ce", "--install"}, 3, "not built yet (PLAN 10.7)"},
+		{"ce over ssh", "CE_HOST=deploy@server.example.test\n", []string{"--docker", "ce", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.7)"},
 		{"rancher", "", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
 		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.10)"},
 		{"cluster on docker", "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n", []string{"--docker", "dd", "--install"}, 3, "not built yet (PLAN 10.8)"},

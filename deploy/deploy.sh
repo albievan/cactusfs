@@ -24,6 +24,8 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/common.sh"
 # shellcheck source=deploy/lib/env.sh
 . "$DEPLOY_DIR/lib/env.sh"
+# shellcheck source=deploy/lib/secrets.sh
+. "$DEPLOY_DIR/lib/secrets.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -56,6 +58,17 @@ Flags:
                   deploy a name that is already recorded on another target
                   (in STATE_DIR) onto this one as well; without it, that is
                   refused as settings pointing at the wrong engine or cluster
+  --adopt         with --install: take the secrets held by the deployment's
+                  labelled volumes on the target into STATE_DIR when
+                  STATE_DIR holds no record of the deployment (it was made
+                  from another machine, or the record was lost); without
+                  it, that is refused (never a setting of the env file)
+  --engine-replaced
+                  with --install: the engine recorded for the deployment is
+                  gone (a factory reset of Docker Desktop, say), and the one
+                  the settings now reach replaces it: the deployment's
+                  secrets are put there and the record names it; without
+                  it, another engine is refused (never a setting)
   --from-source   with --install: build the image from this tree with the
                   Dockerfile (IMAGE_SOURCE=source)
   --dry-run       print the commands that would change something, run none
@@ -66,7 +79,7 @@ A flag wins over the env file, the env file over the defaults; the
 environment of the shell is not read for settings.
 
 Exit status: 0 done, 1 a command failed, 2 refused (nothing changed),
-3 not built yet (nothing changed).
+3 not built yet (what was done before is said above it).
 USAGE
 }
 
@@ -74,6 +87,8 @@ ACTION=
 PURGE=0
 PURGE_CONFIRM=
 ANOTHER_TARGET=0
+ADOPT=0
+ENGINE_REPLACED=0
 DRY_RUN=0
 env_file=
 
@@ -134,6 +149,8 @@ while [ $# -gt 0 ]; do
 	--uninstall) set_action uninstall ;;
 	--print-namespace) set_action print-namespace ;;
 	--another-target) ANOTHER_TARGET=1 ;;
+	--adopt) ADOPT=1 ;;
+	--engine-replaced) ENGINE_REPLACED=1 ;;
 	--purge) PURGE=1 ;;
 	--purge-confirm)
 		flag_value --purge-confirm "the deployment's name" $# "${2:-}"
@@ -157,6 +174,8 @@ done
 }
 [ "$PURGE" = 0 ] || [ "$ACTION" = --uninstall ] || refuse "--purge goes with --uninstall"
 [ -z "$PURGE_CONFIRM" ] || [ "$PURGE" = 1 ] || refuse "--purge-confirm goes with --purge"
+[ "$ADOPT" = 0 ] || [ "$ACTION" = --install ] || refuse "--adopt goes with --install"
+[ "$ENGINE_REPLACED" = 0 ] || [ "$ACTION" = --install ] || refuse "--engine-replaced goes with --install"
 if lookup "$FLAG_SETTINGS" IMAGE_SOURCE >/dev/null && [ "$ACTION" != --install ]; then
 	refuse "--from-source goes with --install"
 fi
@@ -236,7 +255,15 @@ do_install() {
 	binaries) _image="built from the binaries in $(setting RELEASE_DIR)" ;;
 	image) _image="$(setting IMAGE), by digest" ;;
 	esac
-	_secrets="the secrets of $STATE, made once when missing (PLAN 10.3)"
+	# The secrets go to the target before anything starts there (PLAN
+	# 10.3): built for a standalone deployment on a Docker engine; the
+	# other targets keep theirs as the step secrets_where names builds.
+	if [ "$(secrets_where)" = volumes ]; then
+		secrets_install
+		_secrets="the secrets of $STATE, in the volumes $(setting DEPLOY_NAME)-secrets and $(setting DEPLOY_NAME)-config"
+	else
+		_secrets="the secrets of $STATE, made once when missing and put on the target before anything starts (PLAN 10.3, built for this target by $(secrets_where))"
+	fi
 	_helm=$(setting HELM)
 	[ -n "$_helm" ] || _helm=$(setting HELM_IMAGE)
 	[ -n "$_helm" ] || _helm="the helm image the Dockerfile pins"

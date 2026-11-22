@@ -32,6 +32,10 @@ var hostTools = []string{
 	"awk", "sed", "grep", "cat", "tr", "dirname", "sort", "head", "tail", "wc",
 	"mkdir", "rm", "chmod", "mktemp", "id", "uname", "env", "ls", "date",
 	"pwd", "printenv",
+	// The secrets (PLAN 10.3): tar streams, comparing copies, writing a
+	// file without writing over one, a checksum of the binary dev-init
+	// runs from.
+	"tar", "cmp", "ln", "mv", "find", "rmdir", "sha256sum", "shasum",
 }
 
 // systemDirs are where hostTools and the shells are looked for.
@@ -55,6 +59,7 @@ func systemTool(name string) string {
 const (
 	transcriptName = "transcript.jsonl"
 	rulesName      = "rules.json"
+	stdinDir       = "stdin"
 )
 
 // call is one command a fake was asked to run, with its whole environment.
@@ -116,6 +121,14 @@ func fake(name string, args []string) int {
 	if err := errors.Join(werr, f.Close()); err != nil {
 		fmt.Fprintf(os.Stderr, "fake %s: transcript: %v\n", name, err)
 		return 125
+	}
+	// A rig with a directory stdinDir keeps what each call read, by its
+	// hash, for a test that looks inside (rig.keepStdin).
+	if info, err := rig.Stat(stdinDir); err == nil && info.IsDir() && len(in) > 0 {
+		if err := rig.WriteFile(stdinDir+"/"+c.Stdin, in, 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "fake %s: stdin: %v\n", name, err)
+			return 125
+		}
 	}
 	data, err := rig.ReadFile(rulesName)
 	if err != nil {

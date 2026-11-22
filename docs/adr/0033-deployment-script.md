@@ -80,7 +80,8 @@ script refuses when that is ambiguous.
 
 Actions: `--install` (run again, it upgrades and keeps the data), `--status`,
 `--uninstall` (keeps the data), `--uninstall --purge` (deletes it), with
-`--from-source` and `--dry-run`. `--dry-run` runs nothing that changes state and
+`--from-source`, `--adopt` and `--engine-replaced` (section 3), `--another-target`
+(section 15) and `--dry-run`. `--dry-run` runs nothing that changes state and
 prints no secret. A deployment has a name, a DNS label, which names its containers,
 volumes, namespace and its entry of `STATE_DIR` (section 3).
 
@@ -137,7 +138,7 @@ and stores an object, while the key file it opens exists in one place only:
 
 | Target and mode | `kms.json` is made by | Where it is on the target | How a node finds it |
 |---|---|---|---|
-| Docker targets, standalone | `dev-init` on the operator's machine, into `STATE_DIR` | a labelled config volume, filled with `cp -` before the node is first run | `CACTUSFS_KMS_KEY_FILE`, a setting the script manages, names the copy in the config volume |
+| Docker targets, standalone | `dev-init` on the operator's machine, into `STATE_DIR` | two labelled volumes filled with `cp -` before the node is first run: `<name>-config` (dev-init's directory: `kms.json`, the certificates, `ready`) and `<name>-secrets` (the root credentials, and the passphrase or the Vault token) | `CACTUSFS_KMS_KEY_FILE`, a setting the script manages, names the copy in the config volume; the other secrets by their `CACTUSFS_*_FILE` |
 | Docker targets, cluster | `dev-init` on the operator's machine, into `STATE_DIR` | compose's `config` volume, filled before `up`, `ready` included, so compose's `init` service finds the directory complete and writes nothing (`dev-init` leaves a complete directory alone) | `CACTUSFS_KMS_KEY_FILE` of `deploy/compose/compose.yaml` |
 | Kubernetes, both modes | `dev-init` on the operator's machine, into `STATE_DIR` | a Secret of the namespace, applied before the workload | the chart's `kms.local.keyFileSecret` |
 
@@ -159,7 +160,41 @@ makes a key file only when the one it is given is missing) nor `dev-init` (which
 a complete directory alone) makes a new one.
 When both copies exist and differ, the script refuses and names both; it never chooses.
 A secret present on the target with no local state is kept and copied back, and the
-script says that the local copy was missing.
+script says that the local copy was missing. A put onto the target writes only the
+names the target lacks, and only into a copy the same run has read back and compared
+(or made): it never writes over what is there, but for a rotation (below). An engine
+or cluster that cannot be asked fails the run; an error is never taken for "not there".
+
+**Given as files.** A secret the operator gives as a file must equal every copy there
+is when it is one that opens the data or begins the deployment - the root credentials,
+the passphrase, `kms.json` - and one that differs is refused: a new one would open
+nothing, and the script never replaces them. A Vault token or a certificate, key or CA
+of the operator's own (`VAULT_TOKEN_FILE`, `TLS_CERT_FILE`, `TLS_KEY_FILE`,
+`TLS_CA_FILE`) that differs is a **rotation**: no data depends on the old one, so the
+file given replaces both copies - the target's first, then the local one, so that a
+run cut short in between leaves the target on the new file and the same files finish
+it - and the run says what it rotated. A local copy that differs from the target's
+otherwise is refused as two copies that differ. A certificate rotated while a CA is kept
+(`s3-ca.pem`, dev-init's or an earlier one) needs its own CA in `TLS_CA_FILE`, or the
+run is refused: the CA of the certificate it replaces is never kept for clients.
+
+**The record.** The entry's file `target` records the engine or cluster as the
+settings name it (section 15), its own ID - the engine's (`docker info`; Podman's host
+and store root; the server's for `CE_HOST`), or the cluster's `kube-system` UID - and
+the KMS the deployment was made with. Every install compares them. Another ID behind
+the same settings is always refused - the secrets of one deployment are never given to
+a second engine, so two live deployments never share them - with one exception said by
+the flag `--engine-replaced` (with `--install` only, never a setting): the recorded
+engine is gone, as after a factory reset of Docker Desktop, and this one takes its
+place; the run says that the old engine's deployment is treated as gone and that its
+secrets now belong to this engine, and the record is written again with the new ID.
+Another KMS is refused. The ID is kept in the record, not in the entry's path, so no
+entry moves.
+
+**Adopting.** Labelled copies on the target of which `STATE_DIR` holds no record - the
+deployment was made from another machine or another `STATE_DIR`, or the record was
+lost - are taken into `STATE_DIR` only when the operator says `--adopt` (a flag, never
+a setting); otherwise the run is refused before anything is written.
 
 **Two copies.** A local copy in `STATE_DIR`, and the copy in use on the target: Secrets
 in the deployment's namespace, or labelled volumes on a Docker target (the compose
@@ -168,10 +203,12 @@ cluster's exception is in section 10). The nodes read every secret from a file
 
 `STATE_DIR` defaults to `${XDG_STATE_HOME:-~/.local/state}/cactusfs-deploy` and is laid
 out as `STATE_DIR/<target-id>/<name>/`: one entry for each deployment on each target.
-The target ID is the engine's ID on a local Docker target (what `info` reports for the
-engine), the UID of the cluster's `kube-system` namespace on Kubernetes, and the ssh
-host for a server reached through `CE_HOST` or `K3S_SSH`; a byte that is not a letter,
-digit, `.`, `_` or `-` is written as `_`. Directories are of mode 0700 and files of
+The target ID in the path is the target and the context it is reached through
+(`dd-default`, `podman-default`, `k8s-<context>`), and the ssh host for a server
+reached through `CE_HOST` or `K3S_SSH`; a byte that is not a letter, digit, `.`, `_` or
+`-` is written as `_`. The engine's own ID, or the cluster's `kube-system` UID, is not
+part of the path: it is kept in the entry's record and compared (above), so an entry
+never moves when an engine is replaced. Directories are of mode 0700 and files of
 0600. A `STATE_DIR` inside the repository is refused; one inside a folder a known sync
 client keeps (iCloud Drive, Dropbox, OneDrive, Google Drive) is warned about, since a
 synced copy is a copy the operator does not control. The README (PLAN 10.12) says how
@@ -448,6 +485,7 @@ what is listed here, and each fetch is one an operator can avoid:
 |---|---|---|---|
 | `HELM_IMAGE` (`alpine/helm`, pinned by digest in the `Dockerfile`) | every Kubernetes install, upgrade and uninstall, unless present | Docker Hub | a preloaded or mirrored image named with `HELM_IMAGE` (with a digest), or `HELM=<path>` to a helm binary |
 | `RUNTIME_IMAGE` (distroless, by digest) | `IMAGE_SOURCE=binaries`, the base of the `from-binaries` stage, unless present | its registry | preloading it |
+| `RUNTIME_IMAGE` (distroless, by digest) | every install of a standalone deployment on a Docker engine - this machine's, and the server's for `CE_HOST` - unless present: the never-started helper containers that read and fill the secrets' volumes, and dev-init (`IMAGE_SOURCE=binaries`), are made from it. With `IMAGE_SOURCE=image` they are made from `IMAGE` instead (the same base and user), which the target needs anyway, so nothing more is pulled | its registry | preloading it on both engines; `OFFLINE=yes` refuses the pull |
 | The base images (Go, Node, distroless), the Go modules and the npm packages | `--from-source` | their registries, the Go module proxy, the npm registry | not using `--from-source` |
 | The image named | `IMAGE_SOURCE=image`, unless present | its registry | preloading it |
 | Docker CE and its repository key | `CE_INSTALL_DOCKER=yes`, on the server | Docker's own package repository | installing the engine otherwise |
@@ -499,7 +537,15 @@ engine's endpoint and ID, or the context, its API server and the `kube-system` U
 and records it in the deployment's `STATE_DIR` entry. A later run that resolves the same
 name differently - another engine or cluster than recorded, or the name recorded under
 another target and not under this one - is refused, naming both; deploying the same
-name onto a second target is said with `--another-target`.
+name onto a second target ID is said with `--another-target`, which makes a second
+deployment with secrets of its own and never lets one entry's secrets reach a second
+engine. Behind the same target ID, the engine's own ID in the record decides (section
+3): another one is refused, and only `--engine-replaced` lets a new engine take the
+place of one that is gone. Podman reports no ID of its own, so its identity is its
+host's name and the root of its store (`{{.Host.Hostname}}:{{.Store.GraphRoot}}`): a
+weak identifier, which mainly tells another store apart (rootless against rootful,
+another user, a new Podman machine whose store moved) and is not unique across
+machines of one name.
 
 ### 16. SSH and commands from the env file
 

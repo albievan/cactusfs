@@ -72,6 +72,7 @@ ADMIN_BIND=127.0.0.1
 S3_PORT=9000
 ADMIN_PORT=9001
 TLS_HOSTS=
+TLS_VALIDITY=8760h
 TLS_CERT_FILE=
 TLS_KEY_FILE=
 TLS_CA_FILE=
@@ -480,10 +481,12 @@ no_equals() {
 script_vars() {
 	cat <<'VARS'
 ACTION
+ADOPT
 ANOTHER_TARGET
 CR
 DEPLOY_DIR
 DRY_RUN
+ENGINE_REPLACED
 ENV_FILE
 FILE_SETTINGS
 FLAG_SETTINGS
@@ -498,6 +501,7 @@ PASSED
 PURGE
 PURGE_CONFIRM
 REPO_ROOT
+SECRETS_WORK
 SETTINGS
 SOURCES
 SSH_CHECKED
@@ -749,6 +753,18 @@ env_validate() {
 	[ "$(setting S3_PORT)" != "$(setting ADMIN_PORT)" ] || refuse "S3_PORT and ADMIN_PORT are the same port"
 
 	chars TLS_HOSTS 'A-Za-z0-9.:,*-' "DNS names and IP addresses separated by commas"
+	# How long dev-init's certificates are valid, in hours: from a day to
+	# ten years.
+	_validity=$(setting TLS_VALIDITY)
+	case $_validity in
+	[123456789]*h) ;;
+	*) bad TLS_VALIDITY "must be a number of hours, such as 8760h (a year)" ;;
+	esac
+	case ${_validity%h} in
+	*[!0123456789]*) bad TLS_VALIDITY "must be a number of hours, such as 8760h (a year)" ;;
+	esac
+	[ "${#_validity}" -le 7 ] && [ "${_validity%h}" -ge 24 ] && [ "${_validity%h}" -le 87600 ] ||
+		bad TLS_VALIDITY "must be from 24h to 87600h (ten years)"
 	path TLS_CERT_FILE
 	secret_file TLS_KEY_FILE
 	path TLS_CA_FILE
@@ -1022,9 +1038,10 @@ engine_identity() {
 
 # target_id: a stable identity of the engine or cluster, which places the
 # deployment's state: STATE_DIR/<target-id>/<name>/. For a target over ssh,
-# the destination. Stubbed for the others until PLAN 10.3 asks the engine
-# for its ID (docker info) or the cluster for the UID of its kube-system
-# namespace; until then it is the target and its context.
+# the destination; for the others the target and its context. The
+# engine's own ID is not part of the path: it is recorded in the entry and
+# compared by every install (engine_id_check, PLAN 10.3); the cluster's,
+# the UID of its kube-system namespace, is PLAN 10.10's.
 target_id() {
 	if [ "$TARGET" = ce ] && [ -n "$(setting CE_HOST)" ]; then
 		_id="ssh-$(setting CE_HOST)"
@@ -1040,20 +1057,21 @@ target_id() {
 	printf '%s' "$_id" | tr -c 'A-Za-z0-9._-' '_'
 }
 
-# state_check: STATE_DIR/<target-id>/<name>/target records the engine or
-# cluster the deployment was made on (written by PLAN 10.3 when it writes
-# the state). Refused (ADR-0033 section 15): a run whose settings point this
-# entry at another one; and a name that is recorded under another target
-# and not under this one - unless --another-target says a second
-# deployment of that name is meant. Only read here, compared as text, never
-# run.
+# state_check: the first line of STATE_DIR/<target-id>/<name>/target
+# records the settings' engine or cluster the deployment was made on
+# (written at its first install by state_record, deploy/lib/secrets.sh,
+# with the engine's own ID, which an install compares: engine_id_check).
+# Refused (ADR-0033 section 15): a run whose settings point this entry at
+# another one; and a name that is recorded under another target and not
+# under this one - unless --another-target says a second deployment of
+# that name is meant. Only read here, compared as text, never run.
 state_check() {
 	_state_dir=$(setting STATE_DIR)
 	_name=$(setting DEPLOY_NAME)
 	_tid=$(target_id)
 	STATE=$_state_dir/$_tid/$_name
 	if [ -f "$STATE/target" ]; then
-		_recorded=$(printable <"$STATE/target")
+		_recorded=$(head -n 1 "$STATE/target" | printable)
 		[ "$_recorded" = "$(engine_identity)" ] ||
 			refuse "$STATE was made on $_recorded; the settings now point at $(engine_identity): set them back, or remove the deployment first"
 		return 0
