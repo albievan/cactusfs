@@ -896,3 +896,12 @@ none of them is answered by the owner, and each stays open:
     before anything is asked of the cluster. The alternative is a new setting such as
     `K8S_VAULT_FROM` (ranges and a port), with `VAULT_ADDR` free to name a host whose
     certificate carries that name.
+80. **The group `docker` on a server the script installs Docker CE on** (PLAN 10.7).
+    `DOCKER_HOST=ssh://<CE_HOST>` reaches the engine as the ssh user, which needs
+    the group `docker` - root on that server, for that user and for whoever holds its
+    ssh key or agent. Default (the stricter reading): `CE_INSTALL_DOCKER=yes` with a
+    user other than root is refused before anything changes unless
+    `CE_DOCKER_GROUP=yes` says to add it, and the refusal names the `usermod`
+    command to run instead. The alternatives are rootless Docker for that user (a
+    second engine to keep up), or a dedicated deploy user whose only privilege is
+    that group.

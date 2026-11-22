@@ -139,7 +139,7 @@ and stores an object, while the key file it opens exists in one place only:
 | Target and mode | `kms.json` is made by | Where it is on the target | How a node finds it |
 |---|---|---|---|
 | Docker targets, standalone | `dev-init` on the operator's machine, into `STATE_DIR` | two labelled volumes filled with `cp -` before the node is first run: `<name>-config` (dev-init's directory: `kms.json`, the certificates, `ready`) and `<name>-secrets` (the root credentials, and the passphrase or the Vault token) | `CACTUSFS_KMS_KEY_FILE`, a setting the script manages, names the copy in the config volume; the other secrets by their `CACTUSFS_*_FILE` |
-| Docker targets, cluster | `dev-init` on the operator's machine, into `STATE_DIR` | compose's `config` volume, filled before `up`, `ready` included, so compose's `init` service finds the directory complete and writes nothing (`dev-init` leaves a complete directory alone) | `CACTUSFS_KMS_KEY_FILE` of `deploy/compose/compose.yaml` |
+| Docker targets, cluster | `dev-init` on the operator's machine, into `STATE_DIR` (`--nodes node1,node2,node3,node4`) | the labelled volume `<name>-config`, which the override names as compose's `config` volume (`external`), filled before `up`, `ready` included, so compose's `init` service finds the directory complete and writes nothing (`dev-init` leaves a complete directory alone); the root credentials and the passphrase or token in compose's file secrets, `compose/secrets/` of the entry (section 10) | `CACTUSFS_KMS_KEY_FILE` of `deploy/compose/compose.yaml` |
 | Kubernetes, both modes | `dev-init` on the operator's machine, into `STATE_DIR` | a Secret of the namespace, applied before the workload | the chart's `kms.local.keyFileSecret` |
 
 The explicit setting matters on Docker standalone: with no `--kms-key-file`, a
@@ -225,6 +225,7 @@ secrets and the record, 10.9 the marker):
 | `config/` | the directory of `cactusfs dev-init`, in its own layout: `kms.json`, `s3.pem`, `s3.key`, `s3-ca.pem`, `node-ca.pem`, `nodes/<node ID>.{pem,key}`, `ready` |
 | `target` | the record of the resolved engine or cluster (section 15) |
 | `namespace-uid` | the namespace marker (section 7; Kubernetes) |
+| `ssh-known-hosts` | the lines of the user's known_hosts that accepted `CE_HOST` at the first install, as `ssh-keygen -F` finds them (hashed, `@cert-authority` and `@revoked` lines included): from then on the only known_hosts of every ssh to it (section 16; PLAN 10.7) |
 
 A secret the env file names by its `*_FILE` setting is read from that file instead.
 
@@ -597,7 +598,19 @@ for shared servers. The default is `K8S_STORAGE=pvc` on the default class or
   prints the pair that reaches it from the operator's machine: `ssh -L` to the
   server's loopback, and `k3s kubectl port-forward` on the server.
 - **Docker.** S3 on `BIND`; the admin port on the loopback address. For `CE_HOST`,
-  `--status` prints the `ssh -L` command that reaches it.
+  `--status` prints the `ssh -L` command that reaches it. There the loopback address
+  is the server's, so whether a port is free and whether the node is ready are asked
+  on the server, by its own curl over ssh (PLAN 10.7): a port by curl's exit status
+  (7, nothing answered, is free; anything else is in use), `/readyz` by the status
+  line of its headers (`-D -`), over TLS with the deployment's CA streamed on ssh's
+  standard input (`--cacert /dev/stdin`), never `-k`, never through a proxy, the
+  address given with `--resolve` (an IPv6 address needs no brackets there, which
+  would not be plain), and `-q` first so no `.curlrc` is read (the script's curls on
+  this machine too). An ssh that fails while `/readyz` is asked reads as `000`, and
+  the wait goes on. That is simpler than an `ssh -L` forward with a free local port, a
+  background process and a trap, and reads nothing back but a status line; the CA is
+  a certificate, not a secret. S3 is said to be at the HostName `ssh -G` gives for
+  `CE_HOST` (the target's, behind a ProxyJump).
 
 So `admin` / `admin` is never published by a default the script chose.
 
@@ -658,6 +671,87 @@ a second compose file in all but name. So:
   `init` service finds the directory complete and writes nothing (section 3), and the
   nodes, which start as soon as `init` completes, open the key that `STATE_DIR` already
   holds.
+
+**As built (PLAN 10.8, `deploy/lib/compose.sh`).** The compose project is the
+deployment's name. Its two copies of the secrets are PLAN 10.3's, with the same
+guarantees and code (`secrets_install`): the config unit is the labelled volume
+`<name>-config`, which the override names as compose's `config` volume (`external:
+true`, so compose neither makes nor labels it), and the secrets unit is the directory
+of compose's file secrets - read back and put as tar streams, compared file by file
+with `STATE_DIR`'s, put only where missing, a difference refused - on `CE_HOST` over
+ssh (`test -d`, `tar -c`/`tar -x -o` on standard input and output, `chmod`), never as
+an argument. Every install sets its files 0444 and the directory 0700 again, and
+relabels it under enforcing SELinux (`getenforce`; on `CE_HOST`, a missing one, exit
+127, is no SELinux). The record of a cluster ends in `mode=cluster` (a standalone
+record has no such line, as every record of 10.3 and 10.5): a deployment is never
+installed or removed in the other mode. The override sets, for every service, the
+image with `pull_policy: never` and the labels; for `init`, `--validity` and `--hosts`
+(with Vault, `init` runs `version` - there is no key file to seal - and the
+passphrase secret of `compose.yaml` is an empty file of `compose/none/`); for each
+node, `CACTUSFS_DRIVE_LABELS` of compose's volume names, `CACTUSFS_UPGRADE_MODE=off`,
+the restart policy of section 4 (`unless-stopped`, `always` on Podman), Vault's
+settings and token secret, and the env file's `CACTUSFS_*` lines that `compose.yaml`
+does not interpolate; labels on compose's volumes and its default network.
+`compose.env` holds every variable `compose.yaml` interpolates, read from the file
+itself - the image, `CACTUSFS_PORT_BASE_1` to `_4` (`S3_PORT / 100`), the env file's
+value of a node setting or nothing - and a variable the script does not know fails
+the run; a value with a character compose's reader of env files may take as quoting
+or a comment is refused. In cluster mode `S3_PORT` ends in `00`, `ADMIN_PORT` is
+`S3_PORT + 1`, and `ADMIN_BIND` and `DRIVES` stay at their defaults. Before anything
+changes: the operator's node certificates and a Vault CA are refused (not carried
+yet); the Docker context must reach a local socket (`unix://`, `npipe://`) and Podman
+must not be a remote service (but on macOS, whose Podman machine shares the home
+directory); compose must answer; the deployment's containers (by label) must be of
+this target and compose's (a standalone node of the name is refused), and no
+container of a compose project of the name may lack the label; the volumes labelled
+with the name must be of this target and compose's names or `<name>-config`, and none
+of compose's names may be there unlabelled; data without a record needs `--adopt`,
+and data without the key file is refused; every port of the four nodes must be free
+or the deployment's own (another container's binding refused by name; then a probe,
+on `CE_HOST` by the server's curl, where only exit 7 is free). compose runs `up -d
+--no-build`, from the entry's files, under `env -i` (on `CE_HOST`, `env -i` with a
+fixed `PATH` and the user's `HOME`, asked with `printenv HOME`); each node is ready
+when `/readyz` of its admin port answers 200 (on `CE_HOST`, the server's curl with
+the CA sent beside the compose files). An upgrade rewrites the override and runs `up
+-d --no-build --no-deps <service>` for node4, then the voters, the leader last when
+`GET /api/v1/cluster` names it (asked with the root credentials as the bearer API key
+on curl's standard input, `-H @-`), each ready before the next; the first that is not
+within `WAIT_TIMEOUT` ends the run (exit 1), naming the nodes upgraded and those not
+touched. One node that is not ready before an install - failed on a new image or
+secret, stopped, or without its container - is made first, and the readiness of each
+node before the next keeps a second from going down: that is how a failed upgrade is
+rolled back or retried; two or more not ready are refused, naming them and the way out
+(`--uninstall`, then `--install`). A rotation (a Vault token, the operator's
+certificate, key or CA) on a running cluster makes every node again with
+`--force-recreate`, in the same order and with the same readiness stop: a rotated file
+is a new file, and a bind mount of a single file keeps the one the container was made
+with. The rotation is marked pending (`compose/recreate-pending` of the local entry)
+before the target's copy is replaced, every install makes every node again by force
+while the marker is there, and it is removed only once all four are made again and
+ready - a run that stops part way, after both copies were replaced, is finished by the
+next, and its failure says which nodes hold the new files and which the old. On `CE_HOST` the docker
+compose runs with there must report the engine ID that `DOCKER_HOST=ssh://` reaches,
+and the record names the server's compose directory (`compose-dir=`), which a later
+`CE_STATE_DIR` must keep. In cluster mode the env file may not set `CACTUSFS_TOPOLOGY_*`
+or any key `compose.yaml` sets per node, and on macOS a remote Podman service is taken
+only when its default connection is a Podman machine of the machine (127.0.0.1 or
+localhost). Uninstall stops and removes the deployment's containers and its labelled
+network by label (not `compose down`, which acts on compose's project label alone)
+and keeps the volumes and the files; a purge (section 3) first refuses any volume of the
+name that is not compose's 12 or `<name>-config`, then deletes compose's volumes,
+proves none left, deletes `<name>-config`, proves none left, then on `CE_HOST` the
+server's `compose/secrets/` and the rest of its directory (checked gone), and last
+the entry. What remains: `podman compose` with `podman-compose` as its provider may
+merge an override's list of secrets differently from `docker compose` (only Vault's
+token adds one); a remote engine behind a local socket (an ssh tunnel) is not seen.
+Merged onto PLAN 10.4 and 10.7: the cluster's install takes the image as a
+standalone install does (`image_check` with the refusals, the image made before the
+secrets, delivered after them), and on `CE_HOST` its ssh is held to the pin of section
+16 - checked first (`ce_begin`), written at the first install, given alone to every
+later ssh, the Docker CLI's included; `CE_INSTALL_DOCKER=yes` installs Docker CE with
+its compose plugin after the cluster's own refusals. Before anything changes, compose must
+reach the engine as well as answer: `compose ls` (not asked of podman-compose, which has
+no `ls`); Podman's docker-compose provider needs `podman.socket`, which the refusal names.
 
 There is no default KMS. `KMS=local` (a sealed key file) is written in the example and
 must be stated; `KMS=vault` uses Vault Transit; a file without `KMS` is refused. A
@@ -741,6 +835,46 @@ first.
 Ubuntu and the RHEL family, and refuses an unknown distribution, a host that runs k3s
 or Kubernetes (Docker sets the iptables `FORWARD` policy to `DROP`, which breaks pod
 networking) and one with `podman-docker`, unless `CE_INSTALL_DOCKER_FORCE=yes`.
+As built (PLAN 10.7): a server whose `docker --version` says `Docker version` is left
+as it is. Otherwise the distribution is chosen by `ID` of `/etc/os-release` alone -
+`debian` and `ubuntu` (by `VERSION_CODENAME`), `rhel`, and `rocky`, `almalinux` and
+`centos` (Docker's `centos` repository); a derivative that only says `ID_LIKE` is
+refused, and `CE_INSTALL_DOCKER_FORCE` overrides only the Kubernetes and
+`podman-docker` refusals (an unknown distribution has no repository to install
+from). Kubernetes counts as there when any of `/etc/rancher`, `/var/lib/rancher`,
+`/etc/kubernetes`, `/var/lib/kubelet`, `/snap/microk8s`, `/var/snap/microk8s`,
+`/var/lib/k0s`, `/etc/k0s` or a `k3s`, `k0s` or `kubelet` binary is (installed, the
+stricter reading of "runs"), or `ps -e -o comm=` shows `kubelet`, `kubelite`, `k3s*`
+or `k0s*` running (one plain question; `pgrep -x a|b` would not be plain, and a
+server without `ps` is warned about and judged by its files); `podman-docker` when
+its package is installed or `docker --version` names another program. The user is
+root, or has `sudo -n` (asked with `sudo -n true`; refused otherwise); a user other
+than root also needs `CE_DOCKER_GROUP=yes` (below). Every question comes before the
+first change, the server's ports among them (`curl` there; a Debian or Ubuntu server
+without curl yet is said, as the install brings it, and asked again by the install's
+port check; on the RHEL family it is refused). What needs the engine - the
+deployment's containers and volumes, other containers' ports, the engine's ID - can
+only be asked once it is installed, and is, before anything of the deployment is
+made. Docker's signing key is fetched over HTTPS by the server's curl (`-q
+--proto =https --tlsv1.2`, never `-k`), as the user, into a directory of its own
+(`mktemp -d`), and read there by the server's gpg with that directory as its home:
+one primary key whose fingerprint is `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF
+CD88` for Debian and Ubuntu, `060A 61C5 1B55 8A7F 742B 77AA C52F EB6B 621E 9F35` for
+the RHEL family, as Docker publishes them (confirmed against the keys
+download.docker.com serves, 2026-11-22). Only then is it installed where the package
+manager trusts it (`install -m 0644`, as root); another key is never put there - its
+directory is removed and the run fails. The repository's definition is written by
+`dd` from ssh's standard input, as Docker's pages write it: the deb822
+`/etc/apt/sources.list.d/docker.sources` (Types, URIs, Suites, Components,
+Architectures from `dpkg --print-architecture`, Signed-By), or the `docker-ce-stable`
+repository of Docker's `docker-ce.repo` as `/etc/yum.repos.d/docker-ce.repo` with
+`gpgkey=file://` the key checked (Docker's names the URL it was fetched from); then
+`docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin` and
+`docker-compose-plugin` are installed and the service enabled. `DOCKER_HOST=ssh://`
+reaches the engine as the ssh user, which needs the group `docker` - root on that
+server: a user other than root is added to it only with `CE_DOCKER_GROUP=yes`;
+without it the install is refused before any change, naming the `usermod` command
+(threat model, question 80).
 
 ### 13. Windows through WSL 2
 
@@ -749,6 +883,10 @@ PowerShell entry point, and Git Bash is not supported.
 
 ### 14. How it is tested
 
+`make test-deploy DEPLOY_MODE=cluster` runs the lifecycle of a compose cluster (PLAN
+10.8): install, the round trip, `kms.json` and compose's secret files checked, an
+upgrade with the object read from whichever node answers all through it, `--status`,
+uninstall, reinstall and the purges.
 `make deploy-check` (in `make check`, in the builder) runs `go tool shfmt -ln=posix`,
 `dash -n` and `bash -n` on every file of `deploy/`, a standard-library Go harness in
 `test/deploy` (tag `deployscript`) that runs the real script against recording fakes of
@@ -803,7 +941,41 @@ used through `DOCKER_HOST=ssh://` - whose ssh the Docker CLI starts with the use
 configuration - the same check is made with the script's own ssh, so an unknown key is
 refused first. The key seen at the first install is pinned in the deployment's
 `STATE_DIR` entry, and a later run that sees another is refused even if `known_hosts`
-was changed.
+was changed. Every ssh of the script also runs with `-o ConnectTimeout=20 -o
+ControlPath=none` (no multiplexing: each connection is checked on its own).
+
+As built for `CE_HOST` (PLAN 10.7), the pin is enforced by ssh itself, never read from
+its messages (which the server can write to: the review of 10.7 found a pin parsed
+from `ssh -v` forgeable by the remote command's standard error). At the first
+contact the script's ssh runs `true` there against the user's known_hosts; `ssh -G`
+says the name ssh looks the server up by (its `HostKeyAlias`, else its `HostName`,
+with a port other than 22 as `[host]:port`) and which known_hosts files it reads;
+`ssh-keygen -F <name> -f <file>` copies the lines that name it - hashed lines,
+`@cert-authority` lines (host certificates) and `@revoked` lines as they are - into a
+known_hosts of the run, and ssh must accept the server with that file alone
+(`-o UserKnownHostsFile=<it> -o GlobalKnownHostsFile=none -o
+StrictHostKeyChecking=yes`) before anything else runs there. The install keeps the
+file as `STATE/ssh-known-hosts` (0600), written once `secrets_install` has made the
+entry; every later run copies it into its own directory and every ssh to the server
+is given it alone, so a key it does not hold is refused even when known_hosts accepts
+it. To that copy each run adds the `@revoked` lines `ssh-keygen -F` finds for the
+server in the user's known_hosts files, so a key revoked since the first install is
+refused - and nothing else of them: a new key they accept is never taken, and the pin
+in `STATE` is not changed. A pinned ssh is also given `-o VerifyHostKeyDNS=no -o
+UpdateHostKeys=no -o CheckHostIP=no -o IgnoreUnknown=KnownHostsCommand -o
+KnownHostsCommand=none` (the review of 10.7: a KnownHostsCommand or SSHFP records of
+the user's configuration could otherwise accept a key the pin does not hold;
+`IgnoreUnknown` keeps an ssh older than 8.5 from refusing the option), all of them
+before any argument of its caller. The run's directory is refused when its path holds
+a `:`, as it begins a PATH. The Docker CLI's ssh is held to the same: for `CE_HOST`, the PATH `tool` gives it
+begins with the run's directory (0700, in `TMPDIR`, a plain path, removed by the
+EXIT trap, which secrets.sh's trap carries while it is set) holding an `ssh` shim that
+runs the real ssh - found by its absolute path before PATH is changed - with those
+options and `ConnectTimeout=20 -o ControlPath=none` first, which win over the Docker
+CLI's options and the user's configuration. A ProxyJump's own hop is checked by the
+user's configuration; the key of the target behind it is the pinned one. `CE_HOST`
+names no port: the Docker CLI reads it as the URL `ssh://<CE_HOST>`, so a `:` is
+refused and a port goes in `~/.ssh/config`.
 
 `CE_HOST`, `K3S_SSH` and `BUILD_HOST` are plain values (the `plain()` rule of
 `scripts/remote.sh`: letters, digits and `_./=:@+,-`, not empty, no leading `-`), and
@@ -879,7 +1051,7 @@ under which every tool runs, would take it for a variable to set - and no word m
 
 ## Open, for the owner
 
-Defaults are applied until answered; the threat model has each, numbered 72 to 79.
+Defaults are applied until answered; the threat model has each, numbered 72 to 80.
 
 1. **The local KMS** (72). Default: opted into through the example (`KMS=local` must
    be stated); a cluster on one shared key file needs `ALLOW_SHARED_LOCAL_KMS=yes`.
@@ -897,3 +1069,6 @@ Defaults are applied until answered; the threat model has each, numbered 72 to 7
 8. **Vault by a host name on Kubernetes** (79, PLAN 10.9). Default: `VAULT_ADDR` must
    name Vault by its IPv4 address there, which becomes the NetworkPolicy's one egress
    rule; a host name is refused.
+9. **The group `docker` on a server Docker CE is installed on** (80, PLAN 10.7).
+   Default: `CE_INSTALL_DOCKER=yes` with a user other than root is refused unless
+   `CE_DOCKER_GROUP=yes` says to add that user to the group, which is root there.

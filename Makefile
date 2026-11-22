@@ -89,7 +89,7 @@ help:
 	@echo "  run            run the standalone binary (host)   shell   open a shell in the builder"
 	@echo "  up / down      4-node compose cluster     test-chaos  fault injection"
 	@echo "  test-k8s       the Helm chart on k3s (a privileged container; not part of check)"
-	@echo "  test-deploy    deploy/deploy.sh's lifecycle on this host's engine, standalone (host; not part of check)"
+	@echo "  test-deploy    deploy/deploy.sh's lifecycle on this host's engine, standalone or DEPLOY_MODE=cluster (host; not part of check)"
 	@echo "  clean          remove build output"
 
 ifndef CACTUSFS_IN_BUILDER
@@ -235,6 +235,10 @@ down:
 #   make test-deploy LIFECYCLE_IMAGE=cactusfs:0.7.0-348-amd64
 #   make test-deploy LIFECYCLE_SOURCE=binaries   (make image-binaries, then
 #     the script builds the image from them: IMAGE_SOURCE=binaries)
+# DEPLOY_MODE=cluster runs the lifecycle of a compose cluster of four nodes
+# (PLAN 10.8): install, the round trip, an upgrade one node at a time with
+# the object read all through it, uninstall, reinstall and purge:
+#   make test-deploy DEPLOY_MODE=cluster ENGINE=podman
 # What the lifecycle makes it removes again (the deployment by the script's
 # own purge); see the script for its other settings (LIFECYCLE_*). The image
 # this target builds, cactusfs-lifecycle:<version>-<build>, it removes when
@@ -253,7 +257,8 @@ LIFECYCLE_ENGINE := podman
 else
 LIFECYCLE_ENGINE := env -u DOCKER_HOST -u DOCKER_CONTEXT docker --context $(LIFECYCLE_CONTEXT)
 endif
-LIFECYCLE_RUN := ENGINE=$(ENGINE) LIFECYCLE_CONTEXT=$(LIFECYCLE_CONTEXT)
+DEPLOY_MODE ?= standalone
+LIFECYCLE_RUN := ENGINE=$(ENGINE) LIFECYCLE_CONTEXT=$(LIFECYCLE_CONTEXT) LIFECYCLE_MODE=$(DEPLOY_MODE)
 .PHONY: test-deploy
 test-deploy:
 ifeq ($(LIFECYCLE_SOURCE),binaries)

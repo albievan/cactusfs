@@ -4,6 +4,7 @@ package deploy_test
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,7 +27,9 @@ import (
 // fakeTools are the programs the script may run that touch a machine - and
 // git, which says which commit an image is built from (PLAN 10.4): each is
 // this test binary under that name, and records what it was asked.
-var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "k3s", "curl", "helm", "git"}
+// getenforce and chcon are SELinux's, which a compose cluster asks and
+// relabels its bind-mounted secret files with (PLAN 10.8).
+var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "ssh-keygen", "k3s", "curl", "helm", "git", "getenforce", "chcon"}
 
 // optionalFakes are programs of the machine (hostTools) that a test may
 // put a fake in place of, to make it fail as the machine's would not
@@ -78,11 +81,14 @@ const (
 )
 
 // call is one command a fake was asked to run, with its whole environment.
+// For ssh given -o UserKnownHostsFile=<file>, KnownHosts is what that file
+// held when it ran (the pin of PLAN 10.7, which the run removes after).
 type call struct {
-	Tool  string            `json:"tool"`
-	Args  []string          `json:"args"`
-	Stdin string            `json:"stdin_sha256"`
-	Env   map[string]string `json:"env,omitempty"`
+	Tool       string            `json:"tool"`
+	Args       []string          `json:"args"`
+	Stdin      string            `json:"stdin_sha256"`
+	Env        map[string]string `json:"env,omitempty"`
+	KnownHosts *string           `json:"known_hosts,omitempty"`
 }
 
 // rule is how a fake answers: the first rule of its tool whose words are
@@ -91,9 +97,12 @@ type call struct {
 // SaveStdin also keeps what the call read, in that file of the rig's
 // directory (the last such call's). A rule with After holds only once an
 // earlier call of the run, of the same tool, held all those words: an
-// engine whose listing changes after a deletion (PLAN 10.5's purge). A rule with Files writes, for each
-// option it names, the content into the path that follows that option among
-// the arguments, as a program writes a file it is told to (--iidfile,
+// engine whose listing changes after a deletion (PLAN 10.5's purge). A
+// rule with Until holds only while no earlier call of the run, of any
+// tool, held all those words: a node that is not ready until compose has
+// made it again (PLAN 10.8). A rule with Files writes, for each option it
+// names, the content into the path that follows that option among the
+// arguments, as a program writes a file it is told to (--iidfile,
 // --metadata-file, --digestfile). A rule with TermParent sends SIGTERM to
 // the process that started the fake - the shell waiting on it - as a signal
 // would reach it mid-command. SleepMs keeps the fake running that long, as
@@ -103,6 +112,7 @@ type rule struct {
 	Tool       string            `json:"tool"`
 	Contains   []string          `json:"contains"`
 	After      []string          `json:"after,omitempty"`
+	Until      []string          `json:"until,omitempty"`
 	Stdout     string            `json:"stdout"`
 	Stderr     string            `json:"stderr,omitempty"`
 	Exit       int               `json:"exit"`
@@ -122,7 +132,8 @@ func terminate(pid int) error {
 }
 
 // earlier is true when a call of the transcript before the last - the
-// fake's own, written first - is of the tool and holds every word.
+// fake's own, written first - is of the tool (any tool for "") and holds
+// every word.
 func earlier(rig *os.Root, tool string, words []string) (bool, error) {
 	data, err := rig.ReadFile(transcriptName)
 	if err != nil {
@@ -134,7 +145,7 @@ func earlier(rig *os.Root, tool string, words []string) (bool, error) {
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
 			return false, err
 		}
-		if c.Tool == tool && containsAll(c.Args, words) {
+		if (tool == "" || c.Tool == tool) && containsAll(c.Args, words) {
 			return true, nil
 		}
 	}
@@ -160,6 +171,18 @@ func fake(name string, args []string) int {
 	for _, kv := range os.Environ() {
 		k, v, _ := strings.Cut(kv, "=")
 		c.Env[k] = v
+	}
+	if name == "ssh" {
+		for _, a := range args {
+			if path, ok := strings.CutPrefix(a, "UserKnownHostsFile="); ok {
+				kh, err := readIn(path)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "fake ssh: the known_hosts it was given: %v\n", err)
+					return 255
+				}
+				c.KnownHosts = &kh
+			}
+		}
 	}
 	line, err := json.Marshal(c)
 	if err != nil {
@@ -190,6 +213,15 @@ func fake(name string, args []string) int {
 			return 125
 		}
 	}
+	// The Docker CLI reaches DOCKER_HOST=ssh://<destination> by starting
+	// "ssh" from its PATH (docker/cli connhelper): so does this fake, which
+	// is how a test sees which ssh that is, and with which options.
+	if host, ok := strings.CutPrefix(os.Getenv("DOCKER_HOST"), "ssh://"); ok && name == "docker" {
+		if code := dialSSH(host); code != 0 {
+			fmt.Fprintf(os.Stderr, "fake docker: error during connect: ssh exited %d\n", code)
+			return 1
+		}
+	}
 	data, err := rig.ReadFile(rulesName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fake %s: rules: %v\n", name, err)
@@ -211,6 +243,16 @@ func fake(name string, args []string) int {
 				return 125
 			}
 			if !ok {
+				continue
+			}
+		}
+		if len(r.Until) > 0 {
+			done, err := earlier(rig, "", r.Until)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fake %s: transcript: %v\n", name, err)
+				return 125
+			}
+			if done {
 				continue
 			}
 		}
@@ -251,6 +293,68 @@ func fake(name string, args []string) int {
 			return 125
 		}
 		return r.Exit
+	}
+	return 0
+}
+
+// readIn is what the file holds, read within its own directory.
+func readIn(path string) (string, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(filepath.Base(path))
+	return string(data), err
+}
+
+// plainDestination is an ssh destination of letters, digits and _.@-, not
+// beginning with a hyphen.
+var plainDestination = regexp.MustCompile(`^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*$`)
+
+// destinationChars are the characters of a plain destination.
+const destinationChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.@-"
+
+// spelt is the word written again in the characters of destinationChars,
+// each taken from that constant (a word plainDestination matched).
+func spelt(word string) string {
+	var b strings.Builder
+	for i := range len(word) {
+		if j := strings.IndexByte(destinationChars, word[i]); j >= 0 {
+			b.WriteByte(destinationChars[j])
+		}
+	}
+	return b.String()
+}
+
+// dialSSH runs the ssh the fake docker's PATH finds first as the Docker
+// CLI does, with nothing on its standard input, and is its exit status.
+func dialSSH(host string) int {
+	// The destination is a plain word (as the script's CE_HOST and
+	// BUILD_HOST are), never an option or anything a shell would read; it
+	// is handed to ssh spelt in the characters of destinationChars.
+	if !plainDestination.MatchString(host) {
+		fmt.Fprintf(os.Stderr, "fake docker: %q is not a plain destination\n", host)
+		return 255
+	}
+	host = spelt(host)
+	path, err := exec.LookPath("ssh")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake docker: no ssh on its PATH: %v\n", err)
+		return 127
+	}
+	cmd := exec.CommandContext(context.Background(), path, "-o", "ConnectTimeout=30", "-T", "--", host, "docker", "system", "dial-stdio")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "LC_ALL=C"}
+	if agent, ok := os.LookupEnv("SSH_AUTH_SOCK"); ok {
+		cmd.Env = append(cmd.Env, "SSH_AUTH_SOCK="+agent)
+	}
+	cmd.Stdout, cmd.Stderr = io.Discard, os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		return 126
 	}
 	return 0
 }
@@ -437,17 +541,18 @@ func readRepoFile(t *testing.T, rel string) []byte {
 }
 
 // deployFiles are the files of the repository the script reads, relative
-// to it: deploy/ itself, the Dockerfile (which pins the helm and runtime
-// images, and builds the image) and internal/buildinfo/VERSION (the release
-// an image built from source is). The chart it renders is copied only into
-// a rig that renders (rig.chart).
+// to it: deploy/ itself, the compose file a cluster on Docker runs (PLAN
+// 10.8), the Dockerfile (which pins the helm and runtime images, and builds
+// the image) and internal/buildinfo/VERSION (the release an image built
+// from source is). The chart it renders is copied only into a rig that
+// renders (rig.chart).
 func deployFiles(t *testing.T) []string {
 	t.Helper()
 	libs, err := filepath.Glob(filepath.Join(repoRoot, "deploy", "lib", "*.sh"))
 	if err != nil || len(libs) == 0 {
 		t.Fatalf("no deploy/lib/*.sh: %v", err)
 	}
-	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example", "Dockerfile", "internal/buildinfo/VERSION"}
+	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example", "deploy/compose/compose.yaml", "Dockerfile", "internal/buildinfo/VERSION"}
 	for _, l := range libs {
 		files = append(files, filepath.ToSlash(filepath.Join("deploy", "lib", filepath.Base(l))))
 	}

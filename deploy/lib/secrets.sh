@@ -27,8 +27,14 @@
 #   (dd, ce here or on CE_HOST, podman), standalone, the two labelled named
 #   volumes <name>-secrets and <name>-config, holding the same files; the
 #   node is given them as CACTUSFS_*_FILE and CACTUSFS_KMS_KEY_FILE (PLAN
-#   10.5), so it never makes a key file of its own. Rancher Desktop (10.6),
-#   cluster mode on Docker (compose's config volume, 10.8) and Kubernetes
+#   10.5), so it never makes a key file of its own. In cluster mode on a
+#   Docker engine (PLAN 10.8, deploy/lib/compose.sh) the config unit is the
+#   same labelled volume <name>-config, which compose mounts as its "config"
+#   volume (so its init service finds it complete and writes nothing), and
+#   the secrets unit is the directory of compose's file secrets,
+#   compose/secrets/ of the entry - or of CE_STATE_DIR on CE_HOST - (0700,
+#   its files 0444: bind mounts, ADR-0033 section 10), read back and put
+#   as tar streams like a volume. Rancher Desktop (10.6) and Kubernetes
 #   (Secrets of the namespace: read back and compared by 10.9, wired here by
 #   10.10) keep their copies as those steps build;
 #   secrets_where and secrets_install are where they are dispatched.
@@ -59,14 +65,13 @@
 # redirection, and copies are compared by cmp. What is said of a secret is
 # its file's name.
 
-# secrets_where: "volumes" when this step keeps the target's copy - a
-# standalone deployment on a Docker engine - else the step of PLAN
-# milestone 10 that will.
+# secrets_where: "volumes" when this file keeps the target's copy - a
+# deployment on a Docker engine, standalone or a compose cluster (PLAN
+# 10.8: its secrets unit a directory, its config unit a volume) - else the
+# step of PLAN milestone 10 that will.
 secrets_where() {
 	if on_kubernetes; then
 		echo 10.10
-	elif [ "$(setting DEPLOY_MODE)" = cluster ]; then
-		echo 10.8
 	else
 		case $TARGET in
 		dd | ce | podman) echo volumes ;;
@@ -97,6 +102,103 @@ secrets_settings() {
 	_s_context=$(docker_context)
 	_s_ce_host=
 	[ "$TARGET" != ce ] || _s_ce_host=$(setting CE_HOST)
+	_s_mode=$(setting DEPLOY_MODE)
+	# In cluster mode the secrets unit is the directory of compose's file
+	# secrets on the machine compose runs on: compose.sh sets _cp_dir, the
+	# deployment's compose directory there, before it calls anything here.
+	_s_secdir=
+	if [ "$_s_mode" = cluster ]; then
+		[ -n "${_cp_dir:-}" ] || fail "internal: cluster mode without its compose directory (compose_settings)"
+		_s_secdir=$_cp_dir/secrets
+	fi
+}
+
+# unit_place <unit>: where the target keeps a unit, for the messages - its
+# labelled volume, or for the secrets of a compose cluster the directory of
+# compose's file secrets.
+unit_place() {
+	if [ "$1" = secrets ] && [ -n "$_s_secdir" ]; then
+		if [ -n "$_s_ce_host" ]; then
+			printf "compose's secret files %s on %s" "$_s_secdir" "$_s_ce_host"
+		else
+			printf "compose's secret files %s" "$_s_secdir"
+		fi
+	else
+		printf 'the volume %s-%s' "$_s_name" "$1"
+	fi
+}
+
+# secdir_exists: true when the directory of compose's secret files is
+# there - asked of CE_HOST over ssh, where "test -d" answers 0 or 1 and
+# anything else fails the run (an error is never taken for "not there").
+secdir_exists() {
+	if [ -z "$_s_ce_host" ]; then
+		[ -d "$_s_secdir" ]
+		return
+	fi
+	_se_status=0
+	query on_host "$_s_ce_host" test -d "$_s_secdir" </dev/null || _se_status=$?
+	case $_se_status in
+	0) return 0 ;;
+	1) return 1 ;;
+	*) fail "could not ask $_s_ce_host whether $_s_secdir is there (exit $_se_status; ssh's message is above)" ;;
+	esac
+}
+
+# secdir_fetch <tar file>: the directory of compose's secret files as a tar
+# stream of "secrets", into the file - on CE_HOST through ssh's standard
+# output.
+secdir_fetch() {
+	if [ -z "$_s_ce_host" ]; then
+		tar -c -f "$1" -C "${_s_secdir%/*}" secrets
+	else
+		query on_host "$_s_ce_host" tar -c -f - -C "${_s_secdir%/*}" secrets </dev/null >"$1" ||
+			fail "could not read $(unit_place secrets) (ssh's message is above)"
+	fi
+}
+
+# secdir_make: the directory of compose's secret files, made with the
+# directories above it of the deployment's entry, each 0700 - on CE_HOST
+# those below CE_STATE_DIR.
+secdir_make() {
+	if [ -z "$_s_ce_host" ]; then
+		mkdir -p "$_s_secdir"
+		chmod 0700 "$_s_secdir" "${_s_secdir%/*}"
+		return 0
+	fi
+	run on_host "$_s_ce_host" mkdir -p "$_s_secdir" </dev/null
+	_sm_compose=${_s_secdir%/*}
+	_sm_entry=${_sm_compose%/*}
+	run on_host "$_s_ce_host" chmod 0700 "${_sm_entry%/*}" "$_sm_entry" "$_sm_compose" "$_s_secdir" </dev/null
+}
+
+# secdir_put <tar file> <name>...: the names of the tar stream extracted
+# into the directory of compose's file secrets, and each file made 0444:
+# the nodes run as 65532 and a bind-mounted file keeps its owner and mode
+# (ADR-0033 section 10); the 0700 directory keeps them the operator's.
+secdir_put() {
+	_dp_tar=$1
+	shift
+	_dp_files=
+	for _dp_name in "$@"; do
+		[ "$_dp_name" != . ] || continue
+		[ -d "$STATE/secrets/$_dp_name" ] || _dp_files="$_dp_files $_dp_name"
+	done
+	if [ -z "$_s_ce_host" ]; then
+		tar -x -o -f "$_dp_tar" -C "$_s_secdir"
+		for _dp_name in $_dp_files; do
+			chmod 0444 "$_s_secdir/$_dp_name"
+		done
+		chmod 0700 "$_s_secdir"
+		return 0
+	fi
+	run on_host "$_s_ce_host" tar -x -o -f - -C "$_s_secdir" <"$_dp_tar"
+	set --
+	for _dp_name in $_dp_files; do
+		set -- "$@" "$_s_secdir/$_dp_name"
+	done
+	[ $# -eq 0 ] || run on_host "$_s_ce_host" chmod 0444 "$@" </dev/null
+	run on_host "$_s_ce_host" chmod 0700 "$_s_secdir" </dev/null
 }
 
 # target_engine <run|query> <word>...: a command of the target's engine -
@@ -324,7 +426,11 @@ rotated() {
 # there (by their names), and what a run would do. Nothing is read from a
 # file and nothing is asked of the target.
 secrets_plan() {
-	say "secrets: kept in $STATE (directories 0700, files 0600) and on $(engine) in the labelled volumes $(setting DEPLOY_NAME)-secrets and $(setting DEPLOY_NAME)-config, put there before anything starts"
+	if [ "$(setting DEPLOY_MODE)" = cluster ]; then
+		say "secrets: kept in $STATE (directories 0700, files 0600) and on $(engine) in the labelled volume $(setting DEPLOY_NAME)-config and compose's secret files (compose/secrets/, files 0444), put there before anything starts"
+	else
+		say "secrets: kept in $STATE (directories 0700, files 0600) and on $(engine) in the labelled volumes $(setting DEPLOY_NAME)-secrets and $(setting DEPLOY_NAME)-config, put there before anything starts"
+	fi
 	for _sp in secrets/root-access-key secrets/root-secret-key secrets/kms-passphrase secrets/vault-token config/kms.json config/ready; do
 		if [ -f "$STATE/$_sp" ]; then
 			say "secrets: $STATE/$_sp is there and is used as it is"
@@ -368,7 +474,8 @@ secrets_check() {
 	_si_found=
 	for _si_vol in $(printf '%s\n' "$_si_out" | printable); do
 		case $_si_vol in
-		"$_s_name-secrets" | "$_s_name-config") _si_found="$_si_found $_si_vol" ;;
+		"$_s_name-config") _si_found="$_si_found $_si_vol" ;;
+		"$_s_name-secrets") [ -n "$_s_secdir" ] || _si_found="$_si_found $_si_vol" ;;
 		esac
 	done
 	if [ -n "$_si_found" ]; then
@@ -383,8 +490,20 @@ secrets_check() {
 			_si_have="$_si_have ${_si_vol#"$_s_name"-}"
 		done
 	fi
+	# A compose cluster's secrets unit is a directory, there or not.
+	if [ -n "$_s_secdir" ] && secdir_exists; then
+		_si_have="$_si_have secrets"
+	fi
 	if [ -n "$_si_have" ] && [ ! -f "$STATE/target" ] && [ "$ADOPT" != 1 ]; then
-		refuse "the deployment's volumes ($(for _u in $_si_have; do printf '%s ' "$_s_name-$_u"; done | sed 's/ $//')) are on $(engine), and $STATE holds no record of them: they were made from another machine or another STATE_DIR, or the record was lost; say --adopt to take the secrets they hold into $STATE"
+		if [ -n "$_s_secdir" ]; then
+			_si_what=$(for _u in $_si_have; do
+				unit_place "$_u"
+				printf ', '
+			done | sed 's/, $//')
+		else
+			_si_what="the deployment's volumes ($(for _u in $_si_have; do printf '%s ' "$_s_name-$_u"; done | sed 's/ $//'))"
+		fi
+		refuse "$_si_what are on $(engine), and $STATE holds no record of them: they were made from another machine or another STATE_DIR, or the record was lost; say --adopt to take the secrets they hold into $STATE"
 	fi
 	_si_img=$(helper_image)
 	image_ready target_engine "$_si_img"
@@ -432,7 +551,7 @@ secrets_install() {
 			if [ -n "$_rg" ] && cmp -s "$_rg" "$_si_there/$_si_file"; then
 				continue
 			fi
-			refuse "$_si_local/$_si_file and $_si_file in the volume $_s_name-$_si_unit differ: two copies of one secret, and the script never chooses between them (ADR-0033 section 3); find out which one the deployment uses and remove the other, then run again"
+			refuse "$_si_local/$_si_file and $_si_file in $(unit_place "$_si_unit") differ: two copies of one secret, and the script never chooses between them (ADR-0033 section 3); find out which one the deployment uses and remove the other, then run again"
 		done
 	done
 	given_check "$_s_root_id" ROOT_ACCESS_KEY_FILE secrets root-access-key keep
@@ -456,11 +575,17 @@ secrets_install() {
 			[ ! -f "$_si_local/$_si_file" ] || continue
 			! rotated "$_si_unit/$_si_file" || continue
 			copy_new "$_si_there/$_si_file" "$_si_local/$_si_file"
-			warn "the local copy $_si_local/$_si_file was missing: copied back from the volume $_s_name-$_si_unit"
+			warn "the local copy $_si_local/$_si_file was missing: copied back from $(unit_place "$_si_unit")"
 		done
 	done
 	secrets_make
 	config_make
+	# A compose cluster's nodes hold a rotated file only once they are made
+	# again: the rotation is marked as pending first, and the marker goes
+	# only when every node has been made again and is ready (compose.sh).
+	if [ -n "$_s_secdir" ] && [ -n "$_si_rotate" ]; then
+		recreate_pending_mark
+	fi
 	secrets_put "$_si_have"
 	for _si_entry in $_si_rotate; do
 		rotation_given "${_si_entry%%=*}"
@@ -468,9 +593,16 @@ secrets_install() {
 		say "secrets: rotated $_rk: $STATE/${_si_entry%%=*} replaced, after the volume's copy"
 	done
 	trap - EXIT HUP INT TERM
+	# The cleanup of CE_HOST's work directory, which this run's trap held
+	# too, is set again (deploy/lib/ce.sh).
+	[ -z "${_ce_trap:-}" ] || ce_trap_set
 	secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
 	SECRETS_WORK=
-	say "secrets: $STATE and the volumes $_s_name-secrets and $_s_name-config hold the same secrets"
+	if [ -n "$_s_secdir" ]; then
+		say "secrets: $STATE, $(unit_place secrets) and $(unit_place config) hold the same secrets"
+	else
+		say "secrets: $STATE and the volumes $_s_name-secrets and $_s_name-config hold the same secrets"
+	fi
 }
 
 # engine_id_ask: _engine_id, the engine's own ID - "docker info"'s ID, or
@@ -515,6 +647,31 @@ engine_id_check() {
 	_eic_kms=$(sed -n 's/^kms=//p' "$STATE/target" | head -n 1 | printable)
 	[ "$_eic_kms" = "$_s_kms" ] ||
 		refuse "$STATE was made with KMS=$_eic_kms, and the settings now say KMS=$_s_kms: the script does not move a deployment to another KMS"
+	state_mode_check
+}
+
+# state_mode_check: the deployment's mode is the one its record names - a
+# line "mode=cluster" for a compose cluster (PLAN 10.8), none for a
+# standalone node, as every record of 10.3 and 10.5 is. The script never
+# turns one into the other: their volumes, and the nodes the data was
+# written by, differ.
+state_mode_check() {
+	[ -f "$STATE/target" ] || return 0
+	_smc=$(sed -n 's/^mode=//p' "$STATE/target" | head -n 1 | printable)
+	[ -n "$_smc" ] || _smc=standalone
+	[ "$_smc" = "$(setting DEPLOY_MODE)" ] ||
+		refuse "$STATE was made with DEPLOY_MODE=$_smc, and the settings now say DEPLOY_MODE=$(setting DEPLOY_MODE): the script does not turn a deployment into the other mode; set DEPLOY_MODE back, or give the new one another DEPLOY_NAME"
+}
+
+# state_lines: the lines of the record after the engine's identity - its
+# ID, the KMS, and for a compose cluster its mode.
+# On CE_HOST a cluster's record also names the server's compose directory
+# (compose.sh's _cp_rbase and _cp_dir), which a later CE_STATE_DIR must
+# keep.
+state_lines() {
+	printf 'engine-id=%s\nkms=%s\n' "$_engine_id" "$_s_kms"
+	[ "$(setting DEPLOY_MODE)" != cluster ] || printf 'mode=cluster\n'
+	[ "$(setting DEPLOY_MODE)" != cluster ] || [ -z "${_cp_rbase:-}" ] || printf 'compose-dir=%s\n' "$_cp_dir"
 }
 
 # secrets_begin: the deployment's entry of STATE_DIR and the directory of
@@ -533,8 +690,10 @@ secrets_begin() {
 	SECRETS_WORK=$(mktemp -d "$STATE/.work.XXXXXX")
 	# The paths the cleanup works on are written into the trap now, quoted,
 	# not read when it fires: nothing a function does in between - by
-	# assigning a variable of the same name - can point it elsewhere.
-	trap "secrets_end $(shown "$SECRETS_WORK") $(shown "$STATE") $(shown "$_sb_top")" EXIT
+	# assigning a variable of the same name - can point it elsewhere. The
+	# cleanup of CE_HOST's work directory (_ce_trap, deploy/lib/ce.sh), text
+	# whose path was written into it when it was made, goes with it.
+	trap "secrets_end $(shown "$SECRETS_WORK") $(shown "$STATE") $(shown "$_sb_top")${_ce_trap:+; $_ce_trap}" EXIT
 	trap 'exit 129' HUP
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
@@ -570,7 +729,7 @@ state_record() {
 		[ -n "$_engine_rerecord" ] || return 0
 		{
 			head -n 1 "$STATE/target"
-			printf 'engine-id=%s\nkms=%s\n' "$_engine_id" "$_s_kms"
+			state_lines
 		} >"$SECRETS_WORK/target.new"
 		replace_file "$SECRETS_WORK/target.new" "$STATE/target"
 		say "state: recorded the engine $_engine_id in $STATE/target, in place of the one it replaced"
@@ -579,7 +738,7 @@ state_record() {
 	{
 		engine_identity
 		echo
-		printf 'engine-id=%s\nkms=%s\n' "$_engine_id" "$_s_kms"
+		state_lines
 	} | put_new "$STATE/target"
 	say "state: recorded $STATE/target ($(engine_identity), engine $_engine_id, KMS=$_s_kms)"
 }
@@ -591,16 +750,25 @@ secrets_fetch() {
 	mkdir "$SECRETS_WORK/target"
 	[ -n "$1" ] || return 0
 	_sf_ctr=$_s_name-volumes
-	# shellcheck disable=SC2086 # unit names, without spaces
-	io_container "$_sf_ctr" $1
+	_sf_vols=
 	for _sf_unit in $1; do
-		target_engine query cp "$_sf_ctr:/var/lib/cactusfs/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
-		[ "$TARGET" != podman ] || volume_root_check "$SECRETS_WORK/fetch.tar" "$_s_name-$_sf_unit"
+		[ "$_sf_unit" = secrets ] && [ -n "$_s_secdir" ] && continue
+		_sf_vols="$_sf_vols $_sf_unit"
+	done
+	# shellcheck disable=SC2086 # unit names, without spaces
+	[ -z "$_sf_vols" ] || io_container "$_sf_ctr" $_sf_vols
+	for _sf_unit in $1; do
+		if [ "$_sf_unit" = secrets ] && [ -n "$_s_secdir" ]; then
+			secdir_fetch "$SECRETS_WORK/fetch.tar"
+		else
+			target_engine query cp "$_sf_ctr:/var/lib/cactusfs/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
+			[ "$TARGET" != podman ] || volume_root_check "$SECRETS_WORK/fetch.tar" "$_s_name-$_sf_unit"
+		fi
 		tar -x -o -f "$SECRETS_WORK/fetch.tar" -C "$SECRETS_WORK/target"
 		rm -f "$SECRETS_WORK/fetch.tar"
 		[ -d "$SECRETS_WORK/target/$_sf_unit" ] || mkdir "$SECRETS_WORK/target/$_sf_unit"
 	done
-	target_engine run rm -f "$_sf_ctr" </dev/null
+	[ -z "$_sf_vols" ] || target_engine run rm -f "$_sf_ctr" </dev/null
 	only_plain "$SECRETS_WORK/target" "a volume of the deployment"
 }
 
@@ -676,7 +844,7 @@ given_check() {
 	if [ -f "$STATE/$3/$4" ] && ! cmp -s "$1" "$STATE/$3/$4"; then
 		_gc_old="$STATE/$3/$4"
 	elif [ -f "$SECRETS_WORK/target/$3/$4" ] && ! cmp -s "$1" "$SECRETS_WORK/target/$3/$4"; then
-		_gc_old="$4 in the volume $_s_name-$3"
+		_gc_old="$4 in $(unit_place "$3")"
 	fi
 	[ -n "$_gc_old" ] || return 0
 	if [ "$5" = rotate ]; then
@@ -698,11 +866,11 @@ secrets_whole() {
 		_sw_half=1
 	fi
 	if [ -n "$_sw_half" ]; then
-		refuse "one of the root credentials is in $STATE/secrets or the volume $_s_name-secrets and the other is in neither: the deployment began with both; give them with ROOT_ACCESS_KEY_FILE and ROOT_SECRET_KEY_FILE"
+		refuse "one of the root credentials is in $STATE/secrets or $(unit_place secrets) and the other is in neither: the deployment began with both; give them with ROOT_ACCESS_KEY_FILE and ROOT_SECRET_KEY_FILE"
 	fi
 	# (A KMS_KEY_FILE always comes with its KMS_PASSPHRASE_FILE: env.sh.)
 	if [ "$_s_kms" = local ] && ! have secrets kms-passphrase && [ -z "$_s_phrase" ] && have config kms.json; then
-		refuse "the key file kms.json is there and its passphrase is in neither $STATE/secrets nor the volume $_s_name-secrets: a new passphrase would open nothing; give the one it was made with in KMS_PASSPHRASE_FILE"
+		refuse "the key file kms.json is there and its passphrase is in neither $STATE/secrets nor $(unit_place secrets): a new passphrase would open nothing; give the one it was made with in KMS_PASSPHRASE_FILE"
 	fi
 	if [ -n "$(files_of "$STATE/config")$(files_of "$SECRETS_WORK/target/config")" ] && ! have config ready; then
 		refuse "the certificates and key file in $STATE/config and the volume $_s_name-config are not complete (no 'ready': a run stopped while making them): nothing in them is made again; if nothing was ever started with them, remove both and run again"
@@ -876,7 +1044,10 @@ devinit_run() {
 		set -- --entrypoint /cactusfs "$_dc_img"
 	fi
 	rm -f "$_dr_in/kms-passphrase"
-	set -- "$@" dev-init --dir /tmp/out --nodes "$_s_name" --validity "$_s_validity" --kms-passphrase-file /tmp/kms-passphrase
+	# A compose cluster's nodes are compose.yaml's node1 to node4.
+	_dr_nodes=$_s_name
+	[ "$_s_mode" != cluster ] || _dr_nodes=node1,node2,node3,node4
+	set -- "$@" dev-init --dir /tmp/out --nodes "$_dr_nodes" --validity "$_s_validity" --kms-passphrase-file /tmp/kms-passphrase
 	[ -z "$_s_hosts" ] || set -- "$@" --hosts "$_s_hosts"
 	local_engine run create --name "$_dr_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
 		--platform "linux/$_dr_arch" --user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges "$@" </dev/null
@@ -959,7 +1130,16 @@ secrets_put() {
 		fi
 	done
 	[ -n "$_sp_units" ] || return 0
+	_sp_vols=
 	for _sp_unit in $_sp_units; do
+		if [ "$_sp_unit" = secrets ] && [ -n "$_s_secdir" ]; then
+			case " $1 " in
+			*" $_sp_unit "*) ;;
+			*) secdir_make ;;
+			esac
+			continue
+		fi
+		_sp_vols="$_sp_vols $_sp_unit"
 		case " $1 " in
 		*" $_sp_unit "*) ;;
 		*) secrets_volume_create "$_sp_unit" ;;
@@ -967,7 +1147,7 @@ secrets_put() {
 	done
 	_sp_ctr=$_s_name-volumes
 	# shellcheck disable=SC2086 # unit names, without spaces
-	io_container "$_sp_ctr" $_sp_units
+	[ -z "$_sp_vols" ] || io_container "$_sp_ctr" $_sp_vols
 	for _sp_unit in $_sp_units; do
 		case " $1 " in
 		*" $_sp_unit "*) _sp_made=0 ;;
@@ -977,9 +1157,10 @@ secrets_put() {
 		if [ -n "$_sp_list" ]; then
 			# shellcheck disable=SC2086 # names without spaces, the list is the point
 			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$STATE/$_sp_unit" $_sp_list
-			target_engine run cp -a - "$_sp_ctr:/var/lib/cactusfs/$_sp_unit" <"$SECRETS_WORK/put.tar"
+			# shellcheck disable=SC2086 # names without spaces
+			unit_put "$_sp_unit" "$SECRETS_WORK/put.tar" $_sp_list
 			rm -f "$SECRETS_WORK/put.tar"
-			say "secrets: put into the volume $_s_name-$_sp_unit what it lacked of $STATE/$_sp_unit: $(printf '%s' "$_sp_list" | grep -vx '\.' | tr '\n' ' ' | sed 's/ $//')"
+			say "secrets: put into $(unit_place "$_sp_unit") what it lacked of $STATE/$_sp_unit: $(printf '%s' "$_sp_list" | grep -vx '\.' | tr '\n' ' ' | sed 's/ $//')"
 		fi
 		_sp_stage=$SECRETS_WORK/rotate-$_sp_unit
 		_sp_names=
@@ -993,10 +1174,44 @@ secrets_put() {
 		if [ -n "$_sp_names" ]; then
 			# shellcheck disable=SC2086 # names without spaces
 			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$_sp_stage" $_sp_names
-			target_engine run cp -a - "$_sp_ctr:/var/lib/cactusfs/$_sp_unit" <"$SECRETS_WORK/put.tar"
+			# shellcheck disable=SC2086 # names without spaces
+			unit_put "$_sp_unit" "$SECRETS_WORK/put.tar" $_sp_names
 			rm -rf "$SECRETS_WORK/put.tar" "$_sp_stage"
-			say "secrets: rotated in the volume $_s_name-$_sp_unit, from the files given:$_sp_names"
+			say "secrets: rotated in $(unit_place "$_sp_unit"), from the files given:$_sp_names"
 		fi
 	done
-	target_engine run rm -f "$_sp_ctr" </dev/null
+	[ -z "$_sp_vols" ] || target_engine run rm -f "$_sp_ctr" </dev/null
+}
+
+# recreate_pending_mark: STATE/compose/recreate-pending lists the files a
+# rotation replaces in a compose cluster (with those of a rotation still
+# pending), written before the target's copy is replaced - also for a
+# cluster on CE_HOST, whose marker is kept here. compose_install makes
+# every node again while it is there.
+recreate_pending_mark() {
+	_rp=$STATE/compose/recreate-pending
+	mkdir -p "$STATE/compose"
+	chmod 0700 "$STATE/compose"
+	{
+		[ ! -f "$_rp" ] || cat "$_rp"
+		for _rp_entry in $_si_rotate; do
+			printf '%s\n' "${_rp_entry%%=*}"
+		done
+	} | sort -u >"$_rp.new"
+	chmod 0600 "$_rp.new"
+	mv -f "$_rp.new" "$_rp"
+	say "secrets: the rotation of$(for _rp_entry in $_si_rotate; do printf ' %s' "${_rp_entry%%=*}"; done) is pending in $_rp until every node of the cluster has been made again and is ready"
+}
+
+# unit_put <unit> <tar file> <name>...: a tar stream of those names into the
+# target's copy of the unit - its volume, through the helper secrets_put
+# made, or the directory of compose's file secrets.
+unit_put() {
+	_up_unit=$1
+	shift
+	if [ "$_up_unit" = secrets ] && [ -n "$_s_secdir" ]; then
+		secdir_put "$@"
+		return 0
+	fi
+	target_engine run cp -a - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
 }

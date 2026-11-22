@@ -1252,14 +1252,14 @@ func TestSecretsRefused(t *testing.T) {
 			{Tool: "docker", Contains: []string{"ps", "name=cactusfs-dev-init"}, Stdout: "cactusfs-dev-init\n"},
 			{Tool: "docker", Contains: []string{"container", "inspect", "cactusfs-dev-init"}, Stdout: "cactusfs|podman\n"},
 		}, "the container cactusfs-dev-init is the deployment's on the target 'podman', not dd"},
-		// Docker CE on a server (PLAN 10.7, whose install does not make the
-		// image yet): secrets_check's own checks of the binaries dev-init
-		// runs from, and of the images the helpers need, are the ones that
-		// refuse there.
-		{"ce: no binaries", ceHost, func(t *testing.T, r *rig) { remove(t, filepath.Join(r.repo, "dist")) }, nil, "no binary for this machine in " + "RELEASE"},
-		{"ce: a binary that is not the one summed", ceHost, binary("linux-"+runtime.GOARCH+"/cactusfs", "another binary"), nil, "/cactusfs does not match "},
-		{"ce: binaries of make build-all", ceHost, binary("BUILDINFO", "packaging=binary\n"), nil, "/BUILDINFO does not say packaging=image"},
-		{"ce: the runtime image absent, offline", ceHost + "OFFLINE=yes\n", nil, []rule{{Tool: "docker", Contains: []string{"image", "inspect", runtimeImage(t)}, Exit: 1}}, "the image " + runtimeImage(t) + " is not on the engine and OFFLINE=yes"},
+		// Docker CE on a server (PLAN 10.7), whose install makes the image
+		// as every Docker target does (PLAN 10.4): image_check refuses
+		// there as here, the tree a commit (a dirty one is refused for a
+		// target on another machine).
+		{"ce: no binaries", ceHost, func(t *testing.T, r *rig) { remove(t, filepath.Join(r.repo, "dist")) }, gitRules(""), "run make image-binaries"},
+		{"ce: a binary that is not the one summed", ceHost, binary("linux-"+runtime.GOARCH+"/cactusfs", "another binary"), gitRules(""), "does not match"},
+		{"ce: binaries of make build-all", ceHost, binary("BUILDINFO", "packaging=binary\n"), gitRules(""), "these are not the binaries of make image-binaries"},
+		{"ce: the runtime image absent, offline", ceHost + "OFFLINE=yes\n", nil, append(gitRules(""), rule{Tool: "docker", Contains: []string{"image", "inspect", runtimeImage(t)}, Stderr: noSuchImage("docker", runtimeImage(t)), Exit: 1}), "OFFLINE=yes, and the base image " + runtimeImage(t) + " is not on docker --context default"},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
@@ -1273,11 +1273,18 @@ func TestSecretsRefused(t *testing.T) {
 				if strings.HasPrefix(env, "TLS_CERT_FILE") {
 					env += "TLS_KEY_FILE=" + r.envFile("key", "a key") + "\n"
 				}
-				r.rules(append(slices.Clone(c.rules), dockerRules(t, devInitOutput(), nil)...)...)
+				rules := slices.Clone(c.rules)
 				args := installDD
 				if strings.HasPrefix(env, ceHost) {
 					args = []string{"--docker", "ce", "--install"}
+					put(t, filepath.Join(r.home, ".ssh", "known_hosts"), "a file ssh-keygen -F is pointed at\n")
+					// The server's host key, accepted by known_hosts, and its
+					// ports free (PLAN 10.7).
+					rules = append(rules, sshConfig(r, "server.example.test", "22", ""), keygenRule("server.example.test", pinLines),
+						rule{Tool: "ssh", Contains: []string{"curl", "http://port.invalid:9000/"}, Exit: 7},
+						rule{Tool: "ssh", Contains: []string{"curl", "http://port.invalid:9001/"}, Exit: 7})
 				}
+				r.rules(append(rules, dockerRules(t, devInitOutput(), nil)...)...)
 				res := r.guarded("KMS=local\n"+env, args...)
 				res.want(t, 2, strings.Replace(c.want, "RELEASE", filepath.Join(r.repo, "dist", "image"), 1))
 				// image_check and secrets_check refuse before the image is
@@ -1327,13 +1334,16 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 		t.Run("ce over ssh", func(t *testing.T) {
 			t.Parallel()
 			r := secretsRig(t, r.fresh(t))
-			r.rules(dockerRules(t, devInitOutput(), nil)...)
-			res := r.guarded("KMS=local\nCE_HOST=deploy@server.example.test\n", "--docker", "ce", "--install")
-			res.want(t, 3, "not built yet (PLAN 10.7)")
+			// The server's ports free and its host key said (PLAN 10.7); the
+			// image given (PLAN 10.4: as TestCEInstall, which proves the
+			// binaries' route), the node ready there.
+			r.rules(ceRules(t, r, engineState{e: ceEngine, devInit: devInitOutput(), ready: true})...)
+			res := r.guarded(ceEnv, "--docker", "ce", "--install")
+			res.want(t, 0, "ready: cactusfs runs")
 			if len(res.calls) == 0 || res.calls[0].Tool != "ssh" || res.calls[0].Args[len(res.calls[0].Args)-1] != "true" {
 				t.Fatalf("the host key was not checked first: %v", res.calls)
 			}
-			if info := callsOf(res, "docker", "info"); len(info) != 1 || info[0].Env["DOCKER_HOST"] != "ssh://deploy@server.example.test" {
+			if info := callsOf(res, "docker", "info", "{{.ID}}"); len(info) != 1 || info[0].Env["DOCKER_HOST"] != "ssh://deploy@server.example.test" {
 				t.Errorf("the server's engine was not asked its ID: %v", info)
 			}
 			for _, c := range callsOf(res, "docker") {
@@ -1442,8 +1452,8 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 				{"docker", "ps", "-a", "--filter", "name=cactusfs-previous", "--format", "{{.Names}}"},
 				{"docker", "volume", "ls", "--filter", "name=cactusfs-", "--format", "{{.Name}}"},
 				{"docker", "ps", "--format", "{{.Names}}|{{.Ports}}"},
-				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9000/"},
-				{"curl", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9001/"},
+				{"curl", "-q", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9000/"},
+				{"curl", "-q", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9001/"},
 				{"docker", "context", "inspect", "default", "--format", "{{.Endpoints.docker.Host}}"},
 				{"docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"},
 				{"docker", "image", "inspect", "--format", "{{.Id}}", workTag(runtime.GOARCH)},

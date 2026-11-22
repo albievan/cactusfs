@@ -128,7 +128,15 @@ tool() {
 	done
 	IFS=$_tool_ifs
 	[ -z "$_tool_set" ] || set -- "$_tool_set" "$@"
-	env -i ${PATH+"PATH=$PATH"} ${HOME+"HOME=$HOME"} LC_ALL=C "$@"
+	# The engine of CE_HOST: the Docker CLI starts "ssh" from its PATH with
+	# the user's configuration, so the PATH it is given begins with the
+	# directory of the shim deploy/lib/ce.sh writes, which runs the real ssh
+	# with the deployment's pinned host keys (ce_shim).
+	_tool_path=${PATH-}
+	if [ -n "${_ce_pin_host:-}" ] && [ "$_tool_set" = "DOCKER_HOST=ssh://$_ce_pin_host" ]; then
+		_tool_path=$_ce_work/bin:$_tool_path
+	fi
+	env -i ${PATH+"PATH=$_tool_path"} ${HOME+"HOME=$HOME"} LC_ALL=C "$@"
 }
 
 # invoke <command> <argument>...: what run and query start - on_host as it
@@ -190,8 +198,15 @@ host_key_check() {
 # plain, and without "=" (the remote shell would read NAME=value as an
 # assignment). One that is not is refused, never quoted. ssh never asks,
 # never accepts a host key it does not already know, and gives up on a host
-# that does not answer within 20 seconds. The destination's host key must
-# have been checked first (host_key_check).
+# that does not answer within 20 seconds. Multiplexing is off
+# (ControlPath=none): every connection is checked on its own. The
+# destination's host key must have been checked first (host_key_check).
+# For CE_HOST once its keys are pinned (deploy/lib/ce.sh), ssh is given the
+# pin as its only known_hosts, and nothing else that could accept a key:
+# no DNS (VerifyHostKeyDNS), no KnownHostsCommand (IgnoreUnknown keeps an
+# ssh older than 8.5, which lacks it, from refusing the option), no keys
+# learnt from the server (UpdateHostKeys) and no check of its address
+# (CheckHostIP) - the same options as the shim's (ce_shim).
 on_host() {
 	_dest=$1
 	shift
@@ -209,7 +224,13 @@ on_host() {
 	*" $_dest "*) ;;
 	*) fail "internal: the host key of $_dest was not checked before it was used (host_key_check)" ;;
 	esac
-	tool ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -- "$_dest" "$@"
+	if [ -n "${_ce_pin_host:-}" ] && [ "$_dest" = "$_ce_pin_host" ]; then
+		tool ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ControlPath=none \
+			-o "UserKnownHostsFile=$_ce_work/known_hosts" -o GlobalKnownHostsFile=none \
+			-o VerifyHostKeyDNS=no -o UpdateHostKeys=no -o CheckHostIP=no -o IgnoreUnknown=KnownHostsCommand -o KnownHostsCommand=none -- "$_dest" "$@"
+	else
+		tool ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ControlPath=none -- "$_dest" "$@"
+	fi
 }
 
 # not_built <step> <text>: the stub of an action that a later step of PLAN

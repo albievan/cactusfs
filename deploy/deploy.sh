@@ -32,6 +32,10 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/docker.sh"
 # shellcheck source=deploy/lib/image.sh
 . "$DEPLOY_DIR/lib/image.sh"
+# shellcheck source=deploy/lib/ce.sh
+. "$DEPLOY_DIR/lib/ce.sh"
+# shellcheck source=deploy/lib/compose.sh
+. "$DEPLOY_DIR/lib/compose.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -237,20 +241,18 @@ case $ACTION in
 esac
 
 # --- the actions ------------------------------------------------------------------
-# A standalone deployment on Docker Desktop, Docker CE on this machine or
-# Podman is built (PLAN 10.5, deploy/lib/docker.sh). The rest are stubs:
-# each says what the step of PLAN milestone 10 that builds it will do, and
-# ends with "not built yet"; a stub changes nothing but the secrets PLAN
-# 10.3 keeps.
+# A standalone deployment on Docker Desktop, Docker CE on this machine or on
+# a server over SSH, or Podman is built (PLAN 10.5, 10.7,
+# deploy/lib/docker.sh and deploy/lib/ce.sh), and a cluster on Docker
+# Desktop, Docker CE here or on CE_HOST, or Podman (PLAN 10.8,
+# deploy/lib/compose.sh). The rest are stubs: each says what the step of
+# PLAN milestone 10 that builds it will do, and ends with "not built yet";
+# a stub changes nothing but the secrets PLAN 10.3 keeps.
 
 # docker_step: the step that builds the Docker-engine actions of this target.
 docker_step() {
-	if [ "$(setting DEPLOY_MODE)" = cluster ]; then
-		echo 10.8
-	elif [ "$TARGET" = rancher ]; then
+	if [ "$TARGET" = rancher ]; then
 		echo 10.6
-	elif [ "$TARGET" = ce ] && [ -n "$(setting CE_HOST)" ]; then
-		echo 10.7
 	else
 		echo 10.5
 	fi
@@ -280,6 +282,10 @@ kubernetes() {
 }
 
 do_install() {
+	if compose_cluster; then
+		compose_install
+		return 0
+	fi
 	if docker_standalone; then
 		docker_install
 		return 0
@@ -309,6 +315,10 @@ do_install() {
 }
 
 do_status() {
+	if compose_cluster; then
+		compose_status
+		return 0
+	fi
 	if docker_standalone; then
 		docker_status
 		return 0
@@ -320,6 +330,10 @@ do_status() {
 }
 
 do_uninstall() {
+	if compose_cluster; then
+		compose_uninstall
+		return 0
+	fi
 	if docker_standalone; then
 		docker_uninstall
 		return 0

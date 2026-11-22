@@ -542,6 +542,17 @@ image_binaries_meant() {
 			refuse "no $_img_rel/$_ibm_file: run make image-binaries, which writes the binaries of the image for linux/amd64 and linux/arm64 with SHA256SUMS and BUILDINFO (the image is for linux/$RESOLVED_ARCH)"
 	done
 	[ -x "$_ibm_bin" ] || refuse "$_ibm_bin is not executable, and the image keeps its mode: run make image-binaries again"
+	image_buildinfo_meant
+	_ibm_sum=$(CDPATH='' cd -- "$_img_rel" && sha256_line "linux-$RESOLVED_ARCH/cactusfs") ||
+		fail "the checksum of $_ibm_bin could not be made"
+	grep -qxF "$_ibm_sum" "$_img_rel/SHA256SUMS" ||
+		refuse "$_ibm_bin does not match $_img_rel/SHA256SUMS: run make image-binaries again"
+}
+
+# image_buildinfo_meant: BUILDINFO of the binaries says packaging=image
+# and nothing but its four lines - _img_version, _img_build and
+# _img_commit - of a version and commit that are valid.
+image_buildinfo_meant() {
 	_ibm_info=$_img_rel/BUILDINFO
 	_ibm_packaging=$(sed -n 's/^packaging=//p' "$_ibm_info" | head -n 1 | printable)
 	[ "$_ibm_packaging" = image ] ||
@@ -553,10 +564,6 @@ image_binaries_meant() {
 	[ "$(cat "$_ibm_info")" = "$_ibm_want" ] ||
 		refuse "$_ibm_info holds more or other than the four lines version=, build=, commit= and packaging=image: run make image-binaries again"
 	image_meant_valid "$_ibm_info"
-	_ibm_sum=$(CDPATH='' cd -- "$_img_rel" && sha256_line "linux-$RESOLVED_ARCH/cactusfs") ||
-		fail "the checksum of $_ibm_bin could not be made"
-	grep -qxF "$_ibm_sum" "$_img_rel/SHA256SUMS" ||
-		refuse "$_ibm_bin does not match $_img_rel/SHA256SUMS: run make image-binaries again"
 }
 
 # image_git <word>...: git in the repository, through query (under "env
@@ -1052,6 +1059,48 @@ image_check() {
 		;;
 	esac
 	_img_checked=1
+}
+
+# image_precheck: on CE_HOST, the refusals of image_check that need no
+# engine and no other machine, asked before anything is done to the server
+# (ce_begin install, ce_install_docker): OFFLINE=yes with a build from
+# source; for binaries, SHA256SUMS and BUILDINFO there, packaging=image and
+# BUILDINFO's four lines, and a binary that is not its SHA256SUMS line (the
+# architecture of the server's engine is not known yet: each binary listed
+# is checked); a tree with uncommitted changes, or of no known commit, for
+# that target on another machine (unless ALLOW_DIRTY=yes). image_check asks
+# all of it again, with the engine. Only reads.
+image_precheck() {
+	image_settings
+	[ -n "$_img_ce_host" ] || return 0
+	if [ "$_img_offline" = yes ] && [ "$_img_source" = source ]; then
+		refuse "OFFLINE=yes and an image built from source (--from-source, IMAGE_SOURCE=source): the build pulls the Dockerfile's base images, Go modules and npm packages; use IMAGE_SOURCE=binaries or an IMAGE that is here"
+	fi
+	_img_remote=1
+	_img_remote_why="Docker CE on $_img_ce_host"
+	case $_img_source in
+	binaries)
+		for _ipc_file in SHA256SUMS BUILDINFO; do
+			[ -f "$_img_rel/$_ipc_file" ] ||
+				refuse "no $_img_rel/$_ipc_file: run make image-binaries, which writes the binaries of the image for linux/amd64 and linux/arm64 with SHA256SUMS and BUILDINFO"
+		done
+		image_buildinfo_meant
+		for _ipc_arch in amd64 arm64; do
+			_ipc_rel=linux-$_ipc_arch/cactusfs
+			[ -f "$_img_rel/$_ipc_rel" ] || continue
+			_ipc_sum=$(CDPATH='' cd -- "$_img_rel" && sha256_line "$_ipc_rel") ||
+				fail "the checksum of $_img_rel/$_ipc_rel could not be made"
+			grep -qxF "$_ipc_sum" "$_img_rel/SHA256SUMS" ||
+				refuse "$_img_rel/$_ipc_rel does not match $_img_rel/SHA256SUMS: run make image-binaries again"
+		done
+		image_dirty_check "the binaries of $_img_rel" "$_img_commit"
+		image_dockerfile_check
+		;;
+	source)
+		image_source_meant
+		image_dirty_check "this tree" "$_img_commit"
+		;;
+	esac
 }
 
 # image_make: see the top of this file.

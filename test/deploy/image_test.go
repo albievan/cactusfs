@@ -1056,7 +1056,7 @@ func TestImageDelivery(t *testing.T) {
 			want: []string{"imported into the containerd of the cluster's one node"},
 			check: func(t *testing.T, f imgFix, res result) {
 				imp := callsOf(res, "ssh", "import")
-				want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "--", "admin@k3s.example.test", "k3s", "ctr", "-n", "k8s.io", "images", "import", "-"}
+				want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "-o", "ControlPath=none", "--", "admin@k3s.example.test", "k3s", "ctr", "-n", "k8s.io", "images", "import", "-"}
 				if len(imp) != 1 || !slices.Equal(imp[0].Args, want) || imp[0].Stdin != f.tarSum() {
 					t.Fatalf("the import is %v, want ssh %q with the image on stdin", imp, want)
 				}
@@ -1617,8 +1617,10 @@ func TestImageDryRun(t *testing.T) {
 	readOnly := map[string][][]string{
 		"docker":  {{"info"}, {"image", "inspect"}, {"context", "inspect"}},
 		"kubectl": {{"get", "nodes"}},
-		"ssh":     {{"true"}, {"get", "nodes"}},
-		"git":     {{"rev-list"}, {"rev-parse"}, {"status"}},
+		// The Docker CLI reaches DOCKER_HOST=ssh:// over ssh (the fake
+		// docker too): the transport of a docker call checked above.
+		"ssh": {{"true"}, {"get", "nodes"}, {"docker", "system", "dial-stdio"}},
+		"git": {{"rev-list"}, {"rev-parse"}, {"status"}},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {

@@ -846,7 +846,7 @@ func TestK8sNamespace(t *testing.T) {
 			if len(res.calls) != 3 || !slices.Equal(res.calls[0].Args[len(res.calls[0].Args)-1:], []string{"true"}) {
 				t.Fatalf("want the host key check, the get and the create: %v", res.calls)
 			}
-			want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "--", "deploy@k3s.example.test", "k3s", "kubectl", "create", "-f", "-"}
+			want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "-o", "ControlPath=none", "--", "deploy@k3s.example.test", "k3s", "kubectl", "create", "-f", "-"}
 			if !slices.Equal(res.calls[2].Args, want) {
 				t.Errorf("the create over ssh is %q", res.calls[2].Args)
 			}

@@ -335,7 +335,7 @@ func TestKMSMustBeStated(t *testing.T) {
 			})
 		}
 		res := r.withEnv("KMS=local\nDEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n", statusDD...)
-		res.want(t, 3, "not built yet (PLAN 10.8)")
+		res.want(t, statusDone, "cactusfs is not installed on Docker Desktop")
 		token := r.envFile("token", "t")
 		res = r.withEnv("KMS=vault\nVAULT_ADDR=https://vault.example.test:8200\nVAULT_KEY=cactusfs\nVAULT_TOKEN_FILE="+token+"\n", statusDD...)
 		res.want(t, statusDone)
@@ -508,6 +508,7 @@ func TestValidation(t *testing.T) {
 		{"pass docker", "TOOL_ENV_PASS=NO_PROXY,DOCKER_HOST", "DOCKER_HOST would give a tool what the script keeps from it"},
 		{"pass docker config", "TOOL_ENV_PASS=DOCKER_CONFIG", "DOCKER_CONFIG would give"},
 		{"pass containers", "TOOL_ENV_PASS=CONTAINERS_CONF", "CONTAINERS_CONF would give"},
+		{"pass compose", "TOOL_ENV_PASS=COMPOSE_FILE", "COMPOSE_FILE would give"},
 		{"pass containerd", "TOOL_ENV_PASS=CONTAINERD_ADDRESS", "CONTAINERD_ADDRESS would give"},
 		{"pass container host", "TOOL_ENV_PASS=CONTAINER_HOST", "CONTAINER_HOST would give"},
 		{"pass kubeconfig", "TOOL_ENV_PASS=KUBECONFIG", "KUBECONFIG would give"},
@@ -572,7 +573,7 @@ func TestValidation(t *testing.T) {
 		res.setting(t, "KMS_KEY_FILE", kms, "file")
 		r.withEnv("KMS=vault\nVAULT_ADDR=https://vault.example.test:8200\nVAULT_KEY=k\nVAULT_TOKEN_FILE="+pass+"\nKMS_KEY_FILE="+kms+"\nKMS_PASSPHRASE_FILE="+pass+"\n", statusDD...).want(t, 2, "KMS_KEY_FILE is the key file of KMS=local")
 		// BIND stays at its default in cluster mode.
-		r.withEnv("KMS=local\nDEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\nBIND=127.0.0.1\n", statusDD...).want(t, 3)
+		r.withEnv("KMS=local\nDEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\nBIND=127.0.0.1\n", statusDD...).want(t, statusDone)
 		// A target that the file names wrongly is refused (the flag of the
 		// other cases would win over it).
 		r.withEnv("KMS=local\nDEPLOY_TARGET=swarm\n", "--status", "--dry-run").want(t, 2, "DEPLOY_TARGET=swarm: must be one of")
@@ -906,7 +907,7 @@ func TestToolsAndRemoteWords(t *testing.T) {
 		calls int
 	}{
 		{"an engine over ssh needs its host key checked", "tool DOCKER_HOST=ssh://a@b.example.test docker ps", 1, "the host key of a@b.example.test was not checked", 0},
-		{"an engine over ssh after the check", "host_key_check a@b.example.test; tool DOCKER_HOST=ssh://a@b.example.test docker ps", 0, "", 2},
+		{"an engine over ssh after the check", "host_key_check a@b.example.test; tool DOCKER_HOST=ssh://a@b.example.test docker ps", 0, "", 3},
 		{"a podman over ssh after the check", "host_key_check a@b.example.test; tool CONTAINER_HOST=ssh://a@b.example.test podman ps", 0, "", 2},
 		{"another variable", "tool KUBECONFIG=/x kubectl get pods", 1, "not KUBECONFIG", 0},
 		{"a command with an equals sign", "tool A=b", 1, "only DOCKER_HOST or CONTAINER_HOST", 0},
@@ -950,7 +951,7 @@ func TestToolsAndRemoteWords(t *testing.T) {
 // on a host that does not answer, reads nothing of the terminal for a
 // question, and is handed only plain words.
 func TestSSH(t *testing.T) {
-	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "--", "admin@k3s.example.test"}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "-o", "ControlPath=none", "--", "admin@k3s.example.test"}
 	empty := sha256.Sum256(nil)
 	eachShell(t, func(t *testing.T, r *rig) {
 		res := r.withEnv("KMS=local\nK3S_SSH=admin@k3s.example.test\n", "--status", "--dry-run")
@@ -1073,10 +1074,9 @@ func TestActions(t *testing.T) {
 		{"purge confirm alone", "", []string{"--uninstall", "--purge-confirm", "cactusfs"}, 2, "--purge-confirm goes with --purge"},
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
-		{"ce over ssh", "CE_HOST=deploy@server.example.test\n", []string{"--docker", "ce", "--install", "--dry-run"}, 3, "not built yet (PLAN 10.7)"},
 		{"rancher", "", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
 		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.10)"},
-		{"cluster on docker", "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n", []string{"--docker", "dd", "--install"}, 3, "not built yet (PLAN 10.8)"},
+		{"cluster on rancher", "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
 		{"k3s install", "K8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "k3s", "--install"}, 3, "not built yet (PLAN 10.10)"},
 		{"k3s install, S3 published to nobody named", "", []string{"--docker", "k3s", "--install"}, 2, "K8S_S3_ALLOW_FROM must say who may reach it"},
 		{"k3s purge", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs"}, 3, "not built yet (PLAN 10.11)"},
@@ -1275,9 +1275,11 @@ func TestStateRecordsTheEngine(t *testing.T) {
 		r.withEnv("KMS=local\n", statusDD...).want(t, 2, "recorded on another target (k8s-prod", "--another-target")
 		r.withEnv("KMS=local\n", append([]string{"--another-target"}, statusDD...)...).want(t, statusDone)
 		r.withEnv("KMS=local\nDEPLOY_NAME=second\n", statusDD...).want(t, statusDone)
-		// A server over ssh is its own target: the destination is its ID.
+		// A server over ssh is its own target: the destination is its ID
+		// (PLAN 10.7: its host key checked, nothing is installed there).
+		r.rules(ceRules(t, r, engineState{e: ceEngine})...)
 		res = r.withEnv("KMS=local\nCE_HOST=deploy@server.example.test\n", "--docker", "ce", "--status", "--dry-run", "--another-target")
-		res.want(t, 3, "state: "+filepath.Join(r.home, ".local", "state", "cactusfs-deploy", "ssh-deploy_server.example.test", "cactusfs"))
+		res.want(t, statusDone, "state: "+filepath.Join(r.home, ".local", "state", "cactusfs-deploy", "ssh-deploy_server.example.test", "cactusfs"))
 	})
 }
 

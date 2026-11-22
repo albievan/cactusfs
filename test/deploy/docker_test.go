@@ -216,12 +216,21 @@ func mutating(c call) bool {
 	return false
 }
 
-// noChange fails the test when the run changed the engine.
+// noChange fails the test when the run changed the engine, or a server it
+// reached over ssh.
 func noChange(t *testing.T, res result) {
 	t.Helper()
 	for _, c := range res.calls {
 		if mutating(c) {
 			t.Errorf("the run changed the engine: %s %q", c.Tool, c.Args)
+		}
+		// What a run changes on a server over ssh (CE_HOST): a directory or
+		// file made, filled, given a mode or a label, or removed.
+		w := strings.TrimPrefix(remote(c), "sudo -n ")
+		for _, change := range []string{"mkdir ", "tar -x ", "chmod ", "chcon ", "rm "} {
+			if strings.HasPrefix(w, change) {
+				t.Errorf("the run changed the server: %q", w)
+			}
 		}
 	}
 }
@@ -459,6 +468,12 @@ func TestDockerInstall(t *testing.T) {
 						t.Errorf("a mount that is not one of the deployment's volumes: %q", run[i+1])
 					case a == "--env" && !strings.HasPrefix(run[i+1], "CACTUSFS_"):
 						t.Errorf("the node is given %q", run[i+1])
+					}
+				}
+				// curl reads no .curlrc: -q first, on every call.
+				for _, c := range callsOf(res, "curl") {
+					if len(c.Args) == 0 || c.Args[0] != "-q" {
+						t.Errorf("curl without -q first: %q", c.Args)
 					}
 				}
 				// /readyz over TLS with the deployment's CA, never through a

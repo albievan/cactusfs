@@ -1,8 +1,11 @@
 # shellcheck shell=sh
 # A standalone deployment on a Docker engine - Docker Desktop (dd), Docker CE
-# on this machine (ce) and Podman (podman): install, upgrade, status,
-# uninstall and purge (PLAN 10.5; ADR-0033 sections 3, 4, 8, 11). Sourced by
-# deploy/deploy.sh; not run on its own.
+# on this machine or on a server over SSH (ce, CE_HOST) and Podman (podman):
+# install, upgrade, status, uninstall and purge (PLAN 10.5, 10.7; ADR-0033
+# sections 3, 4, 8, 11). Sourced by deploy/deploy.sh; not run on its own.
+# What CE_HOST adds - the host key checked and pinned first, Docker CE
+# installed, the ports and /readyz asked on the server - is
+# deploy/lib/ce.sh's.
 #
 # What a deployment named <name> is on the engine - every object labelled
 # io.cactusfs.deploy.name=<name> and io.cactusfs.deploy.target=<target>, and
@@ -50,15 +53,14 @@
 # (_dk_*) and are called plainly.
 
 # docker_standalone: true for a deployment this file builds - standalone, on
-# Docker Desktop, Docker CE on this machine, or Podman. Docker CE over ssh
-# (PLAN 10.7), Rancher Desktop (10.6), cluster mode (10.8) and Kubernetes
-# (10.10, 10.11) are other steps'.
+# Docker Desktop, Docker CE on this machine or on CE_HOST (PLAN 10.7), or
+# Podman. Rancher Desktop (10.6), cluster mode (10.8) and Kubernetes (10.10,
+# 10.11) are other steps'.
 docker_standalone() {
 	on_kubernetes && return 1
 	[ "$(setting DEPLOY_MODE)" = standalone ] || return 1
 	case $TARGET in
-	dd | podman) return 0 ;;
-	ce) [ -z "$(setting CE_HOST)" ] ;;
+	dd | podman | ce) return 0 ;;
 	*) return 1 ;;
 	esac
 }
@@ -157,9 +159,14 @@ docker_tls_name() {
 # one (dev-init's), else the system's - or 000 when nothing answers. Never
 # through a proxy, never without verifying.
 docker_readyz() {
+	# On CE_HOST the admin port is the server's: asked there (ce.sh).
+	if [ -n "$_s_ce_host" ]; then
+		ce_readyz
+		return 0
+	fi
 	_rz_name=$(docker_tls_name)
 	_rz_addr=$(docker_dial "$_dk_admin_bind")
-	set -- curl -g -s -o /dev/null --noproxy '*' --max-time 5 -w '%{http_code}'
+	set -- curl -q -g -s -o /dev/null --noproxy '*' --max-time 5 -w '%{http_code}'
 	if [ -f "$STATE/config/s3-ca.pem" ]; then
 		set -- "$@" --cacert "$STATE/config/s3-ca.pem"
 	fi
@@ -353,7 +360,7 @@ docker_ports_check() {
 	done <<EOF
 $_pc_out
 EOF
-	command -v curl >/dev/null 2>&1 ||
+	[ -n "$_s_ce_host" ] || command -v curl >/dev/null 2>&1 ||
 		refuse "curl is needed: the script asks with it whether a port is free and whether the node is ready"
 	for _pc_pair in "$_dk_bind $_dk_s3_port S3_PORT" "$_dk_admin_bind $_dk_admin_port ADMIN_PORT"; do
 		_pc_addr=${_pc_pair%% *}
@@ -362,8 +369,17 @@ EOF
 		if printf '%s\n' "$_pc_mine" | grep -q ":$_pc_port\$"; then
 			continue
 		fi
+		# On CE_HOST the addresses are the server's: asked there (ce.sh).
+		if [ -n "$_s_ce_host" ]; then
+			ce_port_answered "$_pc_addr" "$_pc_port"
+			case $_ce_answered in
+			used) refuse "port $_pc_port on $_pc_addr of $_s_ce_host is in use (something answered there): choose another ${_pc_rest#* }, or stop what holds it" ;;
+			nocurl) refuse "curl is needed on $_s_ce_host: the script asks with it, there, whether a port is free and whether the node is ready; install curl there" ;;
+			esac
+			continue
+		fi
 		_pc_dial=$(docker_dial "$_pc_addr")
-		_pc_conn=$(query curl -g -s -o /dev/null --noproxy '*' --max-time 3 -w '%{num_connects}' "http://$_pc_dial:$_pc_port/" </dev/null 2>/dev/null) || :
+		_pc_conn=$(query curl -q -g -s -o /dev/null --noproxy '*' --max-time 3 -w '%{num_connects}' "http://$_pc_dial:$_pc_port/" </dev/null 2>/dev/null) || :
 		case $(printf '%s' "$_pc_conn" | printable | tr -d '\n') in
 		'' | 0) ;;
 		*) refuse "port $_pc_port on $_pc_addr is in use (something answered on $_pc_dial:$_pc_port): choose another ${_pc_rest#* }, or stop what holds it" ;;
@@ -547,6 +563,15 @@ docker_image_check() {
 	fi
 }
 
+# docker_image_precheck: on CE_HOST, PLAN 10.4's image_precheck - the
+# image's refusals that need no engine - before anything is done to the
+# server (ce_begin's install of Docker CE).
+docker_image_precheck() {
+	if command -v image_precheck >/dev/null 2>&1; then
+		image_precheck
+	fi
+}
+
 # docker_image_make: PLAN 10.4's image_make - the image built, pulled and
 # checked where it is made, nothing shipped - before the secrets, so that
 # dev-init can run in an image of this machine's architecture made from the
@@ -564,7 +589,15 @@ docker_image_make() {
 # docker_install: --install of a standalone deployment on a Docker engine.
 docker_install() {
 	docker_settings
+	# What refuses without asking the engine comes first - a deployment
+	# STATE_DIR records in the other mode among it; on CE_HOST then the
+	# host key, and the questions and refusals of an install of Docker CE,
+	# the server's ports among them, before that install (ce.sh). What needs
+	# the engine is asked below, before anything of the deployment is made.
+	state_mode_check
 	docker_vault_ca
+	[ -z "$_s_ce_host" ] || docker_image_precheck
+	[ -z "$_s_ce_host" ] || ce_begin install
 	docker_container
 	docker_previous_check
 	docker_volumes
@@ -585,6 +618,7 @@ docker_install() {
 	# (PLAN 10.3).
 	docker_image_make
 	secrets_install
+	[ -z "$_s_ce_host" ] || ce_pin_record
 	docker_image_ref
 	say "image: $_dk_image"
 
@@ -644,9 +678,11 @@ docker_install() {
 # password admin (ADR-0014). Said at every install; warned about when the
 # admin port is published beyond this machine.
 docker_admin_notice() {
-	say "a new deployment has the console user admin with the password admin (ADR-0014): change its password or delete the user before the admin port is reachable from anywhere but this machine"
+	_an_where="this machine"
+	[ -z "$_s_ce_host" ] || _an_where="the server ${_s_ce_host#*@}"
+	say "a new deployment has the console user admin with the password admin (ADR-0014): change its password or delete the user before the admin port is reachable from anywhere but $_an_where"
 	docker_loopback "$_dk_admin_bind" ||
-		warn "ADMIN_BIND=$_dk_admin_bind publishes the admin API and console beyond this machine: change the password of the console user admin, or delete it, now (ADR-0014)"
+		warn "ADMIN_BIND=$_dk_admin_bind publishes the admin API and console beyond $_an_where: change the password of the console user admin, or delete it, now (ADR-0014)"
 }
 
 # docker_cli: the command an operator types to reach the engine, for the
@@ -654,6 +690,8 @@ docker_admin_notice() {
 docker_cli() {
 	if [ "$TARGET" = podman ]; then
 		printf 'podman'
+	elif [ -n "$_s_ce_host" ]; then
+		printf 'DOCKER_HOST=ssh://%s docker' "$_s_ce_host"
 	else
 		printf 'docker --context %s' "$_s_context"
 	fi
@@ -662,16 +700,25 @@ docker_cli() {
 # docker_reach: where the deployment is reached, and where its CA and root
 # credentials are kept (by their files, never their contents).
 docker_reach() {
+	if [ -n "$_s_ce_host" ]; then
+		ce_reach
+	else
+		docker_reach_here
+	fi
+	if [ -f "$STATE/config/s3-ca.pem" ]; then
+		say "the CA to trust: $STATE/config/s3-ca.pem"
+	fi
+	say "root credentials: $STATE/secrets/root-access-key and $STATE/secrets/root-secret-key (never printed)"
+}
+
+# docker_reach_here: the addresses of a deployment on this machine's engine.
+docker_reach_here() {
 	case $_dk_bind in
 	0.0.0.0 | ::) _rc_s3="https://<any address of this machine>:$_dk_s3_port" ;;
 	*) _rc_s3="https://$(docker_dial "$_dk_bind"):$_dk_s3_port" ;;
 	esac
 	say "S3: $_rc_s3 (on this machine: https://$(docker_tls_name):$_dk_s3_port)"
 	say "admin API and console: https://$(docker_dial "$_dk_admin_bind"):$_dk_admin_port"
-	if [ -f "$STATE/config/s3-ca.pem" ]; then
-		say "the CA to trust: $STATE/config/s3-ca.pem"
-	fi
-	say "root credentials: $STATE/secrets/root-access-key and $STATE/secrets/root-secret-key (never printed)"
 }
 
 # docker_cert_expiry: when the S3 certificate of STATE_DIR expires, read by
@@ -732,6 +779,8 @@ docker_labelled() {
 # installed, 1 when it is installed and not ready.
 docker_status() {
 	docker_settings
+	state_mode_check
+	[ -z "$_s_ce_host" ] || ce_begin status
 	if [ "$TARGET" = podman ]; then
 		_st_format="{{.Names}}|{{.State}}|{{.Image}}|{{index .Labels \"$LABEL_TARGET\"}}|{{index .Labels \"org.opencontainers.image.version\"}}"
 	else
@@ -784,6 +833,7 @@ docker_engine_check() {
 	_ec_recorded=$(sed -n 's/^engine-id=//p' "$STATE/target" | head -n 1 | printable)
 	[ "$_engine_id" = "$_ec_recorded" ] ||
 		refuse "$STATE was made on the engine '$_ec_recorded', and the settings ($(engine_identity)) now reach another, '$_engine_id': nothing of the deployment is removed through it; set the settings back"
+	state_mode_check
 }
 
 # docker_adopt_record: with --adopt, after the container, the node an
@@ -808,7 +858,7 @@ docker_adopt_record() {
 	{
 		engine_identity
 		echo
-		printf 'engine-id=%s\nkms=%s\n' "$_engine_id" "$_s_kms"
+		state_lines
 	} | put_new "$STATE/target"
 	say "state: --adopt: recorded $STATE/target ($(engine_identity), engine $_engine_id, KMS=$_s_kms)"
 }
@@ -836,9 +886,13 @@ docker_purge_confirm() {
 # kept (name and target labels both), and for a purge the labelled volumes.
 docker_uninstall() {
 	docker_settings
+	state_mode_check
 	_dk_labelled=
+	[ "$PURGE" = 0 ] || docker_purge_confirm
+	# On CE_HOST the host key is checked, and compared with the one pinned,
+	# before the server's engine is asked anything (ce.sh).
+	[ -z "$_s_ce_host" ] || ce_begin uninstall
 	if [ "$PURGE" = 1 ]; then
-		docker_purge_confirm
 		docker_engine_check purge
 	else
 		docker_engine_check uninstall
@@ -883,11 +937,12 @@ docker_uninstall() {
 	docker_purge
 }
 
-# docker_purge: the data volumes; a listing that proves none is left; the
-# secrets' volumes; a listing that proves no volume of the deployment is
-# left; and last the deployment's entry of STATE_DIR, and nothing else of
-# it. A step that fails - a listing or an inspect included - ends the run,
-# and the entry - the keys - is kept.
+# docker_purge [<function>]: the data volumes; a listing that proves none
+# is left; the secrets' volumes; a listing that proves no volume of the
+# deployment is left; the function given, when one is (a compose cluster's
+# secret files on CE_HOST, PLAN 10.8); and last the deployment's entry of
+# STATE_DIR, and nothing else of it. A step that fails - a listing or an
+# inspect included - ends the run, and the entry - the keys - is kept.
 docker_purge() {
 	# _dk_labelled: docker_uninstall listed and checked them before it
 	# removed anything.
@@ -925,6 +980,7 @@ docker_purge() {
 			fail "purge: the volumes $_dk_labelled of the deployment are still there; $STATE is kept"
 		say "purge: no volume of $_s_name is left on $(engine)"
 	fi
+	[ -z "${1:-}" ] || "$1"
 	if [ -d "$STATE" ]; then
 		case $STATE in
 		*/"$_s_name") ;;

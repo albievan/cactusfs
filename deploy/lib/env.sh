@@ -81,6 +81,7 @@ NODE_CERT_DIR=
 CE_HOST=
 CE_INSTALL_DOCKER=no
 CE_INSTALL_DOCKER_FORCE=no
+CE_DOCKER_GROUP=no
 CE_STATE_DIR=.cactusfs-deploy
 RANCHER_ENGINE=auto
 RANCHER_KUBERNETES=no
@@ -484,6 +485,7 @@ script_vars() {
 ACTION
 ADOPT
 ANOTHER_TARGET
+COMPOSE_NODES
 CR
 DEPLOY_DIR
 DRY_RUN
@@ -542,7 +544,7 @@ tool_env_pass() {
 	for _pn in "$@"; do
 		case $_pn in
 		[0123456789]*) bad TOOL_ENV_PASS "$_pn is not a name: a name does not begin with a digit" ;;
-		DOCKER_* | CONTAINER* | KUBECONFIG | NERDCTL_* | PODMAN_* | XDG_* | CACTUSFS_* | PATH | HOME | LC_* | SSH_* | \
+		DOCKER_* | CONTAINER* | COMPOSE_* | KUBECONFIG | NERDCTL_* | PODMAN_* | XDG_* | CACTUSFS_* | PATH | HOME | LC_* | SSH_* | \
 			BASH_ENV | ENV | SHELLOPTS | BASHOPTS | IFS | PS4 | LD_* | DYLD_*)
 			bad TOOL_ENV_PASS "$_pn would give a tool what the script keeps from it on purpose (deploy/.env.example, TOOL_ENV_PASS)"
 			;;
@@ -785,8 +787,14 @@ env_validate() {
 	path NODE_CERT_DIR
 
 	ssh_host CE_HOST
+	# The Docker CLI reads CE_HOST as the URL ssh://<CE_HOST>, where a ':'
+	# would start a port and ssh would read it as part of the name.
+	case $(setting CE_HOST) in
+	*:*) bad CE_HOST "names no port or IPv6 address: give the server a Host entry with its HostName and Port in ~/.ssh/config, and name that" ;;
+	esac
 	yes_no CE_INSTALL_DOCKER
 	yes_no CE_INSTALL_DOCKER_FORCE
+	yes_no CE_DOCKER_GROUP
 	case $(setting CE_STATE_DIR) in
 	'~'*) bad CE_STATE_DIR "is a directory on the server: write it relative to the home directory there, or absolute" ;;
 	esac

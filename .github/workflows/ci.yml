@@ -83,21 +83,28 @@ jobs:
   # The deployment script against a real engine: a standalone deployment
   # made by deploy/deploy.sh on Docker and on rootless Podman - installed, an
   # object put and read back over TLS, upgraded, uninstalled, reinstalled
-  # and purged (PLAN 10.5, test/deploy/lifecycle.sh). A job of its own, and
-  # no part of make check: it runs the engine of the runner, on the host.
+  # and purged (PLAN 10.5, test/deploy/lifecycle.sh); and a compose cluster
+  # of four nodes, upgraded one node at a time while the object is read
+  # (PLAN 10.8, DEPLOY_MODE=cluster). A job of its own, and no part of make
+  # check: it runs the engine of the runner, on the host.
   deploy:
-    name: make test-deploy (${{ matrix.engine }})
+    name: make test-deploy (${{ matrix.engine }}, ${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         engine: [docker, podman]
+        mode: [standalone, cluster]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: make test-deploy ENGINE=${{ matrix.engine }}
+      # podman compose runs the runner's docker-compose against Podman's
+      # API socket, which a rootless user starts.
+      - if: matrix.engine == 'podman' && matrix.mode == 'cluster'
+        run: systemctl --user start podman.socket
+      - run: make test-deploy ENGINE=${{ matrix.engine }} DEPLOY_MODE=${{ matrix.mode }}
 
   # The Go-only path on every supported OS: no make, no container engine.
   unit:
