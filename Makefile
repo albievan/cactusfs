@@ -72,6 +72,8 @@ help:
 	@echo "  build          cactusfs for this OS -> bin/"
 	@echo "  build-all      six OS/arch targets -> dist/"
 	@echo "  image          container images for linux/amd64 and linux/arm64 (< 60 MB)"
+	@echo "  image-binaries the image's own binaries for linux/amd64 and linux/arm64 -> dist/image/"
+	@echo "  image-from-binaries  an image of dist/image equals the product image (after image; with podman, on the host)"
 	@echo "  sbom           SPDX SBOMs of both images and of the console's packages -> dist/sbom/ (after image)"
 	@echo "  sign-verify    sign, attest and verify against a throw-away registry; what must be refused, is"
 	@echo "  release        publish a release: the release workflow only, on a tag v<version>; refuses anywhere else"
@@ -149,6 +151,29 @@ builder:
 
 $(BUILDER_TARGETS): builder
 	@$(BUILDER_RUN) $(BUILDER_IMAGE) make $@
+
+# The binaries of the product image, as files, for an image made from a
+# folder of binaries (PLAN 10.2): dist/image/; and the check that such an
+# image is the product image. Targets of their own, out of BUILDER_TARGETS;
+# the check is part of `make check`.
+.PHONY: image-binaries image-from-binaries
+image-binaries: builder
+	@$(BUILDER_RUN) $(BUILDER_IMAGE) make $@
+
+# The check builds with a named build context, which Podman's Docker API -
+# all the builder can reach - does not have. With Podman it runs here, with
+# the podman CLI (4.4 or later), as up and down do, on the images `make
+# image` and `make image-binaries` made in the builder; and `make check`
+# runs it before the builder's gates (whose own list leaves it out when
+# BuildKit is off). With Docker it runs in the builder, through BuildKit.
+ifeq ($(ENGINE),podman)
+image-from-binaries: image image-binaries
+	@ENGINE=podman IMAGE=$(IMAGE) VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image-from-binaries.sh
+check: image-from-binaries
+else
+image-from-binaries: builder
+	@$(BUILDER_RUN) $(BUILDER_IMAGE) make $@
+endif
 
 shell: builder
 	$(BUILDER_RUN) -it $(BUILDER_IMAGE) bash
@@ -390,6 +415,27 @@ build-all: web-build
 
 image:
 	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image.sh
+
+# dist/image/linux-{amd64,arm64}/cactusfs, SHA256SUMS and BUILDINFO, exported
+# from the Dockerfile's image-binaries stage: the product image's binaries,
+# never those of build-all (ADR-0033 section 5). Any engine.
+.PHONY: image-binaries image-from-binaries
+image-binaries:
+	@VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image-binaries.sh
+
+# An image made of dist/image by the Dockerfile's from-binaries stage is the
+# product image that `make image` made (scripts/image-from-binaries.sh),
+# through BuildKit. With ENGINE=podman the builder gets DOCKER_BUILDKIT=0 and
+# the host runs the check with the podman CLI instead (see the host side);
+# here it would fail, saying so - it is never passed over.
+image-from-binaries: image image-binaries
+	@ENGINE=docker VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image-from-binaries.sh
+
+# A gate of `make check`, added here rather than on the line of check; with
+# Podman the host side runs it.
+ifneq ($(DOCKER_BUILDKIT),0)
+check: image-from-binaries
+endif
 
 # The SBOMs of the images `make image` made, and of web/pnpm-lock.yaml, as
 # SPDX JSON in dist/sbom/ (ADR-0021). Run `make image` first.

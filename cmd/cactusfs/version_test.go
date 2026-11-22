@@ -16,31 +16,36 @@ func TestVersionString(t *testing.T) {
 
 	platform := runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH
 	tests := []struct {
-		name  string
-		build buildinfo.Info
-		want  string
+		name      string
+		build     buildinfo.Info
+		packaging string
+		want      string
 	}{
 		{
-			name: "a numbered build", build: buildinfo.Info{Version: "0.7.0", Build: "412", Commit: "3300281abcde"},
-			want: "cactusfs 0.7.0 build 412 (commit 3300281abcde, " + platform + ")",
+			name: "a numbered build", build: buildinfo.Info{Version: "0.7.0", Build: "412", Commit: "3300281abcde"}, packaging: buildinfo.PackagingBinary,
+			want: "cactusfs 0.7.0 build 412 (commit 3300281abcde, " + platform + ", binary)",
 		},
 		{
-			name: "a numbered build of a changed tree", build: buildinfo.Info{Version: "0.7.0", Build: "412", Commit: "3300281abcde-dirty"},
-			want: "cactusfs 0.7.0 build 412 (commit 3300281abcde-dirty, " + platform + ")",
+			name: "the binary of an image", build: buildinfo.Info{Version: "0.7.0", Build: "412", Commit: "3300281abcde"}, packaging: buildinfo.PackagingImage,
+			want: "cactusfs 0.7.0 build 412 (commit 3300281abcde, " + platform + ", image)",
 		},
 		{
-			name: "a plain go build in a checkout", build: buildinfo.Info{Version: "0.7.0", Build: "0", Commit: "3300281abcde"},
-			want: "cactusfs 0.7.0 local build (commit 3300281abcde, " + platform + ")",
+			name: "a numbered build of a changed tree", build: buildinfo.Info{Version: "0.7.0", Build: "412", Commit: "3300281abcde-dirty"}, packaging: buildinfo.PackagingBinary,
+			want: "cactusfs 0.7.0 build 412 (commit 3300281abcde-dirty, " + platform + ", binary)",
 		},
 		{
-			name: "a plain go build of an export", build: buildinfo.Info{Version: "0.7.0", Build: "0"},
-			want: "cactusfs 0.7.0 local build (" + platform + ")",
+			name: "a plain go build in a checkout", build: buildinfo.Info{Version: "0.7.0", Build: "0", Commit: "3300281abcde"}, packaging: buildinfo.PackagingBinary,
+			want: "cactusfs 0.7.0 local build (commit 3300281abcde, " + platform + ", binary)",
+		},
+		{
+			name: "a plain go build of an export", build: buildinfo.Info{Version: "0.7.0", Build: "0"}, packaging: buildinfo.PackagingBinary,
+			want: "cactusfs 0.7.0 local build (" + platform + ", binary)",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := versionString(tt.build); got != tt.want {
+			if got := versionString(tt.build, tt.packaging); got != tt.want {
 				t.Errorf("versionString() = %q, want %q", got, tt.want)
 			}
 		})

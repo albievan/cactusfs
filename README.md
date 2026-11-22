@@ -1734,14 +1734,14 @@ is build `0`, a *local build*; in a checkout, the Go toolchain still records the
 
 ```console
 $ cactusfs version
-cactusfs 0.7.0 build 412 (commit 330028134523, go1.27.2 linux/amd64)
+cactusfs 0.7.0 build 412 (commit 330028134523, go1.27.2 linux/amd64, image)
 $ go build ./cmd/cactusfs && ./cactusfs version
-cactusfs 0.7.0 local build (commit 330028134523-dirty, go1.27.2 darwin/arm64)
+cactusfs 0.7.0 local build (commit 330028134523-dirty, go1.27.2 darwin/arm64, binary)
 ```
 
 | Where | What it says |
 |---|---|
-| `cactusfs version` | version, build, commit, Go toolchain, platform |
+| `cactusfs version` | version, build, commit, Go toolchain, platform, packaging (`image` for the binary of the image, whose binaries `make image-binaries` exports; `binary` otherwise) |
 | the log, when a listener opens | `"version"`, `"build"`, `"commit"` |
 | `cactusfs_build_info` in `/metrics`, `service.version` in traces | `<version>-<build>` |
 | the management API | `server {version, build, commit}` in the answers of `POST /session`, `GET /session` and `GET /cluster` - to a caller who has been authenticated, and to nobody else: no sign-in page, probe, refusal or response header names it. `GET /settings` names the build of every node |

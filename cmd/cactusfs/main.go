@@ -81,7 +81,7 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer, ge
 
 	switch args[0] {
 	case "version":
-		_, _ = fmt.Fprintln(stdout, versionString(buildinfo.Get()))
+		_, _ = fmt.Fprintln(stdout, versionString(buildinfo.Get(), buildinfo.Packaging()))
 		return exitOK
 	case "help", "-h", "-help", "--help":
 		_, _ = io.WriteString(stdout, usage)

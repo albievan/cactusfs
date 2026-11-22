@@ -11,6 +11,12 @@
 #
 # Without the arguments the binary says the release and "local build".
 #
+# Builders: BuildKit (`docker build` and `docker buildx build`, Docker 23 and
+# later) and buildah (`podman build`). The classic builder of dockerd
+# (DOCKER_BUILDKIT=0 against dockerd) is not supported: the stages here rely
+# on the platform arguments (BUILDPLATFORM, TARGETOS, TARGETARCH), which only
+# BuildKit and buildah set, and it builds every stage before the target.
+#
 # Every base image is public and pinned by digest. To move a pin, change the
 # tag AND the digest together.
 
@@ -131,7 +137,10 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOTOOLCHAIN=local \
  # The directories a volume is mounted on. A volume takes the ownership of the
  # directory it is first mounted on, and the image runs as a user that is not
  # root, so they must exist in the image and belong to that user.
- && mkdir -p /out/var/data1 /out/var/data2 /out/var/data3 /out/var/data4 /out/var/meta /out/var/config
+ && mkdir -p /out/var/data1 /out/var/data2 /out/var/data3 /out/var/data4 /out/var/meta /out/var/config \
+ # What the binary was told it is, for the folder `make image-binaries` writes
+ # (the image-binaries stage): the same build arguments as the flags above.
+ && printf 'version=%s\nbuild=%s\ncommit=%s\npackaging=image\n' "${VERSION}" "${BUILD}" "${COMMIT}" >/out/BUILDINFO
 
 # --- pinned tools that are not Go modules --------------------------------------
 FROM ${GOLANGCI_LINT_IMAGE} AS golangci-lint
@@ -301,6 +310,70 @@ ENV CACTUSFS_IN_BUILDER=1 \
     GOLANGCI_LINT_CACHE=/cache/golangci-lint \
     CI=true
 WORKDIR /src
+
+# --- image-binaries: the binaries of the image, as files ---------------------
+# What `make image-binaries` exports (scripts/image-binaries.sh): for each
+# architecture, the very binary the product image holds - built as an image's
+# binary, which never offers to replace itself (internal/buildinfo, Packaging)
+# - and what it was told it is. scripts/image-binaries.sh builds it as an
+# image and copies the files out of a container that is created and never
+# started, which every engine and builder can do.
+FROM scratch AS image-binaries
+ARG TARGETARCH
+COPY --from=build /out/cactusfs /linux-${TARGETARCH}/cactusfs
+COPY --from=build /out/BUILDINFO /BUILDINFO
+
+# --- binaries: what from-binaries takes its binary from ------------------------
+# Replaced by the named build context `binaries` - a folder `make
+# image-binaries` wrote - when one is given (a build context of a stage's name
+# takes that stage's place). Without it, it is the stage above, so that a
+# build of every stage, or of the default target, never looks for an image
+# called "binaries"; but then from-binaries compiles, which is not what it is
+# for.
+FROM image-binaries AS binaries
+
+# --- volumes: the directories a volume is mounted on, for from-binaries ------
+# The tree of /out/var of the build stage, made without a RUN and without the
+# Go stage, so that an image made from binaries needs neither.
+FROM scratch AS volumes
+WORKDIR /var/data1
+WORKDIR /var/data2
+WORKDIR /var/data3
+WORKDIR /var/data4
+WORKDIR /var/meta
+WORKDIR /var/config
+
+# --- from-binaries: the product image, from a folder of binaries ---------------
+# The image of the final stage, made from the folder `make image-binaries`
+# writes instead of from source; `make image-from-binaries`
+# (scripts/image-from-binaries.sh) holds the two equal. The folder is the
+# named build context `binaries`:
+#   docker buildx build --platform linux/<arch> --target from-binaries \
+#     --build-context binaries=dist/image \
+#     --build-arg VERSION=<version> --build-arg BUILD=<build> --build-arg COMMIT=<commit> -t <tag> .
+# Its binaries must be executable (the export makes them so); their mode is
+# kept, as the final stage keeps the build's. The labels come from the build
+# arguments, not from the folder: whoever builds it (the deployment script,
+# PLAN 10.4) reads the folder's BUILDINFO, passes all three, checks SHA256SUMS
+# first and, afterwards, the image's labels and its /cactusfs against them.
+# Like the final stage it has no RUN, so it is made for any architecture
+# without emulation. Keep the two in step: what one says, the other says.
+FROM ${RUNTIME_IMAGE} AS from-binaries
+ARG TARGETARCH
+ARG VERSION
+ARG BUILD
+ARG COMMIT
+LABEL org.opencontainers.image.title="cactusfs" \
+      org.opencontainers.image.description="S3-compatible, erasure-coded object store" \
+      org.opencontainers.image.source="https://github.com/albievan/cactusfs" \
+      org.opencontainers.image.version="${VERSION}-${BUILD}" \
+      org.opencontainers.image.revision="${COMMIT}"
+COPY --from=binaries linux-${TARGETARCH}/cactusfs /cactusfs
+COPY --from=volumes --chown=65532:65532 /var/ /var/lib/cactusfs/
+USER 65532:65532
+EXPOSE 9000 9001 9002 9003
+ENTRYPOINT ["/cactusfs"]
+CMD ["server"]
 
 # --- final: the product image ---------------------------------------------------
 # Distroless static, non-root, no shell. Run it with a read-only root
