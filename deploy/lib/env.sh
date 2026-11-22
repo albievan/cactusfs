@@ -93,6 +93,7 @@ K8S_NAMESPACE=
 K8S_REGISTRY=
 K8S_STORAGE=pvc
 K8S_STORAGE_CLASS=
+K8S_HOSTPATH=/var/lib/cactusfs-deploy
 K8S_DRIVE_SIZE=100Gi
 K8S_META_SIZE=10Gi
 K8S_SERVICE_TYPE=NodePort
@@ -797,6 +798,15 @@ env_validate() {
 	case $(setting K8S_STORAGE_CLASS) in
 	'') ;;
 	*) chars K8S_STORAGE_CLASS 'a-z0-9.-' "lower-case letters, digits, '.' and '-'" ;;
+	esac
+	# A directory on the node (K8S_STORAGE=hostpath): absolute, plain, never
+	# the root and without a '..'.
+	case $(setting K8S_HOSTPATH) in
+	/?*) chars K8S_HOSTPATH 'A-Za-z0-9_./-' "an absolute path of letters, digits and _./-" ;;
+	*) bad K8S_HOSTPATH "must be an absolute directory on the node, other than /" ;;
+	esac
+	case /$(setting K8S_HOSTPATH)/ in
+	*/../*) bad K8S_HOSTPATH "holds a '..': write the directory without one" ;;
 	esac
 	size K8S_DRIVE_SIZE
 	size K8S_META_SIZE

@@ -1,0 +1,10 @@
+# A profile of deploy/deploy.sh on Kubernetes (PLAN 10.9): one node with
+# four drives on the cluster's default StorageClass, S3 on a NodePort for one
+# network, the admin port closed. make deploy-check renders it with the chart
+# and validates the render (test/deploy, TestProfilesRender). Names and
+# addresses are placeholders; no profile holds or names a secret.
+# nodes: 1
+DEPLOY_TARGET=k8s
+K8S_CONTEXT=profile
+KMS=local
+K8S_S3_ALLOW_FROM=192.0.2.0/24

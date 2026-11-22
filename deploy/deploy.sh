@@ -26,6 +26,8 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/env.sh"
 # shellcheck source=deploy/lib/secrets.sh
 . "$DEPLOY_DIR/lib/secrets.sh"
+# shellcheck source=deploy/lib/k8s.sh
+. "$DEPLOY_DIR/lib/k8s.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -40,9 +42,12 @@ Actions (exactly one):
                   remove the deployment and its data; asks for its name at
                   the terminal, or takes it from --purge-confirm
   --print-namespace
-                  print the manifest of the deployment's namespace, its
-                  marker included, for a cluster's administrator to create
-                  beforehand (k3s, k8s)
+                  print the manifests of the deployment's namespace, its
+                  marker included, and of the Role (in it) and ClusterRole
+                  (list nodes, services and storageclasses; get namespaces
+                  <namespace> and kube-system) a K8S_CONTEXT bound to that
+                  namespace needs, for a cluster's administrator to create
+                  beforehand and bind to the operator (k3s, k8s)
 
 Flags:
   --docker TARGET dd (Docker Desktop), ce (Docker CE, here or CE_HOST),
@@ -198,16 +203,24 @@ resolve_target
 target_validate
 state_check
 
-[ "$DRY_RUN" = 0 ] || say "dry run: nothing that changes anything is run"
-say "target $TARGET (from $TARGET_FROM), deployment $(setting DEPLOY_NAME), $(setting DEPLOY_MODE)"
-say "engine: $(engine_identity)"
-say "state: $STATE"
-if [ "$DRY_RUN" = 1 ]; then
-	env_show
-	if [ -n "$(setting K3S_IMPORT)" ]; then
-		say "K3S_IMPORT runs: $(k3s_import_words | while IFS= read -r _w; do printf '[%s] ' "$_w"; done)"
+# header: what was resolved, before anything is done.
+header() {
+	[ "$DRY_RUN" = 0 ] || say "dry run: nothing that changes anything is run"
+	say "target $TARGET (from $TARGET_FROM), deployment $(setting DEPLOY_NAME), $(setting DEPLOY_MODE)"
+	say "engine: $(engine_identity)"
+	say "state: $STATE"
+	if [ "$DRY_RUN" = 1 ]; then
+		env_show
+		if [ -n "$(setting K3S_IMPORT)" ]; then
+			say "K3S_IMPORT runs: $(k3s_import_words | while IFS= read -r _w; do printf '[%s] ' "$_w"; done)"
+		fi
 	fi
-fi
+}
+# An action that prints a manifest keeps standard output for it.
+case $ACTION in
+--print-namespace) header >&2 ;;
+*) header ;;
+esac
 
 # --- the actions ------------------------------------------------------------------
 # Stubs: each says what the step of PLAN milestone 10 that builds it will do,
@@ -268,6 +281,7 @@ do_install() {
 	[ -n "$_helm" ] || _helm=$(setting HELM_IMAGE)
 	[ -n "$_helm" ] || _helm="the helm image the Dockerfile pins"
 	if on_kubernetes; then
+		k8s_validate
 		not_built 10.10 "install: $_secrets; the image $_image (PLAN 10.4); the chart rendered with $_helm and applied server-side to $(kubernetes), storage $(setting K8S_STORAGE), S3 as $(setting K8S_SERVICE_TYPE) (PLAN 10.9, 10.10)"
 	fi
 	not_built "$(docker_step)" "install: $_secrets; the image $_image (PLAN 10.4); on $(engine): $(setting DRIVES) labelled volumes, S3 on $(setting BIND):$(setting S3_PORT), admin on $(setting ADMIN_BIND):$(setting ADMIN_PORT), ready within $(setting WAIT_TIMEOUT) s"
@@ -298,7 +312,7 @@ do_uninstall() {
 
 do_print_namespace() {
 	on_kubernetes || refuse "--print-namespace is for a Kubernetes target (k3s, k8s, rancher with RANCHER_KUBERNETES=yes), not $TARGET"
-	not_built 10.9 "print-namespace: the manifest of $(kubernetes), labelled $LABEL_NAME=$(setting DEPLOY_NAME) and pod-security.kubernetes.io/enforce=restricted, annotated $MARKER_ANNOTATION=<the UID kept in $STATE>"
+	k8s_print_namespace
 }
 
 case $ACTION in

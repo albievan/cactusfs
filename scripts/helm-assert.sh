@@ -280,6 +280,19 @@ check_service() {
 	if [ "$service_type" = ClusterIP ]; then
 		want "$R" "no nodePort on a ClusterIP Service" "$D" '[.spec.ports[] | select(has("nodePort"))] | length' "0"
 	fi
+	# externalTrafficPolicy (PLAN 10.9): what $2.externalTrafficPolicy says,
+	# for a NodePort or LoadBalancer Service only; never rendered otherwise,
+	# nor when the value is empty - so every render without it is unchanged.
+	service_policy=$(q "$V" "(.$2.externalTrafficPolicy // \"\")")
+	case $service_type in
+	NodePort | LoadBalancer) ;;
+	*) service_policy= ;;
+	esac
+	if [ -n "$service_policy" ]; then
+		want "$R" "externalTrafficPolicy $service_policy, as $2.externalTrafficPolicy says" "$D" '.spec.externalTrafficPolicy' "$service_policy"
+	else
+		want "$R" "no externalTrafficPolicy unless $2.externalTrafficPolicy gives one for a NodePort or LoadBalancer" "$D" '.spec | has("externalTrafficPolicy")' "false"
+	fi
 }
 check_service "$RELEASE" service s3 "$service_notes"
 check_service "$RELEASE-admin" adminService admin "$admin_notes"

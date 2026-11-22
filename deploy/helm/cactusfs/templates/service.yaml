@@ -26,6 +26,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  {{- with include "cactusfs.trafficPolicy" (dict "root" . "key" "service") }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     {{- include "cactusfs.selector" . | nindent 4 }}
     cactusfs.io/gateway: "true"
@@ -50,6 +53,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.adminService.type }}
+  {{- with include "cactusfs.trafficPolicy" (dict "root" . "key" "adminService") }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
   selector:
     {{- include "cactusfs.selector" . | nindent 4 }}
     cactusfs.io/gateway: "true"

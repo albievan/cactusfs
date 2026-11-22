@@ -10,18 +10,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // fakeTools are the programs the script may run that touch a machine: each
 // is this test binary under that name, and records what it was asked.
-var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "k3s", "curl"}
+var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "k3s", "curl", "helm"}
+
+// optionalFakes are programs of the machine (hostTools) that a test may
+// put a fake in place of, to make it fail as the machine's would not
+// (rig.fake).
+var optionalFakes = []string{"cmp"}
 
 // hostTools are the programs of this machine the script may use; nothing
 // else is on its PATH. A program the script starts using must be added here,
@@ -34,8 +41,9 @@ var hostTools = []string{
 	"pwd", "printenv",
 	// The secrets (PLAN 10.3): tar streams, comparing copies, writing a
 	// file without writing over one, a checksum of the binary dev-init
-	// runs from.
+	// runs from. The render (PLAN 10.9): copies, base64 of Secret values.
 	"tar", "cmp", "ln", "mv", "find", "rmdir", "sha256sum", "shasum",
+	"cp", "od", "base64",
 }
 
 // systemDirs are where hostTools and the shells are looked for.
@@ -72,17 +80,20 @@ type call struct {
 
 // rule is how a fake answers: the first rule of its tool whose words are
 // all among the arguments decides what it prints and its exit status. A
-// call that no rule matches prints nothing and succeeds.
+// call that no rule matches prints nothing and succeeds. A rule with
+// SaveStdin also keeps what the call read, in that file of the rig's
+// directory (the last such call's).
 type rule struct {
-	Tool     string   `json:"tool"`
-	Contains []string `json:"contains"`
-	Stdout   string   `json:"stdout"`
-	Stderr   string   `json:"stderr,omitempty"`
-	Exit     int      `json:"exit"`
+	Tool      string   `json:"tool"`
+	Contains  []string `json:"contains"`
+	Stdout    string   `json:"stdout"`
+	Stderr    string   `json:"stderr,omitempty"`
+	Exit      int      `json:"exit"`
+	SaveStdin string   `json:"save_stdin,omitempty"`
 }
 
 func TestMain(m *testing.M) {
-	if name := filepath.Base(os.Args[0]); slices.Contains(fakeTools, name) {
+	if name := filepath.Base(os.Args[0]); slices.Contains(fakeTools, name) || slices.Contains(optionalFakes, name) {
 		os.Exit(fake(name, os.Args[1:]))
 	}
 	os.Exit(m.Run())
@@ -143,6 +154,12 @@ func fake(name string, args []string) int {
 	for _, r := range rules {
 		if r.Tool != name || !containsAll(args, r.Contains) {
 			continue
+		}
+		if r.SaveStdin != "" {
+			if err := rig.WriteFile(r.SaveStdin, in, 0o600); err != nil {
+				fmt.Fprintf(os.Stderr, "fake %s: keep stdin: %v\n", name, err)
+				return 125
+			}
 		}
 		if _, err := io.WriteString(os.Stdout, r.Stdout); err != nil {
 			return 125
@@ -235,6 +252,8 @@ type rig struct {
 	// repoAs, when set, is the path of the repository the script is
 	// called by instead of repo: the same directory by another name.
 	repoAs string
+	// input, when set, is what the run reads on its standard input.
+	input string
 }
 
 func newRig(t *testing.T, sh shell) *rig {
@@ -274,6 +293,9 @@ func newRigIn(t *testing.T, sh shell, base string) *rig {
 	}
 	defer func() { _ = copyRoot.Close() }()
 	for _, f := range deployFiles(t) {
+		if err := copyRoot.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err := copyRoot.WriteFile(f, repoFile(t, f), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -300,8 +322,24 @@ func newRigIn(t *testing.T, sh shell, base string) *rig {
 	return r
 }
 
+// repoFiles holds what repoFile has read, by path: the rigs of the
+// parallel subtests copy the same files many times.
+var repoFiles sync.Map
+
 // repoFile is a file of the repository, by its path relative to it.
 func repoFile(t *testing.T, rel string) []byte {
+	t.Helper()
+	if cached, ok := repoFiles.Load(rel); ok {
+		if data, ok := cached.([]byte); ok {
+			return data
+		}
+	}
+	data := readRepoFile(t, rel)
+	repoFiles.Store(rel, data)
+	return data
+}
+
+func readRepoFile(t *testing.T, rel string) []byte {
 	t.Helper()
 	root, err := os.OpenRoot(repoRoot)
 	if err != nil {
@@ -315,17 +353,78 @@ func repoFile(t *testing.T, rel string) []byte {
 	return data
 }
 
-// deployFiles are the files of deploy/ the script is made of, relative to
-// the repository.
+// deployFiles are the files of the repository the script reads, relative
+// to it: deploy/ itself and the Dockerfile (which pins the helm image). The
+// chart it renders is copied only into a rig that renders (rig.chart).
 func deployFiles(t *testing.T) []string {
 	t.Helper()
 	libs, err := filepath.Glob(filepath.Join(repoRoot, "deploy", "lib", "*.sh"))
 	if err != nil || len(libs) == 0 {
 		t.Fatalf("no deploy/lib/*.sh: %v", err)
 	}
-	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example"}
+	files := []string{"deploy/deploy.sh", "deploy/cactusfs.env.example", "deploy/.env.example", "Dockerfile"}
 	for _, l := range libs {
 		files = append(files, filepath.ToSlash(filepath.Join("deploy", "lib", filepath.Base(l))))
+	}
+	return files
+}
+
+// chart copies the chart into the rig's repository, for a test that renders.
+func (r *rig) chart() {
+	r.t.Helper()
+	root, err := os.OpenRoot(r.repo)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	for _, f := range chartFiles(r.t) {
+		if err := root.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+			r.t.Fatal(err)
+		}
+		if err := root.WriteFile(f, repoFile(r.t, f), 0o600); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+}
+
+// fake puts the test binary in place of a program of the machine (one of
+// optionalFakes): it then records its calls and answers by the rules.
+func (r *rig) fake(name string) {
+	r.t.Helper()
+	if !slices.Contains(optionalFakes, name) {
+		r.t.Fatalf("%s is not among the programs a fake may replace", name)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	path := filepath.Join(r.bin, name)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		r.t.Fatal(err)
+	}
+	if err := os.Symlink(self, path); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// chartFiles are the files of the chart, deploy/helm/cactusfs, relative to
+// the repository.
+func chartFiles(t *testing.T) []string {
+	t.Helper()
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	var files []string
+	err = fs.WalkDir(root.FS(), "deploy/helm/cactusfs", func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			files = append(files, path)
+		}
+		return err
+	})
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no chart in deploy/helm/cactusfs: %v", err)
 	}
 	return files
 }

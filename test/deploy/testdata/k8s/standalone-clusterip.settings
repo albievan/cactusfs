@@ -1,0 +1,17 @@
+# A profile of deploy/deploy.sh on Kubernetes (PLAN 10.9): one node with two
+# drives in a namespace of its own on a named StorageClass, S3 and the admin
+# port inside the cluster only, settings of the node passed on.
+# nodes: 3
+DEPLOY_TARGET=k8s
+K8S_CONTEXT=profile
+KMS=local
+DEPLOY_NAME=store
+K8S_NAMESPACE=objects
+DRIVES=2
+K8S_STORAGE_CLASS=example-ssd
+K8S_DRIVE_SIZE=20Gi
+K8S_META_SIZE=2Gi
+K8S_SERVICE_TYPE=ClusterIP
+CACTUSFS_LOG_LEVEL=debug
+CACTUSFS_REGION=eu-west-1
+CACTUSFS_SCRUB_INTERVAL=12h

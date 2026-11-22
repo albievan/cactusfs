@@ -1,0 +1,16 @@
+# One node, published as deploy/deploy.sh publishes it (PLAN 10.9): S3 on a
+# NodePort with externalTrafficPolicy Local, so that the pods - and the
+# NetworkPolicy's ranges - see the clients' addresses. The admin Service
+# says Local as well but stays a ClusterIP, for which no policy is rendered.
+pools:
+  - {name: node, replicas: 1, roles: ""}
+drives: {count: 4, size: 10Gi}
+secrets: {root: cactusfs-root, tls: cactusfs-tls}
+kms:
+  type: local
+  local: {keyFileSecret: cactusfs-kms, passphraseSecret: cactusfs-kms-passphrase}
+spread: {whenUnsatisfiable: ScheduleAnyway}
+service: {type: NodePort, nodePort: 30900, externalTrafficPolicy: Local}
+adminService: {type: ClusterIP, externalTrafficPolicy: Local}
+networkPolicy:
+  clientsFrom: [{ipBlock: {cidr: 192.0.2.0/24}}]

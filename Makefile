@@ -292,7 +292,7 @@ lint: web-build
 # With the console tag the built console is embedded, so it must be built.
 vet: web-build
 	go vet ./...
-	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade,k8s,deployscript ./...
+	go vet -tags=integration,fixturegen,s3compat,s3tools,chaos,console,rollingupgrade,k8s,deployscript,deployrender ./...
 	@echo "vet: PASS"
 
 test:
@@ -457,11 +457,13 @@ helm-lint:
 	@CACTUSFS_KMS_PASSPHRASE=only-to-render-the-file docker compose -f deploy/compose/compose.yaml config --quiet
 	@echo "compose: deploy/compose/compose.yaml is valid"
 
-# The deployment script, deploy/deploy.sh (PLAN 10.1): shfmt's POSIX format,
-# dash -n and bash -n on every shell file of deploy/, and the harness of
-# test/deploy, which runs the real script under dash and bash against
-# recording fakes of docker, podman, nerdctl, kubectl, ssh, k3s and curl - no
-# engine, cluster or network.
+# The deployment script, deploy/deploy.sh (PLAN 10.1, 10.9): shfmt's POSIX
+# format, dash -n and bash -n on every shell file of deploy/, and the harness
+# of test/deploy, which runs the real script under dash and bash against
+# recording fakes of docker, podman, nerdctl, kubectl, ssh, k3s, curl and
+# helm - no engine, cluster or network - and renders every Kubernetes profile
+# of test/deploy/testdata/k8s with the builder's helm, judged by kubeconform
+# -strict against the builder's schemas (tag deployrender).
 deploy-check:
 	@scripts/deploy-check.sh
 

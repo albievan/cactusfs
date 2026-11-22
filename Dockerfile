@@ -201,7 +201,10 @@ RUN case "${TARGETARCH}" in \
  && install -m 0755 "/tmp/yq/yq_linux_${TARGETARCH}" /opt/helmtools/bin/yq \
  && rm -rf /tmp/kubeconform /tmp/yq \
  && /opt/helmtools/bin/kubeconform -v && /opt/helmtools/bin/yq --version
-# The schema of each kind the chart renders, each file by its checksum, named
+# The schema of each kind the chart renders - and of the Namespace, the
+# Secrets, the Role and the ClusterRole deploy/deploy.sh writes itself (make
+# deploy-check, PLAN 10.9) -
+# each file by its checksum, named
 # as kubeconform looks for it: <kind>-<group>-<version>.json, the kind in lower
 # case, the first label of the group, and no group for the core one. A kind
 # that is not in this list fails `make helm-lint` - kubeconform is given no
@@ -219,6 +222,9 @@ RUN schema() { python /usr/local/bin/fetch.py --file \
  && schema serviceaccount-v1             8193d6c3561475c6d3d5c44e1faedb1df53905373d904bc17015694326d659cf \
  && schema role-rbac-v1                  dfe8fb03b1642f985b57b12edd1727b6867c13ed4b6761ef81bdd51b1d236711 \
  && schema rolebinding-rbac-v1           b12ea4163fc37df2e02192b4291b1b7c28836e3e7665d989dd538bfcffa10076 \
+ && schema namespace-v1                  324fae677b98d1a6d54340db0c334d053e8ffbafceb3f73326e41de2610d5843 \
+ && schema secret-v1                     de761ccb06bd1d2c641fb57397f61b68e7ff53a384f0817ce40e5ded8cee86f3 \
+ && schema clusterrole-rbac-v1           0777f91c4fa08bd3989b6db8c59dad0429a63dec8f59e883ff55c947a14d0d5f \
  && ls -l "/opt/kubernetes-schemas/v${K8S_SCHEMAS_VERSION}-standalone-strict"
 
 # --- promtools: promtool, for the gate of the alerting rules ---------------------

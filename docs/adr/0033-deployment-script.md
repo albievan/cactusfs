@@ -214,7 +214,34 @@ client keeps (iCloud Drive, Dropbox, OneDrive, Google Drive) is warned about, si
 synced copy is a copy the operator does not control. The README (PLAN 10.12) says how
 to back the directory up encrypted. Besides the secrets, an entry holds the record of
 the resolved target (section 15), the namespace marker's UID (section 7) and the pinned
-ssh host key (section 16).
+ssh host key (section 16). An entry is laid out as follows (PLAN 10.3 writes the
+secrets and the record, 10.9 the marker):
+
+| Path in the entry | What it holds |
+|---|---|
+| `secrets/root-access-key`, `secrets/root-secret-key` | the root credentials, when generated |
+| `secrets/kms-passphrase` | the KMS passphrase, when generated (`KMS=local`) |
+| `secrets/vault-token` | a copy of `VAULT_TOKEN_FILE` (`KMS=vault`) |
+| `config/` | the directory of `cactusfs dev-init`, in its own layout: `kms.json`, `s3.pem`, `s3.key`, `s3-ca.pem`, `node-ca.pem`, `nodes/<node ID>.{pem,key}`, `ready` |
+| `target` | the record of the resolved engine or cluster (section 15) |
+| `namespace-uid` | the namespace marker (section 7; Kubernetes) |
+
+A secret the env file names by its `*_FILE` setting is read from that file instead.
+
+**On Kubernetes the cluster's copy is never overwritten from here.** Before anything is
+written, every Secret of the deployment is read back by its name (a read that fails,
+other than not-found, stops the run) and each value compared with the local copy, file
+to file (decoded into a 0700 directory of the entry, compared with `cmp`; never a
+variable or an argument). Equal: nothing is done. Different: refused, naming both -
+except a certificate or key given by `TLS_CERT_FILE`/`TLS_KEY_FILE`, or a token or CA
+given by `VAULT_TOKEN_FILE`/`VAULT_CA_FILE`, which is a rotation: the cluster's copy is
+replaced by the file (`kubectl replace` of that Secret alone, at the `resourceVersion` read back, so a change made meanwhile fails it; never forced), with a message. In the
+cluster only: copied back into the entry with a warning. Missing in the cluster: the
+Secret is created (`create`, never `apply`, with the field manager `cactusfs-deploy`).
+Missing in both: PLAN 10.3 makes it. A Secret of the deployment's name without the
+label `io.cactusfs.deploy.name=<name>` is somebody else's, and refused. The root
+credentials, the passphrase, `kms.json`, the node CA and the node certificates and keys
+are never rotated by the script.
 
 **Never on a command line, never in a variable, never printed.** Secrets travel on
 standard input only (`cp -`, `kubectl apply -f -`, a tar stream through ssh), streamed
@@ -346,9 +373,30 @@ there. The identity it acts as is what `KUBECTL` gives it: through `ssh K3S_SSH 
 kubectl` that is cluster-admin, which can do far more than the script does - the
 boundary is the script's code, not RBAC. An operator who wants RBAC to be the boundary
 gives `K8S_CONTEXT` a context bound to a Role in the namespace, with a ClusterRole that
-only lists Services, Nodes and StorageClasses and gets `kube-system`; the namespace is
-then made beforehand by the cluster's administrator from the manifest
-`deploy.sh --print-namespace` writes, marker included.
+only lists Services, Nodes, StorageClasses and PersistentVolumes and gets the
+namespace itself and `kube-system` by name; the namespace is then made beforehand by the cluster's
+administrator from the manifests `deploy.sh --print-namespace` writes - the Namespace,
+marker included, the Role and the ClusterRole - and bound to the operator's identity
+with the two commands it prints on standard error (`kubectl create rolebinding
+cactusfs-deploy -n <ns> --role=cactusfs-deploy --user=<identity>` and `kubectl create
+clusterrolebinding cactusfs-deploy-<ns> --clusterrole=cactusfs-deploy-<ns>
+--user=<identity>`). The rules, exactly:
+
+| Object | apiGroups | resources | resourceNames | verbs |
+|---|---|---|---|---|
+| Role `cactusfs-deploy` in `<ns>` | `""` | `secrets`, `services`, `persistentvolumeclaims`, `serviceaccounts` | | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| | `""` | `pods` | | `get`, `list`, `watch`, `delete` |
+| | `""` | `pods/portforward` | | `create` |
+| | `apps` | `statefulsets` | | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
+| | `networking.k8s.io` | `networkpolicies` | | the same |
+| | `policy` | `poddisruptionbudgets` | | the same |
+| ClusterRole `cactusfs-deploy-<ns>` | `""` | `nodes`, `services`, `persistentvolumes` | | `list` (PersistentVolumes for the purge's check that none bound to the claims is left, PLAN 10.11) |
+| | `storage.k8s.io` | `storageclasses` | | `list` |
+| | `""` | `namespaces` | `<ns>`, `kube-system` | `get` |
+
+A read the context may not make fails, naming the permission it lacks (Forbidden).
+Such a context cannot delete its namespace: a purge then leaves the empty namespace to
+the administrator (PLAN 10.11).
 
 `K8S_STORAGE=hostpath` (the chart's `localVolumes`: a StorageClass and
 PersistentVolumes; and the directories they name, made on the host with their SELinux
@@ -629,7 +677,7 @@ standard input.
 
 ## Open, for the owner
 
-Defaults are applied until answered; the threat model has each, numbered 72 to 78.
+Defaults are applied until answered; the threat model has each, numbered 72 to 79.
 
 1. **The local KMS** (72). Default: opted into through the example (`KMS=local` must
    be stated); a cluster on one shared key file needs `ALLOW_SHARED_LOCAL_KMS=yes`.
@@ -644,3 +692,6 @@ Defaults are applied until answered; the threat model has each, numbered 72 to 7
 6. **The image binaries in releases** (77). Default: published from the next release.
 7. **The acceptance hosts** (78). Default: standalone left running on both; purge tried
    on a second deployment name only.
+8. **Vault by a host name on Kubernetes** (79, PLAN 10.9). Default: `VAULT_ADDR` must
+   name Vault by its IPv4 address there, which becomes the NetworkPolicy's one egress
+   rule; a host name is refused.

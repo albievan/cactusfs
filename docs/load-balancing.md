@@ -544,15 +544,21 @@ MetalLB in layer 2 mode that means all traffic goes to the gateway pods of the o
 machine that holds the address. `Cluster`, the default, spreads over every gateway and
 hides the client.
 
-The chart has **no value** for `externalTrafficPolicy` (nor for
-`loadBalancerSourceRanges`, `loadBalancerClass` or a fixed address); the Service
-template sets `type`, the port, `nodePort` and annotations only. Until it has, set the
-field on the live Service and check it after every `helm upgrade`, or add it with a
-Helm post-renderer:
+The chart sets it with `service.externalTrafficPolicy` (and
+`adminService.externalTrafficPolicy` for the admin Service): `Local` or `Cluster`,
+rendered for a `NodePort` or `LoadBalancer` Service only, and left out when empty -
+the default, which is the cluster's `Cluster`. `deploy/deploy.sh` sets `Local` on
+every Service it publishes, so that the ranges of its allow-lists mean clients.
 
-```sh
-kubectl -n cactusfs patch service cactusfs -p '{"spec":{"externalTrafficPolicy":"Local"}}'
+```yaml
+service:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
 ```
+
+The chart has no value for `loadBalancerSourceRanges`, `loadBalancerClass` or a fixed
+address; the Service template sets `type`, the port, `nodePort`,
+`externalTrafficPolicy` and annotations only.
 
 ### (ii) NodePort and a balancer outside the cluster
 

@@ -1,0 +1,19 @@
+# A profile of deploy/deploy.sh on Kubernetes (PLAN 10.9): 3 voters and one
+# more node with keys in Vault, S3 on a LoadBalancer for every address, the
+# admin port on a NodePort for one network - both published Services keeping
+# the client's address (externalTrafficPolicy: Local).
+# nodes: 4
+DEPLOY_TARGET=k8s
+K8S_CONTEXT=profile
+KMS=vault
+DEPLOY_MODE=cluster
+VAULT_ADDR=https://192.0.2.20:8200
+VAULT_KEY=cactusfs
+VAULT_TOKEN_FILE=~/vault-token
+VAULT_CA_FILE=~/vault-ca.pem
+K8S_SERVICE_TYPE=LoadBalancer
+K8S_S3_ALLOW_FROM=any
+K8S_ADMIN_SERVICE_TYPE=NodePort
+K8S_ADMIN_NODE_PORT=30901
+K8S_ADMIN_ALLOW_FROM=192.0.2.0/28,2001:db8::/64
+CACTUSFS_S3_DOMAIN=s3.example.test

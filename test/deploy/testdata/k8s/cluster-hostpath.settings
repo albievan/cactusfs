@@ -1,0 +1,13 @@
+# A profile of deploy/deploy.sh on Kubernetes (PLAN 10.9): 3 voters and one
+# more node on the disks of the one machine of a k3s, sharing one local key
+# file - a development cluster. K8S_STORAGE=hostpath is the one profile whose
+# render holds cluster-scoped objects (a StorageClass and PersistentVolumes).
+# nodes: 1
+DEPLOY_TARGET=k3s
+KMS=local
+DEPLOY_MODE=cluster
+ALLOW_SHARED_LOCAL_KMS=yes
+K8S_STORAGE=hostpath
+K8S_HOSTPATH=/srv/cactusfs
+K8S_NODE_PORT=30900
+K8S_S3_ALLOW_FROM=192.0.2.0/24,198.51.100.7

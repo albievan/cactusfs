@@ -1,8 +1,9 @@
 // Package deploy tests deploy/deploy.sh, the deployment script, without a
 // container engine, a cluster or a network: the real script runs under dash
 // and bash against recording fakes of docker, podman, nerdctl, kubectl, ssh,
-// k3s and curl, which write what they were asked - every argument and a hash
-// of what they read - to a transcript, and answer as each test tells them.
+// k3s, curl and helm, which write what they were asked - every argument and a
+// hash of what they read - to a transcript, and answer as each test tells
+// them.
 //
 // The fakes are this test binary itself, found on PATH under those names
 // (TestMain tells them apart by the name they were started with). Each test
@@ -11,5 +12,7 @@
 // nothing else.
 //
 // The tests are compiled only with -tags=deployscript and are run by
-// "make deploy-check", which is part of "make check".
+// "make deploy-check", which is part of "make check". With the tag
+// deployrender as well, the Kubernetes profiles of testdata/k8s are rendered
+// with a real helm and judged by kubeconform, which the builder image has.
 package deploy

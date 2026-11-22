@@ -163,9 +163,9 @@ repository ("Settings"); `extraEnv` passes one.
 ## Who may reach it
 
 Both Services are `ClusterIP` unless you say otherwise (`service.type`,
-`adminService.type`, with `nodePort` and `annotations` for each); how they are
-published is yours to choose. The NetworkPolicy then decides who gets through, and by
-default nobody does:
+`adminService.type`, with `nodePort`, `externalTrafficPolicy` and `annotations` for
+each); how they are published is yours to choose. The NetworkPolicy then decides who
+gets through, and by default nobody does:
 
 | Value | Opens |
 |---|---|
@@ -184,6 +184,14 @@ things to know:
   hosts past the host's own firewall. The admin port has a Service of its own so that
   S3 can be published without it.
 - A NetworkPolicy binds only where the cluster's network plugin enforces it.
+- `service.externalTrafficPolicy` and `adminService.externalTrafficPolicy` (empty,
+  `Local` or `Cluster`) are rendered for a `NodePort` or `LoadBalancer` Service only,
+  and not at all when empty. With `Local` the pods see the client's address, so an
+  `ipBlock` of `clientsFrom` or `adminFrom` means clients; only machines that run a
+  ready gateway pod then take traffic. With `Cluster`, the cluster's default, a machine
+  forwards with source NAT and the pods may see a machine's address instead
+  ([docs/load-balancing.md](../../../docs/load-balancing.md)). `deploy/deploy.sh`
+  sets `Local` on every Service it publishes.
 
 **Notification targets** ([ADR-0025](../../../docs/adr/0025-bucket-notifications.md)).
 The node that leads connects to every webhook and NATS server that is defined as a

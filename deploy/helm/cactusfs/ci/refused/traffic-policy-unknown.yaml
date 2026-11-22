@@ -1,0 +1,3 @@
+# expect: service.externalTrafficPolicy is Local or Cluster
+# Laid over ci/cluster-values.yaml; the chart must refuse to render.
+service: {type: NodePort, externalTrafficPolicy: local}

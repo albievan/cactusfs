@@ -29,7 +29,8 @@
 #   node is given them as CACTUSFS_*_FILE and CACTUSFS_KMS_KEY_FILE (PLAN
 #   10.5), so it never makes a key file of its own. Rancher Desktop (10.6),
 #   cluster mode on Docker (compose's config volume, 10.8) and Kubernetes
-#   (Secrets of the namespace, 10.9) keep their copies as those steps build;
+#   (Secrets of the namespace: read back and compared by 10.9, wired here by
+#   10.10) keep their copies as those steps build;
 #   secrets_where and secrets_install are where they are dispatched.
 #
 # Never made again: a secret either copy holds is used as it is. One copy
@@ -63,7 +64,7 @@
 # milestone 10 that will.
 secrets_where() {
 	if on_kubernetes; then
-		echo 10.9
+		echo 10.10
 	elif [ "$(setting DEPLOY_MODE)" = cluster ]; then
 		echo 10.8
 	else

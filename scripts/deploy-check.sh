@@ -1,7 +1,12 @@
 #!/bin/sh
-# Deployment-script gate (PLAN 10.1): every shell file of deploy/ is
+# Deployment-script gate (PLAN 10.1, 10.9): every shell file of deploy/ is
 # formatted as shfmt formats POSIX sh, parses under dash and under bash, and
 # the harness of test/deploy runs the real script against recording fakes.
+# With the tag deployrender it also renders every Kubernetes profile of
+# test/deploy/testdata/k8s through the script with the builder's helm and
+# judges each render with kubeconform -strict against the builder's schemas
+# (TestProfilesRender): helm, kubeconform and the schemas are in the builder
+# image, and a missing one fails the gate.
 # Run through `make deploy-check`, which is part of `make check`.
 #
 # dash is Debian's /bin/sh and is in the builder image (an essential package
@@ -33,5 +38,5 @@ for shell in dash bash; do
 	done
 done
 
-go test -count=1 -tags deployscript ./test/deploy/...
+go test -count=1 -tags deployscript,deployrender ./test/deploy/...
 echo "deploy-check: PASS ($(echo "$files" | wc -l | tr -d ' ') files)"

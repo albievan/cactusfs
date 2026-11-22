@@ -1351,8 +1351,8 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 		t.Run("kubernetes, a later step", func(t *testing.T) {
 			t.Parallel()
 			r := secretsRig(t, r.fresh(t))
-			res := r.guarded("KMS=local\nK8S_CONTEXT=prod\n", "--docker", "k8s", "--install")
-			res.want(t, 3, "not built yet (PLAN 10.10)", "built for this target by 10.9")
+			res := r.guarded("KMS=local\nK8S_CONTEXT=prod\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", "--docker", "k8s", "--install")
+			res.want(t, 3, "not built yet (PLAN 10.10)", "built for this target by 10.10")
 			if _, err := os.Stat(r.stateDir()); err == nil {
 				t.Error("STATE_DIR was written for a target whose secrets are not built yet")
 			}

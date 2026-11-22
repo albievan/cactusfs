@@ -887,3 +887,12 @@ none of them is answered by the owner, and each stays open:
     server after acceptance; `--uninstall --purge` is tried on a second deployment name
     only, so the one left running is never purged. Its `STATE_DIR` stays on the
     operator's machine, and the admin password must be changed there as anywhere.
+79. **Vault named by a host name on Kubernetes** (PLAN 10.9). The chart's default-deny
+    NetworkPolicy lets the nodes reach Vault only through an `egressTo` rule, and a
+    NetworkPolicy names addresses, not hosts; the env file has no setting for Vault's
+    address range. Default (the stricter reading): with `KMS=vault` on Kubernetes,
+    `VAULT_ADDR` must name Vault by its IPv4 address (`https://192.0.2.20:8200`), which
+    becomes the one rule (that address /32 and the port); a host name is refused
+    before anything is asked of the cluster. The alternative is a new setting such as
+    `K8S_VAULT_FROM` (ranges and a port), with `VAULT_ADDR` free to name a host whose
+    certificate carries that name.

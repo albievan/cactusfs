@@ -113,6 +113,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if or (lt (atoi (toString .)) 1) (gt (atoi (toString .)) 65535) -}}{{- fail (printf "networkPolicy.egressTo[%d].ports: %q is not a port, 1 to 65535" $i (toString .)) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
+{{- range $key := list "service" "adminService" -}}
+{{- $policy := dig $key "externalTrafficPolicy" "" $root.Values.AsMap | toString -}}
+{{- if not (has $policy (list "" "Local" "Cluster")) -}}{{- fail (printf "%s.externalTrafficPolicy is Local or Cluster, or empty, not %q" $key $policy) -}}{{- end -}}
+{{- end -}}
 {{- if and .Values.localVolumes.enabled (or (not .Values.localVolumes.basePath) (not .Values.localVolumes.nodeName)) -}}{{- fail "localVolumes: basePath and nodeName are required" -}}{{- end -}}
 {{- if lt (int .Values.drives.count) 1 -}}{{- fail "drives.count is at least 1" -}}{{- end -}}
 {{- if include "cactusfs.upgradeFromConsole" . -}}
@@ -163,6 +167,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
      the namespace (the upgrader's DefaultAPIDir). */}}
 {{- define "cactusfs.upgradeDir" -}}
 /var/run/secrets/cactusfs.io/kubernetes
+{{- end -}}
+
+{{/* The externalTrafficPolicy of a Service (key: service or adminService):
+     its value, only for a type that is reached from outside the cluster
+     (NodePort, LoadBalancer); empty otherwise, and then not rendered. Read
+     with dig, so that the values of a release installed before the value
+     existed read as none. */}}
+{{- define "cactusfs.trafficPolicy" -}}
+{{- if has (toString (dig .key "type" "" .root.Values.AsMap)) (list "NodePort" "LoadBalancer") -}}
+{{- dig .key "externalTrafficPolicy" "" .root.Values.AsMap -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "cactusfs.storageClass" -}}
