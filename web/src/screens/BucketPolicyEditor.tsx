@@ -306,7 +306,10 @@ function SaveQuestion({ title, confirm, confirmTitle, busy, onConfirm, onCancel,
   const titleId = useId();
   const bodyId = useId();
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  // In the commit that shows it, before anything can be clicked: a passive
+  // effect could run after a quick confirm had already given the keyboard to
+  // the status line, take it back, and lose it when the question goes.
+  useLayoutEffect(() => {
     box.current?.focus();
   }, []);
 
