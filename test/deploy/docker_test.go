@@ -42,6 +42,26 @@ const (
 	readyzURL    = "https://localhost:9001/readyz"
 )
 
+// volumeLabel is the template of a volume's label in "volume inspect", by
+// engine: nerdctl's Labels is a pointer to a map, nil without labels, read
+// through "with" (deploy/lib/rancher.sh, PLAN 10.6).
+func volumeLabel(tool, key string) string {
+	if tool == "nerdctl" {
+		return `{{with .Labels}}{{index . "` + key + `"}}{{end}}`
+	}
+	return `{{index .Labels "` + key + `"}}`
+}
+
+// labelsFormatOf and targetFormatOf are labelsFormat and targetFormat of an
+// engine.
+func labelsFormatOf(tool string) string {
+	return "{{.Name}} " + volumeLabel(tool, "io.cactusfs.deploy.name") + " " + volumeLabel(tool, "io.cactusfs.deploy.target")
+}
+
+func targetFormatOf(tool string) string {
+	return "{{.Name}} " + volumeLabel(tool, "io.cactusfs.deploy.target")
+}
+
 // vaultEnv is the lines of an env file for Vault; withVault makes an env
 // file of imageEnv and them: KMS=vault in place of KMS=local, and the token
 // a file of the rig.
@@ -157,7 +177,7 @@ func (s engineState) rules(t *testing.T) []rule {
 	}
 	rules = append(rules,
 		rule{Tool: tool, Contains: []string{"volume", "ls", "name=cactusfs-"}, Stdout: listed},
-		rule{Tool: tool, Contains: []string{"volume", "inspect", labelsFormat}, Stdout: labels})
+		rule{Tool: tool, Contains: []string{"volume", "inspect", labelsFormatOf(tool)}, Stdout: labels})
 	// The listing by label, and the target of each.
 	names, targets := "", ""
 	for _, l := range s.labelled {
@@ -171,7 +191,7 @@ func (s engineState) rules(t *testing.T) []rule {
 	}
 	rules = append(rules,
 		rule{Tool: tool, Contains: []string{"volume", "ls", byLabel}, Stdout: names},
-		rule{Tool: tool, Contains: []string{"volume", "inspect", targetFormat}, Stdout: targets})
+		rule{Tool: tool, Contains: []string{"volume", "inspect", targetFormatOf(tool)}, Stdout: targets})
 	for _, u := range s.inUse {
 		rules = append(rules, rule{Tool: "curl", Contains: []string{u}, Stdout: "1"})
 	}
@@ -183,18 +203,30 @@ func (s engineState) rules(t *testing.T) []rule {
 	return append(rules, engineRules(t, tool, s.e.id, s.devInit, s.keys)...)
 }
 
-// sub is the words of an engine's call after the Docker CLI's context.
+// sub is the words of an engine's call after the Docker CLI's context, or
+// nerdctl's namespace (PLAN 10.6).
 func sub(c call) []string {
 	if c.Tool == "docker" && len(c.Args) >= 2 && c.Args[0] == "--context" {
+		return c.Args[2:]
+	}
+	if c.Tool == "nerdctl" && len(c.Args) >= 2 && c.Args[0] == "--namespace" {
 		return c.Args[2:]
 	}
 	return c.Args
 }
 
+// isEngine is true for a program of a container engine: docker, podman,
+// nerdctl.
+func isEngine(tool string) bool {
+	return tool == "docker" || tool == "podman" || tool == "nerdctl"
+}
+
 // mutating is true for a call that changes the engine: a container, a
-// volume, or an image - built, loaded, pulled, tagged or removed.
+// volume, or an image - built, loaded, pulled, tagged or removed. A copy
+// into a container ("cp -a -", or nerdctl's "cp -") is a change; a copy out
+// of one is not.
 func mutating(c call) bool {
-	if c.Tool != "docker" && c.Tool != "podman" {
+	if !isEngine(c.Tool) {
 		return false
 	}
 	s := sub(c)
@@ -209,7 +241,7 @@ func mutating(c call) bool {
 	case "image":
 		return len(s) > 1 && (s[1] == "tag" || s[1] == "rm" || s[1] == "load" || s[1] == "pull")
 	case "cp":
-		return slices.Contains(s, "-a")
+		return slices.Contains(s, "-a") || (len(s) > 1 && s[1] == "-")
 	case "volume":
 		return len(s) > 1 && (s[1] == "create" || s[1] == "rm" || s[1] == "prune")
 	}
@@ -248,7 +280,7 @@ func steps(res result) []string {
 			out = append(out, "probe "+c.Args[len(c.Args)-1])
 		case c.Tool == "curl":
 			out = append(out, "readyz")
-		case c.Tool != "docker" && c.Tool != "podman":
+		case !isEngine(c.Tool):
 		case len(s) == 0:
 		case s[0] == "build" || (s[0] == "buildx" && len(s) > 1 && s[1] == "build"):
 			out = append(out, "build")
@@ -264,8 +296,8 @@ func steps(res result) []string {
 			out = append(out, "volume rm "+strings.Join(s[2:], " "))
 		case s[0] == "volume" && s[1] == "ls" && slices.Contains(s, byLabel):
 			out = append(out, "listing")
-		case s[0] == "cp" && slices.Contains(s, "-a") && strings.HasPrefix(s[3], "cactusfs-volumes:"):
-			out = append(out, "put "+s[3])
+		case s[0] == "cp" && (slices.Contains(s, "-a") || s[1] == "-") && strings.HasPrefix(s[len(s)-1], "cactusfs-volumes:"):
+			out = append(out, "put "+s[len(s)-1])
 		case s[0] == "start":
 			out = append(out, "dev-init")
 		case s[0] == "run":
@@ -305,7 +337,7 @@ func runOf(t *testing.T, res result) []string {
 	t.Helper()
 	var runs [][]string
 	for _, c := range res.calls {
-		if s := sub(c); (c.Tool == "docker" || c.Tool == "podman") && len(s) > 0 && s[0] == "run" && !isVersionCheck(s) {
+		if s := sub(c); isEngine(c.Tool) && len(s) > 0 && s[0] == "run" && !isVersionCheck(s) {
 			runs = append(runs, s)
 		}
 	}

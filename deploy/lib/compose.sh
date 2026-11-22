@@ -1,8 +1,8 @@
 # shellcheck shell=sh
 # A cluster on a Docker engine - Docker Desktop (dd), Docker CE here or on
-# CE_HOST (ce) and Podman (podman): DEPLOY_MODE=cluster, through
-# deploy/compose/compose.yaml itself (PLAN 10.8; ADR-0033 sections 3, 4,
-# 10, 11). Sourced by deploy/deploy.sh; not run on its own.
+# CE_HOST (ce), Podman (podman) and Rancher Desktop's moby (rancher, PLAN
+# 10.6): DEPLOY_MODE=cluster, through deploy/compose/compose.yaml itself
+# (PLAN 10.8; ADR-0033 sections 3, 4, 9, 10, 11). Sourced by deploy/deploy.sh; not run on its own.
 #
 # What a deployment named <name> is - the compose project <name>, every
 # container, volume and network of it labelled io.cactusfs.deploy.name=<name>
@@ -60,15 +60,19 @@
 # answer set variables (_cp_*) and are called plainly.
 
 # compose_cluster: true for a deployment this file builds - cluster mode on
-# Docker Desktop, Docker CE (here or on CE_HOST) or Podman. Rancher Desktop
-# is PLAN 10.6's, Kubernetes 10.10's.
+# Docker Desktop, Docker CE (here or on CE_HOST), Podman, or Rancher
+# Desktop's moby engine through "docker --context rancher-desktop" (PLAN
+# 10.6; its containerd engine is refused by rancher_resolve, before
+# anything is asked: nerdctl's compose cannot upgrade one node at a time).
+# Kubernetes is 10.10's.
 compose_cluster() {
 	on_kubernetes && return 1
 	[ "$(setting DEPLOY_MODE)" = cluster ] || return 1
 	case $TARGET in
 	dd | ce | podman) return 0 ;;
+	rancher) [ "$(rancher_engine)" = moby ] ;;
+	*) return 1 ;;
 	esac
-	return 1
 }
 
 # The services of compose.yaml that are nodes; node4 does not vote.

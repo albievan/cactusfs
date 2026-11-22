@@ -68,7 +68,9 @@
 #             configuration digest of the tar sent (its manifest.json)
 #   local     the engine here is the cluster's (Rancher Desktop's
 #             Kubernetes, the contexts docker-desktop and rancher-desktop,
-#             whose API server must be on this machine); one node only
+#             whose API server must be on this machine); one node only. On
+#             Rancher Desktop's containerd that engine is nerdctl in the
+#             namespace k8s.io, the one its k3s sees (PLAN 10.6)
 #   registry  pushed to K8S_REGISTRY; the pods pull it by its digest
 #   nodes     IMAGE_SOURCE=image by its digest on Kubernetes without a push
 #             or an import (or IMAGE already under K8S_REGISTRY): checked on
@@ -82,7 +84,12 @@
 # --iidfile, which is the image's ID in Docker's image store, and the
 # manifest's to --metadata-file (containerimage.digest), which is its ID in
 # Docker's containerd store; the first the engine finds is taken, and the
-# build tag must name it. Every engine command runs through run or query
+# build tag must name it. nerdctl (Rancher Desktop on containerd, PLAN 10.6)
+# finds an image by its name or by the digest of its target, the manifest,
+# which its --iidfile holds and its RepoDigests name: on nerdctl that digest
+# is the image's ID here (image_fields), and a tag is made from the name
+# that was checked to name it - nerdctl's "image tag" takes no ID
+# (image_tag_source). Every engine command runs through run or query
 # (common.sh), under "env -i", with the engine named on its command line;
 # ssh's host keys are checked first. A work directory (an image's ID file,
 # a tar stream, a digest) is a directory of its own, removed however the run
@@ -112,11 +119,18 @@ image_settings() {
 	if on_kubernetes; then
 		_img_k8s=1
 	fi
-	# The engine here: Podman for the podman target, the Docker CLI with
-	# its context otherwise - for a Kubernetes target, Podman when there is
-	# no Docker CLI here.
+	# Rancher Desktop's engine (PLAN 10.6): asked here for its Kubernetes,
+	# where deploy.sh does not ask it; nothing when it was asked already.
+	rancher_resolve
+	# The engine here: Podman for the podman target, nerdctl for Rancher
+	# Desktop on containerd (in the namespace of rancher_resolve: default,
+	# or k8s.io for its Kubernetes), the Docker CLI with its context
+	# otherwise - for a Kubernetes target, Podman when there is no Docker
+	# CLI here.
 	if [ "$TARGET" = podman ]; then
 		_img_ltool=podman
+	elif on_nerdctl; then
+		_img_ltool=nerdctl
 	elif [ "$_img_k8s" = 1 ] && [ "$TARGET" != rancher ] && ! command -v docker >/dev/null 2>&1; then
 		command -v podman >/dev/null 2>&1 ||
 			refuse "the image is made with docker or podman here (or on BUILD_HOST), and neither is installed"
@@ -130,6 +144,7 @@ image_settings() {
 	[ -z "$_img_build_host" ] || _img_btool=docker
 	_img_ttool=docker
 	[ "$TARGET" != podman ] || _img_ttool=podman
+	! on_nerdctl || _img_ttool=nerdctl
 	# Where the image is, once made or pulled (image_route sets them), and
 	# BuildKit's builder there.
 	_img_at=
@@ -159,31 +174,59 @@ image_build_engine() {
 	fi
 }
 
-# image_local_engine <how> <word>...: the engine here - Podman, or the
-# Docker CLI with its context. Docker Desktop's and Rancher Desktop's
-# Kubernetes see its images (the route local); dev-init runs on it.
+# image_local_engine <how> <word>...: the engine here - Podman, nerdctl in
+# its namespace, or the Docker CLI with its context. Docker Desktop's and
+# Rancher Desktop's Kubernetes see its images (the route local); dev-init
+# runs on it.
 image_local_engine() {
 	_ile_how=$1
 	shift
 	if [ "$_img_ltool" = podman ]; then
 		"$_ile_how" podman "$@"
+	elif [ "$_img_ltool" = nerdctl ]; then
+		"$_ile_how" nerdctl --namespace "$_rd_ns" "$@"
 	else
 		"$_ile_how" docker --context "$_img_context" "$@"
 	fi
 }
 
 # image_target_engine <how> <word>...: the engine a Docker target runs its
-# containers on - Podman, the Docker engine of CE_HOST through
-# DOCKER_HOST=ssh://, or the Docker CLI with its context.
+# containers on - Podman, nerdctl in its namespace (Rancher Desktop on
+# containerd), the Docker engine of CE_HOST through DOCKER_HOST=ssh://, or
+# the Docker CLI with its context.
 image_target_engine() {
 	_ite_how=$1
 	shift
 	if [ "$TARGET" = podman ]; then
 		"$_ite_how" podman "$@"
+	elif [ "$_img_ttool" = nerdctl ]; then
+		"$_ite_how" nerdctl --namespace "$_rd_ns" "$@"
 	elif [ -n "$_img_ce_host" ]; then
 		"$_ite_how" "DOCKER_HOST=ssh://$_img_ce_host" docker "$@"
 	else
 		"$_ite_how" docker --context "$_img_context" "$@"
+	fi
+}
+
+# image_tool_of <engine>: the program of one of the three engines above -
+# docker, podman or nerdctl.
+image_tool_of() {
+	case $1 in
+	image_target_engine) printf '%s' "$_img_ttool" ;;
+	image_local_engine) printf '%s' "$_img_ltool" ;;
+	*) printf '%s' "$_img_btool" ;;
+	esac
+}
+
+# image_tag_source <name>: what "image tag" is given as the image tagged -
+# its ID (_img_hex), but on nerdctl, whose "image tag" takes a name and not
+# an ID (nerdctl v2.4.2 pkg/cmd/image/tag.go), the name given, which was
+# checked to name that ID; the tag made is checked again after.
+image_tag_source() {
+	if [ "$_img_at_tool" = nerdctl ]; then
+		printf '%s' "$1"
+	else
+		printf '%s' "$_img_hex"
 	fi
 }
 
@@ -289,8 +332,15 @@ image_route() {
 		elif [ -n "$_img_import" ] || [ -n "$_img_k3s_ssh" ]; then
 			_img_route=import
 		elif [ "$TARGET" = rancher ] || [ "$_img_kube" = docker-desktop ] || [ "$_img_kube" = rancher-desktop ]; then
-			[ "$_img_ltool" = docker ] && command -v docker >/dev/null 2>&1 ||
-				refuse "the cluster of $(engine_identity) sees the images of the Docker engine here, and there is no docker here"
+			if [ "$_img_ltool" = nerdctl ]; then
+				# Rancher Desktop on containerd: its k3s sees the namespace
+				# k8s.io of the containerd nerdctl reaches (rancher_resolve
+				# found nerdctl there).
+				:
+			else
+				[ "$_img_ltool" = docker ] && command -v docker >/dev/null 2>&1 ||
+					refuse "the cluster of $(engine_identity) sees the images of the Docker engine here, and there is no docker here"
+			fi
 			_img_route=local
 		elif [ "$TARGET" = k3s ] && [ -z "$_img_kube" ]; then
 			_img_route=import
@@ -318,7 +368,13 @@ image_route_said() {
 	same) echo "made on the target's engine, nothing to move" ;;
 	load) echo "saved there and loaded on $(image_target_engine show_command)" ;;
 	import) echo "saved there and imported into the containerd of the cluster's one node" ;;
-	local) echo "on the Docker engine here, whose images the cluster's one node sees" ;;
+	local)
+		if [ "$_img_ltool" = nerdctl ]; then
+			echo "in the namespace $_rd_ns of the containerd here (nerdctl), whose images the cluster's one node sees"
+		else
+			echo "on the Docker engine here, whose images the cluster's one node sees"
+		fi
+		;;
 	registry) echo "pushed to $_img_registry, pulled by the nodes by its digest" ;;
 	nodes) echo "checked here, then pulled by the nodes by its digest" ;;
 	esac
@@ -426,6 +482,12 @@ image_remote_decide() {
 		else
 			_img_remote_why="the cluster of $(engine_identity)"
 		fi
+		return 0
+	fi
+	if [ "$_img_ttool" = nerdctl ]; then
+		# Rancher Desktop's containerd runs in its virtual machine on this
+		# machine, as Docker Desktop's engine does: here (PLAN 10.6).
+		_img_remote=0
 		return 0
 	fi
 	if [ "$TARGET" = podman ]; then
@@ -733,6 +795,21 @@ image_fields() {
 	_if_out=${_if_out#*|}
 	_if_layers=${_if_out%%|*}
 	_if_config=${_if_out#*|}
+	# nerdctl says .Id, the configuration's digest, and finds an image by
+	# its target's digest, which each of its RepoDigests names (PLAN 10.6):
+	# that digest is the image's ID on nerdctl.
+	# _if_cfg keeps the configuration's digest, which a saved tar names.
+	_if_cfg=$_if_hex
+	if [ "$(image_tool_of "$1")" = nerdctl ]; then
+		_if_target=
+		for _if_d in $_if_digests; do
+			_if_target=${_if_d##*@}
+			break
+		done
+		[ -n "$_if_target" ] || fail "nerdctl names no digest of the image $2 (RepoDigests): its target cannot be told"
+		_if_hex=$(image_hex "$_if_target") || exit
+		_if_id=$(printf '%.12s' "$_if_hex")
+	fi
 }
 
 # image_version_check <image ID> <version> <build> <commit>: on the engine
@@ -829,6 +906,11 @@ image_build() {
 	if [ "$_img_at_tool" = podman ]; then
 		set -- build --format docker --platform "linux/$RESOLVED_ARCH"
 		[ "$_img_offline" != yes ] || set -- "$@" --pull=never
+	elif [ "$_img_at_tool" = nerdctl ]; then
+		# nerdctl's build: BuildKit of Rancher Desktop, --pull a boolean, no
+		# --metadata-file (its --iidfile holds the target's digest).
+		set -- build --platform "linux/$RESOLVED_ARCH"
+		[ "$_img_offline" != yes ] || set -- "$@" --pull=false
 	else
 		set -- buildx build --builder "$_img_builder" --load --platform "linux/$RESOLVED_ARCH"
 		[ "$_img_offline" != yes ] || set -- "$@" --pull=false
@@ -838,7 +920,7 @@ image_build() {
 	fi
 	set -- "$@" --build-arg "VERSION=$_img_version" --build-arg "BUILD=$_img_build" --build-arg "COMMIT=$_img_commit" -t "$_ib_work"
 	if [ "$DRY_RUN" = 1 ]; then
-		if [ "$_img_at_tool" = podman ]; then
+		if [ "$_img_at_tool" != docker ]; then
 			"$_img_at" run "$@" --iidfile '<a work directory>/iid' "$REPO_ROOT" </dev/null
 		else
 			"$_img_at" run "$@" --iidfile '<a work directory>/iid' --metadata-file '<a work directory>/metadata.json' "$REPO_ROOT" </dev/null
@@ -881,10 +963,20 @@ image_build() {
 		fail "the version label of the image built is '$_if_ver', not $_img_version-$_img_build"
 	_img_sig=$_if_sig
 	RESOLVED_IMAGE=cactusfs:$_img_version-$_img_build-$_if_id
-	"$_img_at" run image tag "$_img_hex" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+	"$_img_at" run image tag "$(image_tag_source "$_ib_work")" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+	# A tag made from a name (nerdctl) names the image checked.
+	[ "$_img_at_tool" != nerdctl ] || image_tag_check
 	"$_img_at" run image rm "$_ib_work" </dev/null || fail "removing the build's tag $_ib_work failed"
 	_img_ref_at=$RESOLVED_IMAGE
-	say "image: built $_img_hex (configuration $_img_config), tagged $RESOLVED_IMAGE"
+	if [ "$_img_at_tool" = nerdctl ]; then
+		# nerdctl's ID file holds the manifest's digest; the configuration's
+		# is its inspect's .Id (image_fields, of the tag just checked), which
+		# a saved tar is checked against.
+		_img_config=$_if_cfg
+		say "image: built $_img_hex (manifest; configuration $_img_config), tagged $RESOLVED_IMAGE"
+	else
+		say "image: built $_img_hex (configuration $_img_config), tagged $RESOLVED_IMAGE"
+	fi
 	image_version_check "$_img_hex" "$_img_version" "$_img_build" "$_img_commit"
 }
 
@@ -896,7 +988,7 @@ image_build() {
 image_build_in() {
 	_ibi_dir=$1
 	shift
-	if [ "$_img_at_tool" = podman ]; then
+	if [ "$_img_at_tool" != docker ]; then
 		"$_img_at" run "$@" --iidfile "$_ibi_dir/iid" "$REPO_ROOT" </dev/null >&2 ||
 			fail "building the image failed (the builder's message is above)"
 	else
@@ -920,7 +1012,10 @@ image_build_in() {
 # once it has been pulled (image_stop).
 image_given_inspect() {
 	_img_stop=$1
-	image_fields "$_img_at" "$_img_given"
+	image_fields "$_img_at" "$(image_given_ref)"
+	if [ "$(image_given_ref)" != "$_img_given" ] && ! image_given_listed "$_if_digests"; then
+		image_stop "the image of the digest of $_img_given on $("$_img_at" show_command) does not name the repository $(image_repo "$_img_given") among its RepoDigests"
+	fi
 	_img_hex=$_if_hex
 	_img_sig=$_if_sig
 	_ig_digests=$_if_digests
@@ -942,6 +1037,44 @@ image_given_inspect() {
 	_img_stop=refuse
 }
 
+# image_given_ref: what IMAGE is looked up by on the engine it is made on -
+# IMAGE, but on nerdctl, for IMAGE=<repository>@sha256:<hex>, the bare
+# digest: nerdctl's "image inspect" of <repository>@<digest> takes only an
+# image named <repository>:latest of that digest (nerdctl v2.4.2
+# pkg/cmd/image/inspect.go: a reference with a digest and no tag is matched
+# against the tag "latest"), while one of a bare digest takes any image of
+# it. The repository is then checked among its RepoDigests
+# (image_given_listed).
+image_given_ref() {
+	if [ "$_img_at_tool" = nerdctl ] && image_digest_ok "$_img_given"; then
+		printf 'sha256:%s' "${_img_given##*@sha256:}"
+	else
+		printf '%s' "$_img_given"
+	fi
+}
+
+# image_given_listed "<RepoDigests>": true when IMAGE's repository and
+# digest are among them (Docker Hub's prefixes taken off, as image_norm
+# does).
+image_given_listed() {
+	_igl_want=$(image_norm "$(image_repo "$_img_given")")@sha256:${_img_given##*@sha256:}
+	for _igl in $1; do
+		[ "$(image_norm "$_igl")" != "$_igl_want" ] || return 0
+	done
+	return 1
+}
+
+# image_given_present: true when the engine IMAGE is made on holds it -
+# image_present, and on nerdctl by its bare digest with its repository among
+# the RepoDigests (image_given_ref).
+image_given_present() {
+	image_present "$_img_at" "$(image_given_ref)" || return 1
+	[ "$(image_given_ref)" != "$_img_given" ] || return 0
+	_igp=$("$_img_at" query image inspect --format '{{range .RepoDigests}}{{.}} {{end}}' "$(image_given_ref)" </dev/null) ||
+		fail "could not inspect the image $(image_given_ref) on $("$_img_at" show_command) (its message is above)"
+	image_given_listed "$(printf '%s\n' "$_igp" | printable)"
+}
+
 # image_given_check: IMAGE_SOURCE=image, before anything changes - named by
 # its digest when the nodes pull it; there, and then inspected and checked
 # (image_given_inspect); or not there, which OFFLINE=yes refuses and
@@ -950,7 +1083,7 @@ image_given_check() {
 	if [ "$_img_route" = nodes ] && ! image_digest_ok "$_img_given"; then
 		refuse "IMAGE_SOURCE=image on $(engine_identity) without a push or an import: the nodes pull IMAGE themselves, so it is named by its digest (IMAGE=<repository>@sha256:<64 hex>)"
 	fi
-	if image_present "$_img_at" "$_img_given"; then
+	if image_given_present; then
 		_img_given_absent=0
 		image_given_inspect refuse
 	else
@@ -983,6 +1116,10 @@ image_given_make() {
 		else
 			_ig_repo=$(image_norm "$(image_repo "$_img_given")")
 			RESOLVED_IMAGE=
+			# nerdctl names every image by its target's digest, from a
+			# registry or not, and runs none by that name: an image given
+			# by a tag is tagged by its ID, below.
+			[ "$_img_at_tool" != nerdctl ] || _ig_digests=
 			for _ig_line in $_ig_digests; do
 				case $(image_norm "$_ig_line") in
 				"$_ig_repo@sha256:"*) [ -n "$RESOLVED_IMAGE" ] || RESOLVED_IMAGE=$_ig_line ;;
@@ -997,7 +1134,8 @@ image_given_make() {
 				[ "$_img_route" = same ] ||
 					fail "the image $_img_given has no digest on $("$_img_at" show_command) (it was not pulled from a registry), and the nodes pull it by its digest: name it IMAGE=<repository>@sha256:<64 hex>, or use IMAGE_SOURCE=binaries"
 				RESOLVED_IMAGE=cactusfs:$_img_version-$_img_build-$_ig_id
-				"$_img_at" run image tag "$_img_hex" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+				"$_img_at" run image tag "$(image_tag_source "$_img_given")" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+				[ "$_img_at_tool" != nerdctl ] || [ "$DRY_RUN" = 1 ] || image_tag_check
 			fi
 		fi
 		;;
@@ -1005,7 +1143,8 @@ image_given_make() {
 		# Moved as a tar stream, which keeps no registry digest: the tag
 		# names the ID, which pins the content.
 		RESOLVED_IMAGE=cactusfs:$_img_version-$_img_build-$_ig_id
-		"$_img_at" run image tag "$_img_hex" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+		"$_img_at" run image tag "$(image_tag_source "$_img_given")" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
+		[ "$_img_at_tool" != nerdctl ] || [ "$DRY_RUN" = 1 ] || image_tag_check
 		;;
 	esac
 	_img_ref_at=$RESOLVED_IMAGE
@@ -1018,9 +1157,6 @@ image_check() {
 	RESOLVED_IMAGE=
 	RESOLVED_ARCH=
 	image_settings
-	if [ "$TARGET" = rancher ] && [ "$(setting RANCHER_ENGINE)" != moby ]; then
-		not_built 10.6 "the image on Rancher Desktop with RANCHER_ENGINE=$(setting RANCHER_ENGINE): nerdctl, and for its Kubernetes the namespace k8s.io"
-	fi
 	if [ "$_img_offline" = yes ] && [ "$_img_source" = source ]; then
 		refuse "OFFLINE=yes and an image built from source (--from-source, IMAGE_SOURCE=source): the build pulls the Dockerfile's base images, Go modules and npm packages; use IMAGE_SOURCE=binaries or an IMAGE that is here"
 	fi
@@ -1410,7 +1546,7 @@ image_push() {
 		say "dry run: once pushed, the pods run $_img_registry by the digest the push gives"
 		return 0
 	fi
-	"$_img_at" run image tag "$_img_hex" "$_ipu_to" </dev/null || fail "tagging $_ipu_to failed"
+	"$_img_at" run image tag "$(image_tag_source "$RESOLVED_IMAGE")" "$_ipu_to" </dev/null || fail "tagging $_ipu_to failed"
 	if [ "$_img_at_tool" = podman ]; then
 		_ipu_digest=$(image_in_workdir image_podman_push "$_ipu_to") || exit
 	else
@@ -1466,7 +1602,7 @@ image_deliver() {
 			[ "$DRY_RUN" = 1 ] || image_loaded image_local_engine
 			say "image: $RESOLVED_IMAGE loaded on the Docker engine here, whose images the cluster's one node sees"
 		else
-			say "image: $RESOLVED_IMAGE is on the Docker engine here, whose images the cluster's one node sees"
+			say "image: $RESOLVED_IMAGE is $(image_route_said)"
 		fi
 		;;
 	registry)

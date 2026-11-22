@@ -675,18 +675,35 @@ func TestTarget(t *testing.T) {
 		{name: "empty in the file probes", env: "DEPLOY_TARGET=\n", code: 2, want: []string{"no target: nothing named cactusfs runs here"}},
 		{name: "nothing runs", code: 2, want: []string{"no target: nothing named cactusfs runs here"}},
 		{name: "docker desktop runs", rules: []rule{ps("docker", "dd\ndd\n")}, code: statusDone, want: []string{"target dd (from what runs)", "engine: docker --context default"}},
-		{name: "rancher with moby runs", rules: []rule{ps("docker", "rancher\n")}, code: 3, want: []string{"target rancher (from what runs)"}},
+		{
+			// Rancher Desktop's engine is asked who it is (PLAN 10.6): its
+			// moby answers through the Docker CLI.
+			name: "rancher with moby runs", rules: []rule{ps("docker", "rancher\n"), {Tool: "docker", Contains: []string{"info", "{{.ID}}"}, Stdout: engineID + "\n"}},
+			code: statusDone, want: []string{"target rancher (from what runs)", "engine: Rancher Desktop, engine moby, docker --context rancher-desktop"},
+		},
 		{name: "podman runs", rules: []rule{ps("podman", "podman\n")}, code: statusDone, want: []string{"target podman (from what runs)"}},
-		{name: "nerdctl runs", rules: []rule{ps("nerdctl", "0123abcd\n")}, code: 3, want: []string{"target rancher (from what runs)"}},
+		{
+			name: "nerdctl runs", rules: []rule{ps("nerdctl", "0123abcd\n"), {Tool: "nerdctl", Contains: []string{"info", "{{.ID}}"}, Stdout: "a-containerd-uuid\n"}},
+			code: statusDone, want: []string{"target rancher (from what runs)", "engine: Rancher Desktop, engine containerd, nerdctl --namespace default"},
+		},
 		{
 			name: "a namespace of the context", env: "K8S_CONTEXT=prod\n",
 			rules: []rule{ns("kubectl", "k8s")}, code: 3,
 			want: []string{"target k8s (from what runs)", "engine: kubectl --context prod"},
 		},
 		{
-			name: "rancher's kubernetes in the context", env: "K8S_CONTEXT=rancher-desktop\n",
+			// Its Kubernetes (RANCHER_KUBERNETES=yes) asks no engine (PLAN
+			// 10.6): the status of 10.11's stub.
+			name: "rancher's kubernetes in the context", env: "K8S_CONTEXT=rancher-desktop\nRANCHER_KUBERNETES=yes\n",
 			rules: []rule{ns("kubectl", "rancher")}, code: 3,
-			want: []string{"target rancher (from what runs)"},
+			want: []string{"target rancher (from what runs)", "engine: kubectl --context rancher-desktop"},
+		},
+		{
+			// Found in Rancher Desktop's Kubernetes, with settings that do not
+			// say so: refused, never taken for its engine.
+			name: "rancher's kubernetes without the setting", env: "K8S_CONTEXT=rancher-desktop\n",
+			rules: []rule{ns("kubectl", "rancher")}, code: 2,
+			want: []string{"cactusfs runs in Rancher Desktop's Kubernetes", "say RANCHER_KUBERNETES=yes"},
 		},
 		{
 			name: "no context, no kubectl asked", rules: []rule{ns("kubectl", "k8s")},
@@ -732,6 +749,11 @@ func TestTarget(t *testing.T) {
 					t.Errorf("an engine's answer was printed with a control character:\n%q", res.output())
 				}
 				for _, call := range res.calls {
+					// Rancher Desktop's engine is asked who it is (PLAN 10.6):
+					// a question of the engine, not of a deployment.
+					if call.Tool != "podman" && containsRun(sub(call), []string{"info", "--format", "{{.ID}}"}) {
+						continue
+					}
 					switch call.Tool {
 					case "docker", "podman", "nerdctl":
 						if !slices.Contains(call.Args, "label=io.cactusfs.deploy.name=cactusfs") {
@@ -1074,9 +1096,9 @@ func TestActions(t *testing.T) {
 		{"purge confirm alone", "", []string{"--uninstall", "--purge-confirm", "cactusfs"}, 2, "--purge-confirm goes with --purge"},
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
-		{"rancher", "", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
+		// Rancher Desktop's engine and cluster are TestRancher*'s (PLAN 10.6);
+		// its Kubernetes hands over to 10.10 without asking its engine.
 		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.10)"},
-		{"cluster on rancher", "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
 		{"k3s install", "K8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "k3s", "--install"}, 3, "not built yet (PLAN 10.10)"},
 		{"k3s install, S3 published to nobody named", "", []string{"--docker", "k3s", "--install"}, 2, "K8S_S3_ALLOW_FROM must say who may reach it"},
 		{"k3s purge", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs"}, 3, "not built yet (PLAN 10.11)"},

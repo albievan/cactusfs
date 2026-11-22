@@ -244,8 +244,10 @@ func engineRules(t *testing.T, tool, id string, devInit map[string]string, volum
 	t.Helper()
 	rules := append(madeHere(tool, newImgFix(imgCommit)), []rule{
 		// Putting a unit into a volume prints nothing; it must not match
-		// the rule that reads the volume, below.
+		// the rule that reads the volume, below - nerdctl's put has no -a,
+		// and holds the words of a read in another order.
 		{Tool: tool, Contains: []string{"cp", "-a"}},
+		{Tool: tool, Contains: []string{"cp"}, Starts: []string{"cp", "-"}},
 		{Tool: tool, Contains: []string{"info"}, Stdout: id + "\n"},
 		{Tool: tool, Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", devInit)},
 	}...)

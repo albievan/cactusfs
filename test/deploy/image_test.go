@@ -134,6 +134,25 @@ func (f imgFix) fields(arch string, digests ...string) string {
 	return fieldsLine(f.hex, "linux/"+arch, f.commit, "0.7.0-412", f.layers, digests...)
 }
 
+// configHex is the digest of the image's configuration on nerdctl, whose
+// image is known by its target's digest - the fixture's hex - and says its
+// configuration's as .Id (PLAN 10.6).
+func (f imgFix) configHex() string {
+	sum := sha256.Sum256([]byte("configuration of " + f.hex))
+	return hex.EncodeToString(sum[:])
+}
+
+// fieldsOf is what the engine of the tool answers to "image inspect" of the
+// image for linux/<arch>, with the registry digests given: on nerdctl the
+// configuration's digest as .Id, and RepoDigests that name the target's
+// digest, the fixture's hex, first - as nerdctl names every image.
+func fieldsOf(tool string, f imgFix, arch string, digests ...string) string {
+	if tool == "nerdctl" {
+		return fieldsLine(f.configHex(), "linux/"+arch, f.commit, "0.7.0-412", f.layers, append([]string{"cactusfs@sha256:" + f.hex}, digests...)...)
+	}
+	return f.fields(arch, digests...)
+}
+
 // fieldsLine is an answer of "image inspect" in the format of image_fields:
 // ID, RepoDigests, platform, revision, version, layers and the
 // configuration (imgConfig).
@@ -235,11 +254,11 @@ func noSuchImage(tool, ref string) string {
 func madeHere(tool string, f imgFix) []rule {
 	arch := runtime.GOARCH
 	return append(engineHere(tool),
-		rule{Tool: tool, Contains: []string{"inspect", workTag(arch)}, After: []string{"build", "linux/" + arch}, Stdout: f.fields(arch)},
+		rule{Tool: tool, Contains: []string{"inspect", workTag(arch)}, After: []string{"build", "linux/" + arch}, Stdout: fieldsOf(tool, f, arch)},
 		rule{Tool: tool, Contains: []string{"inspect", workTag(arch)}, Stderr: noSuchImage(tool, workTag(arch)), Exit: 1},
 		built(tool, arch, f),
-		rule{Tool: tool, Contains: []string{"inspect", f.hex}, Stdout: f.fields(arch)},
-		rule{Tool: tool, Contains: []string{"inspect", f.ref()}, Stdout: f.fields(arch)},
+		rule{Tool: tool, Contains: []string{"inspect", f.hex}, Stdout: fieldsOf(tool, f, arch)},
+		rule{Tool: tool, Contains: []string{"inspect", f.ref()}, Stdout: fieldsOf(tool, f, arch)},
 		rule{Tool: tool, Contains: []string{"--rm", "--network", "none", f.hex, "version"}, Stdout: versionLine(f.commit, arch)})
 }
 
@@ -254,10 +273,10 @@ func givenHere(tool string, f imgFix, digest string, refs ...string) []rule {
 	}
 	rules := engineHere(tool)
 	for _, ref := range refs {
-		rules = append(rules, rule{Tool: tool, Contains: []string{"inspect", ref}, Stdout: f.fields(arch, digests...)})
+		rules = append(rules, rule{Tool: tool, Contains: []string{"inspect", ref}, Stdout: fieldsOf(tool, f, arch, digests...)})
 	}
 	return append(rules,
-		rule{Tool: tool, Contains: []string{"inspect", f.hex}, Stdout: f.fields(arch, digests...)},
+		rule{Tool: tool, Contains: []string{"inspect", f.hex}, Stdout: fieldsOf(tool, f, arch, digests...)},
 		rule{Tool: tool, Contains: []string{"--rm", "--network", "none", f.hex, "version"}, Stdout: versionLine(f.commit, arch)})
 }
 
@@ -402,7 +421,7 @@ func imagePrelude(dry string) string {
 	return "set -euf; LC_ALL=C; export LC_ALL; DRY_RUN=" + dry + "; ANOTHER_TARGET=0; " +
 		"REPO_ROOT=$1; DEPLOY_DIR=$1/deploy; " +
 		". \"$DEPLOY_DIR/lib/common.sh\"; . \"$DEPLOY_DIR/lib/env.sh\"; . \"$DEPLOY_DIR/lib/secrets.sh\"; " +
-		". \"$DEPLOY_DIR/lib/k8s.sh\"; . \"$DEPLOY_DIR/lib/image.sh\"; " +
+		". \"$DEPLOY_DIR/lib/k8s.sh\"; . \"$DEPLOY_DIR/lib/image.sh\"; . \"$DEPLOY_DIR/lib/rancher.sh\"; " +
 		"env_parse \"$2\"; env_resolve; env_validate; resolve_target; target_validate; state_check; "
 }
 
@@ -1226,11 +1245,8 @@ func TestImageDelivery(t *testing.T) {
 			},
 			want: []string{"loaded on podman"},
 		},
-		{
-			name: "rancher on containerd is 10.6's",
-			env:  "DEPLOY_TARGET=rancher\nRANCHER_ENGINE=containerd\n",
-			code: 3, want: []string{"not built yet (PLAN 10.6)"},
-		},
+		// Rancher Desktop on containerd (nerdctl, PLAN 10.6) is
+		// TestRancherImage's.
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {

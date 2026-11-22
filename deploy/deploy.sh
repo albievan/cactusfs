@@ -36,6 +36,8 @@ REPO_ROOT=$(dirname -- "$DEPLOY_DIR")
 . "$DEPLOY_DIR/lib/ce.sh"
 # shellcheck source=deploy/lib/compose.sh
 . "$DEPLOY_DIR/lib/compose.sh"
+# shellcheck source=deploy/lib/rancher.sh
+. "$DEPLOY_DIR/lib/rancher.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -219,6 +221,12 @@ fi
 # "env -i" (tool, deploy/lib/common.sh).
 resolve_target
 target_validate
+# Rancher Desktop's engine, moby or containerd, before the engine is named
+# or recorded (PLAN 10.6); its Kubernetes asks it only when its image is
+# made (image.sh).
+if ! on_kubernetes && [ "$ACTION" != --print-namespace ]; then
+	rancher_resolve
+fi
 state_check
 
 # header: what was resolved, before anything is done.
@@ -226,6 +234,7 @@ header() {
 	[ "$DRY_RUN" = 0 ] || say "dry run: nothing that changes anything is run"
 	say "target $TARGET (from $TARGET_FROM), deployment $(setting DEPLOY_NAME), $(setting DEPLOY_MODE)"
 	say "engine: $(engine_identity)"
+	[ -z "$_rd_said" ] || say "$_rd_said"
 	say "state: $STATE"
 	if [ "$DRY_RUN" = 1 ]; then
 		env_show
@@ -242,27 +251,19 @@ esac
 
 # --- the actions ------------------------------------------------------------------
 # A standalone deployment on Docker Desktop, Docker CE on this machine or on
-# a server over SSH, or Podman is built (PLAN 10.5, 10.7,
-# deploy/lib/docker.sh and deploy/lib/ce.sh), and a cluster on Docker
-# Desktop, Docker CE here or on CE_HOST, or Podman (PLAN 10.8,
-# deploy/lib/compose.sh). The rest are stubs: each says what the step of
-# PLAN milestone 10 that builds it will do, and ends with "not built yet";
-# a stub changes nothing but the secrets PLAN 10.3 keeps.
-
-# docker_step: the step that builds the Docker-engine actions of this target.
-docker_step() {
-	if [ "$TARGET" = rancher ]; then
-		echo 10.6
-	else
-		echo 10.5
-	fi
-}
+# a server over SSH, Podman or Rancher Desktop is built (PLAN 10.5, 10.6,
+# 10.7, deploy/lib/docker.sh, deploy/lib/ce.sh and deploy/lib/rancher.sh),
+# and a cluster on Docker Desktop, Docker CE here or on CE_HOST, Podman or
+# Rancher Desktop's moby (PLAN 10.8, deploy/lib/compose.sh). Kubernetes -
+# k3s, k8s and Rancher Desktop's - is a stub: it says what the step of PLAN
+# milestone 10 that builds it will do, and ends with "not built yet"; a stub
+# changes nothing but the secrets PLAN 10.3 keeps.
 
 # engine: where the containers run.
 engine() {
 	case $TARGET in
 	podman) echo "Podman" ;;
-	rancher) echo "Rancher Desktop (engine $(setting RANCHER_ENGINE))" ;;
+	rancher) echo "Rancher Desktop (engine $(rancher_engine))" ;;
 	ce) if [ -n "$(setting CE_HOST)" ]; then echo "Docker CE on $(setting CE_HOST) over SSH"; else echo "Docker CE"; fi ;;
 	*) echo "Docker Desktop" ;;
 	esac
@@ -290,28 +291,23 @@ do_install() {
 		docker_install
 		return 0
 	fi
+	# Only Kubernetes is left (k3s, k8s, Rancher Desktop's): every other
+	# target and mode was taken above.
+	on_kubernetes || fail "internal: no install for $TARGET in $(setting DEPLOY_MODE) mode"
 	case $(setting IMAGE_SOURCE) in
 	source) _image="built from this tree with the Dockerfile" ;;
 	binaries) _image="built from the binaries in $(setting RELEASE_DIR)" ;;
 	image) _image="$(setting IMAGE), by digest" ;;
 	esac
 	# The secrets go to the target before anything starts there (PLAN
-	# 10.3): built for a standalone deployment on a Docker engine; the
-	# other targets keep theirs as the step secrets_where names builds.
-	if [ "$(secrets_where)" = volumes ]; then
-		secrets_install
-		_secrets="the secrets of $STATE, in the volumes $(setting DEPLOY_NAME)-secrets and $(setting DEPLOY_NAME)-config"
-	else
-		_secrets="the secrets of $STATE, made once when missing and put on the target before anything starts (PLAN 10.3, built for this target by $(secrets_where))"
-	fi
+	# 10.3): on Kubernetes as the namespace's Secrets, the step secrets_where
+	# names.
+	_secrets="the secrets of $STATE, made once when missing and put on the target before anything starts (PLAN 10.3, built for this target by $(secrets_where))"
 	_helm=$(setting HELM)
 	[ -n "$_helm" ] || _helm=$(setting HELM_IMAGE)
 	[ -n "$_helm" ] || _helm="the helm image the Dockerfile pins"
-	if on_kubernetes; then
-		k8s_validate
-		not_built 10.10 "install: $_secrets; the image $_image (PLAN 10.4); the chart rendered with $_helm and applied server-side to $(kubernetes), storage $(setting K8S_STORAGE), S3 as $(setting K8S_SERVICE_TYPE) (PLAN 10.9, 10.10)"
-	fi
-	not_built "$(docker_step)" "install: $_secrets; the image $_image (PLAN 10.4); on $(engine): $(setting DRIVES) labelled volumes, S3 on $(setting BIND):$(setting S3_PORT), admin on $(setting ADMIN_BIND):$(setting ADMIN_PORT), ready within $(setting WAIT_TIMEOUT) s"
+	k8s_validate
+	not_built 10.10 "install: $_secrets; the image $_image (PLAN 10.4); the chart rendered with $_helm and applied server-side to $(kubernetes), storage $(setting K8S_STORAGE), S3 as $(setting K8S_SERVICE_TYPE) (PLAN 10.9, 10.10)"
 }
 
 do_status() {
@@ -326,7 +322,7 @@ do_status() {
 	if on_kubernetes; then
 		not_built 10.11 "status: the pods, every address and /readyz of $(kubernetes)"
 	fi
-	not_built "$(docker_step)" "status: the version, the addresses and /readyz of the containers on $(engine)"
+	fail "internal: no status for $TARGET in $(setting DEPLOY_MODE) mode"
 }
 
 do_uninstall() {
@@ -350,7 +346,7 @@ do_uninstall() {
 	if on_kubernetes; then
 		not_built 10.11 "uninstall: $_what, in $(kubernetes)"
 	fi
-	not_built "$(docker_step)" "uninstall: $_what, on $(engine)"
+	fail "internal: no uninstall for $TARGET in $(setting DEPLOY_MODE) mode"
 }
 
 do_print_namespace() {

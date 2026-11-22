@@ -107,10 +107,15 @@ type call struct {
 // the process that started the fake - the shell waiting on it - as a signal
 // would reach it mid-command. SleepMs keeps the fake running that long, as
 // a command that is slow to end (after what it keeps of its standard input,
-// with SaveStdin, which tells a test it has started).
+// with SaveStdin, which tells a test it has started). A rule with Starts
+// holds only for a call whose words, after the engine's own options (the
+// Docker CLI's context, nerdctl's namespace: sub), begin with those words -
+// nerdctl's copy into a container ("cp - <container>:<dir>") and out of one
+// ("cp <container>:<dir> -") hold the same words in another order.
 type rule struct {
 	Tool       string            `json:"tool"`
 	Contains   []string          `json:"contains"`
+	Starts     []string          `json:"starts,omitempty"`
 	After      []string          `json:"after,omitempty"`
 	Until      []string          `json:"until,omitempty"`
 	Stdout     string            `json:"stdout"`
@@ -234,6 +239,9 @@ func fake(name string, args []string) int {
 	}
 	for _, r := range rules {
 		if r.Tool != name || !containsAll(args, r.Contains) {
+			continue
+		}
+		if w := sub(call{Tool: name, Args: args}); len(r.Starts) > 0 && (len(w) < len(r.Starts) || !slices.Equal(w[:len(r.Starts)], r.Starts)) {
 			continue
 		}
 		if len(r.After) > 0 {

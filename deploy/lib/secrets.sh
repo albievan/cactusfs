@@ -34,10 +34,14 @@
 #   the secrets unit is the directory of compose's file secrets,
 #   compose/secrets/ of the entry - or of CE_STATE_DIR on CE_HOST - (0700,
 #   its files 0444: bind mounts, ADR-0033 section 10), read back and put
-#   as tar streams like a volume. Rancher Desktop (10.6) and Kubernetes
-#   (Secrets of the namespace: read back and compared by 10.9, wired here by
-#   10.10) keep their copies as those steps build;
-#   secrets_where and secrets_install are where they are dispatched.
+#   as tar streams like a volume. On Rancher Desktop (PLAN 10.6) the copy is
+#   the same two volumes, on its moby engine through the Docker CLI and on
+#   its containerd engine through nerdctl (deploy/lib/rancher.sh: a put
+#   there is a tar stream owned by 65532, nerdctl's cp having no -a).
+#   Kubernetes (Secrets of the namespace: read back and compared by 10.9,
+#   wired here by 10.10) keeps its copy as that step builds - Rancher
+#   Desktop's Kubernetes too; secrets_where and secrets_install are where
+#   they are dispatched.
 #
 # Never made again: a secret either copy holds is used as it is. One copy
 # missing is put back from the other - the target's from STATE before
@@ -66,16 +70,17 @@
 # its file's name.
 
 # secrets_where: "volumes" when this file keeps the target's copy - a
-# deployment on a Docker engine, standalone or a compose cluster (PLAN
-# 10.8: its secrets unit a directory, its config unit a volume) - else the
-# step of PLAN milestone 10 that will.
+# deployment on a Docker engine or Rancher Desktop's engine, standalone or
+# a compose cluster (PLAN 10.8: its secrets unit a directory, its config
+# unit a volume) - else the step of PLAN milestone 10 that will: the
+# Secrets of a Kubernetes namespace, 10.10.
 secrets_where() {
 	if on_kubernetes; then
 		echo 10.10
 	else
 		case $TARGET in
-		dd | ce | podman) echo volumes ;;
-		*) echo 10.6 ;;
+		dd | ce | podman | rancher) echo volumes ;;
+		*) echo 10.10 ;;
 		esac
 	fi
 }
@@ -202,13 +207,16 @@ secdir_put() {
 }
 
 # target_engine <run|query> <word>...: a command of the target's engine -
-# Podman, the Docker engine of CE_HOST over ssh (its host key checked
-# first), or the Docker CLI with its context.
+# Podman, nerdctl in its namespace (Rancher Desktop on containerd), the
+# Docker engine of CE_HOST over ssh (its host key checked first), or the
+# Docker CLI with its context.
 target_engine() {
 	_te_how=$1
 	shift
 	if [ "$TARGET" = podman ]; then
 		"$_te_how" podman "$@"
+	elif on_nerdctl; then
+		"$_te_how" nerdctl --namespace "$_rd_ns" "$@"
 	elif [ -n "$_s_ce_host" ]; then
 		"$_te_how" "DOCKER_HOST=ssh://$_s_ce_host" docker "$@"
 	else
@@ -224,6 +232,8 @@ local_engine() {
 	shift
 	if [ "$TARGET" = podman ]; then
 		"$_le_how" podman "$@"
+	elif on_nerdctl; then
+		"$_le_how" nerdctl --namespace "$_rd_ns" "$@"
 	else
 		"$_le_how" docker --context "$_s_context" "$@"
 	fi
@@ -261,7 +271,16 @@ helper_image() {
 # ADR-0033 section 12 - unless OFFLINE=yes, which refuses instead.
 image_ready() {
 	_ir_status=0
-	"$1" query image inspect --format '{{.Id}}' "$2" </dev/null >/dev/null 2>&1 || _ir_status=$?
+	# nerdctl finds <repository>@<digest> by "image inspect" only when it is
+	# tagged latest (deploy/lib/image.sh, image_given_ref): it is asked for
+	# the bare digest there.
+	_ir_ref=$2
+	if on_nerdctl; then
+		case $_ir_ref in
+		*@sha256:*) _ir_ref=sha256:${_ir_ref##*@sha256:} ;;
+		esac
+	fi
+	"$1" query image inspect --format '{{.Id}}' "$_ir_ref" </dev/null >/dev/null 2>&1 || _ir_status=$?
 	[ "$_ir_status" != 0 ] || return 0
 	[ "$_s_offline" != yes ] ||
 		refuse "the image $2 is not on the engine and OFFLINE=yes: load it there first (docker load or podman load of a saved copy)"
@@ -480,7 +499,7 @@ secrets_check() {
 	done
 	if [ -n "$_si_found" ]; then
 		# shellcheck disable=SC2086 # volume names, without spaces
-		_si_out=$(target_engine query volume inspect --format "{{.Name}} {{index .Labels \"$LABEL_NAME\"}}" $_si_found </dev/null) ||
+		_si_out=$(target_engine query volume inspect --format "{{.Name}} $(rancher_volume_label "$LABEL_NAME")" $_si_found </dev/null) ||
 			fail "could not inspect the volumes$_si_found (the engine's message is above)"
 		_si_out=$(printf '%s\n' "$_si_out" | printable)
 		for _si_vol in $_si_found; do
@@ -1034,13 +1053,15 @@ devinit_run() {
 	fi
 	devinit_check
 	if [ "$_s_source" = binaries ]; then
-		tar -c -f "$SECRETS_WORK/dev-init.tar" -C "$_s_rel/linux-$_dr_arch" cactusfs -C "$_dr_in" kms-passphrase
+		# shellcheck disable=SC2046 # the options of rancher_tar_owner, words without spaces
+		tar -c -f "$SECRETS_WORK/dev-init.tar" $(rancher_tar_owner) -C "$_s_rel/linux-$_dr_arch" cactusfs -C "$_dr_in" kms-passphrase
 		_dr_img=$(runtime_image)
 		set -- "$_dr_img" /tmp/cactusfs
 	else
 		# IMAGE, or under --from-source the image of this machine's
 		# architecture image_native made: devinit_check's choice.
-		tar -c -f "$SECRETS_WORK/dev-init.tar" -C "$_dr_in" kms-passphrase
+		# shellcheck disable=SC2046 # the options of rancher_tar_owner, words without spaces
+		tar -c -f "$SECRETS_WORK/dev-init.tar" $(rancher_tar_owner) -C "$_dr_in" kms-passphrase
 		set -- --entrypoint /cactusfs "$_dc_img"
 	fi
 	rm -f "$_dr_in/kms-passphrase"
@@ -1051,7 +1072,12 @@ devinit_run() {
 	[ -z "$_s_hosts" ] || set -- "$@" --hosts "$_s_hosts"
 	local_engine run create --name "$_dr_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
 		--platform "linux/$_dr_arch" --user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges "$@" </dev/null
-	local_engine run cp -a - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar"
+	# nerdctl's cp has no -a: the stream is owned by 65532 (rancher_tar_owner).
+	if on_nerdctl; then
+		local_engine run cp - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar"
+	else
+		local_engine run cp -a - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar"
+	fi
 	rm -f "$SECRETS_WORK/dev-init.tar"
 	{
 		local_engine run start -a "$_dr_ctr" </dev/null 2>&1 || echo failed >"$SECRETS_WORK/dev-init.failed"
@@ -1155,8 +1181,8 @@ secrets_put() {
 		esac
 		_sp_list=$(put_list "$_sp_unit" "$_sp_made")
 		if [ -n "$_sp_list" ]; then
-			# shellcheck disable=SC2086 # names without spaces, the list is the point
-			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$STATE/$_sp_unit" $_sp_list
+			# shellcheck disable=SC2046,SC2086 # names and options without spaces, the list is the point
+			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion $(rancher_tar_owner) -C "$STATE/$_sp_unit" $_sp_list
 			# shellcheck disable=SC2086 # names without spaces
 			unit_put "$_sp_unit" "$SECRETS_WORK/put.tar" $_sp_list
 			rm -f "$SECRETS_WORK/put.tar"
@@ -1172,8 +1198,8 @@ secrets_put() {
 			_sp_names="$_sp_names ${_sp_path#*/}"
 		done
 		if [ -n "$_sp_names" ]; then
-			# shellcheck disable=SC2086 # names without spaces
-			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion -C "$_sp_stage" $_sp_names
+			# shellcheck disable=SC2046,SC2086 # names and options without spaces
+			tar -c -f "$SECRETS_WORK/put.tar" --no-recursion $(rancher_tar_owner) -C "$_sp_stage" $_sp_names
 			# shellcheck disable=SC2086 # names without spaces
 			unit_put "$_sp_unit" "$SECRETS_WORK/put.tar" $_sp_names
 			rm -rf "$SECRETS_WORK/put.tar" "$_sp_stage"
@@ -1213,5 +1239,11 @@ unit_put() {
 		secdir_put "$@"
 		return 0
 	fi
-	target_engine run cp -a - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
+	# nerdctl's cp has no -a: the stream is owned by 65532
+	# (rancher_tar_owner, secrets_put).
+	if on_nerdctl; then
+		target_engine run cp - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
+	else
+		target_engine run cp -a - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
+	fi
 }

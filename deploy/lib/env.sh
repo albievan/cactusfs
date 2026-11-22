@@ -940,14 +940,21 @@ printable() {
 
 # probe_engines: containers of the deployment under the Docker CLI (with
 # the context of docker_context; the label says dd, ce or rancher), Podman,
-# and nerdctl (Rancher Desktop with containerd). Read-only. An engine that
-# is not installed or does not answer is not considered. (PLAN 10.5 and
-# 10.6 refine what is asked.)
+# and nerdctl (Rancher Desktop with containerd, in the namespace "default"
+# its containers are made in, PLAN 10.6). Read-only. An engine that is not
+# installed or does not answer is not considered. The Docker CLI is asked
+# through the context of docker_context, which is "default" unless
+# ENGINE_CONTEXT names another: a deployment on Rancher Desktop's moby is
+# found when that context is Rancher Desktop's, else named with --docker
+# rancher or DEPLOY_TARGET.
 probe_engines() {
 	_name=$(setting DEPLOY_NAME)
 	if command -v docker >/dev/null 2>&1; then
 		if _out=$(query docker --context "$(docker_context)" ps -a --filter "label=$LABEL_NAME=$_name" --format "{{.Label \"$LABEL_TARGET\"}}" </dev/null 2>/dev/null); then
-			for _t in $(printf '%s\n' "$_out" | printable); do found "$_t"; done
+			for _t in $(printf '%s\n' "$_out" | printable); do
+				found "$_t"
+				[ "$_t" != rancher ] || _rd_found_engine=1
+			done
 		fi
 	fi
 	if command -v podman >/dev/null 2>&1; then
@@ -956,8 +963,9 @@ probe_engines() {
 		fi
 	fi
 	if command -v nerdctl >/dev/null 2>&1; then
-		if _out=$(query nerdctl ps -a --filter "label=$LABEL_NAME=$_name" --format '{{.ID}}' </dev/null 2>/dev/null) && [ -n "$_out" ]; then
+		if _out=$(query nerdctl --namespace default ps -a --filter "label=$LABEL_NAME=$_name" --format '{{.ID}}' </dev/null 2>/dev/null) && [ -n "$_out" ]; then
 			found rancher
+			_rd_found_engine=1
 		fi
 	fi
 }
@@ -983,6 +991,7 @@ probe_kubernetes() {
 		if [ -n "$_context" ] && command -v "$_kubectl" >/dev/null 2>&1; then
 			_out=$(query "$_kubectl" --context "$_context" "$@" </dev/null 2>/dev/null) || _out=
 			[ -z "$_out" ] || found "$_t"
+			[ -z "$_out" ] || [ "$_t" != rancher ] || _rd_found_k8s=1
 		fi
 		if [ -n "$_ssh" ] && command -v ssh >/dev/null 2>&1; then
 			_out=$(query on_host "$_ssh" k3s kubectl "$@" </dev/null) || _out=
@@ -1029,6 +1038,12 @@ target_validate() {
 	if [ "$TARGET" = k8s ] && [ -z "$(setting K8S_CONTEXT)" ]; then
 		refuse "--docker k8s needs K8S_CONTEXT: the context of your kubeconfig to deploy to is named, never taken from what is current"
 	fi
+	# A deployment found in Rancher Desktop's Kubernetes, and none on its
+	# engine, is its Kubernetes': the settings must say so (PLAN 10.6).
+	if [ "$TARGET" = rancher ] && [ "${TARGET_FROM:-}" = "what runs" ] && [ -n "${_rd_found_k8s:-}" ] &&
+		[ -z "${_rd_found_engine:-}" ] && ! on_kubernetes; then
+		refuse "$(setting DEPLOY_NAME) runs in Rancher Desktop's Kubernetes (a namespace labelled for the target rancher), and RANCHER_KUBERNETES is not yes: say RANCHER_KUBERNETES=yes"
+	fi
 }
 
 # engine_identity: one line that says which engine or cluster the tools are
@@ -1041,8 +1056,10 @@ engine_identity() {
 	rancher)
 		if on_kubernetes; then
 			printf 'kubectl --context %s' "$(kube_context)"
+		elif [ "$(rancher_engine)" = containerd ]; then
+			printf 'Rancher Desktop, engine containerd, nerdctl --namespace default'
 		else
-			printf 'Rancher Desktop, engine %s, docker --context %s' "$(setting RANCHER_ENGINE)" "$(docker_context)"
+			printf 'Rancher Desktop, engine %s, docker --context %s' "$(rancher_engine)" "$(docker_context)"
 		fi
 		;;
 	ce)

@@ -489,8 +489,18 @@ outside a repository, a build from source is build 0 of no known commit: allowed
 target here, refused for one on another machine. An image made of binaries for a
 target on another machine takes the rest of the image from this tree's Dockerfile, so
 HEAD must be `BUILDINFO`'s commit and the Dockerfile without changes (`git status
---porcelain -- Dockerfile`), else the same refusal. Rancher Desktop with
-`RANCHER_ENGINE` other than `moby` is PLAN 10.6's.
+--porcelain -- Dockerfile`), else the same refusal. On Rancher Desktop's containerd
+(PLAN 10.6, section 9) the engine is `nerdctl`, always given its namespace (`default`,
+or `k8s.io` for an image its k3s runs, on the route `local`): it builds with
+`nerdctl build --iidfile` (no `--metadata-file`; `--pull=false` under `OFFLINE`), and
+since `nerdctl` finds an image by its name or by the digest of its target (the
+manifest), which its `--iidfile` holds and its `RepoDigests` name, while `image
+inspect` says the configuration's digest as `.Id`, the image's ID on `nerdctl` is the
+target's digest read from `RepoDigests`; its `image tag` takes a name and not an ID,
+so a tag is made from the name checked to name that ID, and checked again after. A
+given image named by a tag is tagged by its ID there (`nerdctl` names every image by
+a digest, from a registry or not, and runs none by that name). Rancher Desktop's
+engine is this machine's (its virtual machine, as Docker Desktop's is).
 
 ### 6. Kubernetes: render and apply, no Helm release
 
@@ -623,6 +633,46 @@ rancher` runs over the code of `dd` and `k8s`: `RANCHER_ENGINE=auto` picks moby 
 `nerdctl` and images meant for its k3s are built with `--namespace k8s.io`;
 `RANCHER_KUBERNETES=yes` hands over to the Kubernetes path with the local image and the
 context `rancher-desktop`.
+
+As built (PLAN 10.6, `deploy/lib/rancher.sh`): `auto` asks, read-only and before the
+engine is named or recorded, `docker --context rancher-desktop info --format
+'{{.ID}}'` (`ENGINE_CONTEXT` names another context) and takes moby when it answers an
+ID, else `nerdctl --namespace default info --format '{{.ID}}'` and takes containerd
+when that answers; neither is refused, as is `RANCHER_ENGINE=moby` without `docker`
+and `containerd` without `nerdctl`. The engine is part of the record's first line
+(`Rancher Desktop, engine moby, docker --context rancher-desktop`, or `Rancher Desktop,
+engine containerd, nerdctl --namespace default`), so an entry made on one engine is
+refused on the other. On moby a deployment is Docker Desktop's: standalone
+(`docker.sh`) or a compose cluster (`compose.sh`) through `docker --context
+rancher-desktop`. On containerd a standalone deployment is `docker.sh`'s with every
+engine command `nerdctl --namespace default` (`build`, `run`, `create`, `cp`,
+`volume`, `ps`, `port`, `info`, `image`), and these differences of `nerdctl`, each read
+in its source (v2.4.2): its `cp` has no `-a` and extracts as root keeping the owner a
+stream says, so every tar stream the script puts into a container there (the secrets'
+volumes, dev-init's input) is made owned by 65532 by number with no names (`--owner
+--group --numeric-owner`, which GNU tar and bsdtar both take); it copies into and out
+of a container that never ran by mounting its snapshot and the volumes its spec names,
+so the helpers are never started, as on Docker; its `volume inspect` gives `Labels` as
+a pointer, nil without labels, read through `with`; its `ps` has no `.State` and a
+container holds none of its image's labels, so `--status` reads the version label of
+the image; the node's restart policy is `always`, the one every containerd restart
+plugin has, under which a container `nerdctl stop` stopped stays stopped. A compose
+cluster on containerd is refused before anything is changed (with
+`RANCHER_ENGINE=containerd`, before the engine is asked anything): `nerdctl compose` has
+no `up --no-deps`, with which a cluster is upgraded one node at a time, and no `compose
+ls`. An `ENGINE_CONTEXT` on moby must reach Rancher Desktop: `docker info`'s `.Name`
+is `lima-0` (its Lima instance is `0`, `lima.InstanceName` in its `rdctl`; Lima names an
+instance's host `lima-<instance>`; `lima-rancher-desktop` is taken too) or its
+`.OperatingSystem` names Rancher Desktop (its WSL distribution), else the run is
+refused; the header says the context and what its engine said. A deployment found
+by its namespace in Rancher Desktop's Kubernetes, and not on its engine, is refused
+unless `RANCHER_KUBERNETES=yes` says so. On `nerdctl` an `IMAGE` named
+`<repository>@sha256:<hex>` is inspected by its bare digest - `nerdctl image inspect` of
+a repository with a digest takes only an image tagged `latest` - and its repository
+must be among its `RepoDigests`; the configuration's digest (`.Id`) of an image built
+there is kept, against which a saved tar is checked. With `RANCHER_KUBERNETES=yes` the engine is asked only when the image is made
+(`image.sh`), and the secrets are the namespace's (10.9, 10.10), not volumes. What only
+a real Rancher Desktop proves is listed in PLAN 10.6's row of Decisions.
 
 ### 10. Standalone by default, and the KMS opted into
 

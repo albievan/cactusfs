@@ -1,8 +1,10 @@
 # shellcheck shell=sh
 # A standalone deployment on a Docker engine - Docker Desktop (dd), Docker CE
-# on this machine or on a server over SSH (ce, CE_HOST) and Podman (podman):
-# install, upgrade, status, uninstall and purge (PLAN 10.5, 10.7; ADR-0033
-# sections 3, 4, 8, 11). Sourced by deploy/deploy.sh; not run on its own.
+# on this machine or on a server over SSH (ce, CE_HOST), Podman (podman) and
+# Rancher Desktop's engine (rancher: moby through the Docker CLI, containerd
+# through nerdctl, deploy/lib/rancher.sh): install, upgrade, status,
+# uninstall and purge (PLAN 10.5, 10.6, 10.7; ADR-0033 sections 3, 4, 8, 9,
+# 11). Sourced by deploy/deploy.sh; not run on its own.
 # What CE_HOST adds - the host key checked and pinned first, Docker CE
 # installed, the ports and /readyz asked on the server - is
 # deploy/lib/ce.sh's.
@@ -53,14 +55,14 @@
 # (_dk_*) and are called plainly.
 
 # docker_standalone: true for a deployment this file builds - standalone, on
-# Docker Desktop, Docker CE on this machine or on CE_HOST (PLAN 10.7), or
-# Podman. Rancher Desktop (10.6), cluster mode (10.8) and Kubernetes (10.10,
-# 10.11) are other steps'.
+# Docker Desktop, Docker CE on this machine or on CE_HOST (PLAN 10.7),
+# Podman, or Rancher Desktop's engine (PLAN 10.6). Cluster mode (10.8) and
+# Kubernetes (10.10, 10.11) are other steps'.
 docker_standalone() {
 	on_kubernetes && return 1
 	[ "$(setting DEPLOY_MODE)" = standalone ] || return 1
 	case $TARGET in
-	dd | podman | ce) return 0 ;;
+	dd | podman | ce | rancher) return 0 ;;
 	*) return 1 ;;
 	esac
 }
@@ -275,7 +277,7 @@ docker_volumes() {
 	done
 	[ -n "$_dk_vols" ] || return 0
 	# shellcheck disable=SC2086 # volume names, without spaces
-	_dv_out=$(target_engine query volume inspect --format "{{.Name}} {{index .Labels \"$LABEL_NAME\"}} {{index .Labels \"$LABEL_TARGET\"}}" $_dk_vols </dev/null) ||
+	_dv_out=$(target_engine query volume inspect --format "{{.Name}} $(rancher_volume_label "$LABEL_NAME") $(rancher_volume_label "$LABEL_TARGET")" $_dk_vols </dev/null) ||
 		fail "could not inspect the volumes$_dk_vols (the engine's message is above)"
 	_dv_out=$(printf '%s\n' "$_dv_out" | printable)
 	for _dv in $_dk_vols; do
@@ -454,9 +456,14 @@ docker_run_node() {
 	# Podman starts containers again after a reboot only through its
 	# podman-restart service, which starts those whose policy is "always" -
 	# not "unless-stopped" (podman-restart.service: start --all --filter
-	# restart-policy=always). Docker keeps "unless-stopped".
+	# restart-policy=always). nerdctl's policies are what containerd's
+	# restart plugin can do, "always" in every version, and a container
+	# "nerdctl stop" stopped stays stopped under it (deploy/lib/rancher.sh).
+	# Docker keeps "unless-stopped".
 	_rn_restart=unless-stopped
-	[ "$TARGET" != podman ] || _rn_restart=always
+	if [ "$TARGET" = podman ] || on_nerdctl; then
+		_rn_restart=always
+	fi
 	# The node listens inside on the port numbers it is published on
 	# (CACTUSFS_S3_ADDR, CACTUSFS_ADMIN_ADDR below): one number for each
 	# port, wherever it is read. The image's EXPOSE (9000 to 9003) is
@@ -690,6 +697,8 @@ docker_admin_notice() {
 docker_cli() {
 	if [ "$TARGET" = podman ]; then
 		printf 'podman'
+	elif on_nerdctl; then
+		printf 'nerdctl --namespace %s' "$_rd_ns"
 	elif [ -n "$_s_ce_host" ]; then
 		printf 'DOCKER_HOST=ssh://%s docker' "$_s_ce_host"
 	else
@@ -759,7 +768,7 @@ docker_labelled() {
 	docker_labelled_names
 	[ -n "$_dk_labelled" ] || return 0
 	# shellcheck disable=SC2086 # volume names, without spaces
-	_dl_out=$(target_engine query volume inspect --format "{{.Name}} {{index .Labels \"$LABEL_TARGET\"}}" $_dk_labelled </dev/null) ||
+	_dl_out=$(target_engine query volume inspect --format "{{.Name}} $(rancher_volume_label "$LABEL_TARGET")" $_dk_labelled </dev/null) ||
 		fail "could not inspect the volumes of the deployment (the engine's message is above)"
 	_dl_out=$(printf '%s\n' "$_dl_out" | printable)
 	for _dl in $_dk_labelled; do
@@ -783,6 +792,10 @@ docker_status() {
 	[ -z "$_s_ce_host" ] || ce_begin status
 	if [ "$TARGET" = podman ]; then
 		_st_format="{{.Names}}|{{.State}}|{{.Image}}|{{index .Labels \"$LABEL_TARGET\"}}|{{index .Labels \"org.opencontainers.image.version\"}}"
+	elif on_nerdctl; then
+		# nerdctl's ps has no .State, and a container's labels hold none of
+		# its image's: the version is the image's label, asked below.
+		_st_format="{{.Names}}|{{.Status}}|{{.Image}}|{{.Label \"$LABEL_TARGET\"}}|"
 	else
 		_st_format="{{.Names}}|{{.State}}|{{.Image}}|{{.Label \"$LABEL_TARGET\"}}|{{.Label \"org.opencontainers.image.version\"}}"
 	fi
@@ -800,6 +813,10 @@ $_st_line
 EOF
 	[ "$_st_target" = "$TARGET" ] ||
 		refuse "the container $_st_name is the deployment's on the target '$_st_target', not $TARGET: run with --docker $_st_target"
+	if on_nerdctl && [ -n "$_st_image" ]; then
+		_st_version=$(target_engine query image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$_st_image" </dev/null 2>/dev/null) || _st_version=
+		_st_version=$(printf '%s\n' "$_st_version" | printable | head -n 1)
+	fi
 	say "node: $_st_name, $_st_state, image $_st_image, version ${_st_version:-unknown}"
 	say "volumes: ${_dk_labelled:-none}"
 	docker_reach
