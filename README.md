@@ -22,7 +22,9 @@ control and a hash-chained audit trail.
 > nodes and its review in a browser are still to come. Milestone 10, one deployment
 > script for every container platform
 > ([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)), is built but for
-> Rancher Desktop's own Kubernetes, and is in no published release; its acceptance on real hosts (PLAN 10.13) is still to come.
+> Rancher Desktop's own Kubernetes, and is in no published release; it has been run on
+> Docker Desktop and on a remote k3s server (PLAN 10.13), not yet on Rancher Desktop or
+> another Kubernetes.
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -240,9 +242,18 @@ Said plainly, so that nobody finds out by trying:
     refused there, as compose bind-mounts files of `STATE_DIR`);
   - it installs Docker CE (`CE_INSTALL_DOCKER=yes`) on Debian, Ubuntu, RHEL, Rocky
     Linux, AlmaLinux and CentOS Stream only;
-  - not yet run on Docker Desktop, Rancher Desktop or a Kubernetes other than k3s:
-    those paths are proven against recording fakes ([Targets](#targets)), and the
-    acceptance on real hosts (PLAN 10.13) is still to come. The binaries of
+  - not yet run on Rancher Desktop or a Kubernetes other than k3s: those paths are
+    proven against recording fakes ([Targets](#targets));
+  - on the Docker engines (`dd`, `ce`, `podman`, `rancher`) every `--install` from
+    binaries builds an image with a new digest, even of the same binaries, and the
+    script removes none of them, a purge included: remove old `cactusfs:<version>-*`
+    tags yourself (`docker`, `podman` or `nerdctl image rm`). On k3s the tags it
+    imported stay on the node until a purge, which removes those that no pod or
+    workload still names (none under `K3S_IMPORT`) (PLAN 10.14);
+  - S3 published beyond the loopback (a non-loopback `BIND`, a NodePort or a
+    LoadBalancer) and reached by an address or name fails TLS verification unless
+    `TLS_HOSTS` listed it at the first install; nothing warns when it is empty
+    (PLAN 10.14). The binaries of
     `make image-binaries` are in no published release: run `make image-binaries` first
     for the default `IMAGE_SOURCE=binaries`.
 
@@ -932,14 +943,14 @@ A cluster on the local KMS shares one key file among its nodes and is refused un
 
 | Target | `--docker` | Standalone | Cluster | Run on a real engine so far |
 |---|---|---|---|---|
-| Docker Desktop (macOS, Linux; Windows through WSL 2) | `dd` | yes: one container, labelled named volumes | yes: [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml) itself, four nodes on one machine | not on Docker Desktop itself yet (PLAN 10.13); the same code ran on Docker CE |
+| Docker Desktop (macOS, Linux; Windows through WSL 2) | `dd` | yes: one container, labelled named volumes | yes: [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml) itself, four nodes on one machine | standalone on Docker Desktop 29 for macOS (containerd image store): install, a round trip from another machine, upgrade, uninstall, reinstall and purge (PLAN 10.13) |
 | Docker CE on this machine | `ce` | yes | yes | `make test-deploy`, both modes (Docker on Linux) |
 | Docker CE on a server over SSH | `ce` with `CE_HOST=user@server` | yes | yes: compose runs on the server, from `CE_STATE_DIR` | standalone, from macOS to a Linux server |
 | Podman | `podman` | yes | yes: `podman compose`, which needs Podman's API socket (`podman.socket`) | `make test-deploy`, both modes (Podman 5.8 on Linux, SELinux enforcing) |
 | Rancher Desktop, moby | `rancher` (`RANCHER_ENGINE=auto` or `moby`) | yes: Docker Desktop's code through the context `rancher-desktop` | yes | no: the recording fakes of `make deploy-check` only (PLAN 10.6) |
 | Rancher Desktop, containerd | `rancher` (`RANCHER_ENGINE=auto` or `containerd`) | yes, through `nerdctl` | refused: `nerdctl compose` cannot upgrade one node at a time | no: the fakes only (PLAN 10.6) |
 | Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | **not built**: exits 3 | **not built** | - |
-| k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge |
+| k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge; standalone on a remote k3s server over `K3S_SSH` with `K8S_STORAGE=pvc` (local-path): install, round trip through the NodePort, upgrade, uninstall, reinstall and purge (PLAN 10.13) |
 | Kubernetes (1.27 or later aimed at; the version is not checked) | `k8s` with `K8S_CONTEXT` (the current context is never assumed) | yes | yes | no: the fakes only |
 
 Every target is also run by the harness of `make deploy-check`, against recording fakes

@@ -6,8 +6,9 @@
   Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`, section 9), which ends with "not
   built yet (PLAN 10.6)" and exit 3. Run on real engines: Docker and Podman, standalone
   and cluster (`make test-deploy`), Docker CE over SSH (a `CE_HOST` run), k3s in a
-  container (`make test-k8s`); not yet on Docker Desktop, Rancher Desktop or a
-  Kubernetes other than k3s - the acceptance on real hosts is PLAN 10.13. The operator's
+  container (`make test-k8s`), and in the acceptance of PLAN 10.13 standalone on
+  Docker Desktop 29 for macOS and on a remote k3s server over `K3S_SSH`; not yet on
+  Rancher Desktop or a Kubernetes other than k3s. The operator's
   documentation is the README, "Deploying with deploy/deploy.sh". It changes no Raft
   entry schema, on-disk format, crypto design or contract. The points under "Open, for
   the owner" are not answered; their defaults are what was built (the threat model,
