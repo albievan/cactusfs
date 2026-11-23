@@ -41,7 +41,10 @@ BUILD=${BUILD:-$(sh "$(dirname "$0")/buildid.sh" build)}
 COMMIT=${COMMIT-$(sh "$(dirname "$0")/buildid.sh" commit)}
 BINARIES=${IMAGE_BINARIES_DIR:-dist/image}
 LIMIT=$((60 * 1000 * 1000))
-ARCHES="amd64 arm64"
+# The architectures checked: both, unless IMAGE_BINARIES_ARCHES narrows them
+# to those image-binaries made (with Podman, the native one); one left out
+# is named in the result, never passed over in silence.
+ARCHES=${IMAGE_BINARIES_ARCHES:-amd64 arm64}
 
 fail() {
 	echo "image-from-binaries: FAIL - $*" >&2
@@ -82,6 +85,14 @@ listed() {
 	sed -n "s|^\([0-9a-f]*\)  $1\$|\1|p" "$BINARIES/SHA256SUMS"
 }
 
+unchecked="amd64 arm64"
+for arch in $ARCHES; do
+	case $arch in
+	amd64 | arm64) unchecked=$(printf '%s\n' $unchecked | grep -vx "$arch" | tr '\n' ' ' | sed 's/ $//') ;;
+	*) fail "IMAGE_BINARIES_ARCHES may name amd64 and arm64 only, not '$arch'" ;;
+	esac
+done
+[ -n "$ARCHES" ] || fail "IMAGE_BINARIES_ARCHES names no architecture"
 [ -f "$BINARIES/SHA256SUMS" ] && [ -f "$BINARIES/BUILDINFO" ] || fail "no $BINARIES/SHA256SUMS or BUILDINFO; run 'make image-binaries' first"
 for arch in $ARCHES; do
 	[ -f "$BINARIES/linux-$arch/cactusfs" ] || fail "no $BINARIES/linux-$arch/cactusfs; run 'make image-binaries'"
@@ -237,4 +248,8 @@ for arch in $ARCHES; do
 	say "$from equals $tag: $((size / 1000 / 1000)) MB (limit 60 MB); $versions; made of the folder"
 done
 
-say "PASS"
+if [ -n "$unchecked" ]; then
+	say "PASS for linux/$(echo $ARCHES | sed 's| |, linux/|g'); not checked: linux/$(echo $unchecked | sed 's| |, linux/|g') (IMAGE_BINARIES_ARCHES)"
+else
+	say "PASS"
+fi

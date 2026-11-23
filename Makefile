@@ -15,7 +15,15 @@ SHELL := /bin/sh
 
 MODULE        := github.com/albievan/cactusfs
 ENGINE        ?= docker
+# The engine's socket, passed to the builder. With ENGINE=podman it is
+# Podman's API socket (podman.socket), root's or this user's: on a host that
+# also runs Docker, Docker's socket would build with dockerd's classic builder,
+# which the Dockerfile does not support.
+ifeq ($(ENGINE),podman)
+ENGINE_SOCKET ?= $(if $(filter 0,$(shell id -u 2>/dev/null)),/run/podman/podman.sock,$(XDG_RUNTIME_DIR)/podman/podman.sock)
+else
 ENGINE_SOCKET ?= /var/run/docker.sock
+endif
 IMAGE         ?= cactusfs
 BUILDER_IMAGE ?= cactusfs-builder:local
 CACHE_VOLUME  ?= cactusfs-builder-cache
@@ -127,8 +135,38 @@ GO_P ?=
 comma := ,
 
 # The engine socket is passed through for targets that build images and, later,
-# for testcontainers. Rootless Podman: ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock
+# for testcontainers (ENGINE_SOCKET, above).
 SOCKET_MOUNT := $(if $(wildcard $(ENGINE_SOCKET)),-v $(ENGINE_SOCKET):/var/run/docker.sock)
+# The targets whose builder talks to the engine through that socket. Under
+# ENGINE=podman a socket that is not there - podman.socket not started, or
+# XDG_RUNTIME_DIR unset, which leaves /podman/podman.sock - would mount
+# nothing and fail later, inside the builder, with a message about Docker; so
+# naming one of them stops here instead. Other targets (help, fmt, lint, ...)
+# do not need it.
+ENGINE_SOCKET_TARGETS := check test-int s3-compat s3-compat-record test-chaos test-rolling test-k8s \
+	image image-binaries image-from-binaries sbom sign-verify verify-clone release
+# test-deploy is not among them: its own image and LIFECYCLE_IMAGE paths use
+# the podman CLI here, not the builder, and its binaries path runs `make
+# image-binaries`, a make of its own that this guard checks.
+#
+# Off Linux, Podman runs in a Podman machine (a VM), and systemctl here has
+# nothing to start. The socket to name is the machine's API socket as this
+# host sees it - podman machine inspect's ConnectionInfo.PodmanSocket.Path, a
+# socket the machine forwards to this host (on macOS) - so the guard still
+# asks that the path be there: SOCKET_MOUNT mounts only a path this host can
+# see, and a path seen only inside the VM would be left out of the builder
+# anyway, to fail later as the guard is there to prevent.
+ifeq ($(ENGINE),podman)
+ifneq (,$(filter $(ENGINE_SOCKET_TARGETS),$(MAKECMDGOALS)))
+ifeq (,$(wildcard $(ENGINE_SOCKET)))
+ifeq ($(UNAME_S),Linux)
+$(error ENGINE=podman: Podman's API socket '$(ENGINE_SOCKET)' is not there$(if $(XDG_RUNTIME_DIR),, (XDG_RUNTIME_DIR is not set)), and the builder of '$(filter $(ENGINE_SOCKET_TARGETS),$(MAKECMDGOALS))' needs the engine: start it (systemctl --user start podman.socket, or as root systemctl start podman.socket) or name it with ENGINE_SOCKET=<path>)
+else
+$(error ENGINE=podman: Podman's API socket '$(ENGINE_SOCKET)' is not there, and the builder of '$(filter $(ENGINE_SOCKET_TARGETS),$(MAKECMDGOALS))' needs the engine: on $(UNAME_S) Podman runs in a Podman machine - start it (podman machine start) and name its socket with ENGINE_SOCKET=<path>, the path podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' prints)
+endif
+endif
+endif
+endif
 # Podman's Docker-compatible API has no BuildKit, so use the classic builder.
 # Podman applies SELinux labels where Docker does not: on an enforcing host the
 # builder could not read the bind-mounted tree. The builder is a throwaway
@@ -173,8 +211,12 @@ image-binaries: builder
 # runs it before the builder's gates (whose own list leaves it out when
 # BuildKit is off). With Docker it runs in the builder, through BuildKit.
 ifeq ($(ENGINE),podman)
+# Podman's Docker API builds every stage for the target platform, so its
+# image-binaries makes the native architecture only (as test-deploy asks),
+# and the check covers what was made, saying which it did not.
+image-binaries image-from-binaries: IMAGE_BINARIES_ARCHES ?= $(HOST_GOARCH)
 image-from-binaries: image image-binaries
-	@ENGINE=podman IMAGE=$(IMAGE) VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) scripts/image-from-binaries.sh
+	@ENGINE=podman IMAGE=$(IMAGE) VERSION=$(VERSION) BUILD=$(BUILD) COMMIT=$(COMMIT) IMAGE_BINARIES_ARCHES="$(IMAGE_BINARIES_ARCHES)" scripts/image-from-binaries.sh
 check: image-from-binaries
 else
 image-from-binaries: builder
