@@ -120,7 +120,7 @@ rancher_resolve() {
 # nerdctl's compose has no "up --no-deps" and no "compose ls".
 rancher_cluster_check() {
 	if [ "$_rd_engine" = containerd ] && ! on_kubernetes && [ "$(setting DEPLOY_MODE)" = cluster ]; then
-		refuse "DEPLOY_MODE=cluster on Rancher Desktop's containerd engine: its nerdctl compose has no 'up --no-deps', with which a cluster is upgraded one node at a time, and no 'compose ls'; switch Rancher Desktop to moby (RANCHER_ENGINE=moby), or use RANCHER_KUBERNETES=yes"
+		refuse "DEPLOY_MODE=cluster on Rancher Desktop's containerd engine: its nerdctl compose has no 'up --no-deps', with which a cluster is upgraded one node at a time, and no 'compose ls'; switch Rancher Desktop to moby (RANCHER_ENGINE=moby)"
 	fi
 }
 

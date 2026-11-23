@@ -1,5 +1,13 @@
 # CactusFS — a four-node DEVELOPMENT cluster on one machine.
 #
+# deploy/deploy.sh runs this file for you with DEPLOY_MODE=cluster - on Docker
+# Desktop, Docker CE (here, or on a server with CE_HOST), Podman or Rancher
+# Desktop's moby - from a copy kept with the deployment's state (STATE_DIR, or
+# CE_STATE_DIR on the server) and a generated override, and makes and keeps
+# the secrets, so nothing below has to be exported by hand
+# (README.md, "Deploying with deploy/deploy.sh"). What follows is for running
+# it yourself.
+#
 #   export CACTUSFS_KMS_PASSPHRASE="$(openssl rand -hex 24)"   # keep it: it opens the cluster's key
 #   make up            # or: scripts/compose-secrets.sh && docker compose -f deploy/compose/compose.yaml up -d --build
 #   make down          # stop; the volumes, and so the data, are kept

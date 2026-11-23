@@ -1,11 +1,17 @@
 # ADR-0033: One deployment script for every container platform
 
-- **Status:** proposed (2026-11-21, PLAN 10.0). Nothing of it is built yet: PLAN 10.1 to
-  10.11 build it, each with its gate, and PLAN 10.12 is to accept it and say what was
-  built where it differs from the text below. It changes no Raft entry schema, on-disk
-  format, crypto design or contract. The points under "Open, for the owner" are not
-  answered; their defaults are what is to be built (the threat model, questions 72 to
-  78).
+- **Status:** accepted (2026-11-23, PLAN 10.12; proposed 2026-11-21, PLAN 10.0). Built by
+  PLAN 10.1 to 10.11 in `deploy/deploy.sh` and `deploy/lib/` (10.2 and 10.6 stay in progress: Podman's run of the from-binaries image check, and a real Rancher Desktop with its own Kubernetes); where the build differs from
+  or adds to the decision, the section says so under "As built". Not built: Rancher
+  Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`, section 9), which ends with "not
+  built yet (PLAN 10.6)" and exit 3. Run on real engines: Docker and Podman, standalone
+  and cluster (`make test-deploy`), Docker CE over SSH (a `CE_HOST` run), k3s in a
+  container (`make test-k8s`); not yet on Docker Desktop, Rancher Desktop or a
+  Kubernetes other than k3s - the acceptance on real hosts is PLAN 10.13. The operator's
+  documentation is the README, "Deploying with deploy/deploy.sh". It changes no Raft
+  entry schema, on-disk format, crypto design or contract. The points under "Open, for
+  the owner" are not answered; their defaults are what was built (the threat model,
+  questions 72 to 80).
 - **Date:** 2026-11-21
 - **Builds on:** ADR-0014 (the default console user), ADR-0015 (the Helm chart),
   ADR-0020 (certificate rotation), ADR-0021 (SBOMs and image signatures), ADR-0029 (how
@@ -74,9 +80,9 @@ script refuses when that is ambiguous.
 | `dd` | Docker Desktop on macOS, Windows (through WSL 2) or Linux |
 | `ce` | Docker CE, local, or on a server over SSH (`CE_HOST=user@server.example.test`) |
 | `podman` | Podman, rootless or not |
-| `rancher` | Rancher Desktop: its moby or containerd engine, or its bundled k3s |
+| `rancher` | Rancher Desktop: its moby or containerd engine, or its bundled k3s (not built yet: section 9) |
 | `k3s` | k3s, local, over SSH (`K3S_SSH`) or through an import command (`K3S_IMPORT`) |
-| `k8s` | any Kubernetes 1.27 or later, through `kubectl` and a context |
+| `k8s` | any Kubernetes (1.27 or later aimed at; the script does not check the version), through `kubectl` and a context |
 
 Actions: `--install` (run again, it upgrades and keeps the data), `--status`,
 `--uninstall` (keeps the data), `--uninstall --purge` (deletes it), with
@@ -84,6 +90,13 @@ Actions: `--install` (run again, it upgrades and keeps the data), `--status`,
 (section 15) and `--dry-run`. `--dry-run` runs nothing that changes state and
 prints no secret. A deployment has a name, a DNS label, which names its containers,
 volumes, namespace and its entry of `STATE_DIR` (section 3).
+
+As built (PLAN 10.1 to 10.11): the actions are also `--print-namespace` (section 7) and,
+with `--install` on Kubernetes, `--take-image` (section 11); `--purge-confirm=<name>`
+confirms a purge without a terminal. The exit status is 0 done, 1 a command failed, 2
+refused with nothing changed, 3 not built yet; `--status` exits 1 when the deployment is
+installed and not ready. `deploy/deploy.sh --help` lists every flag, and the README,
+"Deploying with deploy/deploy.sh", is the operator's guide.
 
 ### 2. The env file is data, not code
 
@@ -495,7 +508,9 @@ command, environment, working directory, labels, ports, volumes), not its ID, wh
 Docker's image store and its containerd store give differently; an import into k3s,
 the tar's layers (its configuration's `rootfs.diff_ids`) checked against the image's,
 built or given, and its configuration digest (its `manifest.json`) against the one
-built, before it is sent and, over `K3S_SSH` or here, against the node's image ID afterwards
+built - on Docker's containerd store, whose build gives the digest of the image's index
+or manifest and no configuration's, the tar must hold that blob and the configuration
+must be one it names (PLAN 10.13) - before it is sent and, over `K3S_SSH` or here, against the node's image ID afterwards
 (`k3s crictl inspecti -q -o json`, `status.id`; `K3S_IMPORT`'s own words import on a
 node the script cannot ask, which is said); the Docker engine here for Rancher
 Desktop's Kubernetes and the contexts `docker-desktop` and `rancher-desktop`, whose

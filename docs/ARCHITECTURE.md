@@ -1907,13 +1907,18 @@ was not built into it. Logos come from the brand assets:
 masters in `docs/brand/`, the console's copies in `web/src/assets/brand/`, the tab icon
 in `web/public/favicon.svg`. They are used as they are and never redrawn.
 
-## 9. Deployment targets **(implemented: binary, compose and the Helm chart, ADR-0015)**
+## 9. Deployment targets **(implemented: binary, compose and the Helm chart, ADR-0015; the deployment script, ADR-0033, but for Rancher Desktop's Kubernetes)**
 
 | Target | Artifact |
 |---|---|
 | Single binary | `dist/cactusfs-<os>-<arch>` — implemented, six targets |
 | Docker Desktop, Podman | `deploy/compose/compose.yaml` — implemented: 4-node development cluster over mTLS, rootless-safe; `make up` / `make down` |
 | k3s, k8s | `deploy/helm/cactusfs` — implemented: a StatefulSet per node, a claim per drive, PDB, default-deny NetworkPolicy (each address the nodes must reach - Vault, a collector, a notification target - an egress rule of `networkPolicy.egressTo`; a rule without peers or ports is refused), `restricted` Pod Security Standard; rendered, validated and asserted by `make helm-lint`, installed on k3s by `make test-k8s` |
+| Every container platform, one script | `deploy/deploy.sh` (POSIX `sh`, its parts in `deploy/lib/`, its settings `deploy/.env`, a copy of `deploy/.env.example`; ADR-0033, PLAN milestone 10) — implemented: `--install` (again: an upgrade, one node at a time), `--status`, `--uninstall`, `--uninstall --purge`, `--print-namespace`, `--dry-run`. It drives the two artifacts above and makes and keeps their secrets: one copy in the deployment's entry of `STATE_DIR` on the operator's machine, one on the target |
+| Docker Desktop, Docker CE (here, or on a server over SSH: `CE_HOST`), Podman | `deploy/lib/docker.sh` — standalone: one container `<name>`, labelled named volumes for its drives, metadata and secrets, no bind mount; `deploy/lib/compose.sh` — cluster: `deploy/compose/compose.yaml` itself with a generated override, its file secrets the one bind mount; `deploy/lib/ce.sh` — the server's host key pinned, Docker CE installed on request, ports and `/readyz` asked on the server. Run on Docker and Podman by `make test-deploy` |
+| Rancher Desktop | `deploy/lib/rancher.sh` — moby through the context `rancher-desktop` (standalone and cluster, as Docker Desktop), containerd through `nerdctl` (standalone; a cluster refused). Its own Kubernetes (`RANCHER_KUBERNETES=yes`) is not built: the script exits 3 (PLAN 10.6). Proven against recording fakes only |
+| k3s, k8s (script) | `deploy/lib/k8s.sh` — the chart rendered by `helm template` in the pinned helm image and applied with `kubectl apply --server-side --field-manager=cactusfs-deploy` (no Helm release), in a namespace of its own made with a marker; the Secrets read back and compared; upgrade one pod at a time, respecting the console upgrade's lock; `--take-image`. Run on k3s by `make test-k8s` (`TestDeployScriptOnK3s`) |
+| Secrets and the image | `deploy/lib/secrets.sh` — the custody of the secrets (made once, two copies, never made again, refused when they differ); `deploy/lib/image.sh` — the image from `make image-binaries`, the tree or a reference, built for the target's architecture and delivered (same engine, load, import into k3s, a registry); `deploy/lib/env.sh` and `common.sh` — the env file as data, the target and its recorded identity, every tool under `env -i`, ssh with strict host keys |
 
 Core code uses no cloud-provider API. Hybrid means separate clusters per site linked by
 asynchronous bucket replication; one Raft quorum is never stretched across a WAN.

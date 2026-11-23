@@ -8,6 +8,14 @@ shape are in [`docs/adr/0015-helm-chart.md`](../../../docs/adr/0015-helm-chart.m
 and no chart at `oci://ghcr.io/albievan/charts` to pull. Until the first release, install
 the chart from this directory with an image you built ([Installing](#installing)).
 
+**Or let the deployment script do it.** [`deploy/deploy.sh`](../../deploy.sh)
+`--docker k3s` or `--docker k8s` renders this chart with `helm template` and applies it
+in a namespace of its own, makes and keeps the Secrets the values name, delivers the
+image, and upgrades, uninstalls and purges what it made - without a Helm release, so
+`helm list` does not show it. Its settings and what it does are in the README of the
+repository, [Deploying with deploy/deploy.sh](../../../README.md#deploying-with-deploydeploysh).
+This page is for installing the chart yourself, with Helm.
+
 ## What it installs
 
 | Resource | Name | What it is for |

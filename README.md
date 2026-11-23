@@ -19,7 +19,10 @@ control and a hash-chained audit trail.
 > yet. Milestone 9, the visual policy builder with "Who may do this?"
 > ([The policy builder, and "Who may do this?"](#the-policy-builder-and-who-may-do-this)),
 > is built up to PLAN 9.10, and is in no published release either: its test on four
-> nodes and its review in a browser are still to come.
+> nodes and its review in a browser are still to come. Milestone 10, one deployment
+> script for every container platform
+> ([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)), is built but for
+> Rancher Desktop's own Kubernetes, and is in no published release; its acceptance on real hosts (PLAN 10.13) is still to come.
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -43,6 +46,7 @@ control and a hash-chained audit trail.
 - [Keys in Vault](#keys-in-vault)
 - [A cluster](#a-cluster)
 - [On Kubernetes](#on-kubernetes)
+- [Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)
 - [The S3 API](#the-s3-api)
 - [Management API, documentation and console](#management-api-documentation-and-console)
 - [Users, keys and the audit trail](#users-keys-and-the-audit-trail)
@@ -212,6 +216,35 @@ Said plainly, so that nobody finds out by trying:
 - **A rolling upgrade is tested with the binaries themselves for two steps only**: from
   entry schema 3 to 4 and from 4 to 5 (`make test-rolling`). Older states are tested by
   opening fixtures that the older binaries wrote.
+- **What `deploy/deploy.sh` does not do**
+  ([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)):
+  - no PowerShell entry point: on Windows it runs in WSL 2 only;
+  - no command to renew or reissue the development certificates: `cactusfs dev-init`
+    keeps no CA key, so they expire after `TLS_VALIDITY` (a year by default) and their
+    names are fixed when they are made - `--status` shows the expiry, and a deployment
+    that outlives them needs your own PKI (`TLS_CERT_FILE`, `TLS_KEY_FILE`,
+    `TLS_CA_FILE`);
+  - no Helm release on Kubernetes: no `helm list`, `helm history` or `helm rollback`
+    for what it made (going back is `--install` with the earlier image), and a
+    namespace that holds a Helm release of the same name is refused;
+  - Rancher Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`) is not handed to the
+    Kubernetes path yet: the script says so and exits 3 (PLAN 10.6); a cluster on
+    Rancher Desktop's containerd engine is refused;
+  - `VAULT_CA_FILE` is refused on the Docker targets, standalone and cluster: the
+    config volume does not carry it yet, so Vault's certificate must be one the
+    image trusts;
+  - `K8S_STORAGE=hostpath` names the directories on the node and does not make them;
+  - the image reaches a Kubernetes cluster of more than one node only through a
+    registry (`K8S_REGISTRY`); a compose cluster on an engine of another machine is
+    reached only through `CE_HOST` (another context or `DOCKER_HOST` engine is
+    refused there, as compose bind-mounts files of `STATE_DIR`);
+  - it installs Docker CE (`CE_INSTALL_DOCKER=yes`) on Debian, Ubuntu, RHEL, Rocky
+    Linux, AlmaLinux and CentOS Stream only;
+  - not yet run on Docker Desktop, Rancher Desktop or a Kubernetes other than k3s:
+    those paths are proven against recording fakes ([Targets](#targets)), and the
+    acceptance on real hosts (PLAN 10.13) is still to come. The binaries of
+    `make image-binaries` are in no published release: run `make image-binaries` first
+    for the default `IMAGE_SOURCE=binaries`.
 
 ## Build from source
 
@@ -333,6 +366,7 @@ Where the two client ports are, by way of running it:
 | Compose cluster (`make up`) | `https://localhost:9000`, `:9010`, `:9020`, `:9030` (nodes 1 to 4) | `https://localhost:9001`, `:9011`, `:9021`, `:9031`, on this machine only |
 | Helm chart, inside the cluster | `https://<release>.<namespace>.svc:9000` | `https://<release>-admin.<namespace>.svc:9001` |
 | Helm chart, published as NodePorts | `https://<machine>:<service.nodePort>` (`service.type=NodePort`) | `https://<machine>:<adminService.nodePort>` (`adminService.type=NodePort`) |
+| Made by `deploy/deploy.sh` | what `--install` and `--status` print ([Reaching the deployment](#reaching-the-deployment)) | the same; the admin port on `127.0.0.1`, or a ClusterIP, unless you open it |
 
 The certificate authority to trust is your own; for the development setups it is
 `s3-ca.pem`, which `cactusfs dev-init` writes.
@@ -623,7 +657,9 @@ name.
 
 Four nodes on one machine, with Docker or rootless Podman
 ([`deploy/compose/compose.yaml`](deploy/compose/compose.yaml)). It needs `make` and a
-container engine with its compose plugin; the image is built from this tree.
+container engine with its compose plugin; the image is built from this tree. `deploy/deploy.sh`
+with `DEPLOY_MODE=cluster` runs this same file, and makes and keeps its secrets for you
+([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)).
 
 ```sh
 export CACTUSFS_KMS_PASSPHRASE="$(openssl rand -hex 24)"   # keep it: it opens the cluster's key
@@ -717,6 +753,9 @@ lets the nodes reach each other and DNS, and nobody reach them until you say who
 `networkPolicy.clientsFrom` for S3, `networkPolicy.adminFrom` for the admin port, each
 apart, and `networkPolicy.egressTo` for what the nodes must reach themselves (Vault).
 The chart's own README has every value.
+`deploy/deploy.sh --docker k3s` or `--docker k8s` renders this chart and applies it
+in a namespace of its own, with the Secrets it needs
+([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)).
 
 Nodes are named `<release>-<pool>-<index>`, with the name of the Helm release exactly
 as you give it: `helm install store ...` makes `store-meta-0`, `store-meta-1`,
@@ -821,6 +860,314 @@ Two things about the machine, which are not the chart's to do:
   answers on every address of the machine, whatever firewalld says. The admin port has
   a Service of its own so that S3 can be published without it; remember the console
   user `admin` / `admin` before you publish that one.
+
+## Deploying with deploy/deploy.sh
+
+One script, [`deploy/deploy.sh`](deploy/deploy.sh), installs CactusFS on a container
+platform, upgrades it, says how it stands, and removes it: Docker Desktop, Docker CE
+(on this machine or on a server over SSH), Podman, Rancher Desktop, k3s and Kubernetes.
+It is a POSIX `sh` script with its parts in [`deploy/lib/`](deploy/lib); why it is
+built the way it is, is in
+[ADR-0033](docs/adr/0033-deployment-script.md). It drives the same pieces as the
+sections above - one node with four drives, the compose cluster, the Helm chart - and
+makes and keeps their secrets for you.
+
+```sh
+make image-binaries                                # dist/image: the binaries the image is made of
+cp deploy/.env.example deploy/.env                 # KMS=local is the one line it sets
+deploy/deploy.sh --docker dd --install --dry-run   # what it would run; changes nothing
+deploy/deploy.sh --docker dd --install             # Docker Desktop, one node, four drives
+deploy/deploy.sh --status
+```
+
+**The settings** are `deploy/.env` (git ignores it, and it never enters the image's build
+context), or another file named with `--env FILE`. Copy
+[`deploy/.env.example`](deploy/.env.example), which explains every setting with its
+default; a key it does not name is refused. The file is read as data, never run: one
+`KEY=value` a line, the value exactly as written - a `$(...)`, a backtick or a `;` in it
+is text. **It never holds a secret**: a secret is the path of a file that holds it (a
+key ending in `_FILE`), or is generated. `KMS` has no default and must be written out:
+`KMS=local` (a sealed key file opened by a passphrase) or `KMS=vault`. A flag wins over
+the file and the file over the defaults; the environment of your shell is not read, and
+every program the script runs gets only `PATH`, `HOME`, `LC_ALL=C`, what it needs and
+the variables `TOOL_ENV_PASS` names, so a `DOCKER_HOST`, `DOCKER_CONTEXT`, `KUBECONFIG`
+or current context of your shell never decides where it deploys. Settings of the nodes themselves can be added as
+`CACTUSFS_*=value` lines (those [`deploy/cactusfs.env.example`](deploy/cactusfs.env.example)
+lists, but no secret and none the script sets itself).
+
+**The flags** - `deploy/deploy.sh --help` says the same:
+
+| Flag | What it does |
+|---|---|
+| `--docker TARGET` | `dd`, `ce`, `podman`, `rancher`, `k3s` or `k8s`. Without it, `DEPLOY_TARGET`; without that, the target of what already runs under `DEPLOY_NAME` (labelled containers, or a labelled namespace); refused when that is none or more than one |
+| `--install` | installs; on a deployment that is installed, upgrades it, one node at a time, keeping its data |
+| `--status` | how it stands and where it is reached. Exits 0 when it is ready or not installed, 1 when it is installed and not ready |
+| `--uninstall` | removes it and keeps its data |
+| `--uninstall --purge` | removes it and its data and keys, for good; asks for the deployment's name at the terminal, or takes `--purge-confirm=NAME` |
+| `--print-namespace` | Kubernetes: prints the namespace, its Role and the ClusterRole for a cluster's administrator to create beforehand, when your context may not do more than that namespace (ADR-0033 section 7) |
+| `--dry-run` | prints the commands that would change something and runs none of them; what it only reads, it still asks |
+| `--from-source` | with `--install`: builds the image from this tree with the `Dockerfile` instead of from `dist/image` |
+| `--take-image[=NAME]` | with `--install` on Kubernetes, after an upgrade from the console: [below](#upgrade-uninstall-purge) |
+| `--adopt`, `--engine-replaced`, `--another-target` | the cases of a lost record, a replaced engine and a second target ([Secrets, and where they live](#secrets-and-where-they-live)) |
+
+Exit status: 0 done, 1 a command failed, 2 refused (nothing was changed), 3 not built
+yet. Every deployment has a name, `DEPLOY_NAME` (default `cactusfs`): it names and
+labels every container, volume and namespace the script makes, and the script touches
+nothing that does not carry the label. Two deployments of two names live side by side.
+
+On this machine it needs a POSIX shell, the command-line tool of the target (`docker`,
+`podman` or `nerdctl`; `kubectl`, or `k3s kubectl` on the server) and `curl`;
+`ssh` and `ssh-keygen` for a server; for Kubernetes, `docker` or `podman` to run the
+helm image the chart is rendered in, or a helm program named with `HELM`; and `openssl`
+for `--status` to show when the certificate expires. `make image-binaries` (the default
+source of the image, `IMAGE_SOURCE=binaries`) builds in a container engine, as every
+`make` target does.
+
+### Targets
+
+Standalone (`DEPLOY_MODE=standalone`, the default) is one node with `DRIVES` drives (4:
+2 data + 2 parity); cluster (`DEPLOY_MODE=cluster`) is three voters and a fourth node.
+A cluster on the local KMS shares one key file among its nodes and is refused unless
+`ALLOW_SHARED_LOCAL_KMS=yes` says so; a cluster in production uses `KMS=vault`.
+
+| Target | `--docker` | Standalone | Cluster | Run on a real engine so far |
+|---|---|---|---|---|
+| Docker Desktop (macOS, Linux; Windows through WSL 2) | `dd` | yes: one container, labelled named volumes | yes: [`deploy/compose/compose.yaml`](deploy/compose/compose.yaml) itself, four nodes on one machine | not on Docker Desktop itself yet (PLAN 10.13); the same code ran on Docker CE |
+| Docker CE on this machine | `ce` | yes | yes | `make test-deploy`, both modes (Docker on Linux) |
+| Docker CE on a server over SSH | `ce` with `CE_HOST=user@server` | yes | yes: compose runs on the server, from `CE_STATE_DIR` | standalone, from macOS to a Linux server |
+| Podman | `podman` | yes | yes: `podman compose`, which needs Podman's API socket (`podman.socket`) | `make test-deploy`, both modes (Podman 5.8 on Linux, SELinux enforcing) |
+| Rancher Desktop, moby | `rancher` (`RANCHER_ENGINE=auto` or `moby`) | yes: Docker Desktop's code through the context `rancher-desktop` | yes | no: the recording fakes of `make deploy-check` only (PLAN 10.6) |
+| Rancher Desktop, containerd | `rancher` (`RANCHER_ENGINE=auto` or `containerd`) | yes, through `nerdctl` | refused: `nerdctl compose` cannot upgrade one node at a time | no: the fakes only (PLAN 10.6) |
+| Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | **not built**: exits 3 | **not built** | - |
+| k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge |
+| Kubernetes (1.27 or later aimed at; the version is not checked) | `k8s` with `K8S_CONTEXT` (the current context is never assumed) | yes | yes | no: the fakes only |
+
+Every target is also run by the harness of `make deploy-check`, against recording fakes
+of each tool. On Docker targets S3 is published on `BIND` (default `127.0.0.1`) and the
+admin port on `ADMIN_BIND`, `127.0.0.1`; in cluster mode the ports are compose's - S3 on
+every address of the machine at `S3_PORT`, `+10`, `+20` and `+30`, the admin ports on
+`127.0.0.1` - and `BIND` cannot be set. On Kubernetes the script renders the chart with
+`helm template` and applies it with `kubectl apply --server-side`; there is **no Helm
+release**. S3 is a NodePort by default, and a NodePort or LoadBalancer needs
+`K8S_S3_ALLOW_FROM` (address ranges, or `any`); the admin Service stays a ClusterIP
+unless `K8S_ADMIN_SERVICE_TYPE` and `K8S_ADMIN_ALLOW_FROM` are both set. The image
+reaches a cluster by a push to `K8S_REGISTRY`; by an import into k3s's containerd
+(`K3S_SSH`, the command `K3S_IMPORT`, or the k3s of this machine; a cluster of one node
+only); for the contexts `docker-desktop` and `rancher-desktop`, from the engine on this
+machine; or, with `IMAGE_SOURCE=image`, by the nodes pulling `IMAGE` by its digest.
+
+### Secrets, and where they live
+
+A deployment begins with secrets: its root credentials; on the local KMS **the KMS
+passphrase and the sealed key file `kms.json`, which open the data only together**; on
+Vault a token instead; and its TLS certificates and keys. Those you do not give as files
+(`ROOT_ACCESS_KEY_FILE`, `ROOT_SECRET_KEY_FILE`, `KMS_PASSPHRASE_FILE`, `KMS_KEY_FILE`,
+`VAULT_TOKEN_FILE`, `TLS_*_FILE`) are made once, on this machine: the root credentials and
+the passphrase from `/dev/urandom`, `kms.json` and the certificates by
+`cactusfs dev-init` in a container. They are never on a command line, in a container's
+environment, or printed: they go from file to file, on standard input.
+
+Every secret is kept twice: in the deployment's entry of `STATE_DIR` on this machine, and
+on the target before anything there starts - on a Docker engine the labelled volumes
+`<name>-secrets` and `<name>-config` (a compose cluster: `<name>-config`, and compose's
+secret files in the entry's `compose/secrets/`, or on `CE_HOST` in `CE_STATE_DIR` on the
+server); on Kubernetes, Secrets of the deployment's namespace. A secret either copy holds
+is never made again. One copy missing is put back from the other; two copies that differ
+are refused, naming both - the script never chooses. A root credential, passphrase or
+`kms.json` given as a file must equal the copies there are; a Vault token or a
+certificate of your own given as a file that differs replaces both copies (a rotation),
+and the run says so.
+
+`STATE_DIR` is `$XDG_STATE_HOME/cactusfs-deploy`, else
+`~/.local/state/cactusfs-deploy`, unless the env file names another; one inside the
+repository is refused, and one in a folder a sync service copies (Documents, Desktop,
+iCloud Drive, OneDrive, Dropbox, Google Drive) is warned of. Directories are 0700 and
+files 0600. One entry a deployment, `STATE_DIR/<target-id>/<name>/`, where the target ID
+is the target and its Docker or kubectl context - `dd-default`, `ce-default`,
+`podman-default`, `rancher-rancher-desktop`, `k3s-local`, `k8s-<context>` - or
+`ssh-<host>` for `CE_HOST` and `K3S_SSH` (a character other than a letter, digit, `.`,
+`_` or `-` written as `_`: `CE_HOST=deploy@server.example.test` is
+`ssh-deploy_server.example.test`):
+
+| In the entry | What it holds |
+|---|---|
+| `target` | the record: the engine or cluster the deployment was made on, its own ID (the engine's, or the UID of the cluster's `kube-system`) and the KMS. A later run whose settings reach another is refused |
+| `secrets/root-access-key`, `secrets/root-secret-key` | the root credentials (S3, the management API) |
+| `secrets/kms-passphrase` | `KMS=local`: the passphrase of `kms.json` |
+| `secrets/vault-token` | `KMS=vault`: the copy of `VAULT_TOKEN_FILE` |
+| `config/` | what `dev-init` wrote: `kms.json` (`KMS=local`), `s3.pem`, `s3.key`, `s3-ca.pem` (the CA clients trust), `node-ca.pem`, `nodes/`, `ready` - or your own files in their place |
+| `ssh-known-hosts` | `CE_HOST`: the host keys pinned at the first install ([below](#adding-a-servers-host-key)) |
+| `compose/` | a compose cluster on this machine: `compose.yaml`, the generated `override.yaml` and `compose.env`, and `secrets/` |
+| `namespace`, `namespace-uid` | Kubernetes: the namespace and its marker, without which the script treats a namespace as somebody else's |
+| `images` | k3s: the image tags the script imported, which a purge removes |
+
+A secret you give as a file is read from that file: keep it, as you keep `STATE_DIR`.
+
+**On `KMS=local`, every object is opened by `kms.json` and the passphrase together.**
+Losing both copies of either - the entry and the target's - loses every object of the
+deployment, and no one can get them back. On Kubernetes an `--uninstall` deletes the
+namespace's Secrets and leaves the entry the only copy until the next `--install`.
+**Back up `STATE_DIR`, encrypted**, after every install that made or replaced a secret
+(here the default `STATE_DIR`; gpg asks for the backup's passphrase):
+
+```sh
+tar -C ~/.local/state -cf - cactusfs-deploy | gpg --symmetric --cipher-algo AES256 -o cactusfs-deploy.tar.gpg
+# and back:  gpg -d cactusfs-deploy.tar.gpg | tar -C ~/.local/state -xpf -
+```
+
+(`age -p` serves as well as `gpg --symmetric`.) Keep the backup's passphrase apart from
+the backup, and the backup off this machine. A copy that a sync or backup service makes
+of `STATE_DIR` as it is, unencrypted, is a copy of every key it holds.
+
+Three flags are about that record, and none is a setting of the env file:
+
+- `--adopt`: the target holds the deployment's labelled volumes and `STATE_DIR` holds no
+  record of them (the deployment was made from another machine, or the record was
+  lost). With `--install` their secrets are taken into `STATE_DIR`; with `--uninstall
+  --purge` the engine reached is recorded as the deployment's so that they may be
+  purged. Without it, that is refused.
+- `--engine-replaced`: with `--install`, the engine recorded is gone (a factory reset of
+  Docker Desktop, say) and the one the settings reach now takes its place; the run says
+  so and records it. Without it, another engine is refused.
+- `--another-target`: deploys a name already recorded on another target onto this one
+  as well, as a second deployment with secrets of its own.
+
+### Adding a server's host key
+
+Every ssh the script runs - to `CE_HOST`, `K3S_SSH` and `BUILD_HOST`, and the Docker
+CLI's to `CE_HOST` - runs with `BatchMode=yes` and `StrictHostKeyChecking=yes`: it never
+prompts and never accepts a host key `known_hosts` does not already hold. A server it
+has not seen is refused with ssh's own message (exit 2). Add its key yourself, once, and
+only after checking it:
+
+1. Ask the server's administrator for the fingerprint of its host key, by a way other
+   than this network - read on the server's console with
+   `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, say.
+2. Connect once with ssh asking, under the same name the env file gives
+   (`ssh -G` resolves it, so a `Host` entry of `~/.ssh/config` with its `HostName` and
+   `Port` is honoured):
+
+   ```sh
+   ssh -o StrictHostKeyChecking=ask deploy@server.example.test true
+   ```
+
+   ssh shows the key's fingerprint. Answer `yes` only when it is the one the
+   administrator gave; ssh then adds the key to `~/.ssh/known_hosts`.
+3. Run the script again.
+
+`CE_HOST` names no port (the Docker CLI reads it as `ssh://<CE_HOST>`): give the server
+a `Host` entry in `~/.ssh/config` with its `HostName` and `Port`, and name that. At the
+first install with `CE_HOST` the lines of `known_hosts` that accept the server are
+pinned in the entry's `ssh-known-hosts`, and from then on every ssh to it accepts it by
+those alone, even if `known_hosts` changes; a key revoked there (`@revoked`) is still
+refused. When the server's key is replaced on purpose, check the new fingerprint the
+same way, add it to `known_hosts`, and remove `ssh-known-hosts` from the entry: the next
+`--install` pins the keys `known_hosts` then holds. `K3S_SSH` and `BUILD_HOST` are
+checked against `known_hosts` at every run, and not pinned.
+
+### Offline: OFFLINE=yes and the helm image
+
+What the script fetches is listed in ADR-0033 section 12, with the way to avoid each:
+the helm image (Kubernetes), the distroless runtime image the image and the secrets'
+helper containers are made from, the image named by `IMAGE_SOURCE=image`, everything
+`--from-source` builds from, and Docker CE when `CE_INSTALL_DOCKER=yes`. Nothing else;
+a node itself calls nothing on the internet.
+
+`OFFLINE=yes` makes it fetch nothing public: every image it needs must be on the engine
+already (asked with `image inspect` first), builds run without pulling, and
+`--from-source`, `CE_INSTALL_DOCKER=yes` and an `IMAGE` that is not here are refused.
+A push to `K8S_REGISTRY`, your own registry, stays allowed. What to have in place first:
+
+- **The runtime image**, which the image of `IMAGE_SOURCE=binaries`, `dev-init` and the
+  helper containers of a Docker target are made from (on the server too, with
+  `CE_HOST`); with `IMAGE_SOURCE=image`, `IMAGE` serves instead. Its reference, pinned by digest:
+  `sed -n 's/^ARG RUNTIME_IMAGE=//p' Dockerfile`.
+- **The helm image**, for a Kubernetes target, in `docker` (the context
+  `ENGINE_CONTEXT` names) or `podman` on this machine:
+
+  ```sh
+  HELM_REF=$(sed -n 's/^ARG HELM_IMAGE=//p' Dockerfile)   # alpine/helm, pinned by digest
+  docker pull "$HELM_REF"            # while this machine may still fetch it
+  docker image inspect "$HELM_REF" >/dev/null && echo present
+  ```
+
+  The script looks it up by that reference: a copy carried in another way (`docker
+  save` and `docker load`) must answer `docker image inspect "$HELM_REF"` too. Or name
+  a copy in your own registry with `HELM_IMAGE` (by the same digest:
+  `registry.example.test/mirror/helm@sha256:<digest>`), or a helm program on this
+  machine with `HELM=/usr/local/bin/helm`; not both.
+- **`IMAGE`**, when `IMAGE_SOURCE=image`, on the engine here (or already in
+  `K8S_REGISTRY`, for nodes that pull).
+
+### Reaching the deployment
+
+`--install` ends, and `--status` says, where the deployment is reached, which CA to
+trust (`config/s3-ca.pem` of the entry) and which files hold the root credentials -
+never the credentials themselves:
+
+| Target | S3 | Admin API and console |
+|---|---|---|
+| Docker, standalone | `https://<BIND>:<S3_PORT>`, by default `https://localhost:9000` | `https://127.0.0.1:9001` (`ADMIN_BIND:ADMIN_PORT`) |
+| Docker, cluster | `S3_PORT`, `+10`, `+20`, `+30` (nodes 1 to 4) on every address | `127.0.0.1`, `S3_PORT + 1`, `+11`, `+21`, `+31` |
+| Docker CE on `CE_HOST` | the server's address | the server's `127.0.0.1` only: `--status` prints the `ssh -L` command that brings it here |
+| Kubernetes | each address of a machine that runs a ready pod, at the NodePort, or the load balancer's | a ClusterIP: `--status` prints the `kubectl port-forward` command (with `K3S_SSH`, the `ssh -L` to the server and the `k3s kubectl port-forward` to run there) |
+
+For a deployment on this machine with the defaults:
+
+```sh
+E=~/.local/state/cactusfs-deploy/dd-default/cactusfs
+export AWS_ACCESS_KEY_ID="$(cat "$E/secrets/root-access-key")" AWS_SECRET_ACCESS_KEY="$(cat "$E/secrets/root-secret-key")"
+aws --endpoint-url https://localhost:9000 --ca-bundle "$E/config/s3-ca.pem" s3 mb s3://photos
+```
+
+The development certificate names `localhost`, the loopback addresses and what
+`TLS_HOSTS` lists (`s3.example.test,192.0.2.10`, say); a client that reaches S3 by
+another name needs it there at the first install, as the certificate cannot be given
+names later. **The console's first user is `admin` / `admin`** ([First
+sign-in](#first-sign-in)): every install says so. Change its password or delete it
+before the admin port is reachable from anywhere but this machine; a non-loopback
+`ADMIN_BIND` is warned about.
+
+### Upgrade, uninstall, purge
+
+- **Upgrade**: `--install` again, with a new image (a new `make image-binaries`, an
+  `IMAGE`, or `--from-source`). The data is kept. Standalone on Docker: the node is
+  stopped and kept as `<name>-previous`, the new one is run on the same volumes and the
+  old one removed once the new one answers `/readyz`; when it does not, the run says the
+  node is down and how to go back. A cluster: one node at a time - the one that does not
+  vote, then the voters, the leader last when the admin API names it - each ready
+  before the next; the first that is not ready within `WAIT_TIMEOUT` seconds stops the
+  upgrade with a non-zero exit.
+- **Kubernetes and the console's upgrade.** The script reads the lock of an upgrade from
+  the console ([Checking for releases and upgrading](#checking-for-releases-and-upgrading))
+  and refuses, or stops, while it is held; it never takes it. After the console has
+  moved the nodes to another image, `--install` stops at the conflict on the image
+  field. `--install --take-image` (it asks for the deployment's name at the terminal,
+  or takes `--take-image=NAME`) takes the image field back for the script - that field
+  and the version label that goes with it, nothing else - and the pods roll one at a
+  time. It is refused while the console's lock is held.
+- **Uninstall**: `--uninstall` removes the containers, or on Kubernetes the workload,
+  its Services, NetworkPolicy, PodDisruptionBudget and Secrets, and keeps the volumes or
+  claims, the namespace and the entry of `STATE_DIR`: `--install` runs it again with its
+  data.
+- **Purge**: `--uninstall --purge` deletes the data and both copies of the keys, for
+  good. It asks for the deployment's name at the terminal, or takes
+  `--purge-confirm=NAME`; never from the env file. In this order: the data (volumes, or
+  claims), a listing that proves none is left, the target's secrets (and the namespace,
+  when it is the script's and empty), and last the deployment's entry of `STATE_DIR` -
+  nothing else of it. A step that fails stops the purge with the entry kept. Only what
+  carries the deployment's label is deleted, on the engine or cluster recorded for it.
+  With `K8S_STORAGE=hostpath` the host directories, and on a StorageClass whose
+  `reclaimPolicy` is `Retain` the released PersistentVolumes, are named and left:
+  the script deletes no cluster-scoped object.
+
+### Windows through WSL 2
+
+On Windows the script runs inside a WSL 2 distribution, with Docker Desktop's WSL
+integration turned on for that distribution: clone the repository there and run
+`deploy/deploy.sh` from its shell, as on Linux. `STATE_DIR` is then in the
+distribution's home directory. There is no PowerShell entry point, and Git Bash is not
+supported (the script does not detect it).
 
 ## The S3 API
 
@@ -2060,8 +2407,9 @@ internal/adapters/   implementations and inbound transports
 internal/buildinfo/  the version, build and commit of a binary
 api/                 OpenAPI, AsyncAPI and protobuf contracts, and the code generated from them
 web/                 console (React + TypeScript + Vite)
-deploy/              compose cluster, Helm chart, observability pack, the example environment file
-test/                integration, S3 compatibility, chaos and Kubernetes suites
+deploy/              the deployment script (deploy.sh, lib/, .env.example), compose cluster, Helm chart,
+                     observability pack, the example environment file
+test/                integration, S3 compatibility, chaos, Kubernetes and deployment-script suites
 scripts/             the gate scripts behind the make targets
 docs/                architecture, threat model, decision records, brand assets
 ```
