@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -416,12 +417,45 @@ func TestAnAbortedDownloadIsAnError(t *testing.T) {
 	}
 }
 
+// slowReader is the client of the test server with a small receive buffer
+// on each connection it opens, so that the server cannot get far ahead of
+// what it has read.
+func slowReader(t *testing.T, client *http.Client) *http.Client {
+	t.Helper()
+	base, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("the test server's client has a %T", client.Transport)
+	}
+	transport := base.Clone()
+	var dialer net.Dialer
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			if err := tcp.SetReadBuffer(64 << 10); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+		}
+		return conn, nil
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport, Timeout: client.Timeout}
+}
+
 // TestASlowPreviewIsNoStalledOne: the stall bounds each write, not the
 // transfer: a client that takes longer than it in all, and keeps taking
 // bytes, gets every one of them. It takes a little at a time and pauses
 // for a twentieth of the stall: 32 pauses, about 1.6 stalls in all, while
 // no write waits for more than a pause and a read - a margin of the
-// timing, wide enough for the race detector on a busy machine.
+// timing, wide enough for the race detector on a busy machine. The client's
+// receive buffer is small: on Linux the kernel's two buffers of a loopback
+// connection grow to some 10 MB, more than the whole image, so a write
+// could otherwise be taken by the kernel long before the client reads it,
+// and a later one wait for that backlog - longer than the stall when a
+// loaded machine slows the client (a failure seen in make check).
 func TestASlowPreviewIsNoStalledOne(t *testing.T) {
 	t.Parallel()
 	const (
@@ -438,7 +472,7 @@ func TestASlowPreviewIsNoStalledOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+f.root)
-	resp, err := f.Client().Do(request)
+	resp, err := slowReader(t, f.Client()).Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
