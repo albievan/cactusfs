@@ -934,7 +934,10 @@ image_build() {
 		cleanup_none
 		image_in_workdir image_build_in "$@"
 	) || exit
-	_img_config=$(image_hex "${_ib_ids%% *}") || exit
+	_img_config=
+	if [ "${_ib_ids%% *}" != - ]; then
+		_img_config=$(image_hex "${_ib_ids%% *}") || exit
+	fi
 	_ib_manifest=
 	case $_ib_ids in
 	*' '?*) _ib_manifest=$(image_hex "${_ib_ids#* }") || exit ;;
@@ -977,6 +980,10 @@ image_build() {
 		# a saved tar is checked against.
 		_img_config=$_if_cfg
 		say "image: built $_img_hex (manifest; configuration $_img_config), tagged $RESOLVED_IMAGE"
+	elif [ -z "$_img_config" ]; then
+		# Docker's containerd store: a saved tar is checked by its layers,
+		# and what is imported by the configuration that tar holds.
+		say "image: built $_img_hex (the digest of its index or manifest; its configuration is read from a saved tar), tagged $RESOLVED_IMAGE"
 	else
 		say "image: built $_img_hex (configuration $_img_config), tagged $RESOLVED_IMAGE"
 	fi
@@ -984,8 +991,9 @@ image_build() {
 }
 
 # image_build_in <directory> <word>...: the build, its IDs written into the
-# directory and printed as one line - the ID file's, then (Docker) the
-# metadata's containerimage.digest when it gives one - the only line on
+# directory and printed as one line - the ID file's (or "-" when it is no
+# configuration's, below), then (Docker) the metadata's
+# containerimage.digest when it gives one - the only line on
 # standard output (what run says, and the build's own output, go to standard
 # error here). buildx writes its metadata as indented JSON, a key a line.
 image_build_in() {
@@ -1000,9 +1008,20 @@ image_build_in() {
 	fi
 	[ -s "$_ibi_dir/iid" ] || fail "the build wrote no image ID"
 	_ibi_ids=$(printable <"$_ibi_dir/iid" | tr -d '\n')
+	image_hex "$_ibi_ids" >/dev/null || exit
 	if [ -f "$_ibi_dir/metadata.json" ]; then
 		_ibi_manifest=$(sed -n 's/^ *"containerimage\.digest": *"\(sha256:[0-9a-f]*\)".*$/\1/p' "$_ibi_dir/metadata.json" | head -n 1)
-		[ -z "$_ibi_manifest" ] || _ibi_ids="$_ibi_ids $_ibi_manifest"
+		# Docker's image store writes the configuration's digest to the ID
+		# file and the manifest's to the metadata; its containerd store
+		# writes the same digest to both - of the image's index (buildx's
+		# provenance makes one) or its manifest - which is no
+		# configuration's: then "-" stands first for a configuration not
+		# known from the build.
+		if [ -n "$_ibi_manifest" ] && [ "$_ibi_manifest" = "$_ibi_ids" ]; then
+			_ibi_ids="- $_ibi_manifest"
+		elif [ -n "$_ibi_manifest" ]; then
+			_ibi_ids="$_ibi_ids $_ibi_manifest"
+		fi
 	fi
 	printf '%s' "$_ibi_ids"
 }
@@ -1403,8 +1422,22 @@ image_stream_in() {
 		_isi_path=$(image_tar_config_path "$_isi_dir/image.tar" "$_isi_ref") || exit
 		_isi_config=${_isi_path#blobs/sha256/}
 		_isi_config=$(image_hex "${_isi_config%.json}") || exit
-		if [ -n "$_img_config" ] && [ "$_isi_config" != "$_img_config" ]; then
-			fail "the tar saved of $_isi_ref holds the configuration $_isi_config, not the one built, $_img_config: nothing was sent"
+		if [ -n "$_img_config" ]; then
+			[ "$_isi_config" = "$_img_config" ] ||
+				fail "the tar saved of $_isi_ref holds the configuration $_isi_config, not the one built, $_img_config: nothing was sent"
+		elif [ -n "$_img_hex" ] && [ "$_isi_config" != "$_img_hex" ]; then
+			# Docker's containerd store knows the image by its index's or
+			# manifest's digest (image_build_in): the tar must hold that
+			# blob - content-addressed, the ID checked - and the
+			# configuration the layers matched must be one it names,
+			# through its manifests. (Docker's image store and Podman know
+			# an image by its configuration's digest: equal, above.)
+			image_tar_has "$_isi_dir/image.tar" "blobs/sha256/$_img_hex" ||
+				fail "the tar saved of $_isi_ref does not hold the image checked, $_img_hex: nothing was sent"
+			case " $(image_tar_configs_of "$_isi_dir/image.tar" "$_img_hex" "$_isi_ref") " in
+			*" $_isi_config "*) ;;
+			*) fail "the tar saved of $_isi_ref holds the configuration $_isi_config, which the image checked, $_img_hex, does not name: nothing was sent" ;;
+			esac
 		fi
 	fi
 	"$_isi_to" invoke "$@" <"$_isi_dir/image.tar" ||
@@ -1470,6 +1503,31 @@ image_tar_layers() {
 	_itl=$(printf '%s' "$_itl" | tr -d '\n' | sed -n 's/^.*"diff_ids" *: *\[\([^]]*\)\].*$/\1/p' | tr ',"' '  ')
 	# shellcheck disable=SC2086 # the split into words is the point
 	image_words $_itl
+}
+
+# image_tar_has <tar> <member>: true when the tar holds the member.
+image_tar_has() {
+	tar -t -f "$1" "$2" >/dev/null 2>&1
+}
+
+# image_tar_configs_of <tar> <hex> <reference>: the digests (hex) of the
+# configurations the blob <hex> of a saved OCI layout names - itself a
+# manifest ("config"), or an index whose manifests do (an attestation's
+# included) - separated by single spaces.
+image_tar_configs_of() {
+	_itco=$(tar -x -O -f "$1" "blobs/sha256/$2" 2>/dev/null | tr -d ' \n\t\r') ||
+		fail "the tar of the image $3 holds no blob $2"
+	case $_itco in
+	*'"manifests":'*)
+		_itco_list=
+		for _itco_m in $(printf '%s' "$_itco" | sed -n 's/^.*"manifests":\[\(.*\)\].*$/\1/p' | grep -o '"digest":"sha256:[0-9a-f]\{64\}"' | sed 's/^.*sha256://; s/"$//'); do
+			_itco_c=$(tar -x -O -f "$1" "blobs/sha256/$_itco_m" 2>/dev/null | tr -d ' \n\t\r' | sed -n 's/^.*"config":{[^}]*"digest":"sha256:\([0-9a-f]\{64\}\)".*$/\1/p')
+			[ -z "$_itco_c" ] || _itco_list="$_itco_list $_itco_c"
+		done
+		image_words $_itco_list
+		;;
+	*) printf '%s' "$_itco" | sed -n 's/^.*"config":{[^}]*"digest":"sha256:\([0-9a-f]\{64\}\)".*$/\1/p' ;;
+	esac
 }
 
 # image_words <word>...: the words, separated by single spaces.

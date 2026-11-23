@@ -84,7 +84,15 @@ type tarEntry struct{ config, layers string }
 // manifest.json (with a nested LayerSources object, as Docker writes), and
 // each configuration's file. An entry whose config is "" names none.
 func savedTarOf(entries ...tarEntry) string {
-	files := map[string]string{}
+	return savedTarWith(nil, entries...)
+}
+
+// savedTarWith is savedTarOf with more files - an OCI layout's blobs.
+func savedTarWith(extra map[string]string, entries ...tarEntry) string {
+	files := maps.Clone(extra)
+	if files == nil {
+		files = map[string]string{}
+	}
 	var manifest []string
 	for _, e := range entries {
 		var ids []string
@@ -196,6 +204,28 @@ func built(tool, arch string, f imgFix) rule {
 
 // crictlOf is crictl inspecti's answer (-q -o json) of an image whose
 // configuration digest is the one given, by the tool that reaches it.
+// indexBuilt is a build on Docker's containerd store: the ID file and the
+// metadata's containerimage.digest both hold the digest of the image's
+// index, f.hex.
+func indexBuilt(f imgFix) []rule {
+	return []rule{{Tool: "docker", Contains: []string{"build"}, Files: map[string]string{
+		"--iidfile":       "sha256:" + f.hex,
+		"--metadata-file": "{\n  \"buildx.build.ref\": \"default/default/x\",\n  \"containerimage.digest\": \"sha256:" + f.hex + "\"\n}",
+	}}}
+}
+
+// ociIndex is the blobs of an OCI layout, as Docker's containerd store
+// saves them, pretty-printed as it writes them: the index (its ID) naming
+// a manifest of linux/amd64 and an attestation's, and that manifest naming
+// the configuration.
+func ociIndex(index, manifest, config string) map[string]string {
+	attestation := randomHex()
+	return map[string]string{
+		"blobs/sha256/" + index:    "{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.index.v1+json\",\n  \"manifests\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:" + manifest + "\",\n      \"size\": 3128,\n      \"platform\": {\n        \"architecture\": \"amd64\",\n        \"os\": \"linux\"\n      }\n    },\n    {\n      \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n      \"digest\": \"sha256:" + attestation + "\",\n      \"size\": 837,\n      \"annotations\": {\n        \"vnd.docker.reference.digest\": \"sha256:" + manifest + "\",\n        \"vnd.docker.reference.type\": \"attestation-manifest\"\n      },\n      \"platform\": {\n        \"architecture\": \"unknown\",\n        \"os\": \"unknown\"\n      }\n    }\n  ]\n}",
+		"blobs/sha256/" + manifest: `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:` + config + `","size":1},"layers":[]}`,
+	}
+}
+
 func crictlOf(tool, config string) rule {
 	return rule{Tool: tool, Contains: []string{"crictl", "inspecti"}, Stdout: "{\n  \"status\": {\n    \"id\": \"sha256:" + config + "\",\n    \"repoTags\": [\n      \"docker.io/library/cactusfs:x\"\n    ],\n    \"uid\": null\n  }\n}\n"}
 }
@@ -1934,7 +1964,10 @@ func TestImageCheckChangesNothing(t *testing.T) {
 // and the manifest's to --metadata-file; Docker's containerd store knows
 // the image by the manifest's. The ID the engine knows is taken, and the
 // build tag must name it; an engine that knows neither, and a build tag
-// that names another image, fail the run before anything is tagged.
+// that names another image, fail the run before anything is tagged. Docker
+// Desktop's containerd store (seen on Docker Desktop 29) writes its index's
+// digest to both: no configuration is taken from the build then - a saved
+// tar is checked by its layers - and the run says so.
 func TestImageBuildIDs(t *testing.T) {
 	metadata := func(config, manifest string) string {
 		return "{\n  \"buildx.build.ref\": \"default/default/x\",\n  \"containerimage.config.digest\": \"sha256:" + config + "\",\n  \"containerimage.digest\": \"sha256:" + manifest + "\"\n}"
@@ -1948,7 +1981,16 @@ func TestImageBuildIDs(t *testing.T) {
 		tagID func(config, manifest string) string
 		code  int
 		want  string
+		// iidIsManifest: the ID file holds the manifest's (the index's)
+		// digest, as the metadata does.
+		iidIsManifest bool
 	}{
+		{
+			name:          "the containerd store with one digest in both files",
+			rules:         func(string, string) []rule { return nil },
+			tagID:         func(_, manifest string) string { return manifest },
+			iidIsManifest: true,
+		},
 		{
 			name:  "the image store: the configuration's digest",
 			rules: func(string, string) []rule { return nil },
@@ -1987,8 +2029,12 @@ func TestImageBuildIDs(t *testing.T) {
 				tagged := c.tagID(config, manifest)
 				r.imageBinaries(imgCommit, "amd64")
 				rules := c.rules(config, manifest)
+				iid := config
+				if c.iidIsManifest {
+					iid = manifest
+				}
 				rules = append(rules,
-					rule{Tool: "docker", Contains: []string{"build"}, Files: map[string]string{"--iidfile": "sha256:" + config, "--metadata-file": metadata(config, manifest)}},
+					rule{Tool: "docker", Contains: []string{"build"}, Files: map[string]string{"--iidfile": "sha256:" + iid, "--metadata-file": metadata(config, manifest)}},
 					rule{Tool: "docker", Contains: []string{"inspect", workTag("amd64")}, Stdout: fieldsLine(tagged, "linux/amd64", imgCommit, "0.7.0-412", f.layers)})
 				r.rules(append(rules, imgEngine("docker", "amd64", "amd64", f)...)...)
 				res := r.image("KMS=local\nDEPLOY_TARGET=dd\n", resolveAndDeliver, false)
@@ -2003,6 +2049,12 @@ func TestImageBuildIDs(t *testing.T) {
 				ref := "cactusfs:0.7.0-412-" + tagged[:12]
 				if len(tags) != 1 || !slices.Equal(argsAfter(tags[0], "tag"), []string{"tag", tagged, ref}) {
 					t.Fatalf("the tag is %v, want the ID %s", tags, tagged)
+				}
+				if c.iidIsManifest {
+					if !strings.Contains(res.stdout, "built "+manifest+" (the digest of its index or manifest; its configuration is read from a saved tar)") {
+						t.Errorf("a manifest's digest was taken for a configuration's:\n%s", res.stdout)
+					}
+					return
 				}
 				if !strings.Contains(res.stdout, "(configuration "+config+")") {
 					t.Errorf("the configuration's digest is not kept:\n%s", res.stdout)
@@ -2070,6 +2122,48 @@ func TestImageImportVerified(t *testing.T) {
 			name: "a tar of Docker's own layout", env: ssh, want: "the node holds",
 			rules: func(f imgFix) []rule {
 				return []rule{{Tool: "docker", Contains: []string{"save"}, Stdout: savedTar(f.hex+".json", f.layers)}}
+			},
+		},
+		{
+			// Docker Desktop's containerd store: the ID file and the
+			// metadata both hold the index's digest, which is the ID; the
+			// tar's configuration is reached from it through its manifest.
+			name: "the containerd store's index, its configuration in the tar", env: ssh, want: "the node holds",
+			rules: func(f imgFix) []rule {
+				config := randomHex()
+				return append(indexBuilt(f), crictlOf("ssh", config),
+					rule{Tool: "docker", Contains: []string{"save"}, Stdout: savedTarWith(ociIndex(f.hex, randomHex(), config), tarEntry{"blobs/sha256/" + config, f.layers})})
+			},
+			check: func(t *testing.T, _ imgFix, res result) {
+				if len(callsOf(res, "ssh", "import")) != 1 {
+					t.Errorf("the image was not imported")
+				}
+			},
+		},
+		{
+			name: "the containerd store's index names another configuration", env: ssh, code: 1, want: "which the image checked, ",
+			rules: func(f imgFix) []rule {
+				config := randomHex()
+				return append(indexBuilt(f),
+					rule{Tool: "docker", Contains: []string{"save"}, Stdout: savedTarWith(ociIndex(f.hex, randomHex(), randomHex()), tarEntry{"blobs/sha256/" + config, f.layers})})
+			},
+			check: func(t *testing.T, _ imgFix, res result) {
+				if len(callsOf(res, "ssh", "import")) != 0 {
+					t.Errorf("a configuration the index does not name was imported")
+				}
+			},
+		},
+		{
+			name: "the containerd store's index not in the tar", env: ssh, code: 1, want: "does not hold the image checked, ",
+			rules: func(f imgFix) []rule {
+				config := randomHex()
+				return append(indexBuilt(f),
+					rule{Tool: "docker", Contains: []string{"save"}, Stdout: savedTarWith(ociIndex(randomHex(), randomHex(), config), tarEntry{"blobs/sha256/" + config, f.layers})})
+			},
+			check: func(t *testing.T, _ imgFix, res result) {
+				if len(callsOf(res, "ssh", "import")) != 0 {
+					t.Errorf("a tar without the image built was imported")
+				}
 			},
 		},
 		{
