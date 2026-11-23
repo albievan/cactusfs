@@ -1,10 +1,17 @@
-/** Shows a date-time of the API in the reader's own locale and time zone. */
+/**
+ * Shows a date-time of the API in the reader's own locale and time zone. The
+ * zero time (year 1, which the server sends for what was never set, such as
+ * the creation of a built-in policy or role) is shown as missing.
+ */
 export function formatTime(value: string | undefined): string {
   if (value === undefined || value === '') {
     return '-';
   }
   const time = new Date(value);
-  return Number.isNaN(time.getTime()) ? value : time.toLocaleString();
+  if (Number.isNaN(time.getTime())) {
+    return value;
+  }
+  return time.getUTCFullYear() <= 1 ? '-' : time.toLocaleString();
 }
 
 const UNITS = ['bytes', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];

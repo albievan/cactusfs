@@ -147,6 +147,12 @@ describe('formatting', () => {
     expect(formatTime('2026-10-01T00:00:00Z')).toBe(new Date('2026-10-01T00:00:00Z').toLocaleString());
   });
 
+  it('shows the zero time, which the server sends for what was never set, as a dash', () => {
+    expect(formatTime('0001-01-01T00:00:00Z')).toBe('-');
+    expect(formatTime('0001-01-01T00:00:00.000Z')).toBe('-');
+    expect(formatTime('0002-01-01T00:00:00Z')).toBe(new Date('0002-01-01T00:00:00Z').toLocaleString());
+  });
+
   it('splits names on commas and spaces', () => {
     expect(parseNames(' read-only, auditor  ops ,')).toEqual(['read-only', 'auditor', 'ops']);
     expect(parseNames('')).toEqual([]);
