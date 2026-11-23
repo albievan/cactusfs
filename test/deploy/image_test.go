@@ -226,6 +226,17 @@ func ociIndex(index, manifest, config string) map[string]string {
 	}
 }
 
+// ociManifest is the blob of an OCI layout's one manifest, as Docker's
+// containerd store saves an image built without buildx's provenance
+// attestation (--provenance=false, PLAN 10.14): no index, the ID file and
+// the metadata hold the manifest's digest, and the manifest names the
+// configuration itself. Pretty-printed, as Docker writes it.
+func ociManifest(manifest, config string) map[string]string {
+	return map[string]string{
+		"blobs/sha256/" + manifest: "{\n  \"schemaVersion\": 2,\n  \"mediaType\": \"application/vnd.oci.image.manifest.v1+json\",\n  \"config\": {\n    \"mediaType\": \"application/vnd.oci.image.config.v1+json\",\n    \"digest\": \"sha256:" + config + "\",\n    \"size\": 1\n  },\n  \"layers\": [\n    {\n      \"mediaType\": \"application/vnd.oci.image.layer.v1.tar+gzip\",\n      \"digest\": \"sha256:" + randomHex() + "\",\n      \"size\": 1\n    }\n  ]\n}",
+	}
+}
+
 func crictlOf(tool, config string) rule {
 	return rule{Tool: tool, Contains: []string{"crictl", "inspecti"}, Stdout: "{\n  \"status\": {\n    \"id\": \"sha256:" + config + "\",\n    \"repoTags\": [\n      \"docker.io/library/cactusfs:x\"\n    ],\n    \"uid\": null\n  }\n}\n"}
 }
@@ -734,7 +745,8 @@ func TestImageBinariesRemote(t *testing.T) {
 			}
 		}
 		// Here: a changed tree and an unknown commit pass, and the
-		// Dockerfile is not asked about.
+		// Dockerfile is not asked about - git is asked only the time of
+		// the binaries' commit (PLAN 10.14), and not of an unknown one.
 		for _, commit := range []string{imgCommit + "-dirty", ""} {
 			t.Run("here, commit "+commit, func(t *testing.T) {
 				t.Parallel()
@@ -745,8 +757,10 @@ func TestImageBinariesRemote(t *testing.T) {
 					imgEngine("docker", "amd64", "amd64", f)...)...)
 				res := r.image("KMS=local\nDEPLOY_TARGET=dd\n", resolveAndDeliver, false)
 				res.want(t, 0, "resolved "+f.ref())
-				if len(callsOf(res, "git")) != 0 {
-					t.Errorf("git was asked for a target here: %v", callsOf(res, "git"))
+				for _, c := range callsOf(res, "git") {
+					if commit == "" || !containsRun(c.Args, []string{"show", "-s", "--format=%ct", imgCommit + "^{commit}"}) {
+						t.Errorf("git was asked for a target here: %q", c.Args)
+					}
 				}
 			})
 		}
@@ -1666,7 +1680,7 @@ func TestImageDryRun(t *testing.T) {
 		// The Docker CLI reaches DOCKER_HOST=ssh:// over ssh (the fake
 		// docker too): the transport of a docker call checked above.
 		"ssh": {{"true"}, {"get", "nodes"}, {"docker", "system", "dial-stdio"}},
-		"git": {{"rev-list"}, {"rev-parse"}, {"status"}},
+		"git": {{"rev-list"}, {"rev-parse"}, {"status"}, {"show", "-s", "--format=%ct"}},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
@@ -2137,6 +2151,35 @@ func TestImageImportVerified(t *testing.T) {
 			check: func(t *testing.T, _ imgFix, res result) {
 				if len(callsOf(res, "ssh", "import")) != 1 {
 					t.Errorf("the image was not imported")
+				}
+			},
+		},
+		{
+			// Docker's containerd store with buildx's provenance off: the
+			// ID file and the metadata hold the digest of the image's one
+			// manifest, which names the configuration itself.
+			name: "the containerd store's one manifest, its configuration in the tar", env: ssh, want: "the node holds",
+			rules: func(f imgFix) []rule {
+				config := randomHex()
+				return append(indexBuilt(f), crictlOf("ssh", config),
+					rule{Tool: "docker", Contains: []string{"save"}, Stdout: savedTarWith(ociManifest(f.hex, config), tarEntry{"blobs/sha256/" + config, f.layers})})
+			},
+			check: func(t *testing.T, _ imgFix, res result) {
+				if len(callsOf(res, "ssh", "import")) != 1 {
+					t.Errorf("the image was not imported")
+				}
+			},
+		},
+		{
+			name: "the containerd store's one manifest names another configuration", env: ssh, code: 1, want: "which the image checked, ",
+			rules: func(f imgFix) []rule {
+				config := randomHex()
+				return append(indexBuilt(f),
+					rule{Tool: "docker", Contains: []string{"save"}, Stdout: savedTarWith(ociManifest(f.hex, randomHex()), tarEntry{"blobs/sha256/" + config, f.layers})})
+			},
+			check: func(t *testing.T, _ imgFix, res result) {
+				if len(callsOf(res, "ssh", "import")) != 0 {
+					t.Errorf("a configuration the manifest does not name was imported")
 				}
 			},
 		},

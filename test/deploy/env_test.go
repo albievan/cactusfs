@@ -696,10 +696,10 @@ func TestTarget(t *testing.T) {
 		},
 		{
 			// Its Kubernetes (RANCHER_KUBERNETES=yes) asks no engine (PLAN
-			// 10.6): the status of 10.11's stub.
+			// 10.6): the status of the Kubernetes path, through its context.
 			name: "rancher's kubernetes in the context", env: "K8S_CONTEXT=rancher-desktop\nRANCHER_KUBERNETES=yes\n",
-			rules: []rule{ns("kubectl", "rancher")}, code: 3,
-			want: []string{"target rancher (from what runs)", "engine: kubectl --context rancher-desktop"},
+			rules: []rule{ns("kubectl", "rancher")}, code: statusDone,
+			want: []string{"target rancher (from what runs)", "engine: kubectl --context rancher-desktop", "cactusfs is not installed: kubectl --context rancher-desktop has no namespace cactusfs"},
 		},
 		{
 			// Found in Rancher Desktop's Kubernetes, with settings that do not
@@ -1102,8 +1102,9 @@ func TestActions(t *testing.T) {
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
 		// Rancher Desktop's engine and cluster are TestRancher*'s (PLAN 10.6);
-		// its Kubernetes is 10.6's stub, without asking its engine.
-		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
+		// its Kubernetes takes the Kubernetes path, whose refusals come
+		// before its engine or cluster is asked anything.
+		{"rancher kubernetes, S3 published to nobody named", "RANCHER_KUBERNETES=yes\n", []string{"--docker", "rancher", "--install"}, 2, "K8S_S3_ALLOW_FROM must say who may reach it"},
 		{"take image on status", "", []string{"--docker", "k3s", "--status", "--take-image"}, 2, "--take-image goes with --install"},
 		{"take image on docker", "", []string{"--docker", "dd", "--install", "--take-image"}, 2, "--take-image is for a Kubernetes target"},
 		{"take image, another name", "", []string{"--docker", "k3s", "--install", "--take-image=other"}, 2, "--take-image=other is not the name of the deployment, cactusfs"},
@@ -1153,13 +1154,13 @@ func TestDryRunChangesNothing(t *testing.T) {
 	// pass. curl only probes a port or /readyz (PLAN 10.5): it sends nothing.
 	// git (PLAN 10.4: the commit an image is built from) is asked in the
 	// repository - "-C <repo>" - for its count of commits, its commit and
-	// its status.
+	// its status, and the time of the commit of BUILDINFO (PLAN 10.14).
 	engines := map[string][][]string{
 		"docker":  {{"ps"}, {"volume", "ls"}, {"volume", "inspect"}, {"container", "inspect"}, {"info"}, {"image", "inspect"}, {"context", "inspect"}},
 		"podman":  {{"ps"}},
 		"nerdctl": {{"ps"}},
 	}
-	gitAsks := [][]string{{"rev-list", "--count", "HEAD"}, {"rev-parse", "--verify"}, {"--no-optional-locks", "status", "--porcelain"}}
+	gitAsks := [][]string{{"rev-list", "--count", "HEAD"}, {"rev-parse", "--verify"}, {"--no-optional-locks", "status", "--porcelain"}, {"show", "-s", "--format=%ct"}}
 	others := map[string][]string{
 		"kubectl": {"get"},
 		"ssh":     {"get"},

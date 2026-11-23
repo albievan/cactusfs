@@ -160,6 +160,10 @@ image_settings() {
 	_img_route=
 	_img_remote=1
 	_img_remote_why=
+	# The time an image of binaries is made at (image_epoch), and the tags
+	# this run made that the engine lacked before (image_made_note).
+	_img_epoch=
+	_img_made=
 }
 
 # image_build_engine <how> <word>...: the engine the image is made on -
@@ -889,6 +893,11 @@ image_offline_base() {
 #   - the Go stage cross-compiles and the image stages have no RUN, so
 #     nothing is emulated;
 #   - the version, build and commit meant as build arguments;
+#   - of binaries, the time of their commit (image_epoch: SOURCE_DATE_EPOCH
+#     for buildx, with --provenance=false, and for nerdctl with its output
+#     type=docker,rewrite-timestamp=true; --timestamp for Podman), so that
+#     the same binaries make the same image on Podman and nerdctl, and the
+#     same folder of binaries on buildx (PLAN 10.14);
 #   - OFFLINE=yes: "--pull=false" or "--pull=never" (image_offline_base has
 #     found the base, of the platform, on the engine);
 #   - a stale build tag removed first; the image's IDs written to files
@@ -897,7 +906,8 @@ image_offline_base() {
 #     by that ID.
 # Then checked - its platform, revision and version labels, its version
 # line when native - and tagged cactusfs:<version>-<build>-<12 hex of its
-# ID>; the build tag is removed.
+# ID>, a tag the engine lacked noted for the record (image_made_note); the
+# build tag is removed.
 image_build() {
 	_ib_work=cactusfs:deploy-$_img_name-build-$RESOLVED_ARCH
 	if image_present "$_img_at" "$_ib_work"; then
@@ -917,6 +927,22 @@ image_build() {
 	fi
 	if [ "$_img_source" = binaries ]; then
 		set -- "$@" --target from-binaries --build-context "binaries=$_img_rel"
+		# The time of their commit, as each builder takes it (image_epoch,
+		# PLAN 10.14). Podman's --timestamp sets every file's time too, and
+		# so does BuildKit's exporter option rewrite-timestamp, which
+		# nerdctl's output of type docker (the one it loads from) takes: the
+		# same binaries make the same image. buildx on Docker's docker
+		# driver exports through the engine's own exporter, which drops the
+		# option on the classic image store and refuses it on the
+		# containerd store (it unpacks): the files keep their own times
+		# there, and the same folder makes the same image.
+		if [ -n "$_img_epoch" ]; then
+			case $_img_at_tool in
+			podman) set -- "$@" --timestamp "$_img_epoch" ;;
+			nerdctl) set -- "$@" --build-arg "SOURCE_DATE_EPOCH=$_img_epoch" --output type=docker,rewrite-timestamp=true ;;
+			*) set -- "$@" --build-arg "SOURCE_DATE_EPOCH=$_img_epoch" --provenance=false ;;
+			esac
+		fi
 	fi
 	set -- "$@" --build-arg "VERSION=$_img_version" --build-arg "BUILD=$_img_build" --build-arg "COMMIT=$_img_commit" -t "$_ib_work"
 	if [ "$DRY_RUN" = 1 ]; then
@@ -969,6 +995,11 @@ image_build() {
 		fail "the version label of the image built is '$_if_ver', not $_img_version-$_img_build"
 	_img_sig=$_if_sig
 	RESOLVED_IMAGE=cactusfs:$_img_version-$_img_build-$_if_id
+	# A tag the engine lacked is the script's to remove (PLAN 10.14).
+	_ib_where=$(image_made_where)
+	if [ "$_ib_where" != - ] && ! image_present "$_img_at" "$RESOLVED_IMAGE"; then
+		image_made_note "$_ib_where" "$RESOLVED_IMAGE"
+	fi
 	"$_img_at" run image tag "$(image_tag_source "$_ib_work")" "$RESOLVED_IMAGE" </dev/null || fail "tagging the image $RESOLVED_IMAGE failed"
 	# A tag made from a name (nerdctl) names the image checked.
 	[ "$_img_at_tool" != nerdctl ] || image_tag_check
@@ -1203,6 +1234,7 @@ image_check() {
 		image_binaries_meant
 		image_dirty_check "the binaries of $_img_rel" "$_img_commit"
 		image_dockerfile_check
+		image_epoch
 		say "image: made of the binaries in $_img_rel - version $_img_version, build $_img_build, commit ${_img_commit:-unknown} - for linux/$RESOLVED_ARCH on $("$_img_at" show_command); $(image_route_said)"
 		image_offline_base "$_img_at" "$_img_at_tool" "$RESOLVED_ARCH"
 		;;
@@ -1656,8 +1688,13 @@ image_deliver() {
 		say "image: the nodes pull $RESOLVED_IMAGE by its digest"
 		;;
 	load)
-		[ "$DRY_RUN" = 1 ] || image_tag_check
+		_ide_new=0
+		if [ "$DRY_RUN" = 0 ]; then
+			image_tag_check
+			image_present image_target_engine "$RESOLVED_IMAGE" || _ide_new=1
+		fi
 		image_stream "$_img_at" "$RESOLVED_IMAGE" image_target_engine - load
+		[ "$_ide_new" = 0 ] || image_made_note target "$RESOLVED_IMAGE"
 		[ "$DRY_RUN" = 1 ] || image_loaded image_target_engine
 		say "image: $RESOLVED_IMAGE loaded on $(image_target_engine show_command)"
 		;;
@@ -1668,8 +1705,13 @@ image_deliver() {
 		;;
 	local)
 		if [ "$_img_at" = image_build_engine ] && [ -n "$_img_build_host" ]; then
-			[ "$DRY_RUN" = 1 ] || image_tag_check
+			_ide_new=0
+			if [ "$DRY_RUN" = 0 ]; then
+				image_tag_check
+				[ "$TARGET" != rancher ] || image_present image_local_engine "$RESOLVED_IMAGE" || _ide_new=1
+			fi
 			image_stream "$_img_at" "$RESOLVED_IMAGE" image_local_engine - load
+			[ "$_ide_new" = 0 ] || image_made_note target "$RESOLVED_IMAGE"
 			[ "$DRY_RUN" = 1 ] || image_loaded image_local_engine
 			say "image: $RESOLVED_IMAGE loaded on the Docker engine here, whose images the cluster's one node sees"
 		else
@@ -1681,4 +1723,542 @@ image_deliver() {
 		;;
 	*) fail "internal: image_deliver before image_check" ;;
 	esac
+}
+
+# --- the image's time, and the tags the script made (PLAN 10.14) ------------------
+#
+# An image made of binaries takes the time of the commit BUILDINFO names
+# (image_epoch): buildx and nerdctl are given it as the build argument
+# SOURCE_DATE_EPOCH, from which BuildKit sets the image's creation time and
+# its history's times (buildx is also given --provenance=false: the
+# provenance attestation it adds by default records the build's own times
+# and ID, and on Docker's containerd store the image's ID is the digest of
+# the index that holds it); nerdctl's output is BuildKit's exporter of type
+# docker with rewrite-timestamp=true, which sets every file's time of the
+# layers to it too; and Podman --timestamp, its own flag, sets the creation
+# time and the time of every file of the layers. So the same binaries make
+# the same image, of the same digest and tag, on Podman and nerdctl. buildx
+# on Docker's docker driver cannot rewrite the files' times (image_build):
+# there the same folder of binaries makes the same image, and a copy of it
+# made anew (new times) another.
+#
+# A tag the script made on an engine that lacked it - built there, or
+# loaded there from the engine it was built on - is noted while it is made
+# (image_made_note) and written into the entry's file "images" once the
+# install has its entry (image_tags_record), one line a tag, with the ID of
+# the engine it was made on:
+#
+#   target <tag> <engine ID>
+#                       on the target's engine (a Docker target's; for
+#                       Rancher Desktop's Kubernetes, the engine whose
+#                       images its k3s sees), with the ID recorded for the
+#                       deployment (STATE/target's engine-id: docker info's
+#                       ID, or Podman's host and store); for Rancher
+#                       Desktop's Kubernetes <UID of its kube-system>/<ID
+#                       of the engine its k3s sees>, as its runtime can be
+#                       switched under the same cluster (image_target_id)
+#   here:<context> <tag> <engine ID>
+#                       on the Docker engine of this machine through that
+#                       context, where the image for CE_HOST is built and
+#                       saved from, with that engine's own ID ("docker
+#                       --context <context> info", asked when it is
+#                       recorded)
+#
+# A line is acted on only when the engine reached now has the ID it names:
+# a line of another engine (a context pointed elsewhere, an engine made
+# again) is named and left, and so is a line without an ID, which an
+# earlier build of the script wrote (it cannot be checked). --engine-replaced
+# takes the target's engine as gone, with its images: the lines of the
+# target's engine leave the record then (image_tags_engine_replaced).
+#
+# A tag that was there before is never recorded: another deployment's, or
+# the operator's. After an install whose nodes are ready, the tag a
+# replaced node ran is removed when it is recorded and no container of that
+# engine still names it, and so is every recorded tag of this machine's
+# engine but those of the run (image_tags_replaced); a purge removes every
+# recorded tag no container of its engine names (image_tags_purge). On
+# Rancher Desktop's Kubernetes a tag is also kept while a pod or a
+# workload's template of any namespace names it, by name or by its image's
+# digest (k8s_images_used, deploy/lib/k8s.sh). The engine is asked by its
+# own CLI - "docker --context", podman, nerdctl in its namespace, or the
+# Docker CLI over DOCKER_HOST=ssh:// for CE_HOST - and itself refuses to
+# remove an image a container uses. Nothing is removed that the file does
+# not name; a removal that fails is said, the tag stays recorded, and the
+# run goes on: a tag holds no secret. A dry run records nothing and only
+# prints the removals.
+
+# image_epoch: _img_epoch, the time of the commit of BUILDINFO (git's
+# committer time) when git finds that commit in this repository - empty,
+# and said, when it does not: the image then takes the time of its build.
+image_epoch() {
+	_img_epoch=
+	_iep_commit=${_img_commit%-dirty}
+	case $_iep_commit in
+	'' | *[!0-9a-f]*) _iep_commit= ;;
+	esac
+	if [ -n "$_iep_commit" ] && command -v git >/dev/null 2>&1; then
+		_img_epoch=$(image_git show -s --format=%ct "$_iep_commit^{commit}") || _img_epoch=
+		_img_epoch=$(printf '%s\n' "$_img_epoch" | printable | head -n 1)
+		case $_img_epoch in
+		'' | *[!0-9]*) _img_epoch= ;;
+		esac
+	fi
+	if [ -n "$_img_epoch" ]; then
+		case $_img_at_tool in
+		podman | nerdctl) say "image: made with the time of the commit $_iep_commit, $_img_epoch (SOURCE_DATE_EPOCH), its files' times included: the same binaries make the same image" ;;
+		*) say "image: made with the time of the commit $_iep_commit, $_img_epoch (SOURCE_DATE_EPOCH): the same folder of binaries makes the same image - Docker's builder keeps the files' own times, so a copy of the folder made anew makes an image of another digest" ;;
+		esac
+	else
+		say "image: git does not find the commit '${_img_commit:-unknown}' of $_img_rel/BUILDINFO in $REPO_ROOT: the image takes the time of its build, and the same binaries make an image of another digest"
+	fi
+}
+
+# image_made_where: where the image being built is, for the record - target
+# (the target's engine), here:<context> (the Docker engine of this machine,
+# when the target's engine is another machine's: CE_HOST), or "-" for an
+# engine the script does not record (BUILD_HOST's, which it reaches only to
+# build; a Kubernetes target's but Rancher Desktop's, whose images k3s's
+# purge (PLAN 10.11) or a registry handles).
+image_made_where() {
+	case $_img_at in
+	image_build_engine)
+		if [ -n "$_img_build_host" ]; then
+			if [ "$_img_k8s" = 0 ] && [ "$_img_build_host" = "$_img_ce_host" ]; then
+				printf 'target'
+			else
+				printf '%s' -
+			fi
+			return 0
+		fi
+		;;
+	image_local_engine) ;;
+	*)
+		printf '%s' -
+		return 0
+		;;
+	esac
+	if [ "$_img_k8s" = 1 ]; then
+		if [ "$TARGET" = rancher ]; then
+			printf 'target'
+		else
+			printf '%s' -
+		fi
+	elif [ -z "$_img_ce_host" ] && [ "$_img_ttool" = "$_img_ltool" ]; then
+		printf 'target'
+	else
+		printf 'here:%s' "$_img_context"
+	fi
+}
+
+# image_made_note <where> <tag>: the tag was made by this run on an engine
+# that lacked it.
+image_made_note() {
+	case "$NL$_img_made" in
+	*"$NL$1 $2$NL"*) return 0 ;;
+	esac
+	_img_made="$_img_made$1 $2$NL"
+}
+
+# image_tags_record: the tags this run made (image_made_note) added to the
+# entry's file "images" (0600), each once, with the ID of the engine each is
+# on (the deployment's for "target", this machine's engine through the
+# context for "here:"). A copy here whose engine does not say its ID is
+# said and not recorded: a line that cannot be checked is never acted on.
+# After image_deliver, once the entry is there (secrets_install made it,
+# and the deployment's engine ID is known). Not in a dry run.
+image_tags_record() {
+	[ "$DRY_RUN" = 0 ] && [ -n "${_img_made:-}" ] || return 0
+	[ -d "$STATE" ] || fail "internal: the image tags are recorded before $STATE is made"
+	while IFS= read -r _itr_line; do
+		[ -n "$_itr_line" ] || continue
+		_itr_w=${_itr_line%% *}
+		case $_itr_w in
+		target)
+			if ! image_target_id; then
+				warn "the engine whose images Rancher Desktop's Kubernetes sees did not say its ID: the image ${_itr_line#* } is not recorded, and an upgrade or a purge leaves it there"
+				continue
+			fi
+			_itr_id=$_iti
+			;;
+		here:?*)
+			if ! image_here_id "${_itr_w#here:}"; then
+				warn "the Docker engine here (context ${_itr_w#here:}) did not say its ID: the image ${_itr_line#* } is not recorded, and an upgrade or a purge leaves it there"
+				continue
+			fi
+			_itr_id=$_ihi
+			;;
+		*) fail "internal: no engine for '$_itr_w'" ;;
+		esac
+		_itr_tag=${_itr_line#* }
+		_itr_line="$_itr_line $_itr_id"
+		if [ -f "$STATE/images" ] && grep -qxF "$_itr_line" "$STATE/images"; then
+			continue
+		fi
+		(umask 077 && printf '%s\n' "$_itr_line" >>"$STATE/images") || fail "writing $STATE/images failed"
+		say "image: recorded $_itr_tag ($(image_where_said "$_itr_w"), engine $_itr_id) in $STATE/images, for an upgrade or a purge to remove"
+	done <<EOF
+$_img_made
+EOF
+	_img_made=
+}
+
+# image_here_id <context>: _ihi, the ID of the Docker engine here that the
+# context reaches ("docker info"'s), asked once a run for each context;
+# false when it cannot be asked or says nothing.
+image_here_id() {
+	_ihi=
+	plain "$1" || return 1
+	while IFS= read -r _ihi_known; do
+		case $_ihi_known in
+		"$1="?*)
+			_ihi=${_ihi_known#"$1="}
+			return 0
+			;;
+		esac
+	done <<EOF
+${_img_here_ids:-}
+EOF
+	_ihi=$(query docker --context "$1" info --format '{{.ID}}' </dev/null) || {
+		_ihi=
+		return 1
+	}
+	_ihi=$(printf '%s' "$_ihi" | printable | tr -d '\n')
+	[ -n "$_ihi" ] || return 1
+	_img_here_ids="${_img_here_ids:-}$1=$_ihi$NL"
+}
+
+# image_line_engine <where> <tag> <engine ID>: true when the engine of the
+# record's line is the one reached now - the deployment's for "target"
+# (image_target_id: on Rancher Desktop's Kubernetes the cluster's UID and
+# the engine's ID, both compared, so a line written with the UID alone is
+# left too), the one the context reaches for "here:" - and said otherwise: a
+# line without an ID (an earlier build of the script wrote it), of another
+# engine, or of an engine that does not say its ID, is left and stays in
+# the record.
+image_line_engine() {
+	if [ -z "$3" ]; then
+		say "image: $2 ($(image_where_said "$1")) was recorded without the ID of its engine, by an earlier build of the script, so which engine holds it cannot be checked: it is left (remove it by hand when nothing uses it), and stays in $STATE/images"
+		return 1
+	fi
+	case $1 in
+	target)
+		if rancher_kubernetes; then
+			case $3 in
+			*/*) ;;
+			*)
+				say "image: $2 ($(image_where_said "$1")) was recorded with the ID of the cluster alone, '$3', by an earlier build of the script, so which of Rancher Desktop's engines holds it cannot be checked: it is left (remove it by hand when nothing uses it), and stays in $STATE/images"
+				return 1
+				;;
+			esac
+		fi
+		if ! image_target_id; then
+			warn "the engine whose images Rancher Desktop's Kubernetes sees did not say its ID: the image $2 recorded on it is left, and stays in $STATE/images"
+			return 1
+		fi
+		_ile_now=$_iti
+		;;
+	here:?*)
+		if ! image_here_id "${1#here:}"; then
+			warn "the Docker engine here (context ${1#here:}) did not say its ID: the image $2 recorded on it is left, and stays in $STATE/images"
+			return 1
+		fi
+		_ile_now=$_ihi
+		;;
+	*) fail "internal: no engine for '$1'" ;;
+	esac
+	[ "$_ile_now" = "$3" ] && return 0
+	say "image: $2 was recorded on the engine '$3', and the engine reached now ($(image_where_said "$1")) is '$_ile_now': it is left, and stays in $STATE/images"
+	return 1
+}
+
+# rancher_kubernetes: true for Rancher Desktop's own Kubernetes
+# (RANCHER_KUBERNETES=yes), whose images are those of the engine Rancher
+# Desktop runs - moby or containerd, which its settings can switch while the
+# cluster, and the UID of its kube-system, stay.
+rancher_kubernetes() {
+	[ "$TARGET" = rancher ] && on_kubernetes
+}
+
+# image_target_id: _iti, the ID a line of the target's engine is recorded
+# with and checked against: the deployment's (_engine_id); for Rancher
+# Desktop's Kubernetes the cluster's (the UID of its kube-system), a "/",
+# and the ID of the engine whose images its k3s sees - "docker info"'s ID
+# through the context, or nerdctl's in the namespace k8s.io (the UUID of
+# containerd's introspection service, which containerd keeps in its root) -
+# asked once a run: the cluster's UID stays when Rancher Desktop's runtime
+# is switched, and the engine that held a tag is then another. False when
+# that engine cannot be asked or says nothing plain.
+image_target_id() {
+	_iti=
+	[ -n "${_engine_id:-}" ] || fail "internal: a recorded image tag is acted on before the engine's ID is known"
+	if ! rancher_kubernetes; then
+		_iti=$_engine_id
+		return 0
+	fi
+	if [ -z "${_img_rd_id:-}" ]; then
+		_img_rd_id=$(
+			_irec_where=target
+			image_rec_engine query info --format '{{.ID}}' </dev/null
+		) || _img_rd_id=
+		_img_rd_id=$(printf '%s' "$_img_rd_id" | printable | tr -d '\n')
+		plain "$_img_rd_id" || {
+			_img_rd_id=
+			return 1
+		}
+	fi
+	_iti=$_engine_id/$_img_rd_id
+}
+
+# image_where_said <where>: the engine of a line of the record, as the run
+# says it.
+image_where_said() {
+	case $1 in
+	target)
+		if on_kubernetes; then
+			echo "on the engine whose images Rancher Desktop's Kubernetes sees"
+		else
+			echo "on $(engine_identity)"
+		fi
+		;;
+	here:*) echo "on the Docker engine here, context ${1#here:}" ;;
+	*) echo "on '$1'" ;;
+	esac
+}
+
+# image_tag_norm <reference>: a reference as the engines write a name of
+# one part - without docker.io/library/ (nerdctl), docker.io/ or
+# localhost/ (Podman names an image it built localhost/<name>).
+image_tag_norm() {
+	case $1 in
+	docker.io/library/*) printf '%s' "${1#docker.io/library/}" ;;
+	docker.io/*) printf '%s' "${1#docker.io/}" ;;
+	localhost/*) printf '%s' "${1#localhost/}" ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+
+# image_rec_engine <run|query> <word>...: the engine of the record's line
+# acted on (_irec_where): the target's (target_engine; for Rancher
+# Desktop's Kubernetes the engine whose images its k3s sees - nerdctl in
+# the namespace k8s.io, or the Docker CLI with its context), or the Docker
+# engine here through the context the line names.
+image_rec_engine() {
+	_ire_how=$1
+	shift
+	case $_irec_where in
+	target)
+		if on_kubernetes; then
+			if on_nerdctl; then
+				"$_ire_how" nerdctl --namespace k8s.io "$@"
+			else
+				"$_ire_how" docker --context "$(docker_context)" "$@"
+			fi
+		else
+			target_engine "$_ire_how" "$@"
+		fi
+		;;
+	here:*) "$_ire_how" docker --context "${_irec_where#here:}" "$@" ;;
+	*) fail "internal: no engine for '$_irec_where'" ;;
+	esac
+}
+
+# image_tag_remove <where> <tag> <engine ID>: a recorded tag removed from
+# its engine - when that engine is the one reached now (image_line_engine)
+# - unless a container there, any, a stopped one included, names it (its
+# image as "ps -a" writes it), or, while _img_k8s_used is set (Rancher
+# Desktop's Kubernetes, k8s_images_used), a pod or a workload's template
+# of the cluster names it or its image's digest; then its line is taken
+# out of the record. What cannot be listed or removed is said and kept.
+image_tag_remove() {
+	_irec_where=$1
+	_itm_tag=$2
+	_itm_line="$1 $2${3:+ $3}"
+	image_line_engine "$1" "$2" "${3:-}" || return 0
+	_itm_ps=$(image_rec_engine query ps -a --format '{{.Image}}' </dev/null) || {
+		warn "the containers $(image_where_said "$1") could not be listed (the engine's message is above): the image $_itm_tag is kept, and stays in $STATE/images"
+		return 0
+	}
+	_itm_want=$(image_tag_norm "$_itm_tag")
+	for _itm_used in $(printf '%s\n' "$_itm_ps" | printable); do
+		if [ "$(image_tag_norm "$_itm_used")" = "$_itm_want" ]; then
+			say "image: $_itm_tag is kept: a container $(image_where_said "$1") still runs it or was made from it"
+			return 0
+		fi
+	done
+	if [ -n "${_img_k8s_used+set}" ]; then
+		image_k8s_kept "$_itm_tag" && return 0
+	fi
+	if ! image_rec_engine run image rm "$_itm_tag" </dev/null; then
+		warn "removing the image $_itm_tag $(image_where_said "$1") failed (the engine's message is above): it is left, and stays in $STATE/images"
+		return 0
+	fi
+	[ "$DRY_RUN" = 0 ] || return 0
+	image_record_drop "$_itm_line" || :
+	say "image: removed $_itm_tag $(image_where_said "$1"), which the script had made"
+}
+
+# image_k8s_kept <tag>: true, and said, when a pod or a workload's template
+# of the cluster (_img_k8s_used: the names containerd gives the images they
+# name, and the sha256 digests in them, their pods' imageID included) names
+# the tag, or the digest of its image's configuration or of a manifest its
+# engine knows it by ("image inspect": .Id and .RepoDigests): the kubelet
+# names an image by its ID, and another namespace's workload may run the
+# same image under that tag without the script having recorded it. An
+# image that cannot be inspected is kept.
+image_k8s_kept() {
+	if printf '%s\n' "$_img_k8s_used" | grep -qxF "$(k8s_containerd_name "$1")"; then
+		say "image: $1 is kept: a pod or a workload's template of the cluster names it"
+		return 0
+	fi
+	_ikk=$(image_rec_engine query image inspect --format '{{.Id}} {{.RepoDigests}}' "$1" </dev/null) || {
+		warn "the image $1 $(image_where_said target) could not be inspected (the engine's message is above): it is kept, and stays in $STATE/images"
+		return 0
+	}
+	for _ikk_d in $(printf '%s\n' "$_ikk" | image_digests_in); do
+		if printf '%s\n' "$_img_k8s_used" | grep -qxF "sha256:$_ikk_d"; then
+			say "image: $1 is kept: a pod or a workload's template of the cluster runs its image, sha256:$_ikk_d"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# image_digests_in: the hex of every sha256 digest in standard input, one a
+# line.
+image_digests_in() {
+	printable | tr -c '0-9a-z:\n' '\n' | sed -n 's/^.*sha256:\([0-9a-f]\{64\}\)$/\1/p'
+}
+
+# image_record_drop <line>: the line taken out of the entry's record of the
+# image tags; the file is removed when no line is left. The copy is made
+# (0600) before grep writes it, so that a copy that cannot be made is not
+# taken for an empty one. grep's exit 1 (no line left) is success as 0 is;
+# 2 or more - a record it could not read - is said, the copy removed and
+# the record left as it was: a record that was not read is never replaced;
+# false then.
+image_record_drop() {
+	[ -f "$STATE/images" ] || return 0
+	rm -f "$STATE/images.new" || fail "writing $STATE/images failed"
+	(umask 077 && : >"$STATE/images.new") || fail "writing $STATE/images failed"
+	_ird=0
+	grep -vxF "$1" "$STATE/images" >"$STATE/images.new" || _ird=$?
+	if [ "$_ird" -gt 1 ]; then
+		rm -f "$STATE/images.new" || :
+		warn "$STATE/images could not be read (grep's exit $_ird, its message is above): the line '$1' stays in it"
+		return 1
+	fi
+	if [ -s "$STATE/images.new" ]; then
+		mv -f "$STATE/images.new" "$STATE/images" || fail "writing $STATE/images failed"
+	else
+		rm -f "$STATE/images.new" "$STATE/images" || fail "writing $STATE/images failed"
+	fi
+}
+
+# image_tags_replaced <image>...: after an install whose nodes are ready,
+# each image a replaced node ran that is recorded on the target's engine
+# and is not the image the nodes run now is removed (image_tag_remove, each
+# line recording it); one that is not recorded is said and left. So is
+# every tag recorded on this machine's engine through the settings' context
+# (the copies built here for CE_HOST) but those of this run.
+image_tags_replaced() {
+	[ -f "$STATE/images" ] || return 0
+	_itp_now=$(image_tag_norm "${_dk_image:-${RESOLVED_IMAGE:-}}")
+	_itp_native=$(image_tag_norm "${RESOLVED_NATIVE_IMAGE:-}")
+	_itp_lines=$(printable <"$STATE/images")
+	_itp_seen=
+	for _itp_img in "$@"; do
+		_itp_n=$(image_tag_norm "$_itp_img")
+		[ -n "$_itp_n" ] && [ "$_itp_n" != "$_itp_now" ] || continue
+		case " $_itp_seen " in
+		*" $_itp_n "*) continue ;;
+		esac
+		_itp_seen="$_itp_seen $_itp_n"
+		_itp_rec=
+		while read -r _itp_w _itp_t _itp_id; do
+			[ "$_itp_w" = target ] && [ "$(image_tag_norm "$_itp_t")" = "$_itp_n" ] && plain "$_itp_t" || continue
+			_itp_rec="$_itp_rec$_itp_t $_itp_id$NL"
+		done <<EOF
+$_itp_lines
+EOF
+		if [ -z "$_itp_rec" ]; then
+			say "image: $_itp_img, which the replaced node ran, is not a tag the script recorded making: it is left"
+			continue
+		fi
+		while read -r _itp_t _itp_id; do
+			[ -n "$_itp_t" ] || continue
+			image_tag_remove target "$_itp_t" "$_itp_id"
+		done <<EOF
+$_itp_rec
+EOF
+	done
+	_itp_here=$(printf '%s\n' "$_itp_lines" | grep '^here:') || _itp_here=
+	while read -r _itp_w _itp_t _itp_id; do
+		[ -n "$_itp_w" ] && [ "${_itp_w#here:}" = "$(docker_context)" ] && plain "$_itp_t" || continue
+		_itp_n=$(image_tag_norm "$_itp_t")
+		[ "$_itp_n" != "$_itp_now" ] && [ "$_itp_n" != "$_itp_native" ] || continue
+		image_tag_remove "$_itp_w" "$_itp_t" "$_itp_id"
+	done <<EOF
+$_itp_here
+EOF
+}
+
+# image_tags_purge: at a purge, before the entry is deleted, every tag the
+# entry records removed from its engine unless a container there names it
+# (image_tag_remove: only on the engine whose ID the line names). A tag of
+# this machine's engine through another context than the settings', or a
+# line the script does not write, is said and left.
+image_tags_purge() {
+	[ -f "$STATE/images" ] || return 0
+	_ipg_lines=$(printable <"$STATE/images")
+	while IFS= read -r _ipg_line; do
+		[ -n "$_ipg_line" ] || continue
+		_ipg_w=${_ipg_line%% *}
+		_ipg_rest=${_ipg_line#* }
+		_ipg_t=${_ipg_rest%% *}
+		_ipg_id=
+		case $_ipg_rest in
+		*' '*) _ipg_id=${_ipg_rest#* } ;;
+		esac
+		case $_ipg_line in
+		*' ' | *'  '*) _ipg_w=bad ;;
+		esac
+		[ "$_ipg_rest" != "$_ipg_line" ] || _ipg_w=bad
+		plain "$_ipg_t" || _ipg_w=bad
+		case $_ipg_w in
+		target) ;;
+		here:?*)
+			if [ "${_ipg_w#here:}" != "$(docker_context)" ]; then
+				say "purge: the image $_ipg_t is on the Docker engine here through the context ${_ipg_w#here:}, which the settings no longer name: it is left"
+				continue
+			fi
+			;;
+		*)
+			warn "$STATE/images holds a line the script does not write, which is left: $_ipg_line"
+			continue
+			;;
+		esac
+		image_tag_remove "$_ipg_w" "$_ipg_t" "$_ipg_id"
+	done <<EOF
+$_ipg_lines
+EOF
+}
+
+# image_tags_engine_replaced <engine ID>: with --engine-replaced, once the
+# record names the engine that replaced the one recorded: every line of the
+# record but this machine's ("here:") leaves it - the tags of the target's
+# engine, which --engine-replaced takes as gone with its images (and k3s's
+# imports, PLAN 10.11, on a cluster made again), each said. Nothing is
+# removed from any engine. Not in a dry run.
+image_tags_engine_replaced() {
+	[ "$DRY_RUN" = 0 ] && [ -f "$STATE/images" ] || return 0
+	_iter_lines=$(printable <"$STATE/images")
+	while IFS= read -r _iter_line; do
+		case $_iter_line in
+		'' | here:*) continue ;;
+		esac
+		image_record_drop "$_iter_line" || continue
+		say "image: --engine-replaced: '$_iter_line' was recorded on the engine '$1', which is taken as gone with its images: the line leaves $STATE/images, and nothing is removed"
+	done <<EOF
+$_iter_lines
+EOF
 }

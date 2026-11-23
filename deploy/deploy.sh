@@ -245,8 +245,8 @@ target_validate
 # Refused without asking any engine.
 [ "$TAKE_IMAGE" = 0 ] || on_kubernetes || refuse "--take-image is for a Kubernetes target (k3s, k8s): it takes back the image field an upgrade from the console moved"
 # Rancher Desktop's engine, moby or containerd, before the engine is named
-# or recorded (PLAN 10.6); its Kubernetes asks it only when its image is
-# made (image.sh).
+# or recorded (PLAN 10.6); its Kubernetes asks it at the start of an install
+# (k8s_install) and of a purge that has image tags to remove there.
 if ! on_kubernetes && [ "$ACTION" != --print-namespace ]; then
 	rancher_resolve
 fi
@@ -277,11 +277,10 @@ esac
 # a server over SSH, Podman or Rancher Desktop is built (PLAN 10.5, 10.6,
 # 10.7, deploy/lib/docker.sh, deploy/lib/ce.sh and deploy/lib/rancher.sh),
 # a cluster on Docker Desktop, Docker CE here or on CE_HOST, Podman or
-# Rancher Desktop's moby (PLAN 10.8, deploy/lib/compose.sh), and k3s and
-# k8s in both modes (PLAN 10.10, 10.11, deploy/lib/k8s.sh). Rancher
-# Desktop's Kubernetes is a stub: it says what PLAN 10.6 will do, and ends
-# with "not built yet"; a stub changes nothing but the secrets PLAN 10.3
-# keeps.
+# Rancher Desktop's moby (PLAN 10.8, deploy/lib/compose.sh), and k3s, k8s
+# and Rancher Desktop's Kubernetes (RANCHER_KUBERNETES=yes: the context
+# rancher-desktop, the image built on the engine its k3s sees) in both
+# modes (PLAN 10.6, 10.10, 10.11, deploy/lib/k8s.sh).
 
 # engine: where the containers run.
 engine() {
@@ -291,12 +290,6 @@ engine() {
 	ce) if [ -n "$(setting CE_HOST)" ]; then echo "Docker CE on $(setting CE_HOST) over SSH"; else echo "Docker CE"; fi ;;
 	*) echo "Docker Desktop" ;;
 	esac
-}
-
-# kubernetes_step: Rancher Desktop's Kubernetes is handed over to the k8s
-# code by PLAN 10.6, with the local image and the context rancher-desktop.
-kubernetes_step() {
-	[ "$TARGET" != rancher ] || not_built 10.6 "$1 of Rancher Desktop's Kubernetes: the k8s path of PLAN 10.10 and 10.11 with the local image and the context rancher-desktop"
 }
 
 do_install() {
@@ -309,7 +302,6 @@ do_install() {
 		return 0
 	fi
 	if on_kubernetes; then
-		kubernetes_step install
 		k8s_validate
 		k8s_install
 		return 0
@@ -327,7 +319,6 @@ do_status() {
 		return 0
 	fi
 	if on_kubernetes; then
-		kubernetes_step status
 		k8s_status
 		return 0
 	fi
@@ -344,7 +335,6 @@ do_uninstall() {
 		return 0
 	fi
 	if on_kubernetes; then
-		kubernetes_step uninstall
 		k8s_uninstall
 		return 0
 	fi

@@ -138,6 +138,17 @@ secrets_settings() {
 	fi
 }
 
+# tls_hosts_warn <where S3 is published>: an install whose S3 is published
+# beyond the loopback, with TLS_HOSTS empty and no certificate of the
+# operator's (TLS_CERT_FILE), is warned - not refused - that the
+# development certificate holds only localhost and the loopback addresses,
+# so a client that reaches S3 by an address or a name of the machine cannot
+# verify it, and that names cannot be added to it later (PLAN 10.14).
+tls_hosts_warn() {
+	[ -z "$(setting TLS_HOSTS)" ] && [ -z "$(setting TLS_CERT_FILE)" ] || return 0
+	warn "S3 is published $1 and TLS_HOSTS is empty: the development certificate holds only localhost and the loopback addresses, so a client that reaches S3 by an address or a name of the machine cannot verify it - and names cannot be added to it later (cactusfs dev-init keeps no CA key; only a certificate of your own, TLS_CERT_FILE with TLS_KEY_FILE and TLS_CA_FILE, replaces it). For a new deployment, set TLS_HOSTS to the names and addresses clients use before its first install"
+}
+
 # unit_place <unit>: where the target keeps a unit, for the messages - its
 # labelled volume, or for the secrets of a compose cluster the directory of
 # compose's file secrets.
@@ -769,7 +780,8 @@ secrets_end() {
 # first install - the settings' engine (engine_identity, which state_check
 # in env.sh compares on every run), the engine's ID and the KMS - and
 # written again, naming the engine that replaced the recorded one, with
-# --engine-replaced.
+# --engine-replaced; the image tags recorded on the engine it replaced then
+# leave the entry's file "images" (image_tags_engine_replaced, image.sh).
 state_record() {
 	if [ -f "$STATE/target" ]; then
 		[ -n "$_engine_rerecord" ] || return 0
@@ -779,6 +791,11 @@ state_record() {
 		} >"$SECRETS_WORK/target.new"
 		replace_file "$SECRETS_WORK/target.new" "$STATE/target"
 		say "state: recorded the engine $_engine_id in $STATE/target, in place of the one it replaced"
+		# The image tags recorded on the engine taken as gone leave the
+		# record with it (PLAN 10.14): never acted on through this one.
+		if command -v image_tags_engine_replaced >/dev/null 2>&1; then
+			image_tags_engine_replaced "$_eic_recorded"
+		fi
 		return 0
 	fi
 	{

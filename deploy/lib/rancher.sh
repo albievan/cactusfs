@@ -158,7 +158,7 @@ rancher_context_check() {
 
 # rancher_engine: the engine rancher_resolve found, or RANCHER_ENGINE as
 # set when it has not run (Rancher Desktop's Kubernetes, whose engine is
-# asked only when its image is made).
+# asked only by an install and by a purge that removes image tags).
 rancher_engine() {
 	if [ -n "$_rd_engine" ]; then
 		printf '%s' "$_rd_engine"

@@ -44,11 +44,16 @@
 # upgrade - the node is stopped and renamed <name>-previous, the new one is
 # run with the same volumes, and the old one is removed once the new one is
 # ready; if it is not, the run says the node is down and how to go back.
-# Uninstall removes the container and keeps every volume. A purge deletes,
-# in this order, the data volumes, then proves by a listing that none is
-# left, then the secrets' volumes (proved the same way), and last the
-# deployment's entry of STATE_DIR; a step that fails ends the run with the
-# entry kept.
+# Once the node is ready, the image tag the replaced node ran is removed
+# when the script recorded making it and no container uses it (PLAN 10.14,
+# image.sh). S3 published beyond the loopback with TLS_HOSTS empty is
+# warned of (tls_hosts_warn). Uninstall removes the container and keeps
+# every volume and image. A purge deletes, in this order, the data
+# volumes, then proves by a listing that none is left, then the secrets'
+# volumes (proved the same way), the image tags the script recorded making
+# that no container uses, and last the deployment's entry of STATE_DIR; a
+# step that fails ends the run with the entry kept (a tag that cannot be
+# removed is said, and the purge goes on).
 #
 # A function that can refuse or fail is never run inside $(...), where its
 # exit would end only the subshell: those that answer set variables
@@ -96,6 +101,11 @@ docker_image_ref() {
 	if command -v image_deliver >/dev/null 2>&1; then
 		image_deliver
 		_dk_image=${RESOLVED_IMAGE:-}
+		# The tags the run made, recorded for an upgrade or a purge to
+		# remove (PLAN 10.14).
+		if command -v image_tags_record >/dev/null 2>&1; then
+			image_tags_record
+		fi
 	elif [ "$(setting IMAGE_SOURCE)" = image ]; then
 		_dk_image=$(setting IMAGE)
 	else
@@ -602,6 +612,7 @@ docker_install() {
 	# the server's ports among them, before that install (ce.sh). What needs
 	# the engine is asked below, before anything of the deployment is made.
 	state_mode_check
+	docker_loopback "$_dk_bind" || tls_hosts_warn "on $_dk_bind:$_dk_s3_port (BIND)"
 	docker_vault_ca
 	[ -z "$_s_ce_host" ] || docker_image_precheck
 	[ -z "$_s_ce_host" ] || ce_begin install
@@ -672,12 +683,25 @@ docker_install() {
 	if [ -n "$_dk_have_ctr" ]; then
 		target_engine run rm "$_dk_prev" </dev/null
 		say "upgrade: removed $_dk_prev, the node the new one replaced"
+		docker_images_replaced "$_dk_ctr_image"
+	else
+		docker_images_replaced
 	fi
 	docker_reach
 	say "ready: $_dk_ctr runs $_dk_image"
 	docker_admin_notice
 	if [ "$TARGET" = podman ]; then
 		say "Podman starts containers again after a reboot only through its podman-restart service, which starts those with the restart policy always - the node has it: systemctl --user enable podman-restart.service, and for a rootless user loginctl enable-linger \"\$USER\" (as root: systemctl enable podman-restart.service)"
+	fi
+}
+
+# docker_images_replaced [<image>]: once the node is ready, the image tag
+# the node it replaced ran, when the script recorded making it and no
+# container uses it, and its own stale copies on this machine's engine
+# (image_tags_replaced, PLAN 10.14).
+docker_images_replaced() {
+	if command -v image_tags_replaced >/dev/null 2>&1; then
+		image_tags_replaced "$@"
 	fi
 }
 
@@ -958,8 +982,9 @@ docker_uninstall() {
 # docker_purge [<function>]: the data volumes; a listing that proves none
 # is left; the secrets' volumes; a listing that proves no volume of the
 # deployment is left; the function given, when one is (a compose cluster's
-# secret files on CE_HOST, PLAN 10.8); and last the deployment's entry of
-# STATE_DIR, and nothing else of it. A step that fails - a listing or an
+# secret files on CE_HOST, PLAN 10.8); the image tags the entry records,
+# those no container uses (image_tags_purge, PLAN 10.14); and last the
+# deployment's entry of STATE_DIR, and nothing else of it. A step that fails - a listing or an
 # inspect included - ends the run, and the entry - the keys - is kept.
 docker_purge() {
 	# _dk_labelled: docker_uninstall listed and checked them before it
@@ -999,6 +1024,11 @@ docker_purge() {
 		say "purge: no volume of $_s_name is left on $(engine)"
 	fi
 	[ -z "${1:-}" ] || "$1"
+	# The image tags the script made and recorded, those no container uses
+	# (PLAN 10.14).
+	if command -v image_tags_purge >/dev/null 2>&1; then
+		image_tags_purge
+	fi
 	if [ -d "$STATE" ]; then
 		case $STATE in
 		*/"$_s_name") ;;

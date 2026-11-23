@@ -461,11 +461,15 @@ k8s_storage_check() {
 }
 
 # k8s_engine <run|query> <argument>...: the container engine here, for the
-# helm image - the Docker CLI with the context of the settings, else Podman.
+# helm image - nerdctl in its namespace default on Rancher Desktop's
+# containerd (rancher_resolve has run: k8s_install asks it first), the
+# Docker CLI with the context of the settings, else Podman.
 k8s_engine() {
 	_k_m=$1
 	shift
-	if command -v docker >/dev/null 2>&1; then
+	if [ "$TARGET" = rancher ] && on_nerdctl; then
+		"$_k_m" nerdctl --namespace default "$@"
+	elif command -v docker >/dev/null 2>&1; then
 		"$_k_m" docker --context "$(docker_context)" "$@"
 	elif command -v podman >/dev/null 2>&1; then
 		"$_k_m" podman "$@"
@@ -561,7 +565,7 @@ k8s_render_in() {
 		return 0
 	fi
 	_k_image=$(k8s_helm_image) || exit
-	command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 ||
+	{ [ "$TARGET" = rancher ] && on_nerdctl; } || command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 ||
 		refuse "rendering the chart needs docker or podman here, to run $_k_image - or HELM, a helm program"
 	if ! k8s_image_present "$_k_image"; then
 		if [ "$(setting OFFLINE)" = yes ]; then
@@ -767,9 +771,11 @@ k8s_namespace_yaml() {
 
 # k8s_imports: true when the image goes to the cluster by an import into
 # k3s (PLAN 10.4's route import): K3S_SSH, K3S_IMPORT, or a k3s here,
-# without K8S_REGISTRY. Only then does a purge look for the image tags
-# still in use, across namespaces.
+# without K8S_REGISTRY - or is built in the engine Rancher Desktop's k3s
+# sees (PLAN 10.14). Only then does a purge (and on Rancher Desktop an
+# upgrade) look for the image tags still in use, across namespaces.
 k8s_imports() {
+	[ "$TARGET" != rancher ] || return 0
 	[ "$TARGET" = k3s ] && [ -z "$(setting K8S_REGISTRY)" ] || return 1
 	[ -n "$(setting K3S_SSH)" ] || [ -n "$(setting K3S_IMPORT)" ] || [ -z "$(kube_context)" ]
 }
@@ -778,7 +784,8 @@ k8s_imports() {
 # (ADR-0033 section 7): a Role in the namespace for the objects it makes and
 # reads there, and a ClusterRole for its reads outside - listing Nodes,
 # StorageClasses, Services, PersistentVolumes (the purge's check of PLAN
-# 10.11) and - when the image is imported into k3s (k8s_imports) - pods,
+# 10.11) and - when the image is imported into k3s, or built in Rancher
+# Desktop's engine (k8s_imports) - pods,
 # StatefulSets, Deployments, DaemonSets, Jobs and CronJobs (whether
 # anything still names an image tag a purge would remove), getting its own
 # namespace and kube-system by name.
@@ -1759,9 +1766,13 @@ k8s_wait_all() {
 # when it is deleted), each Ready on the new revision and image before the
 # next; the first that is not stops the run (exit 1), the nodes after it
 # untouched. The console upgrade's lock is read before each node. A pod on
-# the new revision and image already is left as it is.
+# the new revision and image already is left as it is. On Rancher Desktop's
+# Kubernetes, once every node is Ready, the tags the replaced pods ran that
+# the script built in its engine are removed when nothing names them
+# (k8s_images_rancher, PLAN 10.14).
 k8s_upgrade() {
 	say "upgrade: one node at a time - those that do not vote, then the voters - each Ready on $_k8_ref before the next; it stops at the first that is not (ADR-0033 section 11)"
+	_k8_replaced=
 	for _k_id in $(k8s_node_order); do
 		k8s_lock_check during
 		if [ "$DRY_RUN" = 1 ]; then
@@ -1795,7 +1806,12 @@ k8s_upgrade() {
 		k8s_wait_pod "$_k_id-0" "$_k_up_old" "$_k8_rev" "$_k8_ref" ||
 			fail "upgrade stopped: the node $_k_id is not Ready on $_k8_ref within WAIT_TIMEOUT=$_k8_wait s (it ran ${_k_up_was:-an image not known} before); the nodes after it were not moved. See $(k8s_kubectl_said) describe pod $_k_id-0 -n $_k8_ns, and its logs; to go back, install the image it ran: IMAGE_SOURCE=image IMAGE=${_k_up_was:-<the image it ran>}"
 		say "upgrade: $_k_id is Ready on $_k8_ref"
+		[ -z "$_k_up_was" ] || [ "$_k_up_was" = "$_k8_ref" ] || _k8_replaced="$_k8_replaced $_k_up_was"
 	done
+	if [ "$TARGET" = rancher ] && [ "$DRY_RUN" = 0 ] && [ -n "$_k8_replaced" ]; then
+		# shellcheck disable=SC2086 # image references, without spaces
+		k8s_images_rancher replaced $_k8_replaced
+	fi
 }
 
 # --- the install (PLAN 10.10) --------------------------------------------------------
@@ -2100,6 +2116,14 @@ k8s_image_known() {
 k8s_install() {
 	k8s_settings
 	k8s_ns_record_check
+	! k8s_published "$(setting K8S_SERVICE_TYPE)" ||
+		tls_hosts_warn "outside the cluster, by a Service of K8S_SERVICE_TYPE=$(setting K8S_SERVICE_TYPE)"
+	# Rancher Desktop's engine (PLAN 10.6), read-only, before the secrets'
+	# checks ask it about dev-init: its image, dev-init and the helm image
+	# are on that engine, whose images its k3s sees.
+	if [ "$TARGET" = rancher ]; then
+		rancher_resolve
+	fi
 	k8s_connect
 	RESOLVED_IMAGE=
 	RESOLVED_NATIVE_IMAGE=
@@ -2142,6 +2166,9 @@ k8s_install() {
 	'' | -* | *[!A-Za-z0-9_./:@-]*) fail "the image reference for the pods is not one: '$(printf '%s' "$_k8_ref" | printable)'" ;;
 	esac
 	k8s_images_record
+	# The tags built in the engine Rancher Desktop's k3s sees (PLAN 10.14):
+	# recorded for a purge to remove; nothing elsewhere.
+	image_tags_record
 	_k8_pull=IfNotPresent
 	case ${_img_route:-} in
 	import | local) _k8_pull=Never ;;
@@ -2458,6 +2485,11 @@ k8s_uninstall() {
 	fi
 	k8s_ns_record_check
 	[ "$PURGE" = 0 ] || k8s_purge_confirm
+	# Rancher Desktop's engine, asked before anything is removed when the
+	# purge has image tags to remove there (PLAN 10.14).
+	if [ "$PURGE" = 1 ] && [ "$TARGET" = rancher ] && [ -f "$STATE/images" ]; then
+		rancher_resolve
+	fi
 	k8s_connect
 	k8s_cluster_check
 	k8s_namespace_peek
@@ -2758,30 +2790,20 @@ k8s_ns_own() {
 	} >"$_k_own_dir/own-prefixes"
 }
 
-# k8s_images_remove: the image tags the script's import made in k3s (the
-# entry's file "images": only tags containerd lacked before the import) -
-# removed from its containerd over K3S_SSH or here, but a tag that a pod of
-# any namespace still names (its containers' image, or the image and
-# imageID its status reports), or the pod template of a StatefulSet,
-# Deployment, DaemonSet, Job or CronJob of any namespace, which is named
-# and kept; K3S_IMPORT's node cannot be asked, so its tags are left. Nothing else is removed. A removal
-# that fails is said and the purge goes on: a tag holds no secret.
-k8s_images_remove() {
-	[ -f "$STATE/images" ] || return 0
-	if [ -n "$(setting K3S_IMPORT)" ]; then
-		say "purge: the images in $STATE/images were imported by K3S_IMPORT's command, on a node the script cannot ask: they are left"
-		return 0
-	fi
-	# A tag a pod, or the pod template of a StatefulSet, Deployment,
-	# DaemonSet, Job or CronJob, of any namespace still names is kept: its
-	# image is in use, or will be. What cannot be listed keeps every tag.
+# k8s_images_used: _k_used_names, what every pod and the pod template of
+# every StatefulSet, Deployment, DaemonSet, Job and CronJob of every
+# namespace names as its image - their containers' image, and the image and
+# imageID their pods' status reports - one a line, by the name containerd
+# gives it, and each sha256 digest in them as sha256:<hex>. False, and
+# warned of, when either listing fails: the caller then keeps every tag.
+k8s_images_used() {
 	_k_used=
 	for _k_ri_kinds in pods statefulsets,deployments,daemonsets,jobs,cronjobs; do
 		_k_ri_status=0
 		_k_ri=$(k8s_cmd query get "$_k_ri_kinds" -A -o json </dev/null) || _k_ri_status=$?
 		if [ "$_k_ri_status" != 0 ]; then
 			warn "the $_k_ri_kinds of every namespace could not be listed (kubectl's message is above): the images in $STATE/images are kept"
-			return 0
+			return 1
 		fi
 		_k_used="$_k_used$NL$(printf '%s\n' "$_k_ri" | printable | k8s_flat | awk -F '\t' '
 			$1 ~ /[Cc]ontainers\[[0-9]+\]\.image$/ || $1 ~ /[Cc]ontainerStatuses\[[0-9]+\]\.(image|imageID)$/ { print substr($0, length($1) + 2) }' | sort -u)"
@@ -2790,6 +2812,57 @@ k8s_images_remove() {
 	for _k_u in $_k_used; do
 		_k_used_names="$_k_used_names$(k8s_containerd_name "$_k_u")$NL"
 	done
+	for _k_u in $(printf '%s\n' "$_k_used" | image_digests_in | sort -u); do
+		_k_used_names="${_k_used_names}sha256:$_k_u$NL"
+	done
+	return 0
+}
+
+# k8s_images_rancher <purge|replaced> <image>...: on Rancher Desktop's
+# Kubernetes, the tags the script built in the engine its k3s sees
+# (image.sh, PLAN 10.14) - every recorded one at a purge
+# (image_tags_purge), those the replaced nodes ran after an upgrade
+# (image_tags_replaced) - each kept while a pod or a workload's template of
+# any namespace names it or its image's digest (k8s_images_used); when they
+# cannot be listed, every tag is kept.
+k8s_images_rancher() {
+	[ -f "$STATE/images" ] || return 0
+	k8s_images_used || return 0
+	_img_k8s_used=$_k_used_names
+	if [ "$1" = purge ]; then
+		image_tags_purge
+	else
+		shift
+		image_tags_replaced "$@"
+	fi
+	unset _img_k8s_used
+}
+
+# k8s_images_remove: the image tags the script's import made in k3s (the
+# entry's file "images": only tags containerd lacked before the import) -
+# removed from its containerd over K3S_SSH or here, but a tag that a pod of
+# any namespace still names (its containers' image, or the image and
+# imageID its status reports), or the pod template of a StatefulSet,
+# Deployment, DaemonSet, Job or CronJob of any namespace, which is named
+# and kept (k8s_images_used); K3S_IMPORT's node cannot be asked, so its
+# tags are left. On Rancher Desktop's Kubernetes the tags built in its
+# engine, with the same check (k8s_images_rancher). Nothing else is
+# removed. A removal that fails is said and the purge goes on: a tag holds
+# no secret.
+k8s_images_remove() {
+	[ -f "$STATE/images" ] || return 0
+	if [ "$TARGET" = rancher ]; then
+		k8s_images_rancher purge
+		return 0
+	fi
+	if [ -n "$(setting K3S_IMPORT)" ]; then
+		say "purge: the images in $STATE/images were imported by K3S_IMPORT's command, on a node the script cannot ask: they are left"
+		return 0
+	fi
+	# A tag a pod, or the pod template of a StatefulSet, Deployment,
+	# DaemonSet, Job or CronJob, of any namespace still names is kept: its
+	# image is in use, or will be. What cannot be listed keeps every tag.
+	k8s_images_used || return 0
 	while IFS= read -r _k_im; do
 		[ -n "$_k_im" ] || continue
 		if ! plain "$_k_im"; then

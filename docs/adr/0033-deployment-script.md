@@ -1,10 +1,12 @@
 # ADR-0033: One deployment script for every container platform
 
 - **Status:** accepted (2026-11-23, PLAN 10.12; proposed 2026-11-21, PLAN 10.0). Built by
-  PLAN 10.1 to 10.11 in `deploy/deploy.sh` and `deploy/lib/` (10.2 and 10.6 stay in progress: Podman's run of the from-binaries image check, and a real Rancher Desktop with its own Kubernetes); where the build differs from
-  or adds to the decision, the section says so under "As built". Not built: Rancher
-  Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`, section 9), which ends with "not
-  built yet (PLAN 10.6)" and exit 3. Run on real engines: Docker and Podman, standalone
+  PLAN 10.1 to 10.11 and 10.14 in `deploy/deploy.sh` and `deploy/lib/` (10.2, 10.6 and
+  10.14 stay in progress: Podman's run of the from-binaries image check, a real Rancher
+  Desktop with its own Kubernetes, and the gate on the test host); where the build
+  differs from or adds to the decision, the section says so under "As built". Rancher
+  Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`, section 9) is handed to the
+  Kubernetes path since PLAN 10.6's second part. Run on real engines: Docker and Podman, standalone
   and cluster (`make test-deploy`), Docker CE over SSH (a `CE_HOST` run), k3s in a
   container (`make test-k8s`), and in the acceptance of PLAN 10.13 standalone on
   Docker Desktop 29 for macOS and on a remote k3s server over `K3S_SSH`; not yet on
@@ -272,7 +274,10 @@ data and, with it, both copies of its secrets, in this order: the data (volumes,
 claims); a check that the data is gone (no volume or claim with the deployment's label
 is left); the target's secrets - the labelled volumes or Secrets, and for a cluster on
 `CE_HOST` the server's `CE_STATE_DIR/<target-id>/<name>/compose/secrets/` (section
-10); on Kubernetes the namespace (section 7); and last the deployment's entry
+10); on Kubernetes the namespace (section 7); the image tags the entry records the
+script made, those nothing uses (as built, PLAN 10.11 for k3s and 10.14 for the Docker
+engines and Rancher Desktop's Kubernetes, section 5: a tag that cannot be removed is
+named and left, and does not stop the purge); and last the deployment's entry
 `STATE_DIR/<target-id>/<name>/`, and nothing else of `STATE_DIR`. A step that fails
 stops the purge, and the local copy is kept while anything it opens may remain. Two
 things the script leaves, names in its output, and does not count as a failure: with
@@ -579,6 +584,61 @@ given image named by a tag is tagged by its ID there (`nerdctl` names every imag
 a digest, from a registry or not, and runs none by that name). Rancher Desktop's
 engine is this machine's (its virtual machine, as Docker Desktop's is).
 
+**Reproducible, and the tags it made, as built (PLAN 10.14).** An image made of
+binaries takes the time of the commit `BUILDINFO` names, git's committer time (`git
+show -s --format=%ct <commit>^{commit}` in this repository; a `-dirty` suffix is
+dropped): `docker buildx build` and `nerdctl build` are given `--build-arg
+SOURCE_DATE_EPOCH=<time>` (buildx, and nerdctl's BuildKit, set the image's creation
+time and its history's from it), buildx also `--provenance=false` (the default
+provenance attestation records the build's own times and invocation, and on Docker's
+containerd store the image's ID is the digest of the index holding it), `nerdctl
+build` also `--output type=docker,rewrite-timestamp=true` (BuildKit's docker exporter,
+which nerdctl loads from in its namespace, clamps every file's time in the layers to
+the epoch; BuildKit 0.13 or later), and `podman build` its own `--timestamp <time>`
+(Podman 5.4's option: the creation time and every file of the layers; it takes no
+`SOURCE_DATE_EPOCH`). So on Podman and nerdctl the same binaries make the same image.
+On buildx with Docker's `docker` driver they do not: its `--load` goes through the
+engine's own exporter, which on the classic image store keeps an unknown option as
+metadata and ignores it (moby's `mobyexporter`) and on the containerd store forces
+`unpack=true`, which BuildKit refuses beside `rewrite-timestamp` (`exporter/
+containerimage/export.go`, v0.25.0); the docker driver of the classic store has no
+`type=docker` exporter to a file either. There the files keep their own times: the
+same folder of binaries makes the same image, a copy made anew another (whose tag
+the upgrade then removes). The run says which holds. When git does not find the
+commit the run says so and the image takes the time of its build. A tag the run makes
+on an engine that lacked it (`image inspect` asked first) is recorded, once the entry
+is there, in the entry's file `images` (0600) with the ID of its engine: `target <tag>
+<engine ID>` on the target's engine - built there, or loaded there from the engine it
+was built on - with the deployment's recorded engine ID (`engine-id` of `target`: the
+Docker engine's ID, or Podman's host and store; for Rancher Desktop's Kubernetes
+`<UID of kube-system>/<engine ID>`, the ID of the engine whose images its k3s sees
+added, section 9), and `here:<context> <tag> <engine ID>` on the Docker engine of
+this machine when the target's is another machine's (`CE_HOST`), with what `docker
+--context <context> info --format '{{.ID}}'` says (a copy whose engine says nothing is
+said and not recorded); `BUILD_HOST`'s engine, an `IMAGE`, a tag that was there before
+and the engine of a Kubernetes target other than Rancher Desktop's are not recorded.
+A line is acted on only when the engine reached now has the ID it names; one of
+another engine, or with no ID (an earlier build of the script wrote it), is named and
+left. `--engine-replaced` takes the recorded engine as gone with its images: once the
+record names the new engine, every line of the target's engine leaves `images`, each
+said, and nothing is removed (`here:` lines stay). Once a Docker target's nodes are
+ready, the tags the replaced nodes ran (standalone: the container's image; a compose
+cluster: each node's) are removed when recorded and no container of that engine names
+them (`ps -a --format '{{.Image}}'`, compared without `docker.io/library/`,
+`docker.io/` or `localhost/`), and so are the recorded copies of this machine's engine
+but the run's; a purge removes every recorded tag no container names, after the
+secrets and before the entry. On Rancher Desktop's Kubernetes, once every node is
+Ready after an upgrade and at a purge, a tag is also kept while a pod or the template
+of a StatefulSet, Deployment, DaemonSet, Job or CronJob of any namespace names it, by
+name or by a digest of its image (`image inspect`'s `.Id` and `.RepoDigests` against
+the pods' `imageID`): the kubelet names images by ID, and another namespace may run
+the same image unrecorded; when either listing fails, or the image cannot be inspected,
+it is kept. The engine is asked by its own CLI (`docker --context`, `podman`, `nerdctl`
+in its namespace, the Docker CLI over `DOCKER_HOST=ssh://` for `CE_HOST`), which itself
+refuses to remove an image a container uses; a removal that fails is said, its line
+kept, and the run goes on. A compose cluster's `init` container keeps the first
+install's image until an uninstall.
+
 ### 6. Kubernetes: render and apply, no Helm release
 
 The chart is rendered with `helm template` in the pinned `HELM_IMAGE` - the reference,
@@ -807,9 +867,41 @@ unless `RANCHER_KUBERNETES=yes` says so. On `nerdctl` an `IMAGE` named
 `<repository>@sha256:<hex>` is inspected by its bare digest - `nerdctl image inspect` of
 a repository with a digest takes only an image tagged `latest` - and its repository
 must be among its `RepoDigests`; the configuration's digest (`.Id`) of an image built
-there is kept, against which a saved tar is checked. With `RANCHER_KUBERNETES=yes` the engine is asked only when the image is made
-(`image.sh`), and the secrets are the namespace's (10.9, 10.10), not volumes. What only
-a real Rancher Desktop proves is listed in PLAN 10.6's row of Decisions.
+there is kept, against which a saved tar is checked. With `RANCHER_KUBERNETES=yes` the engine is asked only by an install (at its
+start, for its ID when a tag is recorded, and after an upgrade with a recorded tag to
+remove) and by a purge with image tags to remove, and the secrets are the namespace's
+(10.9, 10.10), not volumes. What only a real Rancher Desktop proves is listed in PLAN
+10.6's rows of Decisions.
+
+**`RANCHER_KUBERNETES=yes`, as built (PLAN 10.6, after 10.10 and 10.11).** Install,
+upgrade, `--status`, uninstall and purge are those of k3s and k8s (`k8s.sh`) through
+`kubectl --context rancher-desktop` (`K8S_CONTEXT` names another); the record's first
+line is that command, and the target ID `rancher-rancher-desktop`. The image is made on
+the engine `rancher_resolve` finds - asked, read-only, at the start of the install, in the namespace `k8s.io`
+on containerd - by `nerdctl --namespace k8s.io build`, or `docker --context
+rancher-desktop buildx build` on moby, whose images Rancher Desktop's k3s sees: the
+route `local` of section 5, whose API server must be on this machine, and the pods run
+it with `imagePullPolicy: Never`. dev-init runs on that engine; the Secrets go through
+10.9's path (`secrets_install` dispatches to `k8s_secrets_ensure`). The chart is
+rendered in the helm image on that engine too: `nerdctl --namespace default` on
+containerd, where there may be no Docker engine. The tags built there are recorded
+in the entry's `images` as `target <tag> <cluster UID>/<engine ID>`: the UID of the
+cluster's `kube-system` (the deployment's `engine-id`), and the ID of the engine that
+holds the tag - `docker --context rancher-desktop info --format '{{.ID}}'` on moby,
+`nerdctl --namespace k8s.io info --format '{{.ID}}'` on containerd (nerdctl's
+Docker-compatible `info` gives containerd's introspection UUID as `.ID`, v2.4.2
+`pkg/infoutil`), asked once a run. The cluster's UID alone would not do: Rancher
+Desktop's runtime can be switched between moby and containerd under the same cluster,
+and the engine that held a tag is then another. A line is acted on only when both
+parts match what is reached now; a line of the other runtime, a line an earlier
+build wrote with the cluster's UID alone, and every line while the engine does not
+say its ID, are said and left, and nothing is removed through them. After an upgrade
+there, once every node is Ready, the tag a replaced pod ran is removed when it is
+recorded and nothing names it; a purge removes every recorded tag nothing names.
+Nothing names a tag when no container of that engine (its k3s's among them) runs it
+and no pod or workload's template of any namespace names it or its image's digest
+(`k8s_images_used`), each listed before anything is removed; the removal is by the
+engine's own CLI. A removal that fails is said, the line stays, and the run goes on.
 
 ### 10. Standalone by default, and the KMS opted into
 

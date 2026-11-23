@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -662,25 +663,15 @@ func TestRancherCluster(t *testing.T) {
 	})
 }
 
-// TestRancherKubernetes: RANCHER_KUBERNETES=yes stops at 10.6's stub for
-// Rancher Desktop's Kubernetes without asking the engine (k3s and k8s are
-// built by 10.10 and 10.11; handing this target to them is 10.6's), and the
-// image for its k3s is made on the engine here - on containerd by nerdctl
-// in the namespace k8s.io, which its k3s sees, on the route "local"; on
-// moby by the Docker CLI of the context rancher-desktop.
+// TestRancherKubernetes: with RANCHER_KUBERNETES=yes the image for Rancher
+// Desktop's k3s is made on the engine here - on containerd by nerdctl in
+// the namespace k8s.io, which its k3s sees, on the route "local"; on moby
+// by the Docker CLI of the context rancher-desktop. The deployment's whole
+// lifecycle on the Kubernetes path is TestRancherKubernetesLifecycle's.
 func TestRancherKubernetes(t *testing.T) {
 	t.Parallel()
 	const k8s = "DEPLOY_TARGET=rancher\nRANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n"
 	eachShell(t, func(t *testing.T, r *rig) {
-		t.Run("install hands over", func(t *testing.T) {
-			t.Parallel()
-			r := r.fresh(t)
-			res := r.withEnv("KMS=local\n"+k8s, "--install")
-			res.want(t, 3, "engine: kubectl --context rancher-desktop", "not built yet (PLAN 10.6)")
-			if len(res.calls) != 0 {
-				t.Errorf("the hand-over ran %v", res.calls)
-			}
-		})
 		for _, c := range []struct {
 			name, env string
 			rules     []rule
@@ -776,6 +767,285 @@ func TestRancherGivenImage(t *testing.T) {
 					if run[len(run)-2] != nodeImage {
 						t.Errorf("the node runs %q", run[len(run)-2])
 					}
+				}
+			})
+		}
+	})
+}
+
+// rancherKubeID is the ID a tag made for Rancher Desktop's Kubernetes on
+// the tool's engine is recorded with: the cluster's (the UID of its
+// kube-system), a slash, and the engine's.
+func rancherKubeID(tool string) string {
+	if tool == "nerdctl" {
+		return clusterUID + "/" + containerdID
+	}
+	return clusterUID + "/" + engineID
+}
+
+// rancherKubeEngine is the answer of the engine whose images Rancher
+// Desktop's Kubernetes sees, on the tool, to "info --format {{.ID}}":
+// nerdctl in the namespace k8s.io, or the Docker CLI of the context
+// rancher-desktop.
+func rancherKubeEngine(tool string) rule {
+	if tool == "nerdctl" {
+		return rule{Tool: "nerdctl", Contains: []string{"--namespace", "k8s.io", "info", "--format", "{{.ID}}"}, Stdout: containerdID + "\n"}
+	}
+	return rule{Tool: "docker", Contains: []string{"--context", "rancher-desktop", "info", "--format", "{{.ID}}"}, Stdout: engineID + "\n"}
+}
+
+// rancherKube is the fake Kubernetes of Rancher Desktop, reached by the
+// context rancher-desktop, whose API server is on this machine, on the
+// engine of the tool: the image f made there (the engine lacked its tag),
+// the chart rendered in the helm image there, dev-init run there. On
+// containerd every one of them answers nerdctl's.
+func rancherKube(t *testing.T, tool string, k kube) []rule {
+	t.Helper()
+	extra := []rule{kubeServer("https://127.0.0.1:6443"), tagAbsent(tool, k.f), rancherKubeEngine(tool)}
+	extra = append(extra, madeHere(tool, k.f)...)
+	if tool == "nerdctl" {
+		extra = append(extra,
+			rule{Tool: "nerdctl", Contains: []string{"image", "inspect", dockerfileHelm(t)}, Stdout: "[{}]\n"},
+			rule{Tool: "nerdctl", Contains: []string{"--tmpfs", "/work"}, Stdout: kubeRender(k.mode), SaveStdin: "render.tar"},
+			rule{Tool: "nerdctl", Contains: []string{"cp"}, Starts: []string{"cp", "-"}})
+		if k.devInit != nil {
+			extra = append(extra, rule{Tool: "nerdctl", Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", k.devInit)})
+		}
+	}
+	k.extra = append(extra, k.extra...)
+	return k.rules(t)
+}
+
+// rancherKubeCalls fails the test unless every engine call is the one of
+// Rancher Desktop's Kubernetes on the tool: on containerd nerdctl in the
+// namespace k8s.io (the image, dev-init) or default (the helm image) and no
+// docker; on moby the Docker CLI with the context rancher-desktop and no
+// nerdctl; kubectl always with the context rancher-desktop.
+func rancherKubeCalls(t *testing.T, res result, tool string) {
+	t.Helper()
+	for _, c := range res.calls {
+		switch c.Tool {
+		case "kubectl":
+			if len(c.Args) < 2 || c.Args[0] != "--context" || c.Args[1] != "rancher-desktop" {
+				t.Errorf("kubectl was run without the context rancher-desktop: %q", c.Args)
+			}
+		case "podman":
+			t.Errorf("podman was run for Rancher Desktop: %q", c.Args)
+		case "nerdctl":
+			if tool != "nerdctl" {
+				t.Errorf("nerdctl was run for Rancher Desktop's moby: %q", c.Args)
+				continue
+			}
+			helm := slices.Contains(c.Args, "--tmpfs") || slices.Contains(c.Args, dockerfileHelm(t))
+			switch {
+			case len(c.Args) < 2 || c.Args[0] != "--namespace":
+				t.Errorf("nerdctl was run without its namespace: %q", c.Args)
+			case helm && c.Args[1] != "default":
+				t.Errorf("the helm image was run outside the namespace default: %q", c.Args)
+			case !helm && c.Args[1] != "k8s.io":
+				t.Errorf("nerdctl was run outside the namespace k8s.io: %q", c.Args)
+			}
+		case "docker":
+			if tool == "nerdctl" {
+				t.Errorf("docker was run for Rancher Desktop's containerd: %q", c.Args)
+				continue
+			}
+			if slices.Equal(c.Args[:min(len(c.Args), 3)], []string{"context", "inspect", "rancher-desktop"}) {
+				continue
+			}
+			if len(c.Args) < 2 || c.Args[0] != "--context" || c.Args[1] != "rancher-desktop" {
+				t.Errorf("docker was run without the context rancher-desktop: %q", c.Args)
+			}
+		}
+	}
+}
+
+// TestRancherKubernetesLifecycle: RANCHER_KUBERNETES=yes hands Rancher
+// Desktop's own Kubernetes to the Kubernetes path of PLAN 10.10 and 10.11,
+// on each of its engines, through the context rancher-desktop: an install
+// builds the image on the engine its k3s sees (nerdctl in the namespace
+// k8s.io, or the Docker CLI of the context rancher-desktop), runs dev-init
+// there, makes the namespace and its Secrets (PLAN 10.9's path, created
+// once, never on a command line, in an environment or in a trace), renders
+// the chart there with imagePullPolicy Never and the built tag, and records
+// that tag; an install of new binaries upgrades the node; --status, an
+// uninstall that keeps the claims, and a purge that removes the recorded
+// tags no container of that engine runs, by its own CLI, before the entry.
+func TestRancherKubernetesLifecycle(t *testing.T) {
+	t.Parallel()
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range []struct{ engine, tool string }{{"containerd", "nerdctl"}, {"moby", "docker"}} {
+			t.Run(c.engine, func(t *testing.T) {
+				t.Parallel()
+				env := "DEPLOY_TARGET=rancher\nRANCHER_KUBERNETES=yes\nRANCHER_ENGINE=" + c.engine + "\nKMS=local\nK8S_S3_ALLOW_FROM=192.0.2.0/24\nTLS_HOSTS=s3.example.test\nWAIT_TIMEOUT=3\n"
+				r := secretsRig(t, r.fresh(t))
+				r.chart()
+				state := r.stateOf("rancher-rancher-desktop")
+				run := func(args ...string) result {
+					t.Helper()
+					tmp := t.TempDir()
+					res := r.run(append([]string{"--env", r.envFile("site.env", env)}, args...), "TMPDIR="+tmp)
+					if left, err := os.ReadDir(tmp); err != nil || len(left) != 0 {
+						t.Errorf("the run (exit %d) left %v in TMPDIR (%v)", res.code, left, err)
+					}
+					return res
+				}
+
+				// Install.
+				f1 := newImgFix(imgCommit)
+				k := kube{tool: "kubectl", mode: "standalone", f: f1, image: f1.ref(), devInit: k8sDevInit("standalone")}
+				r.rules(rancherKube(t, c.tool, k)...)
+				r.trace = true
+				res := run("--install")
+				r.trace = false
+				res.want(t, 0, "engine: kubectl --context rancher-desktop", "image: the pods run "+f1.ref()+" (imagePullPolicy Never)",
+					"ready: cactusfs-node-0 runs "+f1.ref(), "image: recorded "+f1.ref()+" (on the engine whose images Rancher Desktop's Kubernetes sees, engine "+rancherKubeID(c.tool)+")")
+				if strings.Contains(res.output(), "not built yet") {
+					t.Error("the run says something is not built")
+				}
+				rancherKubeCalls(t, res, c.tool)
+				insideNamespace(t, r, res.calls, "cactusfs")
+				noForce(t, res.calls)
+				if b := builds(res); len(b) != 1 || b[0].Tool != c.tool {
+					t.Fatalf("built %v", b)
+				}
+				files := tarFiles(t, []byte(read(t, filepath.Join(r.dir, "render.tar"))))
+				if !strings.Contains(files["values.yaml"], "  repository: 'cactusfs'\n  tag: '0.7.0-412-"+f1.id12()+"'\n  digest: ''\n  pullPolicy: Never\n") {
+					t.Errorf("the values do not run the tag built with imagePullPolicy Never:\n%s", files["values.yaml"])
+				}
+				if got := read(t, filepath.Join(state, "target")); got != "kubectl --context rancher-desktop\nengine-id="+clusterUID+"\nkms=local\n" {
+					t.Errorf("the record is %q", got)
+				}
+				if got := read(t, filepath.Join(state, "images")); got != "target "+f1.ref()+" "+rancherKubeID(c.tool)+"\n" {
+					t.Errorf("the entry records the images %q", got)
+				}
+				made := entryFiles(t, state)
+				for _, key := range standaloneKeys {
+					if made[key.file] == "" {
+						t.Errorf("%s was not made", key.file)
+					}
+				}
+				checkCreated(t, r, standaloneKeys, made)
+				noLeak(t, res, made)
+				noSecretAnywhere(t, res, state)
+				devInit := callsOf(res, c.tool, "--name", "cactusfs-dev-init")
+				if len(devInit) != 1 || !containsRun(devInit[0].Args, []string{"--network", "none"}) {
+					t.Errorf("dev-init is not run once on the engine, with no network: %v", devInit)
+				}
+
+				// An upgrade to new binaries: the node is replaced, the
+				// Secrets are not made again, and once it is Ready the tag
+				// it ran is removed - nothing of the cluster names it (its
+				// pods and workloads of every namespace listed first) and
+				// no container of the engine runs it.
+				f2 := newImgFix(imgCommit)
+				k = kube{
+					tool: "kubectl", mode: "standalone", f: f2, image: f2.ref(), podImage: f1.ref(),
+					marker: strings.TrimSpace(read(t, filepath.Join(state, "namespace-uid"))), objects: kubeInstalled("standalone"), secrets: made,
+				}
+				r.rules(rancherKube(t, c.tool, k)...)
+				res = run("--install")
+				res.want(t, 0, "this run upgrades it one node at a time", "upgrade: cactusfs-node-0 is Ready on "+f2.ref())
+				rancherKubeCalls(t, res, c.tool)
+				if got := kubeDeletes(res.calls); !slices.Equal(got, []string{"cactusfs-node-0-0"}) {
+					t.Errorf("the pods deleted are %q", got)
+				}
+				for _, call := range res.calls {
+					if slices.Contains(call.Args, "cactusfs-dev-init") {
+						t.Errorf("dev-init ran again: %q", call.Args)
+					}
+				}
+				if !maps.Equal(entryFiles(t, state), made) {
+					t.Error("the upgrade changed the secrets of the entry")
+				}
+				res.want(t, 0, "image: removed "+f1.ref()+" on the engine whose images Rancher Desktop's Kubernetes sees, which the script had made")
+				if got := imageRemovals(res, c.tool); !slices.Equal(got, []string{f1.ref()}) {
+					t.Errorf("the upgrade removed %q, want %s", got, f1.ref())
+				}
+				ready := lineAt(res, "upgrade: cactusfs-node-0 is Ready on "+f2.ref())
+				if removed := lineAt(res, "image: removed "+f1.ref()); removed < ready {
+					t.Errorf("the tag the node ran was removed (line %d) before the node was Ready (line %d)", removed, ready)
+				}
+				for _, kinds := range []string{"pods", "statefulsets,deployments,daemonsets,jobs,cronjobs"} {
+					if i, rm := callIndex(res, "kubectl", "get", kinds, "-A"), callIndex(res, c.tool, "image", "rm", f1.ref()); i < 0 || rm < i {
+						t.Errorf("the %s of every namespace listed at %d, the tag removed at %d", kinds, i, rm)
+					}
+				}
+				if got := read(t, filepath.Join(state, "images")); got != "target "+f2.ref()+" "+rancherKubeID(c.tool)+"\n" {
+					t.Errorf("the entry records the images %q", got)
+				}
+
+				// Status.
+				k.podImage = f2.ref()
+				k.extra = []rule{
+					{Tool: "kubectl", Contains: []string{"get", "services", "cactusfs", "cactusfs-admin"}, Stdout: kjsonNoT(kubeList(
+						obj{"metadata": obj{"name": "cactusfs"}, "spec": obj{"type": "NodePort", "ports": []any{obj{"port": 9000, "nodePort": 30900}}}},
+						obj{"metadata": obj{"name": "cactusfs-admin"}, "spec": obj{"type": "ClusterIP", "ports": []any{obj{"port": 9001}}}}))},
+					{Tool: "kubectl", Contains: []string{"get", "pods"}, Stdout: kjson(t, kubeList(podOf("cactusfs-node-0-0", "u1", "r", f2.ref(), true, true)))},
+				}
+				r.rules(k.rules(t)...)
+				res = run("--status")
+				res.want(t, 0, "node: cactusfs-node-0, pod cactusfs-node-0-0 on na, ready, image "+f2.ref(),
+					"kubectl --context rancher-desktop port-forward -n cactusfs service/cactusfs-admin 9001:9001")
+				rancherKubeCalls(t, res, c.tool)
+				for _, call := range res.calls {
+					if args, ok := kubectlArgs(call); ok && len(args) > 0 && args[0] != "get" && args[0] != "config" && args[0] != "auth" {
+						t.Errorf("--status changed %q", args)
+					}
+				}
+
+				// Uninstall: the claims, the namespace and the entry are kept.
+				k.extra = []rule{
+					{Tool: "kubectl", Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
+					{Tool: "kubectl", Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}}))},
+				}
+				r.rules(k.rules(t)...)
+				res = run("--uninstall")
+				res.want(t, 0, "kept: the claims data1-cactusfs-node-0-0 meta-cactusfs-node-0-0, the namespace cactusfs")
+				rancherKubeCalls(t, res, c.tool)
+				if got := imageRemovals(res, c.tool); len(got) != 0 {
+					t.Errorf("an uninstall removed the images %q", got)
+				}
+				if _, err := os.Stat(filepath.Join(state, "images")); err != nil {
+					t.Errorf("an uninstall dropped the record of the images: %v", err)
+				}
+
+				// Purge: the second tag still runs in a container of the
+				// engine (a pod of another namespace), the first does not
+				// (recorded again here, as by an upgrade that could not
+				// remove it).
+				put(t, filepath.Join(state, "images"), "target "+f1.ref()+" "+rancherKubeID(c.tool)+"\ntarget "+f2.ref()+" "+rancherKubeID(c.tool)+"\n")
+				claims := kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}})
+				k.extra = []rule{
+					rancherKubeEngine(c.tool),
+					usedBy(c.tool, "registry.example.test/web:1", asRun(c.tool, f2.ref())),
+					{Tool: "kubectl", Contains: []string{"get", "persistentvolumeclaims"}, After: []string{"delete", "persistentvolumeclaim/meta-cactusfs-node-0-0"}, Stdout: kjsonNoT(kubeList())},
+					{Tool: "kubectl", Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(claims)},
+					{Tool: "kubectl", Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList())},
+					{Tool: "kubectl", Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, After: []string{"delete", "secret/cactusfs-root"}, Stdout: ""},
+					{Tool: "kubectl", Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
+					{Tool: "kubectl", Contains: []string{"api-resources", "--namespaced"}, Stdout: "configmaps\npods\nserviceaccounts\nsecrets\nendpoints\nendpointslices.discovery.k8s.io\ndeployments.apps\nevents\nevents.events.k8s.io\n"},
+					{Tool: "kubectl", Contains: []string{"get", purgeKinds}, Stdout: "configmap/kube-root-ca.crt\nserviceaccount/default\n"},
+					{Tool: "kubectl", Contains: []string{"delete", "--raw"}, SaveStdin: "delete.json"},
+				}
+				r.rules(k.rules(t)...)
+				res = run("--uninstall", "--purge", "--purge-confirm=cactusfs")
+				res.want(t, 0, "image: removed "+f1.ref()+" on the engine whose images Rancher Desktop's Kubernetes sees, which the script had made",
+					"image: "+f2.ref()+" is kept: a container on the engine whose images Rancher Desktop's Kubernetes sees still runs it", "purged: cactusfs")
+				rancherKubeCalls(t, res, c.tool)
+				if got := imageRemovals(res, c.tool); !slices.Equal(got, []string{f1.ref()}) {
+					t.Errorf("the purge removed %q, want %s alone", got, f1.ref())
+				}
+				ns := slices.IndexFunc(res.calls, func(c call) bool { return slices.Contains(c.Args, "--raw") })
+				rm := callIndex(res, c.tool, "image", "rm", f1.ref())
+				if ns < 0 || rm < ns {
+					t.Errorf("the namespace was deleted at %d, the image removed at %d", ns, rm)
+				}
+				if lineAt(res, "image: removed "+f1.ref()) > lineAt(res, "purge: deleted "+state) {
+					t.Error("the image was removed after the entry")
+				}
+				if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the entry is still there: %v", err)
 				}
 			})
 		}

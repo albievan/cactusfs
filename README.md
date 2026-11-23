@@ -229,9 +229,8 @@ Said plainly, so that nobody finds out by trying:
   - no Helm release on Kubernetes: no `helm list`, `helm history` or `helm rollback`
     for what it made (going back is `--install` with the earlier image), and a
     namespace that holds a Helm release of the same name is refused;
-  - Rancher Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`) is not handed to the
-    Kubernetes path yet: the script says so and exits 3 (PLAN 10.6); a cluster on
-    Rancher Desktop's containerd engine is refused;
+  - a cluster on Rancher Desktop's containerd engine is refused (its Kubernetes,
+    `RANCHER_KUBERNETES=yes`, takes both modes);
   - `VAULT_CA_FILE` is refused on the Docker targets, standalone and cluster: the
     config volume does not carry it yet, so Vault's certificate must be one the
     image trusts;
@@ -244,18 +243,16 @@ Said plainly, so that nobody finds out by trying:
     Linux, AlmaLinux and CentOS Stream only;
   - not yet run on Rancher Desktop or a Kubernetes other than k3s: those paths are
     proven against recording fakes ([Targets](#targets));
-  - on the Docker engines (`dd`, `ce`, `podman`, `rancher`) every `--install` from
-    binaries builds an image with a new digest, even of the same binaries, and the
-    script removes none of them, a purge included: remove old `cactusfs:<version>-*`
-    tags yourself (`docker`, `podman` or `nerdctl image rm`). On k3s the tags it
-    imported stay on the node until a purge, which removes those that no pod or
-    workload still names (none under `K3S_IMPORT`) (PLAN 10.14);
-  - S3 published beyond the loopback (a non-loopback `BIND`, a NodePort or a
-    LoadBalancer) and reached by an address or name fails TLS verification unless
-    `TLS_HOSTS` listed it at the first install; nothing warns when it is empty
-    (PLAN 10.14). The binaries of
-    `make image-binaries` are in no published release: run `make image-binaries` first
-    for the default `IMAGE_SOURCE=binaries`.
+  - the image tags it built, loaded or imported stay until an upgrade on a Docker
+    engine replaces them, or a purge ([Image tags](#image-tags)); on Kubernetes only
+    a purge removes them; a tag the script did not make is never removed, and on k3s
+    an image imported by `K3S_IMPORT`'s command is left;
+  - S3 published beyond the loopback (a non-loopback `BIND`, a compose cluster, a
+    NodePort or a LoadBalancer) and reached by an address or name fails TLS
+    verification unless `TLS_HOSTS` listed it at the first install: the install warns
+    when it is empty, and the development certificate cannot be given names later.
+    The binaries of `make image-binaries` are in no published release: run
+    `make image-binaries` first for the default `IMAGE_SOURCE=binaries`.
 
 ## Build from source
 
@@ -949,7 +946,7 @@ A cluster on the local KMS shares one key file among its nodes and is refused un
 | Podman | `podman` | yes | yes: `podman compose`, which needs Podman's API socket (`podman.socket`) | `make test-deploy`, both modes (Podman 5.8 on Linux, SELinux enforcing) |
 | Rancher Desktop, moby | `rancher` (`RANCHER_ENGINE=auto` or `moby`) | yes: Docker Desktop's code through the context `rancher-desktop` | yes | no: the recording fakes of `make deploy-check` only (PLAN 10.6) |
 | Rancher Desktop, containerd | `rancher` (`RANCHER_ENGINE=auto` or `containerd`) | yes, through `nerdctl` | refused: `nerdctl compose` cannot upgrade one node at a time | no: the fakes only (PLAN 10.6) |
-| Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | **not built**: exits 3 | **not built** | - |
+| Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | yes: the k3s and k8s path through the context `rancher-desktop`, the image built on the engine its k3s sees (`nerdctl --namespace k8s.io` on containerd, `docker --context rancher-desktop` on moby) and run with `imagePullPolicy: Never` | yes | no: the fakes only (PLAN 10.6) |
 | k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge; standalone on a remote k3s server over `K3S_SSH` with `K8S_STORAGE=pvc` (local-path): install, round trip through the NodePort, upgrade, uninstall, reinstall and purge (PLAN 10.13) |
 | Kubernetes (1.27 or later aimed at; the version is not checked) | `k8s` with `K8S_CONTEXT` (the current context is never assumed) | yes | yes | no: the fakes only |
 
@@ -1010,7 +1007,7 @@ is the target and its Docker or kubectl context - `dd-default`, `ce-default`,
 | `ssh-known-hosts` | `CE_HOST`: the host keys pinned at the first install ([below](#adding-a-servers-host-key)) |
 | `compose/` | a compose cluster on this machine: `compose.yaml`, the generated `override.yaml` and `compose.env`, and `secrets/` |
 | `namespace`, `namespace-uid` | Kubernetes: the namespace and its marker, without which the script treats a namespace as somebody else's |
-| `images` | k3s: the image tags the script imported, which a purge removes |
+| `images` | the image tags the script made: on k3s those it imported; on a Docker engine and Rancher Desktop's Kubernetes `target <tag> <engine ID>` for those it built or loaded on the target's engine, and `here:<context> <tag> <engine ID>` for a copy built on this machine for `CE_HOST` ([Image tags](#image-tags)) |
 
 A secret you give as a file is read from that file: keep it, as you keep `STATE_DIR`.
 
@@ -1165,12 +1162,64 @@ before the admin port is reachable from anywhere but this machine; a non-loopbac
   good. It asks for the deployment's name at the terminal, or takes
   `--purge-confirm=NAME`; never from the env file. In this order: the data (volumes, or
   claims), a listing that proves none is left, the target's secrets (and the namespace,
-  when it is the script's and empty), and last the deployment's entry of `STATE_DIR` -
+  when it is the script's and empty), the image tags it recorded making that nothing
+  uses ([Image tags](#image-tags)), and last the deployment's entry of `STATE_DIR` -
   nothing else of it. A step that fails stops the purge with the entry kept. Only what
   carries the deployment's label is deleted, on the engine or cluster recorded for it.
   With `K8S_STORAGE=hostpath` the host directories, and on a StorageClass whose
   `reclaimPolicy` is `Retain` the released PersistentVolumes, are named and left:
   the script deletes no cluster-scoped object.
+
+### Image tags
+
+An image made of `make image-binaries`'s folder takes the time of the commit
+`BUILDINFO` names (git's committer time, when this repository holds that commit), so
+that another install of them adds no image - of the same binaries, or of the same
+folder, by engine:
+
+- `podman build` is given `--timestamp`, and `nerdctl build` `SOURCE_DATE_EPOCH` with
+  the output `type=docker,rewrite-timestamp=true` (BuildKit 0.13 or later): the image's
+  times and every file's time in its layers are the commit's, so **the same binaries**
+  make an image of the same digest and the same tag `cactusfs:<version>-<build>-<12 hex>`.
+- `docker buildx build` is given `SOURCE_DATE_EPOCH` and `--provenance=false`, which fix
+  the image's own times, but on Docker's `docker` driver the files of the layers keep
+  their own times: the engine's exporter drops `rewrite-timestamp` on the classic image
+  store and refuses it on the containerd store. There **the same folder** of binaries
+  makes the same image; a copy of it made anew (new file times) makes another, and its
+  tag is then removed as below.
+
+When git does not find that commit the run says so, and the image takes the time of its
+build.
+
+The tags the script makes on an engine that did not hold them - built there, or loaded
+there from the engine they were built on (`CE_HOST`) - are recorded in the entry's
+`images` file, each with the ID of its engine: the deployment's (`engine-id` of its
+`target` file) for the target's engine, and `docker --context <context> info`'s for the
+copy built on this machine for `CE_HOST`. A tag that was there before (another
+deployment's, or yours) and an `IMAGE` it runs are never recorded, nor is a tag on the
+engine of a Kubernetes target other than Rancher Desktop's. Once an upgrade's nodes are
+ready, the tag the replaced nodes ran is removed when it is recorded and no container of
+that engine, stopped ones included, names it; so are the copies built on this machine
+for `CE_HOST` by earlier runs. A compose cluster's `init` container keeps the image of
+the first install until an uninstall removes it. A purge removes, before the entry,
+every recorded tag no container uses, on `dd`, `ce` (here, or on `CE_HOST` over its SSH
+route), `podman`, `rancher` and Rancher Desktop's Kubernetes, each with the engine's own
+CLI (`docker --context`, `podman`, `nerdctl` in its namespace); on k3s the tags it
+imported, as above. On Rancher Desktop's Kubernetes, after an upgrade and at a purge, a
+tag is also kept while a pod or a workload's template (StatefulSet, Deployment,
+DaemonSet, Job, CronJob) of any namespace names it, or the digest of its image (a pod's
+`imageID`); when those cannot be listed, every tag is kept.
+
+A recorded tag is acted on only on the engine whose ID its line names: when the context
+or the settings now reach another engine, or the line has no ID (written by an earlier
+build of the script), the tag is named and left. On Rancher Desktop's Kubernetes a line
+names the cluster (its `kube-system` UID) and the engine that holds the tag: after
+Rancher Desktop is switched between moby and containerd, the tags recorded on the
+other engine are named and left. `--engine-replaced` takes the recorded
+engine as gone with its images: the lines of the target's engine leave `images`, each
+said, and nothing is removed. A tag that cannot be removed is named and left, and the
+purge goes on. An uninstall removes no tag: `--install` runs the deployment again with
+it.
 
 ### Windows through WSL 2
 
@@ -2277,9 +2326,14 @@ address of any machine is kept in this repository.
 
 Notes:
 
-- The builder reaches the container engine through its socket (`/var/run/docker.sock` by
-  default). For rootless Podman:
-  `make check ENGINE=podman ENGINE_SOCKET=$XDG_RUNTIME_DIR/podman/podman.sock`.
+- The builder reaches the container engine through its socket: `/var/run/docker.sock`
+  by default, and with `ENGINE=podman` Podman's API socket - `/run/podman/podman.sock`
+  for root, `$XDG_RUNTIME_DIR/podman/podman.sock` rootless - which `podman.socket`
+  must be serving (`systemctl start podman.socket`, or `systemctl --user` rootless).
+  `ENGINE_SOCKET=...` names another. Under `ENGINE=podman` a target that needs the
+  engine (`check`, `image`, `image-binaries`, `test-int`, `verify-clone` and the
+  others listed as `ENGINE_SOCKET_TARGETS` in the `Makefile`) stops before it starts
+  when that socket is not there - `XDG_RUNTIME_DIR` unset included - and says so.
   `make test-int` (within `make check`) pauses a container (`TestSiteReplication`), which
   rootless Podman can do only on cgroup v2 with the `freezer` controller delegated to the
   user: `cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers` must list

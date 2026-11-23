@@ -938,6 +938,7 @@ compose_install() {
 	state_mode_check
 	compose_settings
 	compose_refusals
+	tls_hosts_warn "on every address of the machine of its engine, at the ports $_cp_s3, $((_cp_s3 + 10)), $((_cp_s3 + 20)) and $((_cp_s3 + 30)) (a compose cluster)"
 	# On CE_HOST, CE_INSTALL_DOCKER=yes installs Docker CE (and its compose
 	# plugin) once what refuses without an engine has been asked - the
 	# image's such refusals among it (PLAN 10.4's image_precheck; ce.sh).
@@ -979,6 +980,16 @@ compose_install() {
 	fi
 
 	_cp_pending=$STATE/compose/recreate-pending
+	# The images the nodes ran before this run: an upgrade removes those
+	# the script recorded making once every node is ready (PLAN 10.14).
+	_ci_old=
+	while IFS='|' read -r _ci_n _ci_s _ci_state _ci_img; do
+		case $_ci_s in
+		node?) _ci_old="$_ci_old $_ci_img" ;;
+		esac
+	done <<EOF
+$_cp_ctrs
+EOF
 	if [ -n "$_cp_svcs" ]; then
 		if [ -f "$_cp_pending" ]; then
 			say "rotated, not yet held by every node: $(tr '\n' ' ' <"$_cp_pending" | sed 's/ $//') - every node is made again, one at a time, so that its mounts hold the new files"
@@ -1005,6 +1016,8 @@ compose_install() {
 		rm -f "$_cp_pending"
 		say "compose: every node holds the rotated files and is ready: removed $_cp_pending"
 	fi
+	# shellcheck disable=SC2086 # image references, without spaces
+	docker_images_replaced $_ci_old
 	compose_reach
 	say "ready: the cluster $_cp_name runs $_dk_image"
 	docker_admin_notice

@@ -1458,6 +1458,7 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 				{"curl", "-q", "-g", "-s", "-o", "/dev/null", "--noproxy", "*", "--max-time", "3", "-w", "%{num_connects}", "http://127.0.0.1:9001/"},
 				{"docker", "context", "inspect", "default", "--format", "{{.Endpoints.docker.Host}}"},
 				{"docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"},
+				{"git", "-C", r.repo, "show", "-s", "--format=%ct", imgCommit + "^{commit}"},
 				{"docker", "image", "inspect", "--format", "{{.Id}}", workTag(runtime.GOARCH)},
 			}
 			if !slices.EqualFunc(asked, want, slices.Equal[[]string]) {
