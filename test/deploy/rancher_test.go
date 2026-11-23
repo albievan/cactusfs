@@ -662,8 +662,9 @@ func TestRancherCluster(t *testing.T) {
 	})
 }
 
-// TestRancherKubernetes: RANCHER_KUBERNETES=yes hands the install to the
-// Kubernetes path (PLAN 10.10's stub) without asking the engine, and the
+// TestRancherKubernetes: RANCHER_KUBERNETES=yes stops at 10.6's stub for
+// Rancher Desktop's Kubernetes without asking the engine (k3s and k8s are
+// built by 10.10 and 10.11; handing this target to them is 10.6's), and the
 // image for its k3s is made on the engine here - on containerd by nerdctl
 // in the namespace k8s.io, which its k3s sees, on the route "local"; on
 // moby by the Docker CLI of the context rancher-desktop.
@@ -675,7 +676,7 @@ func TestRancherKubernetes(t *testing.T) {
 			t.Parallel()
 			r := r.fresh(t)
 			res := r.withEnv("KMS=local\n"+k8s, "--install")
-			res.want(t, 3, "engine: kubectl --context rancher-desktop", "not built yet (PLAN 10.10)")
+			res.want(t, 3, "engine: kubectl --context rancher-desktop", "not built yet (PLAN 10.6)")
 			if len(res.calls) != 0 {
 				t.Errorf("the hand-over ran %v", res.calls)
 			}

@@ -37,11 +37,13 @@
 #   as tar streams like a volume. On Rancher Desktop (PLAN 10.6) the copy is
 #   the same two volumes, on its moby engine through the Docker CLI and on
 #   its containerd engine through nerdctl (deploy/lib/rancher.sh: a put
-#   there is a tar stream owned by 65532, nerdctl's cp having no -a).
-#   Kubernetes (Secrets of the namespace: read back and compared by 10.9,
-#   wired here by 10.10) keeps its copy as that step builds - Rancher
-#   Desktop's Kubernetes too; secrets_where and secrets_install are where
-#   they are dispatched.
+#   there is a tar stream owned by 65532, nerdctl's cp having no -a). On
+#   Kubernetes (PLAN 10.10) the target's copy is the Secrets of the
+#   deployment's namespace, read back and compared by deploy/lib/k8s.sh
+#   (k8s_secrets_ensure, PLAN 10.9), what neither copy holds made here
+#   (secrets_ensure_k8s). Rancher Desktop's Kubernetes keeps its copy as
+#   10.6 builds; secrets_where and secrets_install are where they are
+#   dispatched.
 #
 # Never made again: a secret either copy holds is used as it is. One copy
 # missing is put back from the other - the target's from STATE before
@@ -72,15 +74,15 @@
 # secrets_where: "volumes" when this file keeps the target's copy - a
 # deployment on a Docker engine or Rancher Desktop's engine, standalone or
 # a compose cluster (PLAN 10.8: its secrets unit a directory, its config
-# unit a volume) - else the step of PLAN milestone 10 that will: the
-# Secrets of a Kubernetes namespace, 10.10.
+# unit a volume) - or "kubernetes" for the Secrets of a namespace (PLAN
+# 10.10). Every target is one of the two.
 secrets_where() {
 	if on_kubernetes; then
-		echo 10.10
+		echo kubernetes
 	else
 		case $TARGET in
 		dd | ce | podman | rancher) echo volumes ;;
-		*) echo 10.10 ;;
+		*) fail "internal: no place for the secrets of the target $TARGET" ;;
 		esac
 	fi
 }
@@ -112,9 +114,27 @@ secrets_settings() {
 	# secrets on the machine compose runs on: compose.sh sets _cp_dir, the
 	# deployment's compose directory there, before it calls anything here.
 	_s_secdir=
-	if [ "$_s_mode" = cluster ]; then
+	if [ "$_s_mode" = cluster ] && ! on_kubernetes; then
 		[ -n "${_cp_dir:-}" ] || fail "internal: cluster mode without its compose directory (compose_settings)"
 		_s_secdir=$_cp_dir/secrets
+	fi
+	# The node IDs dev-init issues certificates for: the standalone node of
+	# a Docker engine is the deployment's name, a compose cluster's nodes
+	# are compose.yaml's node1 to node4, and the chart names its nodes
+	# <name>-<pool>-<index> (k8s_node_ids).
+	_s_nodes=$_s_name
+	[ "$_s_mode" != cluster ] || _s_nodes=node1,node2,node3,node4
+	# The engine here, where dev-init runs: Podman for the podman target,
+	# and for a Kubernetes target when there is no Docker CLI here (as
+	# image.sh chooses); else the Docker CLI with its context.
+	_s_local=docker
+	if [ "$TARGET" = podman ]; then
+		_s_local=podman
+	elif on_kubernetes; then
+		_s_nodes=$(k8s_node_ids | tr '\n' ',' | sed 's/,$//')
+		if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+			_s_local=podman
+		fi
 	fi
 }
 
@@ -230,7 +250,7 @@ target_engine() {
 local_engine() {
 	_le_how=$1
 	shift
-	if [ "$TARGET" = podman ]; then
+	if [ "$_s_local" = podman ]; then
 		"$_le_how" podman "$@"
 	elif on_nerdctl; then
 		"$_le_how" nerdctl --namespace "$_rd_ns" "$@"
@@ -546,6 +566,10 @@ secrets_check() {
 # before STATE is written: first secrets_check, then what needs the copy of
 # the target read.
 secrets_install() {
+	if [ "$(secrets_where)" = kubernetes ]; then
+		secrets_install_k8s
+		return 0
+	fi
 	if [ "$DRY_RUN" = 1 ]; then
 		secrets_plan
 		return 0
@@ -611,10 +635,7 @@ secrets_install() {
 		replace_file "$_rg" "$STATE/${_si_entry%%=*}"
 		say "secrets: rotated $_rk: $STATE/${_si_entry%%=*} replaced, after the volume's copy"
 	done
-	trap - EXIT HUP INT TERM
-	# The cleanup of CE_HOST's work directory, which this run's trap held
-	# too, is set again (deploy/lib/ce.sh).
-	[ -z "${_ce_trap:-}" ] || ce_trap_set
+	cleanup_drop secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
 	secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
 	SECRETS_WORK=
 	if [ -n "$_s_secdir" ]; then
@@ -631,6 +652,10 @@ secrets_install() {
 # targets' purge (docker_engine_check, deploy/lib/docker.sh); called
 # plainly, never in a command substitution.
 engine_id_ask() {
+	if on_kubernetes; then
+		k8s_cluster_id
+		return 0
+	fi
 	if [ "$TARGET" = podman ]; then
 		_eia=$(target_engine query info --format '{{.Host.Hostname}}:{{.Store.GraphRoot}}' </dev/null) ||
 			fail "could not ask $(engine) who it is (its message is above)"
@@ -653,14 +678,20 @@ engine_id_ask() {
 # one (state_record). A KMS other than the one recorded is refused.
 engine_id_check() {
 	engine_id_ask
-	say "engine ID: $_engine_id"
+	if on_kubernetes; then
+		_eic_what=cluster
+		say "cluster ID (the UID of its namespace kube-system): $_engine_id"
+	else
+		_eic_what=engine
+		say "engine ID: $_engine_id"
+	fi
 	_engine_rerecord=
 	[ -f "$STATE/target" ] || return 0
 	_eic_recorded=$(sed -n 's/^engine-id=//p' "$STATE/target" | head -n 1 | printable)
 	if [ "$_eic_recorded" != "$_engine_id" ]; then
 		[ "$ENGINE_REPLACED" = 1 ] ||
-			refuse "$STATE was made on the engine '$_eic_recorded', and the settings ($(engine_identity)) now reach another, '$_engine_id': the secrets of one deployment are never given to a second engine. Set the settings back; or, if the engine '$_eic_recorded' is gone and this one replaced it (a factory reset), say --engine-replaced"
-		warn "--engine-replaced: the deployment made on the engine '$_eic_recorded' is taken as gone; its secrets in $STATE now belong to the engine '$_engine_id', and are put there"
+			refuse "$STATE was made on the $_eic_what '$_eic_recorded', and the settings ($(engine_identity)) now reach another, '$_engine_id': the secrets of one deployment are never given to a second $_eic_what. Set the settings back; or, if the $_eic_what '$_eic_recorded' is gone and this one replaced it (a factory reset, a cluster made again), say --engine-replaced"
+		warn "--engine-replaced: the deployment made on the $_eic_what '$_eic_recorded' is taken as gone; its secrets in $STATE now belong to the $_eic_what '$_engine_id', and are put there"
 		_engine_rerecord=1
 	fi
 	_eic_kms=$(sed -n 's/^kms=//p' "$STATE/target" | head -n 1 | printable)
@@ -707,15 +738,11 @@ secrets_begin() {
 	mkdir -p "$STATE"
 	chmod 0700 "$STATE" "${STATE%/*}"
 	SECRETS_WORK=$(mktemp -d "$STATE/.work.XXXXXX")
-	# The paths the cleanup works on are written into the trap now, quoted,
-	# not read when it fires: nothing a function does in between - by
-	# assigning a variable of the same name - can point it elsewhere. The
-	# cleanup of CE_HOST's work directory (_ce_trap, deploy/lib/ce.sh), text
-	# whose path was written into it when it was made, goes with it.
-	trap "secrets_end $(shown "$SECRETS_WORK") $(shown "$STATE") $(shown "$_sb_top")${_ce_trap:+; $_ce_trap}" EXIT
-	trap 'exit 129' HUP
-	trap 'exit 130' INT
-	trap 'exit 143' TERM
+	# The paths the cleanup works on are written into the run's one EXIT
+	# trap now, quoted, not read when it fires (cleanup_add, common.sh):
+	# nothing a function does in between - by assigning a variable of the
+	# same name - can point it elsewhere.
+	cleanup_add secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
 }
 
 # secrets_end <run's directory> <entry> <first directory this run made, or
@@ -937,7 +964,11 @@ secrets_make() {
 # keeps - the certificates, when TLS_CERT_FILE does not give them, or
 # kms.json on the local KMS, when KMS_KEY_FILE does not.
 secrets_devinit() {
-	if [ -z "$_s_cert" ]; then
+	if [ -n "${_s_devinit_all:-}" ]; then
+		# On Kubernetes, a configuration neither copy holds is dev-init's
+		# whole: the node certificates of a cluster are in it too.
+		echo yes
+	elif [ -z "$_s_cert" ]; then
 		echo yes
 	elif [ "$_s_kms" = local ] && [ -z "$_s_keyfile" ]; then
 		echo yes
@@ -1045,8 +1076,12 @@ devinit_run() {
 	_dr_ctr=$_s_name-dev-init
 	_dr_in=$SECRETS_WORK/dev-init-in
 	mkdir "$_dr_in"
-	if [ "$_s_kms" = local ]; then
+	if [ "$_s_kms" = local ] && [ -f "$STATE/secrets/kms-passphrase" ]; then
 		copy_new "$STATE/secrets/kms-passphrase" "$_dr_in/kms-passphrase"
+	elif [ "$_s_kms" = local ]; then
+		# On Kubernetes a passphrase given as a file is read from it
+		# (deploy/lib/k8s.sh, k8s_secret_file).
+		copy_new "$_s_phrase" "$_dr_in/kms-passphrase"
 	else
 		# dev-init always seals a key file; with Vault it is thrown away.
 		generate "$_dr_in/kms-passphrase" 'A-Za-z0-9' 48
@@ -1065,27 +1100,28 @@ devinit_run() {
 		set -- --entrypoint /cactusfs "$_dc_img"
 	fi
 	rm -f "$_dr_in/kms-passphrase"
-	# A compose cluster's nodes are compose.yaml's node1 to node4.
-	_dr_nodes=$_s_name
-	[ "$_s_mode" != cluster ] || _dr_nodes=node1,node2,node3,node4
-	set -- "$@" dev-init --dir /tmp/out --nodes "$_dr_nodes" --validity "$_s_validity" --kms-passphrase-file /tmp/kms-passphrase
+	set -- "$@" dev-init --dir /tmp/out --nodes "$_s_nodes" --validity "$_s_validity" --kms-passphrase-file /tmp/kms-passphrase
 	[ -z "$_s_hosts" ] || set -- "$@" --hosts "$_s_hosts"
 	local_engine run create --name "$_dr_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
-		--platform "linux/$_dr_arch" --user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges "$@" </dev/null
+		--platform "linux/$_dr_arch" --user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges "$@" </dev/null ||
+		fail "making the container $_dr_ctr failed (the engine's message is above)"
 	# nerdctl's cp has no -a: the stream is owned by 65532 (rancher_tar_owner).
 	if on_nerdctl; then
-		local_engine run cp - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar"
+		local_engine run cp - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar" ||
+			fail "copying the passphrase into $_dr_ctr failed (the engine's message is above)"
 	else
-		local_engine run cp -a - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar"
+		local_engine run cp -a - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar" ||
+			fail "copying the passphrase into $_dr_ctr failed (the engine's message is above)"
 	fi
 	rm -f "$SECRETS_WORK/dev-init.tar"
 	{
 		local_engine run start -a "$_dr_ctr" </dev/null 2>&1 || echo failed >"$SECRETS_WORK/dev-init.failed"
 	} | printable
 	[ ! -f "$SECRETS_WORK/dev-init.failed" ] || fail "dev-init failed in its container (what it said is above)"
-	local_engine query cp "$_dr_ctr:/tmp/out" - </dev/null >"$SECRETS_WORK/dev-init.tar"
-	local_engine run rm -f "$_dr_ctr" </dev/null
-	tar -x -o -f "$SECRETS_WORK/dev-init.tar" -C "$_dr_in"
+	local_engine query cp "$_dr_ctr:/tmp/out" - </dev/null >"$SECRETS_WORK/dev-init.tar" ||
+		fail "copying what dev-init wrote out of $_dr_ctr failed (the engine's message is above)"
+	local_engine run rm -f "$_dr_ctr" </dev/null || fail "removing the container $_dr_ctr failed (the engine's message is above)"
+	tar -x -o -f "$SECRETS_WORK/dev-init.tar" -C "$_dr_in" || fail "what dev-init wrote is not a tar stream"
 	rm -f "$SECRETS_WORK/dev-init.tar"
 	only_plain "$_dr_in" "what dev-init gave back"
 	[ -f "$_dr_in/out/ready" ] && [ -f "$_dr_in/out/s3.pem" ] ||
@@ -1245,5 +1281,152 @@ unit_put() {
 		target_engine run cp - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
 	else
 		target_engine run cp -a - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
+	fi
+}
+
+# --- Kubernetes (PLAN 10.10) ------------------------------------------------------
+#
+# The target's copy is the Secrets of the deployment's namespace, which
+# deploy/lib/k8s.sh reads back and compares, file to file, with the local
+# copy (k8s_secrets_ensure, PLAN 10.9): created where the cluster lacks
+# them, copied back where only the cluster has them, refused where the two
+# differ, rotated for a certificate or token of the operator's. What neither
+# copy holds is made here, by the one hook k8s.sh calls, secrets_ensure_k8s:
+# the root credentials and the passphrase from /dev/urandom, kms.json and the
+# certificates by dev-init on this machine. A secret given by its *_FILE
+# setting is read from that file there; one that would open the data or
+# begins the deployment (the root credentials, the passphrase, kms.json) must
+# equal the copy STATE holds of it, or the run is refused.
+
+# secrets_check_k8s: what secrets_install_k8s asks before anything is
+# written or made, each refusal before any change (k8s_install asks it
+# before the image is made): the files given, the cluster's identity
+# against the record (engine_id_check: the UID of kube-system), a
+# certificate given that replaces STATE's while STATE keeps the CA of the
+# one it replaces, and - when dev-init may run, which is when STATE holds
+# no complete configuration - what dev-init needs (under --from-source
+# devinit_run asks it, after the image is made).
+secrets_check_k8s() {
+	[ -z "${_sc_done:-}" ] || return 0
+	_sc_done=1
+	umask 077
+	secrets_settings
+	for _si_key in TLS_CERT_FILE TLS_CA_FILE; do
+		if [ "$_si_key" = TLS_CERT_FILE ]; then _si_file=$_s_cert; else _si_file=$_s_ca; fi
+		if [ -n "$_si_file" ] && { [ ! -f "$_si_file" ] || [ ! -r "$_si_file" ]; }; then
+			bad "$_si_key" "is not a file that can be read"
+		fi
+	done
+	engine_id_check
+	if [ -n "$_s_cert" ] && [ -z "$_s_ca" ] && [ -f "$STATE/config/s3-ca.pem" ] && [ -f "$STATE/config/s3.pem" ] &&
+		! cmp -s "$_s_cert" "$STATE/config/s3.pem"; then
+		refuse "TLS_CERT_FILE replaces the certificate of $STATE/config/s3.pem, and s3-ca.pem, the CA of the certificate it replaces, would be kept and handed to clients: give the CA that issued the new certificate in TLS_CA_FILE"
+	fi
+	_si_devinit=
+	if [ ! -f "$STATE/config/ready" ]; then
+		if [ "$(secrets_devinit)" = yes ] || { [ "$(setting DEPLOY_MODE)" = cluster ] && [ -z "$(setting NODE_CA_FILE)" ]; }; then
+			_si_devinit=1
+		fi
+	fi
+	if [ -n "$_si_devinit" ] && [ "$_s_source" != source ] && [ "$DRY_RUN" = 0 ]; then
+		devinit_check
+	fi
+}
+
+# secrets_install_k8s: secrets_install on Kubernetes. The given files are
+# compared with STATE's copies first; then the namespace's Secrets are read
+# back and compared (k8s_secrets_ensure), what neither copy holds is made
+# (secrets_ensure_k8s), what the cluster lacks is created; then the record
+# (the cluster's ID) is written, and a certificate or token of the
+# operator's that rotated the cluster's Secret replaces STATE's copy too -
+# the target's first, as on a Docker engine. In a dry run the Secrets are
+# read back and compared, and nothing is made or written.
+secrets_install_k8s() {
+	secrets_check_k8s
+	if [ "$DRY_RUN" = 1 ]; then
+		k8s_secrets_ensure
+		return 0
+	fi
+	_si_rotate=
+	secrets_begin
+	given_check "$_s_root_id" ROOT_ACCESS_KEY_FILE secrets root-access-key keep
+	given_check "$_s_root_key" ROOT_SECRET_KEY_FILE secrets root-secret-key keep
+	given_check "$_s_phrase" KMS_PASSPHRASE_FILE secrets kms-passphrase keep
+	given_check "$_s_keyfile" KMS_KEY_FILE config kms.json keep
+	given_check "$_s_token" VAULT_TOKEN_FILE secrets vault-token rotate
+	given_check "$_s_cert" TLS_CERT_FILE config s3.pem rotate
+	given_check "$_s_tlskey" TLS_KEY_FILE config s3.key rotate
+	given_check "$_s_ca" TLS_CA_FILE config s3-ca.pem rotate
+	k8s_secrets_ensure
+	state_record
+	for _si_entry in $_si_rotate; do
+		rotation_given "${_si_entry%%=*}"
+		[ -n "$_rg" ] || continue
+		replace_file "$_rg" "$STATE/${_si_entry%%=*}"
+		say "secrets: rotated $_rk: $STATE/${_si_entry%%=*} replaced, after the namespace's Secret"
+	done
+	cleanup_drop secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
+	secrets_end "$SECRETS_WORK" "$STATE" "$_sb_top"
+	SECRETS_WORK=
+	say "secrets: $STATE and the Secrets of the namespace $(k8s_ns) hold the same secrets"
+}
+
+# secrets_ensure_k8s <file>: the hook of k8s_secrets_ensure (deploy/lib/k8s.sh)
+# - the secrets neither copy holds, by the paths in STATE the file lists one
+# a line, made once, after what the cluster alone held was copied back. What
+# the copies hold together must be whole first, or nothing is made: half a
+# root pair, kms.json without its passphrase, or part of the configuration
+# (a run stopped while making it, a file removed) is refused - a part made
+# again beside what is there would never match it. Then, in this order: the
+# root credentials and the passphrase from /dev/urandom (dev-init seals
+# kms.json with the passphrase), and the configuration by dev-init on this
+# machine (config_make, with the operator's own files in their place). In a
+# dry run nothing is made.
+secrets_ensure_k8s() {
+	_sek_root=
+	_sek_phrase=
+	_sek_config=
+	while IFS= read -r _sek; do
+		case $_sek in
+		"$STATE/secrets/root-access-key" | "$STATE/secrets/root-secret-key") _sek_root=1 ;;
+		"$STATE/secrets/kms-passphrase") _sek_phrase=1 ;;
+		"$STATE/config/"*) _sek_config="$_sek_config ${_sek#"$STATE/config/"}" ;;
+		"$STATE/secrets/vault-token") refuse "KMS=vault: the Vault token is in neither $STATE nor the Secret $_s_name-vault-token; give it with VAULT_TOKEN_FILE" ;;
+		*) fail "internal: secrets_ensure_k8s was handed $_sek" ;;
+		esac
+	done <"$1"
+	if [ -n "$_sek_root" ]; then
+		if [ -f "$STATE/secrets/root-access-key" ] || [ -f "$STATE/secrets/root-secret-key" ] || [ -n "$_s_root_id" ] || [ -n "$_s_root_key" ]; then
+			refuse "one of the root credentials is in $STATE/secrets, a file given or the Secret $_s_name-root, and the other is in none of them: the deployment began with both; give them with ROOT_ACCESS_KEY_FILE and ROOT_SECRET_KEY_FILE"
+		fi
+	fi
+	if [ -n "$_sek_phrase" ] && { [ -f "$STATE/config/kms.json" ] || [ -n "$_s_keyfile" ]; }; then
+		refuse "the key file kms.json is there and its passphrase is in neither $STATE/secrets nor the Secret $_s_name-kms-passphrase: a new passphrase would open nothing; give the one it was made with in KMS_PASSPHRASE_FILE"
+	fi
+	if [ -n "$_sek_config" ] && [ -n "$(files_of "$STATE/config")" ]; then
+		if [ -f "$STATE/config/ready" ] && [ "$_sek_config" = " kms.json" ]; then
+			refuse "the certificates in $STATE/config are complete, and kms.json is in neither it nor the Secret $_s_name-kms: the deployment's objects are sealed under a key file a new one would not open; give the one it was made with in KMS_KEY_FILE"
+		fi
+		refuse "$STATE/config holds part of the deployment's certificates and key file, and${_sek_config} is in neither it nor the namespace's Secrets: nothing in it is made again; if nothing was ever started with them, remove $STATE/config and the deployment's Secrets, then run again"
+	fi
+	if [ "$DRY_RUN" = 1 ]; then
+		say "dry run: would make what neither copy holds:$([ -z "$_sek_root" ] || printf ' the root credentials')$([ -z "$_sek_phrase" ] || printf ' the KMS passphrase')$([ -z "$_sek_config" ] || printf ' the certificates and key file (dev-init)')"
+		return 0
+	fi
+	[ -n "${SECRETS_WORK:-}" ] || fail "internal: secrets_ensure_k8s outside secrets_install"
+	mkdir -p "$STATE/secrets"
+	if [ -n "$_sek_root" ]; then
+		generate "$STATE/secrets/root-access-key" 'A-Z2-7' 20
+		generate "$STATE/secrets/root-secret-key" 'A-Za-z0-9' 40
+		say "secrets: made the root credentials, $STATE/secrets/root-access-key and $STATE/secrets/root-secret-key (never printed: read them there)"
+	fi
+	if [ -n "$_sek_phrase" ]; then
+		generate "$STATE/secrets/kms-passphrase" 'A-Za-z0-9' 48
+		say "secrets: made the KMS passphrase, $STATE/secrets/kms-passphrase - back up $STATE: kms.json opens nothing without it"
+	fi
+	modes "$STATE/secrets"
+	if [ -n "$_sek_config" ]; then
+		_s_devinit_all=1
+		config_make
 	fi
 }

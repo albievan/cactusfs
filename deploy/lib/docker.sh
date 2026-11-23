@@ -730,11 +730,12 @@ docker_reach_here() {
 	say "admin API and console: https://$(docker_dial "$_dk_admin_bind"):$_dk_admin_port"
 }
 
-# docker_cert_expiry: when the S3 certificate of STATE_DIR expires, read by
-# openssl when it is installed - only its notAfter is printed (a
-# certificate is public; its key is never read).
+# docker_cert_expiry [certificate]: when the S3 certificate of STATE_DIR
+# (or the certificate given) expires, read by openssl when it is installed -
+# only its notAfter is printed (a certificate is public; its key is never
+# read).
 docker_cert_expiry() {
-	_ce=$STATE/config/s3.pem
+	_ce=${1:-$STATE/config/s3.pem}
 	if [ ! -f "$_ce" ]; then
 		say "certificate: $_ce is not there"
 		return 0

@@ -485,6 +485,7 @@ script_vars() {
 ACTION
 ADOPT
 ANOTHER_TARGET
+CLEANUPS
 COMPOSE_NODES
 CR
 DEPLOY_DIR
@@ -495,6 +496,8 @@ FILE_SETTINGS
 FLAG_SETTINGS
 FOUND
 IFS
+K8S_TAKE_IMAGE_FIELD
+K8S_TAKE_LABEL_FIELD
 LABEL_NAME
 LABEL_TARGET
 LC_ALL
@@ -512,6 +515,8 @@ SETTINGS
 SOURCES
 SSH_CHECKED
 STATE
+TAKE_IMAGE
+TAKE_IMAGE_CONFIRM
 TARGET
 TARGETS
 TARGET_FROM
@@ -1086,8 +1091,9 @@ engine_identity() {
 # deployment's state: STATE_DIR/<target-id>/<name>/. For a target over ssh,
 # the destination; for the others the target and its context. The
 # engine's own ID is not part of the path: it is recorded in the entry and
-# compared by every install (engine_id_check, PLAN 10.3); the cluster's,
-# the UID of its kube-system namespace, is PLAN 10.10's.
+# compared by every install (engine_id_check, PLAN 10.3); so is the
+# cluster's, the UID of its kube-system namespace (PLAN 10.10), which an
+# uninstall and a purge compare as well.
 target_id() {
 	if [ "$TARGET" = ce ] && [ -n "$(setting CE_HOST)" ]; then
 		_id="ssh-$(setting CE_HOST)"

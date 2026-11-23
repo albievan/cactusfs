@@ -233,6 +233,65 @@ on_host() {
 	fi
 }
 
+# The cleanups of the run: one EXIT trap for the whole script (PLAN 10.10),
+# whose text is written again whenever a cleanup is added or dropped. Each
+# cleanup is a command whose words - paths among them - are quoted by
+# show_command when it is added, so that nothing is read when the trap
+# fires: a function that later assigns a variable of the same name cannot
+# point it elsewhere. They run last added, first: a work directory inside
+# the deployment's entry goes before the entry's own cleanup (secrets_end).
+# HUP, INT and TERM end the run as 129, 130 and 143, which runs them. A
+# subshell that adds its own starts from none (cleanup_none): a subshell's
+# trap must never run the cleanups of the shell that started it.
+CLEANUPS=
+
+# cleanup_add <word>...: a command the EXIT trap runs.
+cleanup_add() {
+	CLEANUPS="$(show_command "$@")$NL$CLEANUPS"
+	cleanup_trap
+}
+
+# cleanup_drop <word>...: the command, as cleanup_add was given it, is no
+# longer run by the trap (the caller has done it).
+cleanup_drop() {
+	_cd_line=$(show_command "$@")
+	_cd_rest=
+	while IFS= read -r _cd; do
+		[ -n "$_cd" ] || continue
+		[ "$_cd" = "$_cd_line" ] || _cd_rest="$_cd_rest$_cd$NL"
+	done <<EOF
+$CLEANUPS
+EOF
+	CLEANUPS=$_cd_rest
+	cleanup_trap
+}
+
+# cleanup_none: in a subshell, none of the cleanups of the shell that
+# started it.
+cleanup_none() {
+	CLEANUPS=
+	trap - EXIT
+}
+
+# cleanup_trap: the traps, as CLEANUPS says.
+cleanup_trap() {
+	if [ -z "$CLEANUPS" ]; then
+		trap - EXIT
+		return 0
+	fi
+	_ct=
+	while IFS= read -r _cd; do
+		[ -z "$_cd" ] || _ct="$_ct$_cd; "
+	done <<EOF
+$CLEANUPS
+EOF
+	# shellcheck disable=SC2064 # expanded now, on purpose: see above
+	trap "$_ct" EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
 # not_built <step> <text>: the stub of an action that a later step of PLAN
 # milestone 10 builds. Says what it will do and ends the script.
 not_built() {

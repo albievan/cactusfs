@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,10 +19,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // k8sBase is the start of the env file of a Kubernetes test: a k8s target
@@ -47,13 +50,7 @@ func (r *rig) k8s(env, code string, dryRun bool, extraEnv ...string) result {
 		r.t.Fatal(err)
 	}
 	envPath := r.envFile("site.env", env)
-	given := r.givenPaths(env)
-	before := snapshot(r.t, given)
-	defer func() {
-		if after := snapshot(r.t, given); !maps.Equal(before, after) {
-			r.t.Errorf("a file or directory the settings name was removed or changed:\nbefore %v\nafter  %v", before, after)
-		}
-	}()
+	defer r.givenGuard(env)()
 	dry := "0"
 	if dryRun {
 		dry = "1"
@@ -115,38 +112,81 @@ func (r *rig) givenPaths(env string) []string {
 	return out
 }
 
+// givenGuard snapshots the files and directories the env file names (its
+// *_FILE and *_DIR settings, givenPaths) and returns the check to defer: the
+// test fails when the run removed or changed any of them - or anything a
+// symbolic link among them leads to (the deferred minor of the review of
+// 10.9). Every run of the k8s tests goes through it, those through the
+// script (withEnv) as well as those through r.k8s.
+func (r *rig) givenGuard(env string) func() {
+	r.t.Helper()
+	given := r.givenPaths(env)
+	before := snapshot(r.t, given)
+	return func() {
+		if after := snapshot(r.t, given); !maps.Equal(before, after) {
+			r.t.Errorf("a file or directory the settings name was removed or changed:\nbefore %v\nafter  %v", before, after)
+		}
+	}
+}
+
 // snapshot is every file and directory under the paths, with a hash of each
-// file; a path that is not there is recorded as missing.
+// file; a path that is not there is recorded as missing. A symbolic link is
+// followed - recorded by where it points and what it leads to (a file's
+// hash, a directory's tree) - so that a run that changes what a link leads
+// to is seen; one that leads nowhere is recorded as such.
 func snapshot(t *testing.T, paths []string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	for _, p := range paths {
+	seen := map[string]bool{}
+	var walk func(p string)
+	walk = func(p string) {
+		if seen[p] {
+			return
+		}
+		seen[p] = true
 		info, err := os.Lstat(p)
 		if errors.Is(err, os.ErrNotExist) {
 			out[p] = "missing"
-			continue
+			return
 		}
 		if err != nil {
 			t.Fatal(err)
 		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[p] = "link to " + target
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(p), target)
+			}
+			walk(target)
+			return
+		}
 		if !info.IsDir() {
 			out[p] = hashFile(t, p)
-			continue
+			return
 		}
 		for rel, h := range tree(t, p) {
-			out[filepath.Join(p, rel)] = h
+			full := filepath.Join(p, rel)
+			out[full] = h
+			if h == "link" {
+				delete(out, full)
+				walk(full)
+			}
 		}
 		out[p] = "dir"
+	}
+	for _, p := range paths {
+		walk(p)
 	}
 	return out
 }
 
-// hashFile is the SHA-256 of a file, or "link" for a symbolic link.
+// hashFile is the SHA-256 of a file.
 func hashFile(t *testing.T, path string) string {
 	t.Helper()
-	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		return "link"
-	}
 	sum := sha256.Sum256([]byte(read(t, path)))
 	return hex.EncodeToString(sum[:])
 }
@@ -239,6 +279,17 @@ func insideNamespace(t *testing.T, r *rig, calls []call, ns string) {
 		case len(args) >= 2 && args[0] == "get" && slices.Contains([]string{"nodes", "storageclasses", "persistentvolumes"}, args[1]):
 		case len(args) >= 3 && args[0] == "get" && args[1] == "services" && all:
 		case len(args) >= 3 && args[0] == "get" && args[1] == "namespace" && (args[2] == "kube-system" || args[2] == ns):
+		// The kubeconfig here, not the cluster: the API server of the context.
+		case len(args) >= 2 && args[0] == "config" && args[1] == "view":
+		// Discovery: the kinds the API offers (the purge's check that the
+		// namespace is empty).
+		case len(args) >= 1 && args[0] == "api-resources":
+		// The pods of every namespace, read at a purge: whether one still
+		// runs an image tag it would remove.
+		case len(args) >= 3 && args[0] == "get" && (args[1] == "pods" || args[1] == "statefulsets,deployments,daemonsets,jobs,cronjobs") && all:
+		// The namespace's delete, with its preconditions on standard input
+		// (PLAN 10.11): the deployment's own namespace and no other.
+		case len(args) == 5 && args[0] == "delete" && args[1] == "--raw" && args[2] == "/api/v1/namespaces/"+ns && args[3] == "-f" && args[4] == "-":
 		case len(args) == 3 && args[0] == "create" && args[1] == "-f" && args[2] == "-":
 			manifest := read(t, filepath.Join(r.dir, "namespace.yaml"))
 			sum := sha256.Sum256([]byte(manifest))
@@ -471,13 +522,19 @@ func TestK8sRefused(t *testing.T) {
 				}
 			})
 		}
-		// What is allowed gets as far as the stub of PLAN 10.10.
+		// What is allowed gets as far as the cluster (PLAN 10.10): its
+		// first question is the UID of kube-system, which the fakes do not
+		// answer.
 		put(t, filepath.Join(r.home, "token"), "placeholder")
 		for i, env := range allowed {
 			if !all && i > 0 {
 				break
 			}
-			r.withEnv(kmsLine(env)+env, "--docker", "k3s", "--install").want(t, 3, "not built yet (PLAN 10.10)")
+			res := r.withEnv(kmsLine(env)+env, "--docker", "k3s", "--install")
+			res.want(t, 1, "did not say the UID of its namespace kube-system")
+			if len(res.calls) == 0 || !slices.Equal(res.calls[0].Args, []string{"kubectl", "get", "namespace", "kube-system", "-o", "json"}) {
+				t.Errorf("the first question is not the cluster's identity: %v", res.calls)
+			}
 		}
 	})
 }
@@ -1727,6 +1784,1899 @@ func TestK8sNodeCertDirSurvives(t *testing.T) {
 				}
 				noWorkDir(t, r.state("k8s-prod", "cactusfs"))
 			})
+		}
+	})
+}
+
+// --- PLAN 10.10 and 10.11: install, image delivery, upgrade, status,
+// uninstall and purge through deploy/deploy.sh ---------------------------------
+
+// clusterUID is the UID of kube-system the fake cluster says: its identity.
+const clusterUID = "6b2f0c1e-4d3a-4f5b-9c8d-1e2f3a4b5c6d"
+
+// nsUID is the UID the fake cluster gives the deployment's namespace.
+const nsUID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+
+// kubeMarker is the namespace marker of an installed deployment.
+const kubeMarker = "0123456789abcdef0123456789abcdef"
+
+// obj is an object of the Kubernetes API, as kubectl prints it.
+type obj = map[string]any
+
+// kjson is the object as "kubectl get -o json" prints it: indented by four
+// spaces, a key or an element a line, the keys sorted.
+func kjson(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.MarshalIndent(v, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data) + "\n"
+}
+
+// kubeList is a list of objects, as kubectl prints one.
+func kubeList(items ...any) obj {
+	if items == nil {
+		items = []any{}
+	}
+	return obj{"apiVersion": "v1", "kind": "List", "items": items}
+}
+
+// kubeNodes are the node IDs of a deployment named cactusfs.
+func kubeNodes(mode string) []string {
+	if mode == "cluster" {
+		return []string{"cactusfs-meta-0", "cactusfs-meta-1", "cactusfs-meta-2", "cactusfs-data-0"}
+	}
+	return []string{"cactusfs-node-0"}
+}
+
+// kubeRender is what the fake helm renders for the mode: the chart's
+// objects of a deployment named cactusfs, by kind and name.
+func kubeRender(mode string) string {
+	objects := []string{"Service/cactusfs-nodes", "Service/cactusfs", "Service/cactusfs-admin", "NetworkPolicy/cactusfs"}
+	if mode == "cluster" {
+		objects = append(objects, "PodDisruptionBudget/cactusfs")
+	}
+	for _, id := range kubeNodes(mode) {
+		objects = append(objects, "StatefulSet/"+id)
+	}
+	var b strings.Builder
+	for _, o := range objects {
+		kind, name, _ := strings.Cut(o, "/")
+		fmt.Fprintf(&b, "---\n# Source: cactusfs/templates/x.yaml\napiVersion: v1\nkind: %s\nmetadata:\n  name: %s\n  labels:\n    app.kubernetes.io/instance: cactusfs\n    app.kubernetes.io/version: \"0.7.0-412\"\nspec:\n  name: not-the-name\n", kind, name)
+		if kind == "StatefulSet" {
+			b.WriteString("  template:\n    metadata:\n      labels:\n        app.kubernetes.io/version: \"0.7.0-412\"\n")
+		}
+	}
+	return b.String()
+}
+
+// kubeInstalled is what kubectl lists of an installed deployment's objects.
+func kubeInstalled(mode string) []string {
+	out := []string{"networkpolicy.networking.k8s.io/cactusfs", "service/cactusfs", "service/cactusfs-admin", "service/cactusfs-nodes"}
+	if mode == "cluster" {
+		out = append(out, "poddisruptionbudget.policy/cactusfs")
+	}
+	for _, id := range kubeNodes(mode) {
+		out = append(out, "statefulset.apps/"+id)
+	}
+	return out
+}
+
+// k8sDevInit is what the fake dev-init writes for the nodes of the mode.
+func k8sDevInit(mode string) map[string]string {
+	out := map[string]string{}
+	files := []string{"kms.json", "s3.pem", "s3.key", "s3-ca.pem", "node-ca.pem", "ready"}
+	for _, id := range kubeNodes(mode) {
+		files = append(files, "nodes/"+id+".pem", "nodes/"+id+".key")
+	}
+	for _, f := range files {
+		out[f] = "fixture " + f + " " + rand.Text() + "\n"
+	}
+	return out
+}
+
+// lockOf is the value of the console upgrade's lock (ADR-0029) with the
+// heartbeat given.
+func lockOf(heartbeat string) string {
+	return `{"run":"r1","target":"0.8.0","image":"registry.example.test/cactusfs@sha256:` + strings.Repeat("e", 64) +
+		`","holder":"cactusfs-meta-1","startedBy":"admin","startedAt":"2026-11-22T09:00:00Z","heartbeat":"` + heartbeat + `"}`
+}
+
+// kube is a fake cluster of the k8s tests, reached by the context prod (or
+// by "k3s kubectl" over ssh, tool "ssh"), with one machine, na, of this
+// machine's architecture, and the engine here that holds the image given
+// (IMAGE_SOURCE=image) and renders the chart.
+type kube struct {
+	tool string
+	mode string
+	f    imgFix
+	// image is what the pods are to run; podImage what the pods there run
+	// (none: there are no pods).
+	image, podImage string
+	// marker is the marker of the namespace there; none: no namespace.
+	marker string
+	// objects are the release's objects there (kubectl's names).
+	objects []string
+	// secrets are the values of the cluster's Secrets by the entry's file
+	// they are compared with (none: the cluster has no Secret).
+	secrets map[string]string
+	// lock is the lock annotation of the first node's StatefulSet.
+	lock string
+	// never is a node whose new pod is never ready.
+	never string
+	// devInit is what dev-init writes.
+	devInit map[string]string
+	// imported: the image goes to k3s over ssh (save, import, crictl).
+	imported bool
+	// foreign are objects among objects that another field manager
+	// applied (not cactusfs-deploy with the operation Apply).
+	foreign []string
+	// notReady are the nodes whose pod the listing of the release's pods
+	// says is not Ready.
+	notReady []string
+	extra    []rule
+}
+
+// kindOf is the kind of an object kubectl names <resource>/<name>.
+func kindOf(name string) string {
+	switch {
+	case strings.HasPrefix(name, "statefulset.apps/"):
+		return "StatefulSet"
+	case strings.HasPrefix(name, "service/"):
+		return "Service"
+	case strings.HasPrefix(name, "networkpolicy.networking.k8s.io/"):
+		return "NetworkPolicy"
+	case strings.HasPrefix(name, "poddisruptionbudget.policy/"):
+		return "PodDisruptionBudget"
+	}
+	return "Unknown"
+}
+
+// objectsJSON is the listing of the release's objects with their field
+// managers (--show-managed-fields -o json): cactusfs-deploy's Apply, or for
+// those of foreign another manager's Update.
+func objectsJSON(t *testing.T, objects, foreign []string) string {
+	t.Helper()
+	var items []any
+	for _, o := range objects {
+		manager := obj{"manager": "cactusfs-deploy", "operation": "Apply"}
+		if slices.Contains(foreign, o) {
+			manager = obj{"manager": "kubectl-client-side-apply", "operation": "Update"}
+		}
+		_, name, _ := strings.Cut(o, "/")
+		items = append(items, obj{"kind": kindOf(o), "metadata": obj{"name": name, "managedFields": []any{obj{"manager": "kube-controller-manager", "operation": "Update"}, manager}}})
+	}
+	return kjson(t, kubeList(items...))
+}
+
+// podsJSON is the listing of the release's pods: one a node, Ready but
+// those of notReady.
+func podsJSON(t *testing.T, mode, image string, notReady ...string) string {
+	t.Helper()
+	var items []any
+	for _, id := range kubeNodes(mode) {
+		items = append(items, podOf(id+"-0", "uid-"+id, id+"-new", image, !slices.Contains(notReady, id), true))
+	}
+	return kjson(t, kubeList(items...))
+}
+
+// keys are the Secrets of the mode on the local KMS.
+func (k kube) keys() []secretKey {
+	if k.mode == "cluster" {
+		return clusterKeys
+	}
+	return standaloneKeys
+}
+
+func (k kube) rules(t *testing.T) []rule {
+	t.Helper()
+	tool := k.tool
+	if tool == "" {
+		tool = "kubectl"
+	}
+	arch := runtime.GOARCH
+	rs := slices.Clone(k.extra)
+	rs = append(rs,
+		rule{Tool: tool, Contains: []string{"get", "namespace", "kube-system"}, Stdout: kjson(t, obj{"apiVersion": "v1", "kind": "Namespace", "metadata": obj{"name": "kube-system", "uid": clusterUID}})},
+		rule{Tool: "kubectl", Contains: []string{"config", "view"}, Stdout: "https://192.0.2.1:6443\n"},
+		rule{Tool: tool, Contains: []string{"get", "nodes", "json"}, Stdout: kjson(t, kubeList(obj{
+			"metadata": obj{"name": "na"},
+			"status":   obj{"addresses": []any{obj{"type": "Hostname", "address": "na"}, obj{"type": "InternalIP", "address": "192.0.2.11"}}},
+		}))},
+		rule{Tool: tool, Contains: []string{"get", "storageclasses"}, Stdout: "{\n    \"metadata\": {\n        \"annotations\": {\n            \"storageclass.kubernetes.io/is-default-class\": \"true\"\n"},
+		rule{Tool: tool, Contains: []string{"get", "statefulsets,services,networkpolicies,poddisruptionbudgets"}, Stdout: objectsJSON(t, k.objects, k.foreign)},
+		rule{Tool: tool, Contains: []string{"get", "pods", "-l"}, Stdout: podsJSON(t, k.mode, k.image, k.notReady...)},
+	)
+	if k.marker != "" {
+		rs = append(rs, rule{Tool: tool, Contains: []string{"get", "namespace", "cactusfs"}, Stdout: kjson(t, obj{
+			"apiVersion": "v1", "kind": "Namespace",
+			"metadata": obj{
+				"name": "cactusfs", "uid": nsUID, "resourceVersion": "41",
+				"annotations": obj{"deploy.cactusfs.io/owner-uid": k.marker},
+				"labels":      obj{"io.cactusfs.deploy.name": "cactusfs", "kubernetes.io/metadata.name": "cactusfs"},
+			},
+		})})
+	}
+	for _, id := range kubeNodes(k.mode) {
+		meta := obj{"name": id, "namespace": "cactusfs", "generation": 2}
+		// The lock is on the first node by name, as the nodes choose it.
+		if id == slices.Min(kubeNodes(k.mode)) && k.lock != "" {
+			meta["annotations"] = obj{"cactusfs.io/upgrade": k.lock}
+		}
+		if len(k.objects) > 0 {
+			rs = append(rs, rule{Tool: tool, Contains: []string{"get", "statefulset", id}, Stdout: kjson(t, obj{
+				"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": meta,
+				"spec": obj{"template": obj{
+					"metadata": obj{"labels": obj{"app.kubernetes.io/version": "0.6.0-1"}},
+					"spec":     obj{"containers": []any{obj{"name": "cactusfs", "image": k.podImage}}},
+				}},
+				"status": obj{"observedGeneration": 2, "updateRevision": id + "-new"},
+			})})
+		}
+		pod := id + "-0"
+		gateway := k.mode == "standalone" || id == "cactusfs-data-0" || strings.Contains(id, "-meta-")
+		fresh := podOf(pod, "uid-new-"+id, id+"-new", k.image, id != k.never, gateway)
+		rs = append(rs, rule{Tool: tool, Contains: []string{"get", "pod", pod}, After: []string{"delete", "pod", pod}, Stdout: kjson(t, fresh)})
+		if k.podImage != "" {
+			rev := id + "-old"
+			if k.podImage == k.image {
+				rev = id + "-new"
+			}
+			rs = append(rs, rule{Tool: tool, Contains: []string{"get", "pod", pod}, Stdout: kjson(t, podOf(pod, "uid-old-"+id, rev, k.podImage, true, gateway))})
+		} else {
+			rs = append(rs, rule{Tool: tool, Contains: []string{"get", "pod", pod}, Stdout: kjson(t, fresh)})
+		}
+	}
+	if k.secrets != nil {
+		for _, r := range clusterHas(k.keys(), k.secrets) {
+			r.Tool = tool
+			rs = append(rs, r)
+		}
+	}
+	rs = append(rs,
+		rule{Tool: tool, Contains: []string{"create", "--field-manager=cactusfs-deploy"}, SaveStdin: "created.yaml"},
+		rule{Tool: tool, Contains: []string{"create", "-f", "-"}, SaveStdin: "namespace.yaml"},
+		rule{Tool: tool, Contains: []string{"apply", "--field-manager=cactusfs-deploy"}, SaveStdin: "applied.yaml"},
+	)
+	rs = append(rs, nodeRules(tool, arch)...)
+	if k.imported {
+		rs = append(rs,
+			rule{Tool: "docker", Contains: []string{"inspect", k.f.ref()}, Stdout: k.f.fields(arch)},
+			rule{Tool: "docker", Contains: []string{"save"}, Stdout: k.f.tar},
+			crictlOf(tool, k.f.hex))
+	}
+	given := registry + "@sha256:" + k.f.hex
+	rs = append(rs, givenHere("docker", k.f, given, given)...)
+	rs = append(rs,
+		rule{Tool: "docker", Contains: []string{"image", "inspect", dockerfileHelm(t)}, Stdout: "[{}]\n"},
+		rule{Tool: "docker", Contains: []string{"--tmpfs", "/work"}, Stdout: kubeRender(k.mode), SaveStdin: "render.tar"},
+	)
+	if k.devInit != nil {
+		rs = append(rs, rule{Tool: "docker", Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", k.devInit)})
+	}
+	return rs
+}
+
+// podOf is a pod of a node, as kubectl prints it.
+func podOf(name, uid, rev, image string, ready, gateway bool) obj {
+	labels := obj{"app.kubernetes.io/instance": "cactusfs", "app.kubernetes.io/name": "cactusfs", "app.kubernetes.io/version": "0.7.0-412", "controller-revision-hash": rev}
+	if gateway {
+		labels["cactusfs.io/gateway"] = "true"
+	}
+	status := "False"
+	if ready {
+		status = "True"
+	}
+	return obj{
+		"apiVersion": "v1", "kind": "Pod",
+		"metadata": obj{"name": name, "namespace": "cactusfs", "uid": uid, "labels": labels},
+		"spec":     obj{"nodeName": "na", "containers": []any{obj{"name": "cactusfs", "image": image}}},
+		"status":   obj{"conditions": []any{obj{"type": "Initialized", "status": "True"}, obj{"type": "Ready", "status": status}}},
+	}
+}
+
+// kubeEnv is the env file of a deployment on the context prod whose image
+// is given by its digest in K8S_REGISTRY: the nodes pull it (PLAN 10.4's
+// route "nodes").
+func kubeEnv(f imgFix) string {
+	return "DEPLOY_TARGET=k8s\nK8S_CONTEXT=prod\nKMS=local\nK8S_S3_ALLOW_FROM=192.0.2.0/24\nIMAGE_SOURCE=image\nK8S_REGISTRY=" + registry +
+		"\nIMAGE=" + registry + "@sha256:" + f.hex + "\nWAIT_TIMEOUT=3\n"
+}
+
+// kubeRun runs the script with the env file, as withEnv does, with a
+// TMPDIR of its own that must be empty afterwards: every work directory is
+// removed, however the run ends (the run's one EXIT trap).
+func (r *rig) kubeRun(env string, args ...string) result {
+	r.t.Helper()
+	path := r.envFile("site.env", env)
+	defer r.givenGuard(env)()
+	tmp := r.t.TempDir()
+	res := r.run(append([]string{"--env", path}, args...), "TMPDIR="+tmp)
+	if left, err := os.ReadDir(tmp); err != nil || len(left) != 0 {
+		r.t.Errorf("the run (exit %d) left %v in TMPDIR (%v)", res.code, left, err)
+	}
+	if entries, err := os.ReadDir(r.state("k8s-prod", "cactusfs")); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".") {
+				r.t.Errorf("the run (exit %d) left %s in the entry", res.code, e.Name())
+			}
+		}
+	}
+	return res
+}
+
+// kubeEntry writes the STATE_DIR entry of an installed deployment of the
+// mode on the context prod: its record (the cluster's ID), its namespace
+// marker, and a value made for the run for each of its secrets, which it
+// returns by file.
+func kubeEntry(t *testing.T, r *rig, mode, engineID string) map[string]string {
+	t.Helper()
+	state := r.state("k8s-prod", "cactusfs")
+	keys := standaloneKeys
+	if mode == "cluster" {
+		keys = clusterKeys
+	}
+	values := secretFixtures(t, state, keys)
+	put(t, filepath.Join(state, "config", "ready"), "2026-11-22T10:00:00Z\n")
+	put(t, filepath.Join(state, "config", "s3-ca.pem"), "a CA\n")
+	put(t, filepath.Join(state, "namespace-uid"), kubeMarker+"\n")
+	put(t, filepath.Join(state, "namespace"), "cactusfs\n")
+	record := "kubectl --context prod\nengine-id=" + engineID + "\nkms=local\n"
+	if mode == "cluster" {
+		record += "mode=cluster\n"
+	}
+	put(t, filepath.Join(state, "target"), record)
+	return values
+}
+
+// kubeIndex is the index of the first call of the tool whose kubectl words
+// (kubectlArgs) begin with the words given, at or after from; -1 when none.
+func kubeIndex(calls []call, from int, words ...string) int {
+	for i := from; i < len(calls); i++ {
+		if args, ok := kubectlArgs(calls[i]); ok && len(args) >= len(words) && slices.Equal(args[:len(words)], words) {
+			return i
+		}
+	}
+	return -1
+}
+
+// kubeDeletes is the pods the run deleted, in order.
+func kubeDeletes(calls []call) []string {
+	var out []string
+	for _, c := range calls {
+		if args, ok := kubectlArgs(c); ok && len(args) > 2 && args[0] == "delete" && args[1] == "pod" {
+			out = append(out, args[2])
+		}
+	}
+	return out
+}
+
+// noForce fails the test when any apply forced its way - but, with
+// takeImage, the one apply of the render by cactusfs-deploy.
+func noForce(t *testing.T, calls []call, takeImage ...bool) {
+	t.Helper()
+	forced := 0
+	for _, c := range calls {
+		args, ok := kubectlArgs(c)
+		if !ok || !slices.Contains(args, "--force-conflicts") {
+			continue
+		}
+		forced++
+		if len(takeImage) == 0 || !takeImage[0] || strings.Join(args, " ") != forceApply || forced > 1 {
+			t.Errorf("an apply was forced: %q", args)
+		}
+	}
+}
+
+// entryFiles is the secrets of the entry by file: every file of
+// secrets/ and config/.
+func entryFiles(t *testing.T, state string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, unit := range []string{"secrets", "config"} {
+		for f, v := range filesUnder(t, filepath.Join(state, unit)) {
+			out[unit+"/"+f] = v
+		}
+	}
+	return out
+}
+
+// TestK8sInstall: a first install on Kubernetes asks everything first and
+// changes nothing until it has (the cluster's identity, the nodes, the
+// storage, the namespace, the image), then makes the namespace, makes the
+// secrets once - the root credentials and the passphrase from /dev/urandom,
+// kms.json and the certificates by dev-init on this machine - into
+// STATE_DIR and the namespace's Secrets (create, never apply), records the
+// cluster's identity (the UID of kube-system), applies the render
+// server-side as cactusfs-deploy, never forced, and waits for the pod. A
+// second install makes nothing, creates nothing and deletes no pod that
+// runs the image already. No secret is on a command line, in an
+// environment, in the output or in a trace (PLAN 10.3's assertions, kept on
+// Kubernetes).
+func TestK8sInstall(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, mode := range []string{"standalone", "cluster"} {
+			t.Run(mode, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				r.chart()
+				r.trace = true
+				f := newImgFix(imgCommit)
+				image := registry + "@sha256:" + f.hex
+				env := kubeEnv(f)
+				if mode == "cluster" {
+					env += "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n"
+				}
+				k := kube{mode: mode, f: f, image: image, devInit: k8sDevInit(mode)}
+				r.rules(k.rules(t)...)
+				res := r.kubeRun(env, "--install")
+				last := kubeNodes(mode)[len(kubeNodes(mode))-1]
+				res.want(t, 0, "ready: "+last+" runs "+image, "cluster ID (the UID of its namespace kube-system): "+clusterUID,
+					"API server of the context prod: https://192.0.2.1:6443", "imagePullPolicy IfNotPresent", "the console user admin with the password admin (ADR-0014)")
+				insideNamespace(t, r, res.calls, "cactusfs")
+				noForce(t, res.calls)
+
+				// Every question before the first change.
+				first := kubeIndex(res.calls, 0, "create", "-f", "-")
+				if first < 0 {
+					t.Fatal("the namespace was not created")
+				}
+				for _, c := range res.calls[:first] {
+					args, isKube := kubectlArgs(c)
+					if isKube && args[0] != "get" && args[0] != "config" {
+						t.Errorf("%q before the namespace was made", args)
+					}
+					if c.Tool == "docker" && (slices.Contains(c.Args, "create") || slices.Contains(c.Args, "cp") || slices.Contains(c.Args, "--tmpfs")) {
+						t.Errorf("%q before the namespace was made", c.Args)
+					}
+				}
+				var order []string
+				for _, w := range writes(res.calls) {
+					args, _ := kubectlArgs(w)
+					order = append(order, strings.Join(args, " "))
+				}
+				want := []string{"create -f -", "create --field-manager=cactusfs-deploy -n cactusfs -f -", "apply --server-side --field-manager=cactusfs-deploy -n cactusfs -f -"}
+				if !slices.Equal(order, want) {
+					t.Fatalf("the changes are\n%q\nwant\n%q", order, want)
+				}
+				if read(t, filepath.Join(r.dir, "applied.yaml")) != kubeRender(mode) {
+					t.Error("what was applied is not the render")
+				}
+				files := tarFiles(t, []byte(read(t, filepath.Join(r.dir, "render.tar"))))
+				if !strings.Contains(files["values.yaml"], "  digest: 'sha256:"+f.hex+"'\n  pullPolicy: IfNotPresent\n") {
+					t.Errorf("the values do not name the image by its digest for the nodes to pull:\n%s", files["values.yaml"])
+				}
+				// The record: the settings' cluster, its ID and the KMS.
+				state := r.state("k8s-prod", "cactusfs")
+				record := "kubectl --context prod\nengine-id=" + clusterUID + "\nkms=local\n"
+				if mode == "cluster" {
+					// The mode is recorded too (state_mode_check, PLAN 10.8).
+					record += "mode=cluster\n"
+				}
+				if got := read(t, filepath.Join(state, "target")); got != record {
+					t.Errorf("the record is %q", got)
+				}
+				made := entryFiles(t, state)
+				for _, k := range k.keys() {
+					if made[k.file] == "" {
+						t.Errorf("%s was not made", k.file)
+					}
+				}
+				checkCreated(t, r, k.keys(), made)
+				for f := range k.devInit {
+					if _, ok := made["config/"+f]; !ok {
+						t.Errorf("dev-init's %s is not in the entry", f)
+					}
+				}
+				if got := made["secrets/root-access-key"]; !regexp.MustCompile(`^[A-Z2-7]{20}$`).MatchString(got) {
+					t.Errorf("the access key is %d characters of another alphabet", len(got))
+				}
+				noLeak(t, res, made)
+				for _, c := range res.calls {
+					for name, value := range c.Env {
+						for file, secret := range made {
+							if strings.Contains(value, secret) {
+								t.Errorf("the secret of %s is in the environment of %s (%s)", file, c.Tool, name)
+							}
+						}
+					}
+				}
+				var devInit []call
+				for _, c := range res.calls {
+					if c.Tool == "docker" && slices.Contains(c.Args, "--name") && slices.Contains(c.Args, "cactusfs-dev-init") {
+						devInit = append(devInit, c)
+					}
+				}
+				if len(devInit) != 1 || !containsRun(devInit[0].Args, []string{"--nodes", strings.Join(kubeNodes(mode), ",")}) ||
+					!containsRun(devInit[0].Args, []string{"--network", "none"}) || !containsRun(devInit[0].Args, []string{"--user", "65532:65532"}) {
+					t.Errorf("dev-init is not run once, for the chart's nodes, with no network, as 65532: %v", devInit)
+				}
+
+				// A second install: the cluster has the namespace, the
+				// Secrets and the pods on this image.
+				k.marker = strings.TrimSpace(read(t, filepath.Join(state, "namespace-uid")))
+				k.objects = kubeInstalled(mode)
+				k.secrets = made
+				k.podImage = image
+				k.devInit = nil
+				r.rules(k.rules(t)...)
+				again := r.kubeRun(env, "--install")
+				again.want(t, 0, "runs "+image+" already, and is ready")
+				order = nil
+				for _, w := range writes(again.calls) {
+					args, _ := kubectlArgs(w)
+					order = append(order, args[0])
+				}
+				if !slices.Equal(order, []string{"apply"}) {
+					t.Errorf("a second install changed %q, want the apply alone", order)
+				}
+				if !maps.Equal(entryFiles(t, state), made) {
+					t.Error("a second install changed the secrets of the entry")
+				}
+				for _, c := range again.calls {
+					if c.Tool == "docker" && slices.Contains(c.Args, "cactusfs-dev-init") {
+						t.Errorf("dev-init ran again: %q", c.Args)
+					}
+				}
+				noLeak(t, again, made)
+			})
+		}
+	})
+}
+
+// TestK8sInstallValues: the values of an install carry the image as the
+// route delivered it - by its digest for the nodes to pull, imported into
+// k3s over K3S_SSH by a tag of its ID with imagePullPolicy Never, the tag
+// recorded in the entry so that a purge removes it and no other.
+func TestK8sInstallValues(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range []struct {
+			name, env, tool, pull, target string
+			imported, known, words        bool
+		}{
+			{name: "pulled by the nodes", tool: "kubectl", pull: "IfNotPresent", target: "k8s-prod"},
+			{
+				name: "imported over ssh", tool: "ssh", pull: "Never", target: "ssh-admin_k3s.example.test", imported: true,
+				env: "DEPLOY_TARGET=k3s\nK3S_SSH=admin@k3s.example.test\nKMS=local\nK8S_S3_ALLOW_FROM=192.0.2.0/24\nIMAGE_SOURCE=image\nWAIT_TIMEOUT=3\n",
+			},
+			{
+				// The bench's route (test/k8s): a context, and K3S_IMPORT's
+				// words, whose node the script cannot ask whether it held
+				// the tag before - so it records none, says so, and the
+				// purge leaves it.
+				name: "imported by K3S_IMPORT's words", tool: "kubectl", pull: "Never", target: "k3s-prod", imported: true, words: true,
+				env: "DEPLOY_TARGET=k3s\nK8S_CONTEXT=prod\nK3S_IMPORT=docker exec -i k3s-bench ctr -n k8s.io images import -\nALLOW_DIRTY=yes\nKMS=local\nK8S_S3_ALLOW_FROM=192.0.2.0/24\nIMAGE_SOURCE=image\nWAIT_TIMEOUT=3\n",
+			},
+			{
+				name: "imported over ssh, the tag there before", tool: "ssh", pull: "Never", target: "ssh-admin_k3s.example.test", imported: true, known: true,
+				env: "DEPLOY_TARGET=k3s\nK3S_SSH=admin@k3s.example.test\nKMS=local\nK8S_S3_ALLOW_FROM=192.0.2.0/24\nIMAGE_SOURCE=image\nWAIT_TIMEOUT=3\n",
+			},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				r.chart()
+				f := newImgFix(imgCommit)
+				image := registry + "@sha256:" + f.hex
+				podImage := image
+				if c.imported {
+					podImage = f.ref()
+				}
+				k := kube{tool: c.tool, mode: "standalone", f: f, image: podImage, devInit: k8sDevInit("standalone"), imported: c.imported}
+				if c.known {
+					k.extra = []rule{{Tool: "ssh", Contains: []string{"images", "ls", "-q", "name==docker.io/library/" + f.ref()}, Stdout: "docker.io/library/" + f.ref() + "\n"}}
+				}
+				r.rules(k.rules(t)...)
+				env := kubeEnv(f)
+				if c.env != "" {
+					env = c.env + "IMAGE=" + image + "\n"
+				}
+				path := r.envFile("site.env", env)
+				res := r.run([]string{"--env", path, "--install"})
+				res.want(t, 0, "imagePullPolicy "+c.pull, "ready: cactusfs-node-0 runs "+podImage)
+				insideNamespace(t, r, res.calls, "cactusfs")
+				files := tarFiles(t, []byte(read(t, filepath.Join(r.dir, "render.tar"))))
+				if !strings.Contains(files["values.yaml"], "  pullPolicy: "+c.pull+"\n") {
+					t.Errorf("the values do not say pullPolicy %s:\n%s", c.pull, files["values.yaml"])
+				}
+				images := filepath.Join(r.state(c.target, "cactusfs"), "images")
+				if c.words {
+					res.want(t, 0, "image: docker.io/library/"+f.ref()+" was imported by K3S_IMPORT's command, on a node the script cannot ask: it is not recorded, and a purge leaves it")
+					if _, err := os.Stat(images); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("a tag K3S_IMPORT imported was recorded: %v", err)
+					}
+					for _, call := range res.calls {
+						if containsRun(call.Args, []string{"images", "ls"}) {
+							t.Errorf("containerd was asked through %s %q, which K3S_IMPORT does not reach", call.Tool, call.Args)
+						}
+					}
+					imp := callsOf(res, "docker", "exec", "-i", "k3s-bench", "ctr", "-n", "k8s.io", "images", "import", "-")
+					if len(imp) != 1 || imp[0].Stdin != f.tarSum() {
+						t.Errorf("the image was not imported once by K3S_IMPORT's words: %v", imp)
+					}
+				} else if c.imported {
+					// The question comes before the import.
+					ls, imp := -1, -1
+					for i, call := range res.calls {
+						if containsRun(call.Args, []string{"k3s", "ctr", "-n", "k8s.io", "images", "ls", "-q", "name==docker.io/library/" + f.ref()}) && ls < 0 {
+							ls = i
+						}
+						if containsRun(call.Args, []string{"images", "import", "-"}) && imp < 0 {
+							imp = i
+						}
+					}
+					if ls < 0 || imp < 0 || ls > imp {
+						t.Errorf("containerd was asked for the tag at %d, the image imported at %d", ls, imp)
+					}
+				}
+				if c.known {
+					res.want(t, 0, "was in the containerd of k3s before the import")
+					if _, err := os.Stat(images); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("a tag that was there before was recorded: %v", err)
+					}
+				} else if c.imported && !c.words {
+					if got := read(t, images); got != "docker.io/library/"+f.ref()+"\n" {
+						t.Errorf("the entry records the images %q", got)
+					}
+					if !strings.Contains(files["values.yaml"], "  repository: 'cactusfs'\n  tag: '0.7.0-412-"+f.id12()+"'\n  digest: ''\n") {
+						t.Errorf("the values do not name the tag imported:\n%s", files["values.yaml"])
+					}
+				} else if !c.imported {
+					if _, err := os.Stat(images); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("an image pulled by the nodes was recorded as imported: %v", err)
+					}
+					if !strings.Contains(files["values.yaml"], "  tag: ''\n  digest: 'sha256:"+f.hex+"'\n") {
+						t.Errorf("the values do not name the digest:\n%s", files["values.yaml"])
+					}
+				}
+			})
+		}
+	})
+}
+
+// TestK8sInstallRefused: what an install refuses, it refuses before any
+// change - nothing written to the cluster, no secret made, no dev-init run,
+// no image built or pulled - with exit 2.
+func TestK8sInstallRefused(t *testing.T) {
+	fresh := func(ts time.Time) string { return lockOf(ts.UTC().Format(time.RFC3339Nano)) }
+	cases := []struct {
+		name  string
+		env   string
+		entry string // the engine ID of an entry of an installed deployment, or none
+		k     func(k kube) kube
+		want  string
+		tty   bool
+		input string
+		mode  string
+	}{
+		{name: "another cluster", entry: "another-uid-0000", k: installedKube, want: "now reach another, '" + clusterUID + "'"},
+		{name: "a console upgrade on the first node by name, cluster mode", mode: "cluster", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.lock = fresh(time.Now())
+			return k
+		}, want: "holds the lock cactusfs.io/upgrade on the StatefulSet cactusfs-data-0"},
+		{
+			name: "another namespace than the one recorded", entry: clusterUID, env: "K8S_NAMESPACE=elsewhere\n", k: installedKube,
+			want: "records the namespace cactusfs, and the settings name elsewhere",
+		},
+		{name: "a node port another Service holds", env: "K8S_NODE_PORT=30900\n", k: func(k kube) kube {
+			k.extra = append(k.extra, rule{Tool: "kubectl", Contains: []string{"get", "services", "-A"}, Stdout: "{\n    \"items\": [\n        {\n            \"metadata\": {\n                \"name\": \"web\",\n                \"namespace\": \"shop\"\n            },\n            \"spec\": {\n                \"ports\": [\n                    {\n                        \"nodePort\": 30900,\n                        \"port\": 80\n                    }\n                ]\n            }\n        }\n    ]\n}\n"})
+			return k
+		}, want: "the NodePort 30900 is held by the Service shop/web"},
+		{name: "a console upgrade under way", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.lock = fresh(time.Now().Add(-time.Minute))
+			return k
+		}, want: "an upgrade from the console (ADR-0029) holds the lock cactusfs.io/upgrade on the StatefulSet cactusfs-node-0"},
+		{name: "a console upgrade's heartbeat with an offset", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.lock = lockOf(time.Now().In(time.FixedZone("x", 2*3600)).Format(time.RFC3339))
+			return k
+		}, want: "holds the lock cactusfs.io/upgrade"},
+		{name: "a lock that cannot be read", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.lock = `{"run":"r1"}`
+			return k
+		}, want: "its heartbeat cannot be read"},
+		{name: "a node the settings have not", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.objects = append(k.objects, "statefulset.apps/cactusfs-meta-0")
+			return k
+		}, want: "the StatefulSet cactusfs-meta-0 of cactusfs in the namespace cactusfs is not a node of DEPLOY_MODE=standalone"},
+		{name: "take-image on nothing installed", env: "", k: nil, want: "--take-image: cactusfs is not installed"},
+		{name: "take-image with a stale lock", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.lock = fresh(time.Now().Add(-2 * time.Hour))
+			return k
+		}, want: "--take-image is refused while the StatefulSet cactusfs-node-0 holds the console upgrade's lock"},
+		{name: "take-image not confirmed", entry: clusterUID, k: installedKube, want: "type the deployment's name when asked at a terminal, or say --take-image=cactusfs"},
+		{name: "take-image, another name typed", entry: clusterUID, k: installedKube, tty: true, input: "other\n", want: "that is not the name of the deployment"},
+		{name: "a given root secret that differs", entry: clusterUID, env: "ROOT_SECRET_KEY_FILE=~/rsk\n", k: installedKube, want: "ROOT_SECRET_KEY_FILE"},
+		{name: "a Secret that differs", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.secrets = maps.Clone(k.secrets)
+			k.secrets["config/kms.json"] = "fixture-other-" + rand.Text()
+			return k
+		}, want: "hold different values of kms.json"},
+		{name: "half a root pair", entry: clusterUID, k: func(k kube) kube {
+			k = installedKube(k)
+			k.secrets = nil
+			return k
+		}, want: "one of the root credentials is in"},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				r.chart()
+				r.trace = true
+				r.input = c.input
+				f := newImgFix(imgCommit)
+				image := registry + "@sha256:" + f.hex
+				mode := c.mode
+				if mode == "" {
+					mode = "standalone"
+				}
+				k := kube{mode: mode, f: f, image: image, devInit: k8sDevInit(mode)}
+				var values map[string]string
+				if c.entry != "" {
+					values = kubeEntry(t, r, mode, c.entry)
+					k.secrets = values
+				}
+				if c.k != nil {
+					k = c.k(k)
+				}
+				if c.name == "half a root pair" {
+					remove(t, filepath.Join(r.state("k8s-prod", "cactusfs"), "secrets", "root-secret-key"))
+				}
+				if c.name == "a given root secret that differs" {
+					put(t, filepath.Join(r.home, "rsk"), "fixture-given-"+rand.Text())
+				}
+				r.rules(k.rules(t)...)
+				args := []string{"--install"}
+				if strings.HasPrefix(c.name, "take-image") {
+					args = append(args, "--take-image")
+				}
+				state := r.state("k8s-prod", "cactusfs")
+				before := map[string]string{}
+				if c.entry != "" {
+					before = entryFiles(t, state)
+				}
+				env := kubeEnv(f) + c.env
+				if mode == "cluster" {
+					env += "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n"
+				}
+				var res result
+				if c.tty {
+					path := r.envFile("site.env", env)
+					res = r.runTTY([]string{"--env", path, "--install", "--take-image"})
+				} else {
+					res = r.kubeRun(env, args...)
+				}
+				res.want(t, 2, c.want)
+				if w := writes(res.calls); len(w) != 0 {
+					t.Errorf("a refused install changed the cluster: %v", w)
+				}
+				for _, call := range res.calls {
+					if call.Tool == "docker" && (slices.Contains(call.Args, "cactusfs-dev-init") || slices.Contains(call.Args, "pull") || slices.Contains(call.Args, "--tmpfs")) {
+						t.Errorf("a refused install ran %q", call.Args)
+					}
+				}
+				if c.entry != "" && !maps.Equal(entryFiles(t, state), before) {
+					t.Error("a refused install changed the secrets of the entry")
+				}
+				if c.entry == "" {
+					if _, err := os.Stat(filepath.Join(state, "secrets")); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("a refused install made secrets: %v", err)
+					}
+				}
+				if values != nil {
+					noLeak(t, res, values)
+				}
+			})
+		}
+	})
+}
+
+// The applies of --take-image, by their words.
+const (
+	dryApply   = "apply --server-side --dry-run=server --field-manager=cactusfs-deploy -n cactusfs -f -"
+	forceApply = "apply --server-side --force-conflicts --field-manager=cactusfs-deploy -n cactusfs -f -"
+	mainApply  = "apply --server-side --field-manager=cactusfs-deploy -n cactusfs -f -"
+)
+
+// takeFields are the fields an upgrade from the console patches.
+var takeFields = []string{".spec.template.spec.containers[name=\"cactusfs\"].image", ".spec.template.metadata.labels.app.kubernetes.io/version"}
+
+// kubectlAdvice is what kubectl adds to a conflict of a server-side apply
+// (kubectl v0.37.0, pkg/cmd/apply/apply.go).
+const kubectlAdvice = `Please review the fields above--they currently have other managers. Here
+are the ways you can resolve this warning:
+* If you intend to manage all of these fields, please re-run the apply
+  command with the ` + "`--force-conflicts`" + ` flag.
+* If you do not intend to manage all of the fields, please edit your
+  manifest to remove references to the fields that should keep their
+  current managers.
+* You may co-own fields by updating your manifest to match the existing
+  value; in this case, you'll become the manager if the other manager(s)
+  stop managing the field (remove it from their configuration).
+See https://kubernetes.io/docs/reference/using-api/server-side-apply/#conflicts
+`
+
+// conflictOf is one object's conflict as kubectl prints it: the message of
+// apimachinery's getConflictMessage (one conflict, or several under the
+// manager's line) and kubectl's advice.
+func conflictOf(fields ...string) string {
+	if len(fields) == 1 {
+		return "Apply failed with 1 conflict: conflict with \"cactusfs-upgrade\" using apps/v1: " + fields[0] + "\n" + kubectlAdvice
+	}
+	msg := fmt.Sprintf("Apply failed with %d conflicts: conflicts with \"cactusfs-upgrade\" using apps/v1:\n", len(fields))
+	for _, f := range fields {
+		msg += "- " + f + "\n"
+	}
+	return msg + kubectlAdvice
+}
+
+// dryConflict is the answer of the server's dry run of the apply when two
+// StatefulSets conflict with the console's field manager on the fields
+// given: two errors, which kubectl prints one after the other without the
+// "error: " it gives a single one (cmd/util/helpers.go MultipleErrors).
+func dryConflict(fields ...string) rule {
+	return dryAnswer(conflictOf(fields...) + "\n" + conflictOf(fields...) + "\n")
+}
+
+// dryAnswer is the dry run's answer with the standard error given.
+func dryAnswer(stderr string) rule {
+	return rule{Tool: "kubectl", Contains: []string{"apply", "--dry-run=server"}, Stderr: stderr, Exit: 1}
+}
+
+// checkTake fails the test unless the applies of the run are those given.
+func checkTake(t *testing.T, res result, want []string) {
+	t.Helper()
+	var applies []string
+	for _, c := range res.calls {
+		if args, ok := kubectlArgs(c); ok && args[0] == "apply" {
+			applies = append(applies, strings.Join(args, " "))
+		}
+	}
+	if !slices.Equal(applies, want) {
+		t.Errorf("the applies are\n%q\nwant\n%q", applies, want)
+	}
+}
+
+// podsJSONNoT is podsJSON for a value that always encodes.
+func podsJSONNoT(mode, image string, notReady ...string) string {
+	var items []any
+	for _, id := range kubeNodes(mode) {
+		items = append(items, podOf(id+"-0", "uid-"+id, id+"-new", image, !slices.Contains(notReady, id), true))
+	}
+	return kjsonNoT(kubeList(items...))
+}
+
+// installedKube is a cluster on which the deployment is installed: its
+// namespace with the marker of kubeEntry, its objects, its Secrets (the
+// values the entry holds) and its pods on an older image.
+func installedKube(k kube) kube {
+	k.marker = kubeMarker
+	k.objects = kubeInstalled(k.mode)
+	k.podImage = registry + "@sha256:" + strings.Repeat("0", 64)
+	k.devInit = nil
+	return k
+}
+
+// runTTY runs the script as run does, as if at a terminal: k8s_tty, the
+// script's one test of a terminal, says yes. Standard input is r.input.
+func (r *rig) runTTY(args []string) result {
+	r.t.Helper()
+	// deploy.sh is copied with k8s_tty answering yes.
+	lib := filepath.Join(r.repo, "deploy", "lib", "k8s.sh")
+	data := strings.Replace(read(r.t, lib), "k8s_tty() {\n\t[ -t 0 ]\n}", "k8s_tty() {\n\treturn 0\n}", 1)
+	if err := os.WriteFile(lib, []byte(data), 0o600); err != nil {
+		r.t.Fatal(err)
+	}
+	return r.runIn(args)
+}
+
+// runIn runs the script with r.input on its standard input.
+func (r *rig) runIn(args []string) result {
+	r.t.Helper()
+	if err := os.Remove(r.transcript); err != nil && !errors.Is(err, os.ErrNotExist) {
+		r.t.Fatal(err)
+	}
+	argv := slices.Clone(r.sh.argv[1:])
+	if r.trace {
+		argv = append(argv, "-x")
+	}
+	argv = append(argv, filepath.Join(r.repo, "deploy", "deploy.sh"))
+	argv = append(argv, args...)
+	cmd := exec.CommandContext(r.t.Context(), r.sh.argv[0], argv...)
+	cmd.Dir = r.work
+	cmd.Env = []string{"PATH=" + r.bin, "HOME=" + r.home}
+	cmd.Stdin = strings.NewReader(r.input)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	var res result
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		res.code = exit.ExitCode()
+	default:
+		r.t.Fatalf("run the script: %v", err)
+	}
+	res.stdout, res.stderr = stdout.String(), stderr.String()
+	res.calls = r.calls()
+	return res
+}
+
+// TestK8sUpgrade: an install over an installed deployment applies the
+// render and then deletes the pods one at a time - the nodes that do not
+// vote, then the voters - each Ready on the new revision and image before
+// the next, reading the console upgrade's lock before each; it stops at
+// the first that is not ready, at a lock that appears, and at a conflict of
+// the apply (a console upgrade moved the image), which it never forces;
+// --take-image, after a dry run on the server shows conflicts on the image
+// and the version label alone (read by allowlist, line by line, as kubectl
+// writes them), applies the render once with --force-conflicts by
+// cactusfs-deploy, and refuses anything else; what the render no longer
+// holds is pruned.
+func TestK8sUpgrade(t *testing.T) {
+	conflict := rule{
+		Tool: "kubectl", Contains: []string{"apply", "--field-manager=cactusfs-deploy"},
+		Stderr: "error: Apply failed with 1 conflict: conflict with \"cactusfs-upgrade\" using apps/v1: .spec.template.spec.containers[name=\"cactusfs\"].image\n", Exit: 1,
+	}
+	cases := []struct {
+		name    string
+		mode    string
+		env     string
+		args    []string
+		k       func(k kube) kube
+		code    int
+		want    []string
+		deletes []string
+		check   func(t *testing.T, r *rig, res result)
+	}{
+		{
+			name: "standalone", mode: "standalone",
+			deletes: []string{"cactusfs-node-0-0"},
+			want:    []string{"upgrade: cactusfs-node-0 is Ready on "},
+		},
+		{
+			name: "cluster: the node that does not vote first, then the voters", mode: "cluster",
+			deletes: []string{"cactusfs-data-0-0", "cactusfs-meta-0-0", "cactusfs-meta-1-0", "cactusfs-meta-2-0"},
+			want:    []string{"upgrade: cactusfs-meta-2 is Ready on "},
+			check: func(t *testing.T, _ *rig, res result) {
+				// Before each node the lock is read, and each pod is
+				// asked for after its deletion and before the next.
+				at := kubeIndex(res.calls, 0, "apply")
+				for _, id := range []string{"cactusfs-data-0", "cactusfs-meta-0", "cactusfs-meta-1", "cactusfs-meta-2"} {
+					// The lock is on the first node by name, cactusfs-data-0.
+					lock := kubeIndex(res.calls, at, "get", "statefulset", "cactusfs-data-0")
+					del := kubeIndex(res.calls, at, "delete", "pod", id+"-0")
+					got := kubeIndex(res.calls, del, "get", "pod", id+"-0")
+					if lock < 0 || del < 0 || got < 0 || lock > del {
+						t.Fatalf("%s: the lock read at %d, the delete at %d, the pod read at %d", id, lock, del, got)
+					}
+					at = got
+				}
+			},
+		},
+		{
+			name: "a node that is not ready stops it", mode: "cluster",
+			k:       func(k kube) kube { k.never = "cactusfs-meta-0"; return k },
+			code:    1,
+			deletes: []string{"cactusfs-data-0-0", "cactusfs-meta-0-0"},
+			want:    []string{"upgrade stopped: the node cactusfs-meta-0 is not Ready on ", "the nodes after it were not moved", "IMAGE_SOURCE=image IMAGE=" + registry + "@sha256:" + strings.Repeat("0", 64)},
+		},
+		{
+			name: "a console upgrade that starts during it stops it", mode: "cluster",
+			k: func(k kube) kube {
+				// The lock appears on cactusfs-data-0, the first node by name,
+				// once its pod was replaced.
+				k.extra = append(k.extra, rule{
+					Tool: "kubectl", Contains: []string{"get", "statefulset", "cactusfs-data-0"}, After: []string{"delete", "pod", "cactusfs-data-0-0"},
+					Stdout: kjsonNoT(obj{
+						"apiVersion": "apps/v1", "kind": "StatefulSet",
+						"metadata": obj{"name": "cactusfs-data-0", "generation": 2, "annotations": obj{"cactusfs.io/upgrade": lockOf(time.Now().UTC().Format(time.RFC3339Nano))}},
+						"status":   obj{"observedGeneration": 2, "updateRevision": "cactusfs-data-0-new"},
+					}),
+				})
+				return k
+			},
+			code:    1,
+			deletes: []string{"cactusfs-data-0-0"},
+			want:    []string{"upgrade stopped: an upgrade from the console (ADR-0029) holds the lock"},
+		},
+		{
+			name: "a stale lock is left to the nodes", mode: "standalone",
+			k: func(k kube) kube {
+				k.lock = lockOf(time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano))
+				return k
+			},
+			deletes: []string{"cactusfs-node-0-0"},
+			want:    []string{"is older than 25 minutes: its holder is gone, and the nodes settle it"},
+		},
+		{
+			name: "a conflict stops it", mode: "standalone",
+			k:    func(k kube) kube { k.extra = append(k.extra, conflict); return k },
+			code: 1,
+			want: []string{"the apply met a conflict", "error: Apply failed with 1 conflict", "run --install --take-image", "no node was moved"},
+		},
+		{
+			name: "--take-image forces the render once", mode: "cluster", args: []string{"--take-image=cactusfs"},
+			k:       func(k kube) kube { k.extra = append(k.extra, dryConflict(takeFields...)); return k },
+			deletes: []string{"cactusfs-data-0-0", "cactusfs-meta-0-0", "cactusfs-meta-1-0", "cactusfs-meta-2-0"},
+			want:    []string{"--take-image: the render is applied once with --force-conflicts by cactusfs-deploy"},
+			check: func(t *testing.T, _ *rig, res result) {
+				checkTake(t, res, []string{dryApply, forceApply})
+				if kubeIndex(res.calls, 0, "apply", "--server-side", "--force-conflicts") > kubeIndex(res.calls, 0, "delete", "pod") {
+					t.Error("a pod was deleted before the render was applied")
+				}
+			},
+		},
+		{
+			name: "--take-image refuses another field's conflict", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, dryConflict(append(slices.Clone(takeFields), ".spec.template.spec.containers[name=\"cactusfs\"].env")...))
+				return k
+			},
+			code: 2,
+			want: []string{"--take-image takes the image and the version label alone, and the apply would also conflict on .spec.template.spec.containers[name=\"cactusfs\"].env"},
+			check: func(t *testing.T, _ *rig, res result) {
+				checkTake(t, res, []string{dryApply})
+			},
+		},
+		{
+			name: "--take-image refuses an error that is no conflict", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, rule{Tool: "kubectl", Contains: []string{"apply", "--dry-run=server"}, Stderr: "error: unable to recognize \"STDIN\": no matches for kind\n", Exit: 1})
+				return k
+			},
+			code: 2,
+			want: []string{"--take-image: the dry run of the apply failed with something that is not a conflict"},
+			check: func(t *testing.T, _ *rig, res result) {
+				checkTake(t, res, []string{dryApply})
+			},
+		},
+		{
+			name: "--take-image refuses a conflict with another error beside it", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				c := dryConflict(takeFields...)
+				c.Stderr += "Error from server (Invalid): StatefulSet.apps \"cactusfs-node-0\" is invalid\n"
+				k.extra = append(k.extra, c)
+				return k
+			},
+			code: 2,
+			want: []string{"something that is not a conflict", "Error from server (Invalid)"},
+			check: func(t *testing.T, _ *rig, res result) {
+				checkTake(t, res, []string{dryApply})
+			},
+		},
+		{
+			name: "--take-image refuses a conflict on a field outside the template", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, dryAnswer("error: Apply failed with 1 conflict: conflict with \"admin\" using storage.k8s.io/v1 at 2026-11-22T10:00:00Z: .reclaimPolicy\n"+kubectlAdvice))
+				return k
+			},
+			code:  2,
+			want:  []string{"would also conflict on .reclaimPolicy"},
+			check: func(t *testing.T, _ *rig, res result) { checkTake(t, res, []string{dryApply}) },
+		},
+		{
+			name: "--take-image refuses a connection error beside a conflict", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, dryAnswer(conflictOf(takeFields...)+"\nThe connection to the server 192.0.2.1:6443 was refused - did you specify the right host or port?\n"))
+				return k
+			},
+			code:  2,
+			want:  []string{"something that is not a conflict", "'The connection to the server 192.0.2.1:6443 was refused"},
+			check: func(t *testing.T, _ *rig, res result) { checkTake(t, res, []string{dryApply}) },
+		},
+		{
+			name: "--take-image refuses a count that does not match", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, dryAnswer(strings.Replace(conflictOf(takeFields...), "Apply failed with 2 conflicts", "Apply failed with 3 conflicts", 1)))
+				return k
+			},
+			code:  2,
+			want:  []string{"counts 3 conflicts and names 2 fields"},
+			check: func(t *testing.T, _ *rig, res result) { checkTake(t, res, []string{dryApply}) },
+		},
+		{
+			name: "--take-image forces a single conflict with the error prefix", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			k: func(k kube) kube {
+				k.extra = append(k.extra, dryAnswer("error: "+conflictOf(takeFields[0])+"Warning: a warning of the server\n"))
+				return k
+			},
+			deletes: []string{"cactusfs-node-0-0"},
+			want:    []string{"--take-image: the render is applied once with --force-conflicts"},
+			check:   func(t *testing.T, _ *rig, res result) { checkTake(t, res, []string{dryApply, forceApply}) },
+		},
+		{
+			name: "--take-image with nothing to force", mode: "standalone", args: []string{"--take-image=cactusfs"},
+			deletes: []string{"cactusfs-node-0-0"},
+			want:    []string{"--take-image: the render applies without a conflict; nothing is forced"},
+			check: func(t *testing.T, _ *rig, res result) {
+				checkTake(t, res, []string{dryApply, mainApply})
+			},
+		},
+		{
+			name: "two nodes away refuse it", mode: "cluster",
+			k:    func(k kube) kube { k.notReady = []string{"cactusfs-meta-1", "cactusfs-meta-2"}; return k },
+			code: 2,
+			want: []string{"the nodes cactusfs-meta-1 cactusfs-meta-2 of cactusfs are not Ready"},
+		},
+		{
+			name: "a node away is replaced first", mode: "cluster",
+			k: func(k kube) kube {
+				k.notReady = []string{"cactusfs-meta-1"}
+				k.extra = append(k.extra, rule{Tool: "kubectl", Contains: []string{"get", "pods", "-l"}, After: []string{"delete", "pod", "cactusfs-meta-1-0"}, Stdout: podsJSONNoT(k.mode, k.image)})
+				return k
+			},
+			deletes: []string{"cactusfs-meta-1-0", "cactusfs-data-0-0", "cactusfs-meta-0-0", "cactusfs-meta-2-0"},
+			want:    []string{"upgrade: the node cactusfs-meta-1 is not Ready; it is replaced first"},
+		},
+		{
+			name: "a second node away stops it", mode: "cluster",
+			k: func(k kube) kube {
+				k.extra = append(k.extra, rule{Tool: "kubectl", Contains: []string{"get", "pods", "-l"}, After: []string{"delete", "pod", "cactusfs-data-0-0"}, Stdout: podsJSONNoT(k.mode, k.image, "cactusfs-meta-2")})
+				return k
+			},
+			code:    1,
+			deletes: []string{"cactusfs-data-0-0"},
+			want:    []string{"upgrade stopped before the node cactusfs-meta-0: the nodes cactusfs-meta-2 are not Ready"},
+		},
+		{
+			name: "what the render no longer holds is pruned", mode: "standalone",
+			k: func(k kube) kube {
+				k.objects = append(slices.Clone(k.objects), "poddisruptionbudget.policy/cactusfs")
+				return k
+			},
+			deletes: []string{"cactusfs-node-0-0"},
+			want:    []string{"pruned what the render no longer holds: poddisruptionbudget.policy/cactusfs"},
+			check: func(t *testing.T, _ *rig, res result) {
+				prune := kubeIndex(res.calls, 0, "delete", "poddisruptionbudget.policy/cactusfs", "-n", "cactusfs")
+				if prune < kubeIndex(res.calls, 0, "apply") || prune > kubeIndex(res.calls, 0, "delete", "pod") {
+					t.Errorf("the prune is at %d, not between the apply and the first pod", prune)
+				}
+			},
+		},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				r.chart()
+				r.keepStdin()
+				f := newImgFix(imgCommit)
+				image := registry + "@sha256:" + f.hex
+				values := kubeEntry(t, r, c.mode, clusterUID)
+				k := installedKube(kube{mode: c.mode, f: f, image: image, secrets: values})
+				if c.k != nil {
+					k = c.k(k)
+				}
+				r.rules(k.rules(t)...)
+				env := kubeEnv(f) + c.env
+				if c.mode == "cluster" {
+					env += "DEPLOY_MODE=cluster\nALLOW_SHARED_LOCAL_KMS=yes\n"
+				}
+				res := r.kubeRun(env, append([]string{"--install"}, c.args...)...)
+				res.want(t, c.code, c.want...)
+				insideNamespace(t, r, res.calls, "cactusfs")
+				noForce(t, res.calls, slices.Contains(c.args, "--take-image=cactusfs"))
+				if got := kubeDeletes(res.calls); !slices.Equal(got, c.deletes) {
+					t.Errorf("the pods deleted are %q, want %q", got, c.deletes)
+				}
+				for _, w := range writes(res.calls) {
+					if args, _ := kubectlArgs(w); args[0] == "create" {
+						t.Errorf("an upgrade created %q", args)
+					}
+				}
+				if c.check != nil {
+					c.check(t, r, res)
+				}
+			})
+		}
+	})
+}
+
+// TestK8sStatus: --status lists the pods, every address - a NodePort on the
+// machines that run a ready pod of a gateway - probes /healthz and /readyz
+// of a published admin port with the CA, and prints the port-forward
+// commands when no admin port answered (with K3S_SSH, the pair ssh -L and
+// k3s kubectl port-forward); it changes nothing, and exits 0 when every
+// node is ready or nothing is installed, 1 when a node is not ready.
+func TestK8sStatus(t *testing.T) {
+	services := func(admin string) rule {
+		adminSvc := obj{"metadata": obj{"name": "cactusfs-admin"}, "spec": obj{"type": "ClusterIP", "ports": []any{obj{"port": 9001}}}}
+		if admin != "" {
+			adminSvc = obj{"metadata": obj{"name": "cactusfs-admin"}, "spec": obj{"type": "NodePort", "ports": []any{obj{"port": 9001, "nodePort": 30901}}}}
+		}
+		return rule{Tool: "kubectl", Contains: []string{"get", "services", "cactusfs", "cactusfs-admin"}, Stdout: kjsonNoT(kubeList(
+			obj{"metadata": obj{"name": "cactusfs"}, "spec": obj{"type": "NodePort", "ports": []any{obj{"port": 9000, "nodePort": 30900}}}},
+			adminSvc))}
+	}
+	pods := func(t *testing.T, image string, ready bool) rule {
+		return rule{Tool: "kubectl", Contains: []string{"get", "pods"}, Stdout: kjson(t, kubeList(podOf("cactusfs-node-0-0", "u1", "r", image, ready, true)))}
+	}
+	cases := []struct {
+		name  string
+		env   string
+		k     func(t *testing.T, k kube) kube
+		code  int
+		want  []string
+		never []string
+	}{
+		{
+			name: "ready, the admin port inside the cluster",
+			k: func(t *testing.T, k kube) kube {
+				k.extra = append(k.extra, services(""), pods(t, k.image, true))
+				return k
+			},
+			want: []string{
+				"node: cactusfs-node-0, pod cactusfs-node-0-0 on na, ready, image " + registry,
+				"S3: https://192.0.2.11:30900 (NodePort, on the machine na, which runs a ready pod)",
+				"admin API and console: inside the cluster only, https://cactusfs-admin.cactusfs.svc:9001 (ClusterIP)",
+				"the admin API from this machine: kubectl --context prod port-forward -n cactusfs service/cactusfs-admin 9001:9001",
+			},
+		},
+		{
+			name: "the admin port published and answering", env: "K8S_ADMIN_SERVICE_TYPE=NodePort\nK8S_ADMIN_ALLOW_FROM=192.0.2.0/24\n",
+			k: func(t *testing.T, k kube) kube {
+				k.extra = append(k.extra, services("NodePort"), pods(t, k.image, true), rule{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "200"})
+				return k
+			},
+			want:  []string{"admin API and console: https://192.0.2.11:30901", "/healthz 200, /readyz 200"},
+			never: []string{"port-forward"},
+		},
+		{
+			name: "a node not ready", code: 1,
+			k: func(t *testing.T, k kube) kube {
+				k.extra = append(k.extra, services(""), pods(t, k.image, false))
+				return k
+			},
+			want:  []string{"NOT ready", "the NodePort 30900, on no machine yet"},
+			never: []string{"https://192.0.2.11:30900"},
+		},
+		{
+			name: "a console upgrade under way",
+			k: func(t *testing.T, k kube) kube {
+				k.lock = lockOf(time.Now().UTC().Format(time.RFC3339Nano))
+				k.extra = append(k.extra, services(""), pods(t, k.image, true))
+				return k
+			},
+			want: []string{"an upgrade from the console holds the lock cactusfs.io/upgrade on cactusfs-node-0"},
+		},
+		{
+			name: "not installed", code: 0,
+			k:    func(_ *testing.T, k kube) kube { k.marker = ""; return k },
+			want: []string{"cactusfs is not installed: kubectl --context prod has no namespace cactusfs"},
+		},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				f := newImgFix(imgCommit)
+				image := registry + "@sha256:" + f.hex
+				kubeEntry(t, r, "standalone", clusterUID)
+				k := c.k(t, installedKube(kube{mode: "standalone", f: f, image: image}))
+				r.rules(k.rules(t)...)
+				res := r.kubeRun(kubeEnv(f)+c.env, "--status")
+				res.want(t, c.code, c.want...)
+				for _, n := range c.never {
+					if strings.Contains(res.output(), n) {
+						t.Errorf("the output says %q:\n%s", n, res.output())
+					}
+				}
+				if w := writes(res.calls); len(w) != 0 {
+					t.Errorf("--status changed %v", w)
+				}
+				insideNamespace(t, r, res.calls, "cactusfs")
+			})
+		}
+		t.Run("over ssh", func(t *testing.T) {
+			t.Parallel()
+			r := r.fresh(t)
+			r.rules(rule{Tool: "ssh", Contains: []string{"get", "namespace", "cactusfs"}, Stdout: kjson(t, obj{"metadata": obj{"name": "cactusfs", "annotations": obj{"deploy.cactusfs.io/owner-uid": kubeMarker}}})},
+				rule{Tool: "ssh", Contains: []string{"get", "statefulsets,services,networkpolicies,poddisruptionbudgets"}, Stdout: objectsJSON(t, []string{"statefulset.apps/cactusfs-node-0"}, nil)})
+			put(t, filepath.Join(r.state("ssh-admin_k3s.example.test", "cactusfs"), "namespace-uid"), kubeMarker+"\n")
+			res := r.withEnv("DEPLOY_TARGET=k3s\nK3S_SSH=admin@k3s.example.test\nKMS=local\n", "--status")
+			res.want(t, 1, "node: cactusfs-node-0 has no pod",
+				"ssh -L 9001:127.0.0.1:9001 -- admin@k3s.example.test, and in that session k3s kubectl port-forward -n cactusfs service/cactusfs-admin 9001:9001")
+		})
+	})
+}
+
+// kjsonNoT is kjson for a value that always encodes.
+func kjsonNoT(v any) string {
+	data, err := json.MarshalIndent(v, "", "    ")
+	if err != nil {
+		return "{}"
+	}
+	return string(data) + "\n"
+}
+
+// TestK8sUninstall: --uninstall deletes the release's objects and its
+// Secrets and keeps its claims, the namespace and STATE_DIR's entry; it is
+// refused on another cluster than the recorded one, in a namespace that is
+// not the deployment's, and while a console upgrade is under way.
+func TestK8sUninstall(t *testing.T) {
+	deleteObjects := "delete networkpolicy.networking.k8s.io/cactusfs service/cactusfs service/cactusfs-admin service/cactusfs-nodes statefulset.apps/cactusfs-node-0 -n cactusfs"
+	deleteSecrets := "delete secret/cactusfs-root secret/cactusfs-tls -n cactusfs"
+	cases := []struct {
+		name    string
+		entry   string
+		env     string
+		prepare func(t *testing.T, r *rig, state string, k kube) kube
+		code    int
+		want    string
+		writes  []string
+	}{
+		{name: "removed, the claims kept", entry: clusterUID, want: "kept: the claims data1-cactusfs-node-0-0 meta-cactusfs-node-0-0, the namespace cactusfs", writes: []string{deleteObjects, deleteSecrets}},
+		{name: "another cluster", entry: "another-uid-0000", code: 2, want: "now reach another"},
+		{name: "a namespace that is not the deployment's", entry: clusterUID, code: 2, want: "is not this deployment's", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.marker = strings.Repeat("f", 32)
+			return k
+		}},
+		{name: "another namespace than the one recorded", entry: clusterUID, env: "K8S_NAMESPACE=other\n", code: 2, want: "records the namespace cactusfs, and the settings name other"},
+		{name: "a console upgrade under way", entry: clusterUID, code: 2, want: "holds the lock cactusfs.io/upgrade", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.lock = lockOf(time.Now().UTC().Format(time.RFC3339Nano))
+			return k
+		}},
+		// The review of 10.10: an uninstall deleted the Secrets without
+		// knowing STATE_DIR still held their values.
+		{name: "a key file the cluster alone holds", entry: clusterUID, code: 2, want: "config/kms.json is missing from", prepare: func(t *testing.T, _ *rig, state string, k kube) kube {
+			remove(t, filepath.Join(state, "config", "kms.json"))
+			return k
+		}},
+		{name: "a passphrase that differs", entry: clusterUID, code: 2, want: "hold different values of passphrase", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.secrets = maps.Clone(k.secrets)
+			k.secrets["secrets/kms-passphrase"] = "fixture-other-" + rand.Text()
+			return k
+		}},
+		{
+			name: "a certificate given that differs", entry: clusterUID, env: "TLS_CERT_FILE=~/own.crt\nTLS_KEY_FILE=~/own.key\nTLS_CA_FILE=~/own-ca.pem\n", code: 2,
+			want: "hold other values than the files the settings name", prepare: func(t *testing.T, r *rig, state string, k kube) kube {
+				put(t, filepath.Join(r.home, "own.crt"), "fixture-own-"+rand.Text())
+				put(t, filepath.Join(r.home, "own.key"), read(t, filepath.Join(state, "config", "s3.key")))
+				put(t, filepath.Join(r.home, "own-ca.pem"), "a CA\n")
+				return k
+			},
+		},
+		{name: "a Secret the settings do not name", entry: clusterUID, code: 2, want: "holds the Secret cactusfs-vault-token of cactusfs, which is not one the settings name (it was made under other settings: DEPLOY_MODE, KMS or VAULT_CA_FILE)", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-vault-token\n"}}, k.extra...)
+			return k
+		}},
+		{name: "a StatefulSet another manager applied keeps the Secrets", entry: clusterUID, want: "kept: the Secrets secret/cactusfs-root secret/cactusfs-tls, as a StatefulSet carrying the release's labels that the script did not apply is left", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.foreign = []string{"statefulset.apps/cactusfs-node-0"}
+			return k
+		}, writes: []string{"delete networkpolicy.networking.k8s.io/cactusfs service/cactusfs service/cactusfs-admin service/cactusfs-nodes -n cactusfs"}},
+		{name: "an object another manager applied is left", entry: clusterUID, want: "left: service/cactusfs-admin carries the release's labels and was not applied by the script", prepare: func(_ *testing.T, _ *rig, _ string, k kube) kube {
+			k.foreign = []string{"service/cactusfs-admin"}
+			return k
+		}, writes: []string{"delete networkpolicy.networking.k8s.io/cactusfs service/cactusfs service/cactusfs-nodes statefulset.apps/cactusfs-node-0 -n cactusfs", deleteSecrets}},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				f := newImgFix(imgCommit)
+				values := kubeEntry(t, r, "standalone", c.entry)
+				state := r.state("k8s-prod", "cactusfs")
+				k := installedKube(kube{mode: "standalone", f: f, image: registry + "@sha256:" + f.hex, secrets: values})
+				k.extra = []rule{
+					{Tool: "kubectl", Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
+					{Tool: "kubectl", Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}}))},
+				}
+				if c.prepare != nil {
+					k = c.prepare(t, r, state, k)
+				}
+				r.rules(k.rules(t)...)
+				before := tree(t, state)
+				res := r.kubeRun(kubeEnv(f)+c.env, "--uninstall")
+				res.want(t, c.code, c.want)
+				if len(res.calls) > 0 {
+					insideNamespace(t, r, res.calls, "cactusfs")
+				}
+				var got []string
+				for _, w := range writes(res.calls) {
+					args, _ := kubectlArgs(w)
+					got = append(got, strings.Join(args, " "))
+				}
+				if !slices.Equal(got, c.writes) {
+					t.Errorf("the uninstall changed\n%q\nwant\n%q", got, c.writes)
+				}
+				if !equalTrees(before, tree(t, state)) {
+					t.Error("the uninstall changed the entry of STATE_DIR")
+				}
+			})
+		}
+	})
+}
+
+// TestK8sPurge: --uninstall --purge, confirmed, deletes in the order of
+// ADR-0033 section 3 - the workload, the release's claims, a listing that
+// proves none and no PersistentVolume bound to one is left (a Released one
+// kept by reclaimPolicy Retain is named and left), the Secrets and a
+// listing that proves them gone, the namespace (marked, empty when read
+// again, deleted by "delete --raw" with preconditions on its uid and
+// resourceVersion), the image tags it imported - and last STATE_DIR's
+// entry, a sibling entry kept; a step that fails keeps the entry.
+// purgeKinds is the kinds the fake API offers to list in a namespace, as
+// the purge lists them (events left out).
+const purgeKinds = "configmaps,pods,serviceaccounts,secrets,endpoints,endpointslices.discovery.k8s.io,deployments.apps"
+
+func TestK8sPurge(t *testing.T) {
+	claims := kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}})
+	pv := func(name, claim, phase, policy string) obj {
+		return obj{"metadata": obj{"name": name}, "spec": obj{"claimRef": obj{"namespace": "cactusfs", "name": claim}, "persistentVolumeReclaimPolicy": policy}, "status": obj{"phase": phase}}
+	}
+	base := func(k kube) kube {
+		k.extra = append(k.extra,
+			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, After: []string{"delete", "persistentvolumeclaim/meta-cactusfs-node-0-0"}, Stdout: kjsonNoT(kubeList())},
+			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(claims)},
+			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList(
+				pv("pvc-1", "meta-cactusfs-node-0-0", "Released", "Retain"),
+				pv("pvc-other", "meta-cactusfs-node-0-0", "Bound", "Delete")))},
+			rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, After: []string{"delete", "secret/cactusfs-root"}, Stdout: ""},
+			rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
+			rule{Tool: k.tool, Contains: []string{"api-resources", "--namespaced"}, Stdout: "configmaps\npods\nserviceaccounts\nsecrets\nendpoints\nendpointslices.discovery.k8s.io\ndeployments.apps\nevents\nevents.events.k8s.io\n"},
+			// What is left: what every namespace holds, and the
+			// deployment's own objects on their way out.
+			rule{Tool: k.tool, Contains: []string{"get", purgeKinds}, Stdout: "configmap/kube-root-ca.crt\nserviceaccount/default\npod/cactusfs-node-0-0\nendpoints/cactusfs\nendpointslice.discovery.k8s.io/cactusfs-x7k2p\n"},
+			rule{Tool: k.tool, Contains: []string{"get", "pods", "-A"}, Stdout: kjsonNoT(kubeList(podOf("web-0", "u", "r", "registry.example.test/web:1", true, false)))},
+			rule{Tool: k.tool, Contains: []string{"get", "statefulsets,deployments,daemonsets,jobs,cronjobs", "-A"}, Stdout: kjsonNoT(kubeList())},
+			rule{Tool: k.tool, Contains: []string{"delete", "--raw"}, SaveStdin: "delete.json"},
+		)
+		return k
+	}
+	// The PV of another namespace's claim of the same name is not ours.
+	otherNS := func(k kube) kube {
+		k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList(
+			obj{"metadata": obj{"name": "pvc-x"}, "spec": obj{"claimRef": obj{"namespace": "shop", "name": "meta-cactusfs-node-0-0"}, "persistentVolumeReclaimPolicy": "Delete"}, "status": obj{"phase": "Bound"}},
+			pv("pvc-1", "meta-cactusfs-node-0-0", "Released", "Retain")))}}, k.extra...)
+		return k
+	}
+	cases := []struct {
+		name   string
+		env    string
+		args   []string
+		k      func(k kube) kube
+		code   int
+		want   []string
+		purged bool
+		noName bool
+		check  func(t *testing.T, r *rig, res result)
+	}{
+		{
+			name: "purged", k: otherNS, purged: true,
+			want: []string{
+				"purge: no claim of cactusfs is left", "left, as their StorageClass's reclaimPolicy Retain keeps them: pvc-1",
+				"purge: deleted the namespace cactusfs (uid " + nsUID + ", resourceVersion 41: the preconditions guard the Namespace object itself, not what it holds", "purged: cactusfs",
+			},
+			check: func(t *testing.T, r *rig, res result) {
+				steps := []int{
+					kubeIndex(res.calls, 0, "delete", "networkpolicy.networking.k8s.io/cactusfs"),
+					kubeIndex(res.calls, 0, "delete", "persistentvolumeclaim/data1-cactusfs-node-0-0"),
+				}
+				steps = append(steps, kubeIndex(res.calls, steps[1], "get", "persistentvolumeclaims"))
+				steps = append(steps, kubeIndex(res.calls, steps[2], "get", "persistentvolumes"))
+				steps = append(steps, kubeIndex(res.calls, steps[3], "delete", "secret/cactusfs-root"))
+				steps = append(steps, kubeIndex(res.calls, steps[4], "get", "secrets"))
+				steps = append(steps, kubeIndex(res.calls, steps[5], "get", "namespace", "cactusfs"))
+				steps = append(steps, kubeIndex(res.calls, steps[6], "get", purgeKinds))
+				steps = append(steps, kubeIndex(res.calls, steps[7], "delete", "--raw", "/api/v1/namespaces/cactusfs", "-f", "-"))
+				for i, s := range steps {
+					if s < 0 || (i > 0 && s <= steps[i-1]) {
+						t.Fatalf("the purge's steps are at %v: step %d is out of order", steps, i)
+					}
+				}
+				if got := read(t, filepath.Join(r.dir, "delete.json")); got != `{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"`+nsUID+`","resourceVersion":"41"}}`+"\n" {
+					t.Errorf("the namespace's delete sent %q", got)
+				}
+				for _, c := range res.calls {
+					if args, ok := kubectlArgs(c); ok && args[0] == "delete" && slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "persistentvolume/") || a == "persistentvolumes" }) {
+						t.Errorf("a PersistentVolume was deleted: %q", args)
+					}
+				}
+			},
+		},
+		{
+			name: "claims that stay keep the entry", code: 1,
+			k: func(k kube) kube {
+				k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(claims)}}, k.extra...)
+				return k
+			},
+			want: []string{"purge: the claims data1-cactusfs-node-0-0 meta-cactusfs-node-0-0 of cactusfs are still there after WAIT_TIMEOUT=3 s"},
+			check: func(t *testing.T, _ *rig, res result) {
+				if kubeIndex(res.calls, 0, "delete", "secret/cactusfs-root") >= 0 || kubeIndex(res.calls, 0, "delete", "--raw") >= 0 {
+					t.Error("the Secrets or the namespace were deleted while claims are left")
+				}
+			},
+		},
+		{
+			name: "a volume still bound keeps the entry", code: 1,
+			want: []string{"purge: the PersistentVolumes pvc-other (Bound) of the claims of cactusfs are still there"},
+		},
+		{
+			name: "a namespace that holds more is left", purged: true,
+			k: func(k kube) kube {
+				k = otherNS(k)
+				k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"get", purgeKinds}, Stdout: "configmap/kube-root-ca.crt\nendpoints/cactusfs\ndeployment.apps/web\n"}}, k.extra...)
+				return k
+			},
+			want: []string{"purge: the namespace cactusfs is left: it holds deployment.apps/web, which is not the deployment's", "purged: cactusfs"},
+			check: func(t *testing.T, _ *rig, res result) {
+				if kubeIndex(res.calls, 0, "delete", "--raw") >= 0 {
+					t.Error("a namespace that holds more was deleted")
+				}
+			},
+		},
+		{
+			name: "a namespace the context may not delete is left", purged: true,
+			k: func(k kube) kube {
+				k = otherNS(k)
+				k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"delete", "--raw"}, Stderr: "Error from server (Forbidden): namespaces \"cactusfs\" is forbidden\n", Exit: 1}}, k.extra...)
+				return k
+			},
+			want: []string{"the context may not delete the namespace cactusfs (Forbidden): it is left, empty, to the cluster's administrator", "purged: cactusfs"},
+		},
+		{
+			name: "a precondition that fails keeps the entry", code: 1,
+			k: func(k kube) kube {
+				k = otherNS(k)
+				k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"delete", "--raw"}, Stderr: "Error from server (Conflict): Precondition failed: UID in precondition\n", Exit: 1}}, k.extra...)
+				return k
+			},
+			want: []string{"purge: deleting the namespace cactusfs failed"},
+		},
+		{
+			name: "a key file the cluster alone holds is not deleted", code: 2,
+			k: func(k kube) kube {
+				k.extra = append(k.extra, rule{
+					Tool: "kubectl", Contains: []string{"get", "secret", "cactusfs-kms"},
+					Stdout: secretJSON("cactusfs-kms", "Opaque", "cactusfs", map[string]string{"kms.json": "fixture-only-here-" + rand.Text()}),
+				})
+				return k
+			},
+			want: []string{"hold different values of kms.json"},
+		},
+		{
+			name: "a Secret the settings do not name goes with the purge", purged: true, k: func(k kube) kube {
+				k = otherNS(k)
+				sel := "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"
+				k.extra = append([]rule{
+					{Tool: "kubectl", Contains: []string{"get", "secrets", sel}, After: []string{"delete", "secret/cactusfs-root"}, Stdout: ""},
+					{Tool: "kubectl", Contains: []string{"get", "secrets", sel}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-vault-token\n"},
+				}, k.extra...)
+				return k
+			},
+			want: []string{"the Secret cactusfs-vault-token of cactusfs is not one the settings name (they changed since it was made); the purge deletes it with the rest", "purge: deleted the Secrets secret/cactusfs-root secret/cactusfs-vault-token", "purged: cactusfs"},
+		},
+		{
+			name: "no record of the namespace's name", code: 2, noName: true,
+			want: []string{"holds no record of cactusfs (its target, its namespace's name and marker)"},
+		},
+		{
+			name: "the namespace is gone already", purged: true,
+			k:    func(k kube) kube { k.marker = ""; return k },
+			want: []string{"has no namespace cactusfs", "purged: cactusfs"},
+		},
+		{
+			name: "what hostpath made is named and left", env: "K8S_STORAGE=hostpath\n", k: otherNS, purged: true,
+			want: []string{"purge: left, cluster-scoped and never deleted by the script: the StorageClass cactusfs-cactusfs-local and the PersistentVolumes cactusfs-<node ID>-<volume>, and the directories /var/lib/cactusfs-deploy/cactusfs on the node"},
+		},
+		{
+			name: "not confirmed", args: []string{"--uninstall", "--purge"}, code: 2,
+			want: []string{"type its name when asked at a terminal, or say --purge-confirm=cactusfs; nothing was deleted"},
+		},
+		{
+			name: "a dry run", args: []string{"--uninstall", "--purge", "--purge-confirm=cactusfs", "--dry-run"}, k: otherNS,
+			want: []string{"run: kubectl --context prod delete persistentvolumeclaim/data1-cactusfs-node-0-0", "run: rm -rf --"},
+		},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				f := newImgFix(imgCommit)
+				values := kubeEntry(t, r, "standalone", clusterUID)
+				if c.noName {
+					remove(t, filepath.Join(r.state("k8s-prod", "cactusfs"), "namespace"))
+				}
+				sibling := r.state("k8s-prod", "other")
+				put(t, filepath.Join(sibling, "target"), "kubectl --context prod\n")
+				k := base(installedKube(kube{tool: "kubectl", mode: "standalone", f: f, image: registry + "@sha256:" + f.hex, secrets: values}))
+				if c.k != nil {
+					k = c.k(k)
+				}
+				r.rules(k.rules(t)...)
+				args := c.args
+				if args == nil {
+					args = []string{"--uninstall", "--purge", "--purge-confirm=cactusfs"}
+				}
+				res := r.kubeRun(kubeEnv(f)+c.env, args...)
+				res.want(t, c.code, c.want...)
+				if len(res.calls) > 0 {
+					insideNamespace(t, r, res.calls, "cactusfs")
+				}
+				state := r.state("k8s-prod", "cactusfs")
+				_, err := os.Stat(state)
+				if c.purged != errors.Is(err, os.ErrNotExist) {
+					t.Errorf("purged %v, and the entry: %v", c.purged, err)
+				}
+				if _, err := os.Stat(filepath.Join(sibling, "target")); err != nil {
+					t.Errorf("a sibling entry was touched: %v", err)
+				}
+				if c.code == 2 || slices.Contains(args, "--dry-run") {
+					if w := writes(res.calls); len(w) != 0 {
+						t.Errorf("a refused or dry run changed %v", w)
+					}
+				}
+				if c.check != nil {
+					c.check(t, r, res)
+				}
+			})
+		}
+		t.Run("the images it imported, over ssh", func(t *testing.T) {
+			t.Parallel()
+			r := r.fresh(t)
+			f := newImgFix(imgCommit)
+			state := r.state("ssh-admin_k3s.example.test", "cactusfs")
+			put(t, filepath.Join(state, "target"), "k3s kubectl over ssh admin@k3s.example.test\nengine-id="+clusterUID+"\nkms=local\n")
+			put(t, filepath.Join(state, "namespace-uid"), kubeMarker+"\n")
+			put(t, filepath.Join(state, "namespace"), "cactusfs\n")
+			put(t, filepath.Join(state, "images"), "docker.io/library/cactusfs:0.7.0-412-0123456789ab\ndocker.io/library/cactusfs:0.7.0-412-feedfacefeed\ndocker.io/library/cactusfs:0.7.0-412-0000beefcafe\n")
+			k := base(installedKube(kube{tool: "ssh", mode: "standalone", f: f, image: f.ref()}))
+			// A pod of another namespace runs the second tag, by the name
+			// its spec gives it: that tag is kept.
+			k.extra = append([]rule{
+				{Tool: "ssh", Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList())},
+				{Tool: "ssh", Contains: []string{"get", "pods", "-A"}, Stdout: kjsonNoT(kubeList(podOf("other-0", "u", "r", "cactusfs:0.7.0-412-feedfacefeed", true, false)))},
+				// A Deployment scaled to none names the third in its template.
+				{Tool: "ssh", Contains: []string{"get", "statefulsets,deployments,daemonsets,jobs,cronjobs", "-A"}, Stdout: kjsonNoT(kubeList(obj{
+					"kind": "Deployment", "metadata": obj{"name": "later", "namespace": "shop"},
+					"spec": obj{"template": obj{"spec": obj{"containers": []any{obj{"name": "c", "image": "cactusfs:0.7.0-412-0000beefcafe"}}}}},
+				}))},
+			}, k.extra...)
+			r.rules(k.rules(t)...)
+			res := r.withEnv("DEPLOY_TARGET=k3s\nK3S_SSH=admin@k3s.example.test\nKMS=local\n", "--uninstall", "--purge", "--purge-confirm=cactusfs")
+			res.want(t, 0, "purge: removed the image docker.io/library/cactusfs:0.7.0-412-0123456789ab it imported",
+				"purge: the image docker.io/library/cactusfs:0.7.0-412-feedfacefeed is kept: a pod or a workload's template still names it",
+				"purge: the image docker.io/library/cactusfs:0.7.0-412-0000beefcafe is kept: a pod or a workload's template still names it", "purged: cactusfs")
+			rm := callsOf(res, "ssh", "images", "rm")
+			want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "-o", "ControlPath=none", "--", "admin@k3s.example.test", "k3s", "ctr", "-n", "k8s.io", "images", "rm", "docker.io/library/cactusfs:0.7.0-412-0123456789ab"}
+			if len(rm) != 1 || !slices.Equal(rm[0].Args, want) {
+				t.Errorf("the image removed is %v", rm)
+			}
+			if i, j := slices.IndexFunc(res.calls, func(c call) bool { return slices.Contains(c.Args, "--raw") }), slices.IndexFunc(res.calls, func(c call) bool { return slices.Contains(c.Args, "rm") }); i < 0 || j < i {
+				t.Errorf("the image was removed at %d, the namespace at %d", j, i)
+			}
+			if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the entry is still there: %v", err)
+			}
+		})
+	})
+}
+
+// TestK8sEngineReplaced: a cluster made again (another UID of kube-system
+// behind the same settings) is refused, and taken with --engine-replaced,
+// which says so and records its ID.
+func TestK8sEngineReplaced(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		r.chart()
+		f := newImgFix(imgCommit)
+		values := kubeEntry(t, r, "standalone", "gone-0000")
+		k := installedKube(kube{mode: "standalone", f: f, image: registry + "@sha256:" + f.hex, secrets: values})
+		k.podImage = k.image
+		r.rules(k.rules(t)...)
+		res := r.kubeRun(kubeEnv(f), "--install", "--engine-replaced")
+		res.want(t, 0, "--engine-replaced: the deployment made on the cluster 'gone-0000' is taken as gone", "state: recorded the engine "+clusterUID)
+		if got := read(t, filepath.Join(r.state("k8s-prod", "cactusfs"), "target")); got != "kubectl --context prod\nengine-id="+clusterUID+"\nkms=local\n" {
+			t.Errorf("the record is %q", got)
+		}
+	})
+}
+
+// shq is the word as a shell reads it back, in single quotes.
+func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// TestOneExitTrap: the cleanups of a run are one EXIT trap (PLAN 10.10,
+// common.sh): each command is written into it when it is added, its words
+// quoted - a path with spaces, quotes and "$(...)" is removed as it is, and
+// a variable assigned afterwards changes nothing - and they run last added
+// first, on an exit, a refusal, a failure and a TERM; one dropped is not
+// run; a subshell that adds its own (after cleanup_none) runs only those
+// when it ends.
+func TestOneExitTrap(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range []struct {
+			name, end string
+			code      int
+		}{
+			{"an exit", "exit 0", 0},
+			{"a refusal", "refuse no", 2},
+			{"a failure", "fail no", 1},
+			{"a TERM", "kill -TERM $$; sleep 5", 143},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := r.fresh(t)
+				odd := filepath.Join(r.dir, "a dir with 'quotes' and $(id)")
+				outer := filepath.Join(r.dir, "outer")
+				inner := filepath.Join(outer, "inner")
+				dropped := filepath.Join(r.dir, "dropped")
+				sub := filepath.Join(r.dir, "sub")
+				for _, d := range []string{odd, inner, dropped, sub} {
+					if err := os.MkdirAll(d, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				code := "d=" + shq(odd) + "; cleanup_add rm -rf -- \"$d\"; d=/nonexistent; " +
+					// Last added, first run: inner goes before its parent.
+					"cleanup_add rmdir -- " + shq(outer) + "; cleanup_add rm -rf -- " + shq(inner) + "; " +
+					"cleanup_add rm -rf -- " + shq(dropped) + "; cleanup_drop rm -rf -- " + shq(dropped) + "; " +
+					"(cleanup_none; cleanup_add rm -rf -- " + shq(sub) + "; exit 0); " +
+					"[ -d " + shq(odd) + " ] && [ ! -d " + shq(sub) + " ] && echo the-subshell-ran-its-own; " + c.end
+				res := r.source(code)
+				res.want(t, c.code, "the-subshell-ran-its-own")
+				for _, d := range []string{odd, outer} {
+					if _, err := os.Stat(d); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("%s was not removed: %v", d, err)
+					}
+				}
+				if _, err := os.Stat(dropped); err != nil {
+					t.Errorf("a cleanup that was dropped ran: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// TestWorkdirInSubstitution: image_in_workdir called in a command
+// substitution, as image_build and image_podman_push call it, keeps the
+// run's own cleanups for the run - started with cleanup_none, the
+// substitution's trap removes its work directory and nothing else (the
+// review of the 10.10 merge: without it, the substitution's EXIT trap ran
+// every cleanup of the run, CE_HOST's pinned known_hosts among them, when
+// it ended) - and the run's run when the run ends.
+func TestWorkdirInSubstitution(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		r = r.fresh(t)
+		run := filepath.Join(r.dir, "the run's")
+		if err := os.MkdirAll(run, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		code := ". \"$DEPLOY_DIR/lib/image.sh\"; " +
+			"cleanup_add rm -rf -- " + shq(run) + "; " +
+			"in_dir() { [ -d \"$1\" ] && echo \"$1\"; }; " +
+			"w=$(cleanup_none; image_in_workdir in_dir); " +
+			"[ -n \"$w\" ] && [ ! -d \"$w\" ] && echo the-workdir-went; " +
+			"[ -d " + shq(run) + " ] && echo the-run-kept-its-own; exit 0"
+		res := r.source(code, "DEPLOY_DIR="+filepath.Join(r.repo, "deploy"), "TMPDIR="+r.dir)
+		res.want(t, 0, "the-workdir-went", "the-run-kept-its-own")
+		if _, err := os.Stat(run); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the run's cleanup did not run when it ended: %v", err)
+		}
+	})
+}
+
+// TestWorkdirSubstitutionsStartClean: every command substitution of the
+// scripts that calls a function adding a cleanup starts with cleanup_none
+// (TestWorkdirInSubstitution says why).
+func TestWorkdirSubstitutionsStartClean(t *testing.T) {
+	t.Parallel()
+	adders := regexp.MustCompile(`\$\(\s*(?:cleanup_none\s*[;\n]\s*)?(image_in_workdir|k8s_in_workdir|ce_work_begin|secrets_begin|k8s_secrets_ensure|k8s_secrets_verify|k8s_namespace_check)\b`)
+	dir := filepath.Join("..", "..", "deploy")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	files, err := fs.Glob(root.FS(), "lib/*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, "deploy.sh")
+	seen := 0
+	for _, f := range files {
+		body, err := root.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Comments out, lines kept: shfmt puts a substitution's commands on
+		// lines of their own.
+		lines := strings.Split(string(body), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				lines[i] = ""
+			}
+		}
+		text := strings.Join(lines, "\n")
+		for _, at := range adders.FindAllStringIndex(text, -1) {
+			seen++
+			if m := text[at[0]:at[1]]; !strings.Contains(m, "cleanup_none") {
+				t.Errorf("%s:%d: %q does not start with cleanup_none", f, strings.Count(text[:at[0]], "\n")+1, m)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Error("no command substitution of image_in_workdir was found: the scripts were not read")
+	}
+}
+
+// TestK8sGenerationFails: a step of making the secrets that fails - here,
+// reading dev-init's directory out of its container - ends the install
+// with exit 1 before any Secret is created (the review of 10.10: on the
+// left of "||" a failed step was passed over).
+func TestK8sGenerationFails(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		r.chart()
+		f := newImgFix(imgCommit)
+		k := kube{mode: "standalone", f: f, image: registry + "@sha256:" + f.hex, devInit: k8sDevInit("standalone")}
+		k.extra = []rule{{Tool: "docker", Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stderr: "Error: no such container\n", Exit: 1}}
+		r.rules(k.rules(t)...)
+		res := r.kubeRun(kubeEnv(f), "--install")
+		res.want(t, 1, "copying what dev-init wrote out of cactusfs-dev-init failed")
+		for _, c := range res.calls {
+			if args, ok := kubectlArgs(c); ok && len(args) > 1 && args[0] == "create" && args[1] == "--field-manager=cactusfs-deploy" {
+				t.Errorf("a Secret was created after the generation failed: %q", args)
+			}
+			if args, ok := kubectlArgs(c); ok && len(args) > 0 && args[0] == "apply" {
+				t.Errorf("the render was applied after the generation failed: %q", args)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(r.state("k8s-prod", "cactusfs"), "config")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a configuration was kept from a dev-init that failed: %v", err)
+		}
+	})
+}
+
+// TestK8sHostpathSaidFirst: with K8S_STORAGE=hostpath the install says which
+// cluster-scoped objects it will make before it changes anything, and once.
+func TestK8sHostpathSaidFirst(t *testing.T) {
+	eachShell(t, func(t *testing.T, r *rig) {
+		r.chart()
+		f := newImgFix(imgCommit)
+		k := kube{mode: "standalone", f: f, image: registry + "@sha256:" + f.hex, devInit: k8sDevInit("standalone")}
+		r.rules(k.rules(t)...)
+		res := r.kubeRun(kubeEnv(f)+"K8S_STORAGE=hostpath\n", "--install")
+		said := "K8S_STORAGE=hostpath makes cluster-scoped objects: the StorageClass cactusfs-cactusfs-local and 5 PersistentVolumes"
+		res.want(t, 0, said)
+		if strings.Count(res.stdout, said) != 1 || strings.Index(res.stdout, said) > strings.Index(res.stdout, "run: kubectl --context prod create -f -") {
+			t.Errorf("the cluster-scoped objects are not said once, before the first change:\n%s", res.stdout)
+		}
+	})
+}
+
+// TestPrintNamespaceImport: the ClusterRole lists pods and the workloads
+// cluster-wide only when the image is imported into k3s (a purge's check
+// of the tags still in use), never otherwise.
+func TestPrintNamespaceImport(t *testing.T) {
+	tableShells(t, func(t *testing.T, r *rig, _ bool) {
+		res := r.withEnv("KMS=local\nK8S_CONTEXT=team-a\nK3S_IMPORT=docker exec -i k3s-bench ctr -n k8s.io images import -\n", "--docker", "k3s", "--print-namespace")
+		res.want(t, 0)
+		for _, w := range []string{
+			"  - apiGroups: [\"\"]\n    resources: [nodes, services, persistentvolumes, pods]\n    verbs: [list]\n",
+			"  - apiGroups: [apps]\n    resources: [statefulsets, deployments, daemonsets]\n    verbs: [list]\n",
+			"  - apiGroups: [batch]\n    resources: [jobs, cronjobs]\n    verbs: [list]\n",
+		} {
+			if !strings.Contains(res.stdout, w) {
+				t.Errorf("the ClusterRole of an import does not hold %q:\n%s", w, res.stdout)
+			}
+		}
+		other := r.fresh(t).withEnv("KMS=local\nK8S_CONTEXT=team-a\n", "--docker", "k8s", "--print-namespace")
+		if strings.Contains(other.stdout, "persistentvolumes, pods") || strings.Contains(other.stdout, "daemonsets") {
+			t.Errorf("the ClusterRole lists pods or workloads without an import:\n%s", other.stdout)
 		}
 	})
 }

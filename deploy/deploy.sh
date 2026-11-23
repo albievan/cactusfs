@@ -54,8 +54,10 @@ Actions (exactly one):
   --print-namespace
                   print the manifests of the deployment's namespace, its
                   marker included, and of the Role (in it) and ClusterRole
-                  (list nodes, services and storageclasses; get namespaces
-                  <namespace> and kube-system) a K8S_CONTEXT bound to that
+                  (list nodes, services, storageclasses and
+                  persistentvolumes - and pods and workloads, for an
+                  image imported into k3s; get namespaces <namespace>
+                  and kube-system) a K8S_CONTEXT bound to that
                   namespace needs, for a cluster's administrator to create
                   beforehand and bind to the operator (k3s, k8s)
 
@@ -89,6 +91,13 @@ Flags:
                   it, another engine is refused (never a setting)
   --from-source   with --install: build the image from this tree with the
                   Dockerfile (IMAGE_SOURCE=source)
+  --take-image, --take-image=NAME
+                  with --install on Kubernetes, after an upgrade from the
+                  console: take the image field of the nodes' StatefulSets
+                  back for the script (--force-conflicts on that field
+                  alone); asks for the deployment's name at the terminal,
+                  or takes it as NAME; refused while a console upgrade's
+                  lock is there (never a setting)
   --dry-run       print the commands that would change something, run none
                   of them; what runs is still asked (read-only)
   --help          this text
@@ -109,6 +118,8 @@ PURGE_CONFIRM=
 ANOTHER_TARGET=0
 ADOPT=0
 ENGINE_REPLACED=0
+TAKE_IMAGE=0
+TAKE_IMAGE_CONFIRM=
 DRY_RUN=0
 # The image of the run (PLAN 10.4): what image_make and image_native set,
 # never what the environment holds.
@@ -187,6 +198,12 @@ while [ $# -gt 0 ]; do
 		PURGE_CONFIRM=${1#--purge-confirm=}
 		;;
 	--from-source) env_flag IMAGE_SOURCE source ;;
+	--take-image) TAKE_IMAGE=1 ;;
+	--take-image=*)
+		flag_given --take-image "the deployment's name" "${1#--take-image=}"
+		TAKE_IMAGE=1
+		TAKE_IMAGE_CONFIRM=${1#--take-image=}
+		;;
 	--dry-run) DRY_RUN=1 ;;
 	*) refuse "unknown argument '$1' (deploy/deploy.sh --help)" ;;
 	esac
@@ -201,6 +218,7 @@ done
 [ -z "$PURGE_CONFIRM" ] || [ "$PURGE" = 1 ] || refuse "--purge-confirm goes with --purge"
 [ "$ADOPT" = 0 ] || [ "$ACTION" = --install ] || [ "$PURGE" = 1 ] || refuse "--adopt goes with --install, or with --uninstall --purge"
 [ "$ENGINE_REPLACED" = 0 ] || [ "$ACTION" = --install ] || refuse "--engine-replaced goes with --install"
+[ "$TAKE_IMAGE" = 0 ] || [ "$ACTION" = --install ] || refuse "--take-image goes with --install"
 if lookup "$FLAG_SETTINGS" IMAGE_SOURCE >/dev/null && [ "$ACTION" != --install ]; then
 	refuse "--from-source goes with --install"
 fi
@@ -217,10 +235,15 @@ env_validate
 if [ -n "$PURGE_CONFIRM" ] && [ "$PURGE_CONFIRM" != "$(setting DEPLOY_NAME)" ]; then
 	refuse "--purge-confirm $PURGE_CONFIRM is not the name of the deployment, $(setting DEPLOY_NAME)"
 fi
+if [ -n "$TAKE_IMAGE_CONFIRM" ] && [ "$TAKE_IMAGE_CONFIRM" != "$(setting DEPLOY_NAME)" ]; then
+	refuse "--take-image=$TAKE_IMAGE_CONFIRM is not the name of the deployment, $(setting DEPLOY_NAME)"
+fi
 # Nothing of the environment points a tool elsewhere: every tool runs under
 # "env -i" (tool, deploy/lib/common.sh).
 resolve_target
 target_validate
+# Refused without asking any engine.
+[ "$TAKE_IMAGE" = 0 ] || on_kubernetes || refuse "--take-image is for a Kubernetes target (k3s, k8s): it takes back the image field an upgrade from the console moved"
 # Rancher Desktop's engine, moby or containerd, before the engine is named
 # or recorded (PLAN 10.6); its Kubernetes asks it only when its image is
 # made (image.sh).
@@ -253,11 +276,12 @@ esac
 # A standalone deployment on Docker Desktop, Docker CE on this machine or on
 # a server over SSH, Podman or Rancher Desktop is built (PLAN 10.5, 10.6,
 # 10.7, deploy/lib/docker.sh, deploy/lib/ce.sh and deploy/lib/rancher.sh),
-# and a cluster on Docker Desktop, Docker CE here or on CE_HOST, Podman or
-# Rancher Desktop's moby (PLAN 10.8, deploy/lib/compose.sh). Kubernetes -
-# k3s, k8s and Rancher Desktop's - is a stub: it says what the step of PLAN
-# milestone 10 that builds it will do, and ends with "not built yet"; a stub
-# changes nothing but the secrets PLAN 10.3 keeps.
+# a cluster on Docker Desktop, Docker CE here or on CE_HOST, Podman or
+# Rancher Desktop's moby (PLAN 10.8, deploy/lib/compose.sh), and k3s and
+# k8s in both modes (PLAN 10.10, 10.11, deploy/lib/k8s.sh). Rancher
+# Desktop's Kubernetes is a stub: it says what PLAN 10.6 will do, and ends
+# with "not built yet"; a stub changes nothing but the secrets PLAN 10.3
+# keeps.
 
 # engine: where the containers run.
 engine() {
@@ -269,17 +293,10 @@ engine() {
 	esac
 }
 
-# kubernetes: where the namespace is, for k3s and k8s (and Rancher Desktop's
-# Kubernetes).
-kubernetes() {
-	_ns=$(setting K8S_NAMESPACE)
-	_where="namespace ${_ns:-$(setting DEPLOY_NAME)}"
-	if [ -n "$(setting K3S_SSH)" ]; then
-		_where="$_where of k3s on $(setting K3S_SSH)"
-	elif [ -n "$(setting K8S_CONTEXT)" ]; then
-		_where="$_where of context $(setting K8S_CONTEXT)"
-	fi
-	echo "$_where"
+# kubernetes_step: Rancher Desktop's Kubernetes is handed over to the k8s
+# code by PLAN 10.6, with the local image and the context rancher-desktop.
+kubernetes_step() {
+	[ "$TARGET" != rancher ] || not_built 10.6 "$1 of Rancher Desktop's Kubernetes: the k8s path of PLAN 10.10 and 10.11 with the local image and the context rancher-desktop"
 }
 
 do_install() {
@@ -291,23 +308,13 @@ do_install() {
 		docker_install
 		return 0
 	fi
-	# Only Kubernetes is left (k3s, k8s, Rancher Desktop's): every other
-	# target and mode was taken above.
-	on_kubernetes || fail "internal: no install for $TARGET in $(setting DEPLOY_MODE) mode"
-	case $(setting IMAGE_SOURCE) in
-	source) _image="built from this tree with the Dockerfile" ;;
-	binaries) _image="built from the binaries in $(setting RELEASE_DIR)" ;;
-	image) _image="$(setting IMAGE), by digest" ;;
-	esac
-	# The secrets go to the target before anything starts there (PLAN
-	# 10.3): on Kubernetes as the namespace's Secrets, the step secrets_where
-	# names.
-	_secrets="the secrets of $STATE, made once when missing and put on the target before anything starts (PLAN 10.3, built for this target by $(secrets_where))"
-	_helm=$(setting HELM)
-	[ -n "$_helm" ] || _helm=$(setting HELM_IMAGE)
-	[ -n "$_helm" ] || _helm="the helm image the Dockerfile pins"
-	k8s_validate
-	not_built 10.10 "install: $_secrets; the image $_image (PLAN 10.4); the chart rendered with $_helm and applied server-side to $(kubernetes), storage $(setting K8S_STORAGE), S3 as $(setting K8S_SERVICE_TYPE) (PLAN 10.9, 10.10)"
+	if on_kubernetes; then
+		kubernetes_step install
+		k8s_validate
+		k8s_install
+		return 0
+	fi
+	fail "internal: no install for $TARGET in $(setting DEPLOY_MODE) mode"
 }
 
 do_status() {
@@ -320,7 +327,9 @@ do_status() {
 		return 0
 	fi
 	if on_kubernetes; then
-		not_built 10.11 "status: the pods, every address and /readyz of $(kubernetes)"
+		kubernetes_step status
+		k8s_status
+		return 0
 	fi
 	fail "internal: no status for $TARGET in $(setting DEPLOY_MODE) mode"
 }
@@ -334,17 +343,10 @@ do_uninstall() {
 		docker_uninstall
 		return 0
 	fi
-	if [ "$PURGE" = 1 ]; then
-		if [ -n "$PURGE_CONFIRM" ]; then
-			_what="the deployment and its data (confirmed by --purge-confirm)"
-		else
-			_what="the deployment and its data, once its name is typed at the terminal"
-		fi
-	else
-		_what="the deployment, keeping its data"
-	fi
 	if on_kubernetes; then
-		not_built 10.11 "uninstall: $_what, in $(kubernetes)"
+		kubernetes_step uninstall
+		k8s_uninstall
+		return 0
 	fi
 	fail "internal: no uninstall for $TARGET in $(setting DEPLOY_MODE) mode"
 }

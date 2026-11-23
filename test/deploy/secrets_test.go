@@ -1311,8 +1311,8 @@ func TestSecretsRefused(t *testing.T) {
 // Docker CE on a server keeps its copy there - its engine over ssh, after
 // its host key is checked - while dev-init runs on this machine's engine.
 // The runtime image is pulled when it is not there. A dry run asks nothing
-// and writes nothing; a target whose copy a later step keeps (Kubernetes)
-// makes no secret and records nothing yet.
+// and writes nothing; on Kubernetes a cluster that does not say who it is
+// fails the run before any secret is made or recorded.
 func TestSecretsOnEveryEngine(t *testing.T) {
 	t.Parallel()
 	eachShell(t, func(t *testing.T, r *rig) {
@@ -1467,15 +1467,18 @@ func TestSecretsOnEveryEngine(t *testing.T) {
 				t.Errorf("a dry run wrote files")
 			}
 		})
-		t.Run("kubernetes, a later step", func(t *testing.T) {
+		t.Run("kubernetes, a cluster that cannot be asked", func(t *testing.T) {
 			t.Parallel()
+			// Kubernetes keeps its copy in Secrets (PLAN 10.10, k8s_test.go):
+			// a cluster that does not say who it is fails the run before
+			// anything is made or written.
 			r := secretsRig(t, r.fresh(t))
 			res := r.guarded("KMS=local\nK8S_CONTEXT=prod\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", "--docker", "k8s", "--install")
-			res.want(t, 3, "not built yet (PLAN 10.10)", "built for this target by 10.10")
+			res.want(t, 1, "did not say the UID of its namespace kube-system")
 			if _, err := os.Stat(r.stateDir()); err == nil {
-				t.Error("STATE_DIR was written for a target whose secrets are not built yet")
+				t.Error("STATE_DIR was written for a cluster that did not say who it is")
 			}
-			if len(res.calls) != 0 {
+			if len(res.calls) != 1 || res.calls[0].Tool != "kubectl" {
 				t.Errorf("calls: %v", res.calls)
 			}
 		})

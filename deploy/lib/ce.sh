@@ -61,11 +61,10 @@
 # server needs - the repository's definition - goes on standard input to
 # dd, never into a command line.
 
-# _ce_trap: the cleanup of the run's work directory, a command whose path
-# was written into it when the directory was made (ce_work_begin); the
-# traps of secrets.sh carry it too. _ce_pin_host: the destination whose
-# keys are pinned in the work directory - on_host and tool give it the pin.
-_ce_trap=
+# _ce_pin_host: the destination whose keys are pinned in the work directory
+# - on_host and tool give it the pin. The work directory is removed by the
+# run's one EXIT trap (cleanup_add, deploy/lib/common.sh), its path written
+# into it when it is made.
 _ce_pin_host=
 _ce_work=
 
@@ -89,8 +88,7 @@ ce_work_begin() {
 	_cw_tmp=${_cw_tmp%/}
 	_ce_work=$(umask 077 && mktemp -d "$_cw_tmp/cactusfs-ce.XXXXXX") ||
 		fail "could not make a directory in $_cw_tmp for the run (mktemp -d)"
-	_ce_trap="ce_work_end $(shown "$_ce_work")"
-	ce_trap_set
+	cleanup_add ce_work_end "$_ce_work"
 	case $_ce_work in
 	*:*) _cw_ok= ;;
 	*) _cw_ok=1 ;;
@@ -99,15 +97,6 @@ ce_work_begin() {
 		refuse "the run's directory $_ce_work is not a path ssh can be given in an option and PATH can begin with: set TMPDIR to a directory whose path is letters, digits and _./=@+,- only"
 	fi
 	mkdir "$_ce_work/bin"
-}
-
-# ce_trap_set: the cleanup of the work directory on exit, and an exit on the
-# signals that end a run, so that the cleanup runs then too.
-ce_trap_set() {
-	trap "$_ce_trap" EXIT
-	trap 'exit 129' HUP
-	trap 'exit 130' INT
-	trap 'exit 143' TERM
 }
 
 # ce_work_end <directory>: the work directory removed - only one of the form

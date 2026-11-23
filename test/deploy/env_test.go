@@ -20,10 +20,13 @@ import (
 )
 
 // withEnv writes the env file site.env and runs the script with --env and
-// the arguments.
+// the arguments, under the guard of the files the settings name.
 func (r *rig) withEnv(content string, args ...string) result {
 	r.t.Helper()
 	path := r.envFile("site.env", content)
+	// No file or directory the settings name is removed or changed, nor
+	// anything a link among them leads to (givenGuard, k8s_test.go).
+	defer r.givenGuard(content)()
 	return r.run(append([]string{"--env", path}, args...))
 }
 
@@ -562,9 +565,9 @@ func TestValidation(t *testing.T) {
 		// is not refused: HELM_IMAGE (or HELM) must then be present, which
 		// is asked where it is used (ADR-0033 section 12, PLAN 10.9).
 		r.withEnv("KMS=local\nOFFLINE=yes\n", "--docker", "dd", "--install", "--from-source", "--dry-run").want(t, 2, "OFFLINE=yes and an image built from source")
-		r.withEnv("KMS=local\nOFFLINE=yes\n", "--docker", "k3s", "--status", "--dry-run").want(t, 3)
+		r.withEnv("KMS=local\nOFFLINE=yes\n", "--docker", "k3s", "--status", "--dry-run").want(t, statusDone, "is not installed")
 		// The operator's own registry is not a public pull.
-		r.withEnv("KMS=local\nOFFLINE=yes\nK8S_REGISTRY=registry.example.test/cactusfs\n", "--docker", "k3s", "--status", "--dry-run").want(t, 3)
+		r.withEnv("KMS=local\nOFFLINE=yes\nK8S_REGISTRY=registry.example.test/cactusfs\n", "--docker", "k3s", "--status", "--dry-run").want(t, statusDone, "is not installed")
 		// A key file of one's own, with its passphrase; never with Vault.
 		kms := r.envFile("kms.json", "{}")
 		pass := r.envFile("pass", "p")
@@ -586,7 +589,7 @@ func TestK3sImportIsWordsNotShell(t *testing.T) {
 	eachShell(t, func(t *testing.T, r *rig) {
 		mark := filepath.Join(r.dir, "ran")
 		res := r.withEnv("KMS=local\nK3S_IMPORT=docker exec -i k3s-bench  k3s ctr -n k8s.io images import -\n", "--docker", "k3s", "--status", "--dry-run")
-		res.want(t, 3, "K3S_IMPORT runs: [docker] [exec] [-i] [k3s-bench] [k3s] [ctr] [-n] [k8s.io] [images] [import] [-]")
+		res.want(t, statusDone, "K3S_IMPORT runs: [docker] [exec] [-i] [k3s-bench] [k3s] [ctr] [-n] [k8s.io] [images] [import] [-]")
 		for _, value := range []string{
 			"k3s ctr images import -; touch " + mark,
 			"k3s $(touch " + mark + ")",
@@ -666,7 +669,7 @@ func TestTarget(t *testing.T) {
 	}{
 		{name: "flag", args: []string{"--docker", "podman"}, code: statusDone, want: []string{"target podman (from --docker)", "engine: podman (local)"}},
 		{name: "flag form with equals", args: []string{"--docker=ce"}, code: statusDone, want: []string{"target ce (from --docker)"}},
-		{name: "file", env: "DEPLOY_TARGET=k3s\n", code: 3, want: []string{"target k3s (from DEPLOY_TARGET)"}},
+		{name: "file", env: "DEPLOY_TARGET=k3s\n", code: statusDone, want: []string{"target k3s (from DEPLOY_TARGET)", "cactusfs is not installed: k3s kubectl (local) has no namespace cactusfs"}},
 		{name: "flag over file", env: "DEPLOY_TARGET=k3s\n", args: []string{"--docker", "dd"}, code: statusDone, want: []string{"target dd (from --docker)"}},
 		{name: "bad flag", args: []string{"--docker", "swarm"}, code: 2, want: []string{"DEPLOY_TARGET=swarm: must be one of"}},
 		{name: "no value", args: []string{"--docker"}, code: 2, want: []string{"--docker needs a target"}},
@@ -688,7 +691,7 @@ func TestTarget(t *testing.T) {
 		},
 		{
 			name: "a namespace of the context", env: "K8S_CONTEXT=prod\n",
-			rules: []rule{ns("kubectl", "k8s")}, code: 3,
+			rules: []rule{ns("kubectl", "k8s")}, code: statusDone,
 			want: []string{"target k8s (from what runs)", "engine: kubectl --context prod"},
 		},
 		{
@@ -718,7 +721,7 @@ func TestTarget(t *testing.T) {
 		},
 		{
 			name: "k3s over ssh", env: "K3S_SSH=admin@k3s.example.test\n",
-			rules: []rule{ns("ssh", "k3s")}, code: 3,
+			rules: []rule{ns("ssh", "k3s")}, code: statusDone,
 			want: []string{"target k3s (from what runs)", "engine: k3s kubectl over ssh admin@k3s.example.test"},
 		},
 		{
@@ -734,7 +737,7 @@ func TestTarget(t *testing.T) {
 		{name: "engine does not answer", rules: []rule{{Tool: "docker", Contains: []string{"ps"}, Stdout: "dd\n", Exit: 1}}, code: 2, want: []string{"no target"}},
 		{name: "no engine installed", without: []string{"docker", "podman", "nerdctl", "kubectl"}, code: 2, want: []string{"no target"}},
 		{name: "k8s needs its context", args: []string{"--docker", "k8s"}, code: 2, want: []string{"--docker k8s needs K8S_CONTEXT"}},
-		{name: "k8s with its context", env: "K8S_CONTEXT=prod\n", args: []string{"--docker", "k8s"}, code: 3, want: []string{"engine: kubectl --context prod", "not built yet (PLAN 10.11)"}},
+		{name: "k8s with its context", env: "K8S_CONTEXT=prod\n", args: []string{"--docker", "k8s"}, code: statusDone, want: []string{"engine: kubectl --context prod", "cactusfs is not installed: kubectl --context prod has no namespace cactusfs"}},
 	}
 	eachShell(t, func(t *testing.T, r *rig) {
 		for _, c := range cases {
@@ -1054,7 +1057,9 @@ func TestSecretsNeverInTheTrace(t *testing.T) {
 		} {
 			args := run.args
 			res := r.withEnv(run.env, args...)
-			if res.code != 3 && res.code != 2 {
+			// A refusal, a step not built yet, or a --status that finds
+			// nothing installed (PLAN 10.11) - never a failure.
+			if res.code != 3 && res.code != 2 && res.code != statusDone {
 				t.Fatalf("%v: exit status %d\n%s", args, res.code, res.output())
 			}
 			if !strings.Contains(res.stderr, "+ ") {
@@ -1097,11 +1102,15 @@ func TestActions(t *testing.T) {
 		{"purge confirm wrong name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "other"}, 2, "is not the name of the deployment"},
 		{"from source on status", "", []string{"--status", "--from-source"}, 2, "--from-source goes with --install"},
 		// Rancher Desktop's engine and cluster are TestRancher*'s (PLAN 10.6);
-		// its Kubernetes hands over to 10.10 without asking its engine.
-		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.10)"},
-		{"k3s install", "K8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "k3s", "--install"}, 3, "not built yet (PLAN 10.10)"},
+		// its Kubernetes is 10.6's stub, without asking its engine.
+		{"rancher kubernetes", "RANCHER_KUBERNETES=yes\nK8S_S3_ALLOW_FROM=192.0.2.0/24\n", []string{"--docker", "rancher", "--install"}, 3, "not built yet (PLAN 10.6)"},
+		{"take image on status", "", []string{"--docker", "k3s", "--status", "--take-image"}, 2, "--take-image goes with --install"},
+		{"take image on docker", "", []string{"--docker", "dd", "--install", "--take-image"}, 2, "--take-image is for a Kubernetes target"},
+		{"take image, another name", "", []string{"--docker", "k3s", "--install", "--take-image=other"}, 2, "--take-image=other is not the name of the deployment, cactusfs"},
+		{"take image, no name", "", []string{"--docker", "k3s", "--install", "--take-image="}, 2, "--take-image needs the deployment's name"},
 		{"k3s install, S3 published to nobody named", "", []string{"--docker", "k3s", "--install"}, 2, "K8S_S3_ALLOW_FROM must say who may reach it"},
-		{"k3s purge", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs"}, 3, "not built yet (PLAN 10.11)"},
+		{"k3s purge without a record", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs"}, 2, "holds no record of cactusfs (its target, its namespace's name and marker)"},
+		{"k3s purge, adopted", "", []string{"--docker", "k3s", "--uninstall", "--purge", "--purge-confirm", "cactusfs", "--adopt"}, 2, "--adopt is not for a purge on Kubernetes"},
 		{"purge confirm without its name", "", []string{"--docker", "dd", "--uninstall", "--purge", "--purge-confirm", "--dry-run"}, 2, "--purge-confirm needs the deployment's name, not '--dry-run'"},
 		{"env without its file", "", []string{"--status", "--env"}, 2, "--env needs a file"},
 		{"print namespace", "K8S_CONTEXT=prod\n", []string{"--docker", "k8s", "--print-namespace"}, 0, "deploy.cactusfs.io/owner-uid: '"},

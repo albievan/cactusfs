@@ -290,6 +290,67 @@ read as an empty one inside a command substitution; every function that can refu
 or fail is now called plainly and answers in variables). Volumes are found by the
 label only, so an unlabelled volume of the same name is never touched.
 
+**On Kubernetes, as built (PLAN 10.10).** `secrets_where` says `kubernetes`, and
+`secrets_install` hands over to `secrets_install_k8s`: the files given are compared with
+`STATE_DIR`'s copies first (the root credentials, the passphrase and `kms.json` refused
+when they differ; a Vault token or an operator's certificate, key or CA noted as a
+rotation); then 10.9's `k8s_secrets_ensure` reads every Secret back and compares it;
+what neither copy holds is handed to the one hook `secrets_ensure_k8s`, after the
+copy-backs, which refuses half a root pair, `kms.json` without its passphrase and a
+configuration that is in part there, and otherwise makes the root credentials and the
+passphrase from `/dev/urandom` and the configuration by `dev-init` on the operator's
+machine (`--nodes` the chart's node IDs, `<name>-node-0` or `<name>-meta-0..2,data-0`;
+in `IMAGE`, the runtime image with the binary of `make image-binaries`, or under
+`--from-source` the image `image_native` makes); the Secrets the cluster lacks are
+created; only then is the record written, holding the cluster's identity - the UID of
+`kube-system`, compared at every install, uninstall and purge as an engine's ID is,
+`--engine-replaced` included - and a rotated file replaces `STATE_DIR`'s copy after the
+cluster's. A secret given by its `*_FILE` setting is read from that file and not copied
+into `STATE_DIR`. The cleanups of the secrets' run directory and of every work
+directory of `k8s.sh` are one EXIT trap of the script (`cleanup_add`, `common.sh`):
+each command is written into the trap's text, its paths quoted, when it is added;
+they run last added first; a subshell that adds its own starts from none. The
+read-back, the comparison and the generation run in the script's own shell, not a
+subshell on the left of `||`, so `set -e` holds in every step (the review of 10.10).
+The entry records the namespace's name (`namespace`) beside its marker; every action
+whose settings name another namespace is refused.
+
+**A purge on Kubernetes, as built (PLAN 10.11).** Refused without the record and the
+namespace marker in `STATE_DIR` (`--adopt` is not taken), confirmed by the name, on
+the recorded cluster only, in the marked namespace only, and while no console
+upgrade's lock is fresh. The workload's objects (StatefulSets, Services,
+NetworkPolicy, PodDisruptionBudget, by the release's labels) are deleted; then the
+release's claims (by the pods' selector, which the StatefulSet controller gives them,
+`--wait=false`) - after every Secret about to be deleted was read back and found equal
+to its copy in `STATE_DIR` or in the file the settings name, or refused (a value the
+cluster alone holds, one that differs, a file that cannot be read, a labelled Secret
+the settings do not name: exit 2, nothing removed; an uninstall checks the same before
+it deletes the Secrets); a listing proves none is left, asked every 2 seconds up to
+`WAIT_TIMEOUT`; the PersistentVolumes are listed until none bound to one of those
+claims is left but those a `reclaimPolicy: Retain` keeps `Released`, which are named
+with their path and left; the deployment's Secrets (labelled
+`io.cactusfs.deploy.name`, `app.kubernetes.io/managed-by=cactusfs-deploy`) and a
+listing that proves them gone; the namespace (section 7); the image tags the script
+imported into k3s, recorded in the entry's file `images` only when containerd lacked
+the name before the import (`k3s ctr -n k8s.io images ls -q name==<name>`), removed
+over `K3S_SSH` or here with `k3s ctr -n k8s.io images rm` unless a pod of any namespace
+still names it (`get pods -A`: its containers' image, its status's image and imageID),
+which is named and kept; those of `K3S_IMPORT` named and left; and last the entry. A
+purge whose namespace is gone already removes the images so and then the entry, when
+the entry records that namespace's name. Only the workload's objects the script
+applied (`metadata.managedFields` holds `cactusfs-deploy` with the operation `Apply`)
+are deleted, by an uninstall as by a prune; others carrying the release's labels are
+named and left, and while a StatefulSet among them is left an uninstall keeps the
+Secrets its pods may use. A labelled Secret the settings do not name (made under
+another `DEPLOY_MODE`, `KMS` or `VAULT_CA_FILE`) refuses an uninstall, which names the
+way out (run with the settings it was made under, or save and delete it by hand); a
+confirmed purge deletes it with the rest, saying so, while a value the cluster alone
+holds for a key the settings do name still refuses it. A tag is also kept while the
+pod template of a StatefulSet, Deployment, DaemonSet, Job or CronJob of any namespace
+names it;
+what cannot be listed keeps every tag. An uninstall without `--purge` deletes the workload and the Secrets and
+keeps the claims, the namespace and the entry.
+
 `dev-init` keeps no CA private key, so a development deployment's certificates cannot
 be renewed or reissued by the script: they are valid for `--validity` (a year by
 default), `--status` shows their expiry, and the names and addresses of the S3
@@ -522,6 +583,22 @@ script and Helm never manage the same objects. The chart has no `lookup` and no 
 so its render is exact; a change of the chart that adds either must revisit this
 decision.
 
+**As built (PLAN 10.10).** The render is checked before it is applied: only
+StatefulSets, Services, NetworkPolicies and PodDisruptionBudgets, and the StorageClass
+and PersistentVolumes of `K8S_STORAGE=hostpath`; any other kind fails the run. It is
+applied with `KUBECTL apply --server-side --field-manager=cactusfs-deploy -n <ns> -f -`,
+never with `--force-conflicts`; a conflict stops the run naming `--take-image`
+(section 11). kubectl's own `--prune` is not used (it prunes by the client-side
+annotation a server-side apply does not write): the release's objects of those four
+kinds are listed by its labels in the namespace before the apply, and those the render
+no longer holds, and that the script applied (`cactusfs-deploy` with the operation
+`Apply` among their `managedFields`, read with `--show-managed-fields`), are deleted
+after it - but a StatefulSet that is not a node of the
+settings (`DEPLOY_MODE` or the name changed) refuses the install before any change,
+since it holds a node and its data. The values give `image.pullPolicy: Never` on the
+routes `import` and `local` of section 5, and the image by digest or by tag, never both.
+
+
 ### 7. Namespace isolation on shared clusters
 
 The script writes only namespaced objects, in its own namespace. It creates the
@@ -551,6 +628,11 @@ the namespace, it only reads:
   one-node cluster) and their addresses for `--status`;
 - the StorageClasses (list), to find the default class or check `K8S_STORAGE_CLASS`;
 - the `kube-system` namespace (get), whose UID is the target's ID.
+- the PersistentVolumes (list), at a purge, for the volumes bound to the release's claims;
+- the pods, StatefulSets, Deployments, DaemonSets, Jobs and CronJobs of every
+  namespace (list), at a
+  purge of an image imported into k3s, for the image tags still in use;
+- the kinds the API offers (`api-resources`), at a purge, to find the namespace empty.
 
 Helm's release records are Secrets inside the namespace (`owner=helm`), and are read
 there. The identity it acts as is what `KUBECTL` gives it: through `ssh K3S_SSH k3s
@@ -574,7 +656,9 @@ clusterrolebinding cactusfs-deploy-<ns> --clusterrole=cactusfs-deploy-<ns>
 | | `apps` | `statefulsets` | | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` |
 | | `networking.k8s.io` | `networkpolicies` | | the same |
 | | `policy` | `poddisruptionbudgets` | | the same |
-| ClusterRole `cactusfs-deploy-<ns>` | `""` | `nodes`, `services`, `persistentvolumes` | | `list` (PersistentVolumes for the purge's check that none bound to the claims is left, PLAN 10.11) |
+| ClusterRole `cactusfs-deploy-<ns>` | `""` | `nodes`, `services`, `persistentvolumes` (and `pods` when the image is imported into k3s) | | `list` (PersistentVolumes for the purge's check that none bound to the claims is left, pods for its check of the image tags still in use, PLAN 10.11) |
+| | `apps` | `statefulsets`, `deployments`, `daemonsets` (only when the image is imported into k3s) | | `list` |
+| | `batch` | `jobs`, `cronjobs` (only when the image is imported into k3s) | | `list` |
 | | `storage.k8s.io` | `storageclasses` | | `list` |
 | | `""` | `namespaces` | `<ns>`, `kube-system` | `get` |
 
@@ -587,6 +671,31 @@ PersistentVolumes; and the directories they name, made on the host with their SE
 label) is **opt-in only**, announced as cluster-scoped before it is applied, and not
 for shared servers. The default is `K8S_STORAGE=pvc` on the default class or
 `K8S_STORAGE_CLASS`.
+
+**As built (PLAN 10.10, 10.11).** The namespace is checked (read, its marker
+compared, a Helm release looked for) before anything changes, and made after the
+image; a namespace confirmed at a terminal is listed for the release's objects like
+one of its own. At a purge it is read again: a namespace that no longer carries the
+marker is left; every kind the API offers to list in a namespace
+(`api-resources --verbs=list --namespaced -o name`, events but) is listed in it, and
+one that holds anything but `configmap/kube-root-ca.crt`, `serviceaccount/default` and
+the deployment's own objects on their way out (its pods, Services, StatefulSets, their
+Endpoints, EndpointSlices and ControllerRevisions) is named and left; a listing that
+fails, or a delete the context may not make (Forbidden), leaves it to the
+administrator; otherwise it is deleted by `delete --raw /api/v1/namespaces/<ns> -f -`
+with `{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":...,
+"resourceVersion":...}}` of that read, and a precondition that fails keeps the entry.
+The preconditions guard the Namespace object itself, not what it holds: an object made
+in it after it was found empty is deleted with it. When the image is
+imported into k3s, the ClusterRole of `--print-namespace` also lists pods,
+StatefulSets, Deployments and DaemonSets cluster-wide, for the purge's check of the
+image tags; otherwise it does not.
+`K8S_STORAGE=hostpath`'s directories are not made by the script: the install names
+them (`<K8S_HOSTPATH>/<ns>/<node ID>/<volume>`, owned by 65532) and the operator makes
+them. Besides the reads listed above, the script reads the API server of a named
+context from the kubeconfig here (`config view --minify`), which asks the cluster
+nothing.
+
 
 ### 8. Reaching a deployment
 
@@ -621,6 +730,18 @@ for shared servers. The default is `K8S_STORAGE=pvc` on the default class or
   background process and a trap, and reads nothing back but a status line; the CA is
   a certificate, not a secret. S3 is said to be at the HostName `ssh -G` gives for
   `CE_HOST` (the target's, behind a ProxyJump).
+
+**`--status` on Kubernetes, as built (PLAN 10.11).** Read-only: the namespace (not
+installed, or not the deployment's, said), each node's pod (its machine, readiness,
+image and version), a console upgrade's lock, the S3 and admin Services - a NodePort
+listed on the InternalIP and ExternalIP of each machine that runs a ready pod of a
+gateway, a load balancer by its ingress, a ClusterIP as the Service's name in the
+cluster - `/healthz` and `/readyz` of a published admin port over TLS with the
+deployment's CA (`TLS_CA_FILE`, else `STATE_DIR`'s) through `curl --connect-to`, the
+certificates' expiry (the S3 certificate, and in cluster mode each node's), and the
+port-forward commands when no admin port answered 200. It exits 1 when a node of the
+settings has no pod or one that is not Ready.
+
 
 So `admin` / `admin` is never published by a default the script chose.
 
@@ -844,6 +965,49 @@ meets that conflict; `--take-image` (a flag, never a setting) takes the field ba
 is refused while a lock is held, asks for the deployment's name as `--purge` does,
 applies `--force-conflicts` to the workloads' image fields only, and says so in its
 output. Without it the deployment stays with console upgrades.
+
+**On Kubernetes, as built (PLAN 10.11).** After the apply, for each node in the order
+`<name>-data-0`, then `<name>-meta-0` to `-2` (standalone: its one node): the lock is
+read; the StatefulSet is read until its controller has seen the apply
+(`observedGeneration` equal to `generation`, within `WAIT_TIMEOUT`); a pod already of
+its `updateRevision` and image is left; otherwise it is deleted (`--wait=false`) and the
+new pod - another UID, `Ready`, of that revision, running the image - is waited for up
+to `WAIT_TIMEOUT`, else the run stops (exit 1) naming the image the node ran before
+and the nodes after it untouched. The leader is not asked of the admin API, which needs
+a credential and none is put on a command line: the voters go in the order of their
+index (a decision of PLAN 10.11). Before each pod is deleted the release's pods are
+listed: unless every other node's pod is Ready (and not being deleted) the run stops
+(exit 1); an upgrade does not begin (exit 2) while more than one is not Ready, and one
+that is not is replaced first. The lock is read on the first node by name, as the
+nodes choose it (`<name>-data-0` in cluster mode). A lock is fresh when its heartbeat
+(RFC 3339, read from the annotation) is at most 1500 s old by this machine's clock -
+twice the nodes' `DefaultNodeTimeout` of 10 minutes, and 300 s for a clock here ahead
+of the cluster's (the heartbeat is the node's time); a lock whose heartbeat cannot be
+read is taken as fresh (the stricter reading). `--take-image` (or `--take-image=<name>`
+without a terminal) first applies the whole render with `--dry-run=server`: no
+conflict, nothing is forced. Its answer is read by allowlist, line by line, as the
+API server and kubectl write a conflict (apimachinery v0.37.0 `getConflictMessage`,
+kubectl v0.37.0 `apply.go` and `MultipleErrors`): a one-conflict header, whose path
+follows its last `: `; a several-conflicts header or a further manager's `conflicts
+with` line; a `- <path>` line; one of kubectl's fixed advice lines; a `Warning:`
+line; or an empty line. Any other line (an error that is no conflict, a connection
+refused), a number of paths other than the headers count, or a path but the cactusfs
+container's image and the pod template's `app.kubernetes.io/version` label (the two an
+upgrade from the console patches; a top-level field such as a StorageClass's
+`.reclaimPolicy` included) refuses it (exit 2) before the workload changes; otherwise the render is applied
+**once**, with `--force-conflicts`, by the script's own manager `cactusfs-deploy`, which
+server-side apply then makes the owner of exactly those conflicting fields. There is
+no second field manager, no put-back and no release step (the review of 10.10/10.11:
+a multi-step take could orphan the image field, or stop part way through the
+StatefulSets). The upgrade then rolls the pods one at a time as usual. What remains: a
+conflict that appears between the dry run and the apply is forced with them.
+
+The check that every other node is Ready is a listing, and the pod is deleted after
+it: a node that goes away between the two is not seen, and the run then has two away
+until the next node's check stops it. The pod is deleted, not evicted, so the
+PodDisruptionBudget is not consulted - the script's own check takes its place; an
+eviction would need the `pods/eviction` permission in the Role, which the script does
+not ask for.
 
 ### 12. Every network fetch, and `OFFLINE`
 

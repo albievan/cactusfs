@@ -930,7 +930,10 @@ image_build() {
 		say "dry run: once built, the image is checked and tagged cactusfs:$_img_version-$_img_build-<12 hex of its ID>"
 		return 0
 	fi
-	_ib_ids=$(image_in_workdir image_build_in "$@") || exit
+	_ib_ids=$(
+		cleanup_none
+		image_in_workdir image_build_in "$@"
+	) || exit
 	_img_config=$(image_hex "${_ib_ids%% *}") || exit
 	_ib_manifest=
 	case $_ib_ids in
@@ -1316,34 +1319,41 @@ image_native() {
 # image_in_workdir <function> <argument>...: the function, in a subshell
 # in the foreground, given a new work directory of mode 0700 (under TMPDIR)
 # as its first argument. The subshell removes it when it ends, however it
-# ends - its own EXIT trap, with HUP, INT and TERM ending it as 129, 130 and
-# 143 - and so does this function after it. In the foreground, a Ctrl-C (an
-# INT to the terminal's process group) or a TERM to the process group
+# ends - the run's one EXIT trap (cleanup_add), with HUP, INT and TERM
+# ending it as 129, 130 and 143 - and so does this function after it. In
+# the foreground, a Ctrl-C (an INT to the terminal's process group) or a
+# TERM to the process group
 # reaches the subshell and the tool it runs at once. A HUP, INT or TERM sent
 # to the script's process alone is taken by the shell when the step it
 # waits on ends - a shell runs a trap only after its foreground command -
 # and the run then ends as above. The subshell's status is the run's, and
 # what it prints on standard output is the caller's. "set -e" does not hold
-# in it: every step checks its own status.
+# in it: every step checks its own status. Called in a command substitution,
+# the substitution starts with cleanup_none - "$(cleanup_none;
+# image_in_workdir ...)" - as that shell is a subshell holding the run's
+# cleanups, and the trap cleanup_add sets there would otherwise run them
+# all when it ends (removing CE_HOST's pinned known_hosts mid-run, say).
 image_in_workdir() {
 	# Under TMPDIR, named: macOS's mktemp -d without a template does not
 	# read TMPDIR.
 	_img_iw_tmp=${TMPDIR:-/tmp}
 	_img_iw_dir=$(umask 077 && mktemp -d "${_img_iw_tmp%/}/cactusfs-deploy.XXXXXX") || fail "no temporary directory in $_img_iw_tmp"
+	# The path is written into the run's one EXIT trap now, quoted
+	# (cleanup_add, common.sh): the function may assign any variable, and
+	# the trap removes this directory and no other. The subshell starts
+	# with none of the shell's cleanups (cleanup_none) and adds its own, so
+	# that it removes the directory however it ends, a signal included.
+	cleanup_add rm -rf -- "$_img_iw_dir"
 	_img_iw_status=0
 	(
-		# The path is expanded now, quoted: the function may assign any
-		# variable, and the trap removes this directory and no other.
-		# shellcheck disable=SC2064
-		trap "rm -rf -- $(shown "$_img_iw_dir")" EXIT
-		trap 'exit 129' HUP
-		trap 'exit 130' INT
-		trap 'exit 143' TERM
+		cleanup_none
+		cleanup_add rm -rf -- "$_img_iw_dir"
 		_img_iw_fn=$1
 		shift
 		"$_img_iw_fn" "$_img_iw_dir" "$@"
 	) || _img_iw_status=$?
 	rm -rf -- "$_img_iw_dir"
+	cleanup_drop rm -rf -- "$_img_iw_dir"
 	[ "$_img_iw_status" = 0 ] || exit "$_img_iw_status"
 }
 
@@ -1548,7 +1558,10 @@ image_push() {
 	fi
 	"$_img_at" run image tag "$(image_tag_source "$RESOLVED_IMAGE")" "$_ipu_to" </dev/null || fail "tagging $_ipu_to failed"
 	if [ "$_img_at_tool" = podman ]; then
-		_ipu_digest=$(image_in_workdir image_podman_push "$_ipu_to") || exit
+		_ipu_digest=$(
+			cleanup_none
+			image_in_workdir image_podman_push "$_ipu_to"
+		) || exit
 	else
 		"$_img_at" run push "$_ipu_to" </dev/null || fail "pushing $_ipu_to failed (the engine's message is above)"
 		image_fields "$_img_at" "$_ipu_to"
