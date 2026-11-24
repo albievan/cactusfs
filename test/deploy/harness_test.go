@@ -113,7 +113,10 @@ type call struct {
 // holds only for a call whose words, after the engine's own options (the
 // Docker CLI's context, nerdctl's namespace: sub), begin with those words -
 // nerdctl's copy into a container ("cp - <container>:<dir>") and out of one
-// ("cp <container>:<dir> -") hold the same words in another order.
+// ("cp <container>:<dir> -") hold the same words in another order. A rule
+// with Seen holds only once that many earlier calls of the run, of the same
+// tool, held all its Contains words: an answer that changes as the same
+// question is asked again (a pod waiting, then Ready).
 type rule struct {
 	Tool       string            `json:"tool"`
 	Contains   []string          `json:"contains"`
@@ -127,6 +130,7 @@ type rule struct {
 	Files      map[string]string `json:"files,omitempty"`
 	TermParent bool              `json:"term_parent,omitempty"`
 	SleepMs    int               `json:"sleep_ms,omitempty"`
+	Seen       int               `json:"seen,omitempty"`
 }
 
 // terminate sends SIGTERM to the process.
@@ -142,21 +146,29 @@ func terminate(pid int) error {
 // fake's own, written first - is of the tool (any tool for "") and holds
 // every word.
 func earlier(rig *os.Root, tool string, words []string) (bool, error) {
+	n, err := earlierCount(rig, tool, words)
+	return n > 0, err
+}
+
+// earlierCount is how many calls of the transcript before the last are of
+// the tool (any tool for "") and hold every word.
+func earlierCount(rig *os.Root, tool string, words []string) (int, error) {
 	data, err := rig.ReadFile(transcriptName)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	n := 0
 	for _, line := range lines[:len(lines)-1] {
 		var c call
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
-			return false, err
+			return 0, err
 		}
 		if (tool == "" || c.Tool == tool) && containsAll(c.Args, words) {
-			return true, nil
+			n++
 		}
 	}
-	return false, nil
+	return n, nil
 }
 
 func TestMain(m *testing.M) {
@@ -253,6 +265,16 @@ func fake(name string, args []string) int {
 				return 125
 			}
 			if !ok {
+				continue
+			}
+		}
+		if r.Seen > 0 {
+			n, err := earlierCount(rig, name, r.Contains)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fake %s: transcript: %v\n", name, err)
+				return 125
+			}
+			if n < r.Seen {
 				continue
 			}
 		}

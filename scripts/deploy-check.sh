@@ -43,5 +43,5 @@ for shell in dash bash; do
 	done
 done
 
-go test -count=1 -timeout 30m -tags deployscript,deployrender ./test/deploy/...
+go test -count=1 -timeout 60m -tags deployscript,deployrender ./test/deploy/...
 echo "deploy-check: PASS ($(echo "$files" | wc -l | tr -d ' ') files)"

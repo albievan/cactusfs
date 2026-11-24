@@ -772,10 +772,17 @@ k8s_namespace_yaml() {
 # k8s_imports: true when the image goes to the cluster by an import into
 # k3s (PLAN 10.4's route import): K3S_SSH, K3S_IMPORT, or a k3s here,
 # without K8S_REGISTRY - or is built in the engine Rancher Desktop's k3s
-# sees (PLAN 10.14). Only then does a purge (and on Rancher Desktop an
-# upgrade) look for the image tags still in use, across namespaces.
+# sees (PLAN 10.14) - or may be imported into the node of Docker Desktop's
+# Kubernetes in kind mode (the context docker-desktop without
+# K8S_REGISTRY: which mode it runs is asked of the cluster, and this is
+# told from the settings alone, for --print-namespace). Only then does a
+# purge (and on Rancher Desktop an upgrade) look for the image tags still
+# in use, across namespaces.
 k8s_imports() {
 	[ "$TARGET" != rancher ] || return 0
+	if [ "$TARGET" = k8s ] && [ "$(kube_context)" = docker-desktop ] && [ -z "$(setting K8S_REGISTRY)" ]; then
+		return 0
+	fi
 	[ "$TARGET" = k3s ] && [ -z "$(setting K8S_REGISTRY)" ] || return 1
 	[ -n "$(setting K3S_SSH)" ] || [ -n "$(setting K3S_IMPORT)" ] || [ -z "$(kube_context)" ]
 }
@@ -1389,6 +1396,9 @@ k8s_settings() {
 	_k8_others=
 	_k8_secrets=
 	_k8_down=
+	# Where a pod that cannot start stops the run (k8s_image_final).
+	_k8_final_pre=
+	_k8_final_post=
 }
 
 # k8s_cluster_id: _engine_id, the cluster's identity - the UID of its
@@ -1631,8 +1641,12 @@ k8s_lock_check() {
 
 # k8s_pod <pod>: _k8_pod_uid, _k8_pod_ready (True, False or nothing),
 # _k8_pod_rev (its controller-revision-hash) and _k8_pod_image (the image
-# its container runs) of the pod as the cluster has it; all empty when
-# there is none. Called plainly.
+# its container runs) of the pod as the cluster has it, and _k8_pod_final:
+# "<reason>|<message>" of the first of its containers (init containers
+# included) waiting with a reason that cannot clear while the run waits -
+# the image is not on the node under imagePullPolicy Never
+# (ErrImageNeverPull), or its reference is not one (InvalidImageName); all
+# empty when there is none. Called plainly.
 k8s_pod() {
 	_k_pj=$(k8s_cmd query get pod "$1" -n "$_k8_ns" --ignore-not-found -o json </dev/null) ||
 		fail "reading the pod $1 of the namespace $_k8_ns failed (kubectl's message is above)"
@@ -1641,14 +1655,53 @@ k8s_pod() {
 	_k8_pod_rev=$(printf '%s\n' "$_k_pf" | k8s_at .metadata.labels.controller-revision-hash) || _k8_pod_rev=
 	_k8_pod_image=$(printf '%s\n' "$_k_pf" | k8s_at '.spec.containers[0].image') || _k8_pod_image=
 	_k8_pod_ready=$(printf '%s\n' "$_k_pf" | sed 's/^\./.items[0]./' | k8s_items ready)
-	[ -n "$_k8_pod_uid" ] || _k8_pod_ready=
+	_k8_pod_final=$(printf '%s\n' "$_k_pf" | awk -F '\t' '
+		$1 ~ /^\.status\.(initC|c)ontainerStatuses\[[0-9]+\]\.state\.waiting\.reason$/ {
+			v = substr($0, length($1) + 2)
+			if (v == "ErrImageNeverPull" || v == "InvalidImageName") {
+				if (reason == "") { reason = v; at = substr($1, 1, length($1) - length("reason")) "message" }
+			}
+		}
+		{ value[$1] = substr($0, length($1) + 2) }
+		END { if (reason != "") print reason "|" value[at] }')
+	[ -n "$_k8_pod_uid" ] || {
+		_k8_pod_ready=
+		_k8_pod_final=
+	}
+}
+
+# k8s_image_final <pod> <image>: the pod's container waits with a reason
+# that cannot clear by itself here (_k8_pod_final). The kubelet syncs the
+# pod again, but nothing it does changes the answer: the image was
+# delivered to the cluster - and on an import checked on the node - before
+# the apply, the pod's reference is the one applied, and nothing the run
+# waits for puts the image there or changes the reference. So the run fails
+# now, naming the image, the reason and the route the image took, rather
+# than waiting out WAIT_TIMEOUT for a pod that cannot start. _k8_final_pre and
+# _k8_final_post say where the run stops (an upgrade's node).
+k8s_image_final() {
+	_k_if_reason=${_k8_pod_final%%|*}
+	_k_if_msg=$(printf '%s' "${_k8_pod_final#*|}" | tr -d '\\')
+	_k_if_route=${_img_route:-}
+	if [ -n "$_k_if_route" ]; then
+		_k_if_route="the image went to the cluster by the route $_k_if_route ($(image_route_said))"
+	else
+		_k_if_route="the route of the image is not known to this run"
+	fi
+	case $_k_if_reason in
+	ErrImageNeverPull) _k_if_why="the pods run it with imagePullPolicy Never and the container runtime of the node it was placed on does not hold it" ;;
+	*) _k_if_why="the kubelet does not take the reference" ;;
+	esac
+	fail "${_k8_final_pre:-}the pod $1 cannot start: its container waits with $_k_if_reason${_k_if_msg:+ ($_k_if_msg)}, which cannot clear by itself here - the image was delivered, and checked where the route allows, before the apply, and the pod's reference does not change - so the run does not wait WAIT_TIMEOUT=$_k8_wait s for it: $_k_if_why. The image is $2; $_k_if_route. See $(k8s_kubectl_said) describe pod $1 -n $_k8_ns${_k8_final_post:-}"
 }
 
 # k8s_wait_pod <pod> <uid it must not have> <revision> <image>: true once
 # the pod is there with another UID than the one given (any, when none is
 # given), Ready, of the revision (when given) and running the image -
 # asked every 2 seconds until WAIT_TIMEOUT seconds have passed; false when
-# it never was.
+# it never was. Such a pod whose container waits with a reason that cannot
+# clear by itself here fails the run at once (k8s_image_final), on every
+# route.
 k8s_wait_pod() {
 	_k_wp_start=$(date +%s)
 	while :; do
@@ -1656,6 +1709,10 @@ k8s_wait_pod() {
 		if [ -n "$_k8_pod_uid" ] && [ "$_k8_pod_uid" != "$2" ] && [ "$_k8_pod_ready" = True ] &&
 			{ [ -z "$3" ] || [ "$_k8_pod_rev" = "$3" ]; } && [ "$_k8_pod_image" = "$4" ]; then
 			return 0
+		fi
+		# The new pod, on the image, that cannot start: no use waiting.
+		if [ -n "$_k8_pod_final" ] && [ "$_k8_pod_uid" != "$2" ] && [ "$_k8_pod_image" = "$4" ]; then
+			k8s_image_final "$1" "$4"
 		fi
 		_k_wp_now=$(date +%s)
 		[ $((_k_wp_now - _k_wp_start)) -lt "$_k8_wait" ] || return 1
@@ -1803,6 +1860,8 @@ k8s_upgrade() {
 			k8s_cmd run delete pod "$_k_id-0" -n "$_k8_ns" --wait=false </dev/null ||
 				fail "upgrade stopped: deleting the pod $_k_id-0 failed (kubectl's message is above); the nodes after it were not moved"
 		fi
+		_k8_final_pre="upgrade stopped: "
+		_k8_final_post="; the nodes after it were not moved. To go back, install the image it ran: IMAGE_SOURCE=image IMAGE=${_k_up_was:-<the image it ran>}"
 		k8s_wait_pod "$_k_id-0" "$_k_up_old" "$_k8_rev" "$_k8_ref" ||
 			fail "upgrade stopped: the node $_k_id is not Ready on $_k8_ref within WAIT_TIMEOUT=$_k8_wait s (it ran ${_k_up_was:-an image not known} before); the nodes after it were not moved. See $(k8s_kubectl_said) describe pod $_k_id-0 -n $_k8_ns, and its logs; to go back, install the image it ran: IMAGE_SOURCE=image IMAGE=${_k_up_was:-<the image it ran>}"
 		say "upgrade: $_k_id is Ready on $_k8_ref"
@@ -2034,18 +2093,44 @@ k8s_containerd_name() {
 
 # k8s_images_record: an image imported into k3s (PLAN 10.4's route import)
 # is recorded in the entry's file "images", by the name containerd gives
-# it, so that a purge removes those tags and no other (PLAN 10.11).
+# it, so that a purge removes those tags and no other (PLAN 10.11). One
+# imported into the node of Docker Desktop's Kubernetes in kind mode (the
+# route kind) is recorded as "kind <name> <cluster>/<node>": the UID of the
+# cluster's kube-system (_engine_id) and the node's name say which
+# containerd holds it - the node is a container of the Docker engine, made
+# again with the cluster (PLAN 10.14's rule of an engine's ID).
+#
+# A new tag is recorded BEFORE the import (k8s_install), so that an import
+# that succeeds and whose check then fails, or a run killed between the
+# import and its end, leaves a tag the record names and a purge removes; an
+# import that fails takes the line out again (_img_import_undo, called by
+# image_stream_in: k8s_images_unrecord). A line whose tag never reached the
+# node does no harm: a purge keeps a tag in use, and one the node does not
+# hold leaves the record (k8s_images_kind) or is said and left (k3s).
 k8s_images_record() {
-	[ "${_img_route:-}" = import ] && [ "$DRY_RUN" = 0 ] || return 0
+	_img_import_undo=
+	_k8_ir_new=
+	case ${_img_route:-} in
+	import | kind) ;;
+	*) return 0 ;;
+	esac
+	[ "$DRY_RUN" = 0 ] || return 0
 	_k_ir=$(k8s_containerd_name "$RESOLVED_IMAGE")
+	_k_ir_line=$_k_ir
+	_k_ir_where="the containerd of k3s"
+	if [ "$_img_route" = kind ]; then
+		[ -n "${_engine_id:-}" ] || fail "internal: an imported image is recorded before the cluster's ID is known"
+		_k_ir_line="kind $_k_ir $_engine_id/$_kind_node"
+		_k_ir_where="the containerd of the node $_kind_node"
+	fi
 	# Recorded by an earlier install of this deployment: the script's.
-	if [ -f "$STATE/images" ] && grep -qxF "$_k_ir" "$STATE/images"; then
+	if [ -f "$STATE/images" ] && grep -qxF "$_k_ir_line" "$STATE/images"; then
 		return 0
 	fi
 	case $_k8_image_known in
 	no) ;;
 	yes)
-		say "image: $_k_ir was in the containerd of k3s before the import: it is not recorded, and a purge leaves it"
+		say "image: $_k_ir was in $_k_ir_where before the import: it is not recorded, and a purge leaves it"
 		return 0
 		;;
 	*)
@@ -2053,10 +2138,24 @@ k8s_images_record() {
 		return 0
 		;;
 	esac
-	if [ -f "$STATE/images" ] && grep -qxF "$_k_ir" "$STATE/images"; then
-		return 0
+	(umask 077 && printf '%s\n' "$_k_ir_line" >>"$STATE/images") || fail "writing $STATE/images failed"
+	_k8_ir_new=$_k_ir_line
+	_img_import_undo=k8s_images_unrecord
+	if [ "$_img_route" = kind ]; then
+		say "image: recorded $_k_ir ($_k_ir_where, cluster $_engine_id) in $STATE/images before the import, for a purge to remove"
+	else
+		say "image: recorded $_k_ir ($_k_ir_where) in $STATE/images before the import, for a purge to remove"
 	fi
-	(umask 077 && printf '%s\n' "$_k_ir" >>"$STATE/images") || fail "writing $STATE/images failed"
+}
+
+# k8s_images_unrecord: the line k8s_images_record wrote before an import
+# that then failed leaves the entry's file "images" (image_record_drop), and
+# is said. Called by image_stream_in (_img_import_undo), in the subshell of
+# the import.
+k8s_images_unrecord() {
+	[ -n "${_k8_ir_new:-}" ] || return 0
+	image_record_drop "$_k8_ir_new" || return 0
+	say "image: the import failed; '$_k8_ir_new' leaves $STATE/images"
 }
 
 # k8s_ctr <run|query> <word>...: "k3s ctr -n k8s.io" with the words, over
@@ -2074,19 +2173,30 @@ k8s_ctr() {
 	fi
 }
 
-# k8s_image_known: _k8_image_known - "no" when the containerd of k3s has no
-# image of the name the import is to give it (only then is the tag the
+# k8s_image_known: _k8_image_known - "no" when the containerd of k3s (or of
+# the node of Docker Desktop's Kubernetes in kind mode, the route kind) has
+# no image of the name the import is to give it (only then is the tag the
 # script's to remove at a purge), "yes" when it has, and a reason when that
 # cannot be asked (K3S_IMPORT's node). Asked of "k3s ctr -n k8s.io images
 # ls -q name==<name>" (containerd's filter syntax: the name, one a line,
-# nothing when there is none), before image_deliver imports.
+# nothing when there is none) - or of the kind node's ctr through docker
+# exec (image_kind_ctr) - before image_deliver imports.
 k8s_image_known() {
 	_k8_image_known=
-	[ "${_img_route:-}" = import ] && [ "$DRY_RUN" = 0 ] || return 0
+	case ${_img_route:-} in
+	import | kind) ;;
+	*) return 0 ;;
+	esac
+	[ "$DRY_RUN" = 0 ] || return 0
 	_k_ik_name=$(k8s_containerd_name "$RESOLVED_IMAGE")
 	plain "$_k_ik_name" || fail "the image name $_k_ik_name is not one the script hands to ctr"
 	_k_ik_status=0
-	_k_ik=$(k8s_ctr query images ls -q "name==$_k_ik_name" </dev/null) || _k_ik_status=$?
+	if [ "$_img_route" = kind ]; then
+		_k_ik=$(image_kind_ctr query images ls -q "name==$_k_ik_name" </dev/null) ||
+			fail "asking the containerd of the node $_kind_node for $_k_ik_name failed (its message is above)"
+	else
+		_k_ik=$(k8s_ctr query images ls -q "name==$_k_ik_name" </dev/null) || _k_ik_status=$?
+	fi
 	case $_k_ik_status in
 	0) ;;
 	3)
@@ -2160,18 +2270,21 @@ k8s_install() {
 	k8s_namespace_make
 	secrets_install
 	k8s_image_known
+	# A tag new to the node is recorded before it is imported
+	# (k8s_images_record).
+	k8s_images_record
 	image_deliver
+	_img_import_undo=
 	_k8_ref=${RESOLVED_IMAGE:-}
 	case $_k8_ref in
 	'' | -* | *[!A-Za-z0-9_./:@-]*) fail "the image reference for the pods is not one: '$(printf '%s' "$_k8_ref" | printable)'" ;;
 	esac
-	k8s_images_record
 	# The tags built in the engine Rancher Desktop's k3s sees (PLAN 10.14):
 	# recorded for a purge to remove; nothing elsewhere.
 	image_tags_record
 	_k8_pull=IfNotPresent
 	case ${_img_route:-} in
-	import | local) _k8_pull=Never ;;
+	import | local | kind) _k8_pull=Never ;;
 	esac
 	say "image: the pods run $_k8_ref (imagePullPolicy $_k8_pull)"
 	if [ "$(setting K8S_STORAGE)" = hostpath ]; then
@@ -2846,9 +2959,10 @@ k8s_images_rancher() {
 # Deployment, DaemonSet, Job or CronJob of any namespace, which is named
 # and kept (k8s_images_used); K3S_IMPORT's node cannot be asked, so its
 # tags are left. On Rancher Desktop's Kubernetes the tags built in its
-# engine, with the same check (k8s_images_rancher). Nothing else is
-# removed. A removal that fails is said and the purge goes on: a tag holds
-# no secret.
+# engine, with the same check (k8s_images_rancher); on Docker Desktop's in
+# kind mode those imported into its node (k8s_images_kind). Nothing else
+# is removed. A removal that fails is said and the purge goes on: a tag
+# holds no secret.
 k8s_images_remove() {
 	[ -f "$STATE/images" ] || return 0
 	if [ "$TARGET" = rancher ]; then
@@ -2865,6 +2979,12 @@ k8s_images_remove() {
 	k8s_images_used || return 0
 	while IFS= read -r _k_im; do
 		[ -n "$_k_im" ] || continue
+		case $_k_im in
+		'kind '*)
+			k8s_images_kind "$_k_im"
+			continue
+			;;
+		esac
 		if ! plain "$_k_im"; then
 			warn "$STATE/images holds a name that is not one, which is left: $(printf '%s' "$_k_im" | printable)"
 			continue
@@ -2881,6 +3001,81 @@ k8s_images_remove() {
 		*) warn "removing the image $_k_im from k3s failed (its message is above); it is left" ;;
 		esac
 	done <"$STATE/images"
+}
+
+# k8s_images_kind <line>: a line "kind <name> <cluster>/<node>" of the
+# entry's file "images" (k8s_images_record): the tag imported into the node
+# of Docker Desktop's Kubernetes in kind mode, removed from that node's
+# containerd ("docker exec <node> ctr --namespace k8s.io images rm",
+# image_kind_ctr) when the cluster and the node reached now are the ones
+# the line names (image_kind_find, and the cluster's ID) - else it is said
+# and left - and when no pod or workload's template of any namespace names
+# it (_k_used_names of k8s_images_used), by its name or by a digest of its
+# image there: the digest of its target and of each configuration that
+# names. Then the line leaves the record. What cannot be asked is said and
+# the tag kept.
+k8s_images_kind() {
+	_k_kl_rest=${1#kind }
+	_k_kl_name=${_k_kl_rest%% *}
+	_k_kl_id=${_k_kl_rest#* }
+	case $_k_kl_rest in
+	*' '*' '* | *' ' | ' '*) _k_kl_id= ;;
+	esac
+	if [ "$_k_kl_rest" = "$_k_kl_name" ] || ! plain "$_k_kl_name" || ! plain "$_k_kl_id"; then
+		warn "$STATE/images holds a line the script does not write, which is left: $(printf '%s' "$1" | printable)"
+		return 0
+	fi
+	if [ -z "${_k8_kind_now+set}" ]; then
+		_k8_kind_now=
+		_k_kl_status=0
+		image_kind_find || _k_kl_status=$?
+		case $_k_kl_status in
+		0) _k8_kind_now=$_engine_id/$_kind_node ;;
+		1) ;;
+		*) warn "the nodes of the cluster of $(engine_identity) could not be listed (kubectl's message is above): the images imported into Docker Desktop's kind node are kept" ;;
+		esac
+	fi
+	if [ "$_k8_kind_now" != "$_k_kl_id" ]; then
+		_k_kl_now=$_k8_kind_now
+		[ -n "$_k_kl_now" ] || _k_kl_now="none, as the cluster is not Docker Desktop's Kubernetes in kind mode"
+		say "purge: the image $_k_kl_name was imported into the node of Docker Desktop's Kubernetes '$_k_kl_id' (cluster/node), and the node the settings reach now is $_k_kl_now: it is left"
+		return 0
+	fi
+	if printf '%s\n' "$_k_used_names" | grep -qxF "$_k_kl_name"; then
+		say "purge: the image $_k_kl_name is kept: a pod or a workload's template still names it"
+		return 0
+	fi
+	_k_kl_ls=$(image_kind_ctr query images ls "name==$_k_kl_name" </dev/null) || {
+		warn "the node $_kind_node could not be asked for the image $_k_kl_name (its message is above): it is kept"
+		return 0
+	}
+	_k_kl_target=$(printf '%s\n' "$_k_kl_ls" | printable | awk -v n="$_k_kl_name" '$1 == n { print $3; exit }')
+	if [ -z "$_k_kl_target" ]; then
+		say "purge: the image $_k_kl_name it imported is no longer in the node $_kind_node"
+		[ "$DRY_RUN" = 1 ] || image_record_drop "$1" || :
+		return 0
+	fi
+	_k_kl_digests=$(printf '%s\n' "$_k_kl_target" | image_digests_in)
+	if [ -n "$_k_kl_digests" ]; then
+		_k_kl_configs=$(image_kind_configs "$_k_kl_digests") || {
+			warn "the image $_k_kl_name of the node $_kind_node could not be read: it is kept"
+			return 0
+		}
+		_k_kl_digests="$_k_kl_digests $_k_kl_configs"
+	fi
+	for _k_kl_d in $_k_kl_digests; do
+		if printf '%s\n' "$_k_used_names" | grep -qxF "sha256:$_k_kl_d"; then
+			say "purge: the image $_k_kl_name is kept: a pod or a workload's template runs its image, sha256:$_k_kl_d"
+			return 0
+		fi
+	done
+	if ! image_kind_ctr run images rm "$_k_kl_name" </dev/null; then
+		warn "removing the image $_k_kl_name from the node $_kind_node failed (its message is above); it is left"
+		return 0
+	fi
+	[ "$DRY_RUN" = 0 ] || return 0
+	image_record_drop "$1" || :
+	say "purge: removed the image $_k_kl_name it imported into the node $_kind_node"
 }
 
 # k8s_purge_entry: last, the deployment's entry of STATE_DIR, and nothing

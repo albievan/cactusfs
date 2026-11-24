@@ -49,7 +49,7 @@
 #     "nothing changed") are true.
 #   - On a Docker engine, RESOLVED_IMAGE is run with "--pull never": it is on
 #     the engine, and a pull would fetch something else of that name.
-#   - On the routes import and local, the chart's pods are given
+#   - On the routes import, local and kind, the chart's pods are given
 #     imagePullPolicy: Never - the image is on the node and nowhere else.
 #   - For the chart's values, a reference repo@sha256:<digest> is split into
 #     repository and digest, and repo:tag into repository and tag
@@ -71,6 +71,15 @@
 #             whose API server must be on this machine); one node only. On
 #             Rancher Desktop's containerd that engine is nerdctl in the
 #             namespace k8s.io, the one its k3s sees (PLAN 10.6)
+#   kind      Docker Desktop's Kubernetes in its kind mode (the context
+#             docker-desktop, whose one node is a container of the Docker
+#             engine here with a containerd of its own - image_kind_find):
+#             made on the Docker engine here as for local, saved, and
+#             imported into that node's containerd - "docker exec -i <node>
+#             ctr --namespace k8s.io images import -" through the context
+#             of the settings, the image on standard input. Then the node
+#             must list it (ctr images ls -q) and name the configuration of
+#             the tar sent (image_kind_verify)
 #   registry  pushed to K8S_REGISTRY; the pods pull it by its digest
 #   nodes     IMAGE_SOURCE=image by its digest on Kubernetes without a push
 #             or an import (or IMAGE already under K8S_REGISTRY): checked on
@@ -158,6 +167,10 @@ image_settings() {
 	_img_checked=0
 	_img_stop=refuse
 	_img_route=
+	_kind_node=
+	_kind_many=
+	# What image_stream_in calls when an import fails (k8s_images_record).
+	_img_import_undo=
 	_img_remote=1
 	_img_remote_why=
 	# The time an image of binaries is made at (image_epoch), and the tags
@@ -379,6 +392,7 @@ image_route_said() {
 			echo "on the Docker engine here, whose images the cluster's one node sees"
 		fi
 		;;
+	kind) echo "saved there and imported into the containerd of the cluster's one node, the container $_kind_node of the Docker engine here (Docker Desktop's Kubernetes in kind mode)" ;;
 	registry) echo "pushed to $_img_registry, pulled by the nodes by its digest" ;;
 	nodes) echo "checked here, then pulled by the nodes by its digest" ;;
 	esac
@@ -472,7 +486,7 @@ image_remote_decide() {
 			_img_remote_why="pushed to $_img_registry"
 			return 0
 			;;
-		local)
+		local | kind)
 			_img_remote=0
 			return 0
 			;;
@@ -541,8 +555,9 @@ image_nodes_of() {
 
 # image_target_arch: RESOLVED_ARCH, the target's architecture - the target
 # engine's, or the one every Node of the cluster has (kubernetes.io/arch).
-# An import, and the local route, reach one node's images only: on a cluster
-# of more than one node they are refused, and K8S_REGISTRY is required.
+# An import, and the routes local and kind, reach one node's images only:
+# on a cluster of more than one node they are refused, and K8S_REGISTRY is
+# required.
 image_target_arch() {
 	if [ "$_img_k8s" = 0 ]; then
 		RESOLVED_ARCH=$(image_engine_arch image_target_engine "$_img_ttool") || exit
@@ -551,7 +566,10 @@ image_target_arch() {
 	_ita_nodes=$(k8s_nodes) || exit
 	_ita_count=${_ita_nodes%% *}
 	case $_img_route in
-	import | local)
+	import | local | kind)
+		if [ "$_ita_count" != 1 ] && [ -n "${_kind_many:-}" ]; then
+			refuse "the cluster of $(engine_identity) is Docker Desktop's Kubernetes in kind mode (its $_kind_many nodes each run a containerd of their own, containerd://...), with more than one node: an image imported into one node's containerd, or left on the Docker engine here, is not on the others, and a pod placed there would find no image (ErrImageNeverPull). Push it to a registry the nodes pull from: set K8S_REGISTRY"
+		fi
 		[ "$_ita_count" = 1 ] ||
 			refuse "the cluster of $(engine_identity) has $_ita_count nodes, and an image imported or loaded here reaches the containerd of one node only: a pod placed on another would find no image (ErrImageNeverPull). Push it to a registry the nodes pull from: set K8S_REGISTRY"
 		;;
@@ -1227,6 +1245,7 @@ image_check() {
 	if [ "$_img_route" = local ] && ! image_kube_local; then
 		refuse "the context $_img_kube names the API server '$_ikl_server', which is not on this machine: its nodes do not see the images of the Docker engine here; set K8S_REGISTRY"
 	fi
+	[ "$_img_route" != local ] || image_kind_check
 	image_remote_decide
 	image_target_arch
 	case $_img_source in
@@ -1472,8 +1491,12 @@ image_stream_in() {
 			esac
 		fi
 	fi
-	"$_isi_to" invoke "$@" <"$_isi_dir/image.tar" ||
+	if ! "$_isi_to" invoke "$@" <"$_isi_dir/image.tar"; then
+		# A tag recorded before an import that failed (k8s_images_record)
+		# leaves the record.
+		[ -z "${_img_import_undo:-}" ] || "$_img_import_undo"
 		fail "$("$_isi_to" show_command "$@") failed (its message is above)"
+	fi
 	[ "$_isi_verify" = - ] || "$_isi_verify" "$_isi_config"
 }
 
@@ -1614,6 +1637,161 @@ image_import_verify() {
 	say "image: the node holds $RESOLVED_IMAGE, configuration $1"
 }
 
+# --- Docker Desktop's Kubernetes in kind mode (the route kind) ------------------------
+#
+# Docker Desktop runs its Kubernetes in one of two modes. In the older one,
+# kubeadm, its one node uses the Docker engine's own images (the route
+# local). In kind mode its one node, desktop-control-plane, is a container
+# of that engine - hidden from "docker ps", reached by "docker exec" - with
+# a containerd of its own (the node's containerRuntimeVersion is
+# containerd://<version>), which does not see the engine's images: a pod
+# given an image left on the engine fails with ErrImageNeverPull. There the
+# image is imported into the node's containerd, in its namespace k8s.io,
+# the one the kubelet's CRI uses, as into k3s's (the route import).
+#
+# The node's ctr is containerd 2.2's (cmd/ctr of containerd v2.2.0, read
+# for its flags): the global --namespace; "images import -" reads the tar
+# stream on standard input and, without --all-platforms, imports and
+# unpacks the content of the node's own platform - the image is made for
+# the node's architecture (image_target_arch), and --all-platforms would
+# fail on a tar whose index names platforms whose content it does not
+# hold. --digests is not given: the tar names the image by the tag it was
+# saved by, and a digest image would be a second name in the node that no
+# record holds. "images ls -q" prints the names, "images ls" the name, the
+# type and the digest of the target of each, "content get <digest>" a
+# blob, and "images rm" removes a name (the content goes with the
+# containerd's garbage collection).
+
+# image_kind_find: true when the target is Docker Desktop's Kubernetes in
+# kind mode: TARGET=k8s with K8S_CONTEXT=docker-desktop, a cluster of one
+# node whose containerRuntimeVersion is containerd://<version>, and a
+# container of that node's name on the Docker engine of the settings'
+# context ("docker inspect --type container", which names it
+# /<name>). _kind_node is then that name, and _kind_runtime its runtime.
+# _kind_many is the number of nodes when there are more than one, all of a
+# containerd runtime: kind mode with several nodes, which no route of one
+# node serves. 1 otherwise - Docker Desktop's kubeadm mode, whose node is the engine
+# itself (docker://), and any other cluster; 2 when the nodes cannot be
+# listed (kubectl's message is above). Only reads. Called plainly.
+image_kind_find() {
+	_kind_node=
+	_kind_runtime=
+	_kind_many=
+	[ "$TARGET" = k8s ] && [ "$(kube_context)" = docker-desktop ] || return 1
+	_ikf=$(k8s_cmd query get nodes -o json </dev/null) || return 2
+	_ikf=$(printf '%s\n' "$_ikf" | printable | k8s_flat | k8s_items .metadata.name .status.nodeInfo.containerRuntimeVersion)
+	_ikf_n=$(printf '%s\n' "$_ikf" | grep -c . || :)
+	if [ "$_ikf_n" -gt 1 ] && ! printf '%s\n' "$_ikf" | grep -v '|containerd://' | grep -q .; then
+		# Docker Desktop's kind mode with more than one node: an import
+		# reaches one node's containerd (image_target_arch says so).
+		_kind_many=$_ikf_n
+	fi
+	[ "$_ikf_n" = 1 ] || return 1
+	_ikf_name=${_ikf%%|*}
+	_ikf_rt=${_ikf#*|}
+	case $_ikf_rt in
+	containerd://*) ;;
+	*) return 1 ;;
+	esac
+	case $_ikf_name in
+	'' | [!a-z0-9]* | *[!a-z0-9.-]*) return 1 ;;
+	esac
+	# Docker's own message for a node that is not a container (the
+	# kubeadm mode's) is not shown: it is the answer, not a failure.
+	[ "$DRY_RUN" = 0 ] ||
+		say "query: $(show_command docker --context "$(docker_context)" inspect --type container --format '{{.Name}}' "$_ikf_name")" >&2
+	_ikf_c=$(invoke docker --context "$(docker_context)" inspect --type container --format '{{.Name}}' "$_ikf_name" </dev/null 2>/dev/null) ||
+		return 1
+	[ "$(printf '%s\n' "$_ikf_c" | printable | head -n 1)" = "/$_ikf_name" ] || return 1
+	_kind_node=$_ikf_name
+	_kind_runtime=$_ikf_rt
+}
+
+# image_kind_check: in image_check, on the route local: Docker Desktop's
+# Kubernetes in kind mode (image_kind_find) takes the route kind, which is
+# said; its kubeadm mode, and Rancher Desktop's Kubernetes, keep the route
+# local.
+image_kind_check() {
+	_ikch=0
+	image_kind_find || _ikch=$?
+	case $_ikch in
+	0) ;;
+	1) return 0 ;;
+	*) fail "listing the nodes of the cluster of $(engine_identity) failed (kubectl's message is above)" ;;
+	esac
+	_img_route=kind
+	say "image: Docker Desktop's Kubernetes runs in kind mode - its one node, $_kind_node, is a container of the Docker engine here with a containerd of its own ($_kind_runtime), which does not see that engine's images: the image is imported into it"
+}
+
+# image_kind_ctr <how> <word>...: the node's ctr in its namespace k8s.io,
+# with the words, run by "docker exec" on the Docker engine of the
+# settings' context - with -i for an import, which reads the image on its
+# standard input.
+image_kind_ctr() {
+	_ikx_how=$1
+	shift
+	[ -n "${_kind_node:-}" ] || fail "internal: ctr of Docker Desktop's kind node before image_kind_find"
+	if [ "${1:-} ${2:-}" = "images import" ]; then
+		"$_ikx_how" docker --context "$(docker_context)" exec -i "$_kind_node" ctr --namespace k8s.io "$@"
+	else
+		"$_ikx_how" docker --context "$(docker_context)" exec "$_kind_node" ctr --namespace k8s.io "$@"
+	fi
+}
+
+# image_kind_verify <configuration digest>: after the import, the node's
+# containerd lists the image by the name it was given (images ls -q), and
+# the target of that name - a manifest, or an index whose manifests of the
+# node's platform it holds - names the configuration of the tar sent, which
+# image_stream_in has checked against the one built (image_kind_configs).
+image_kind_verify() {
+	_ikv_name=$(k8s_containerd_name "$RESOLVED_IMAGE")
+	plain "$_ikv_name" || fail "the image name $_ikv_name is not one the script hands to ctr"
+	_ikv=$(image_kind_ctr query images ls -q "name==$_ikv_name" </dev/null) ||
+		fail "asking the node $_kind_node for $_ikv_name after the import failed (its message is above)"
+	printf '%s\n' "$_ikv" | printable | grep -qxF "$_ikv_name" ||
+		fail "after the import the node $_kind_node does not list $_ikv_name (ctr --namespace k8s.io images ls): the image is not in the containerd its kubelet uses, and the pods would not start (ErrImageNeverPull)"
+	_ikv=$(image_kind_ctr query images ls "name==$_ikv_name" </dev/null) ||
+		fail "asking the node $_kind_node for $_ikv_name after the import failed (its message is above)"
+	_ikv_target=$(printf '%s\n' "$_ikv" | printable | awk -v n="$_ikv_name" '$1 == n { print $3; exit }')
+	case $_ikv_target in
+	sha256:*) ;;
+	*) fail "the node $_kind_node lists $_ikv_name without the digest of its target: '$_ikv_target'" ;;
+	esac
+	_ikv_hex=$(image_hex "$_ikv_target") || exit
+	_ikv_configs=$(image_kind_configs "$_ikv_hex") ||
+		fail "reading the blob $_ikv_target of the node $_kind_node failed (its message is above)"
+	case " $_ikv_configs " in
+	*" $1 "*) ;;
+	*) fail "after the import the node's image $_ikv_name ($_ikv_target) names the configuration '${_ikv_configs:-none}', not the one sent, $1" ;;
+	esac
+	say "image: the node $_kind_node holds $RESOLVED_IMAGE, configuration $1"
+}
+
+# image_kind_configs <hex>: the digests (hex) of the configurations the blob
+# <hex> of the node's containerd names - itself a manifest ("config"), or an
+# index whose manifests do, of those the node holds (an import without
+# --all-platforms leaves another platform's out) - separated by single
+# spaces, as image_tar_configs_of reads them of a tar. 1, with nothing
+# said but ctr's own message, when the blob cannot be read: the caller says
+# what that means (the import's check fails the run; a purge keeps the tag).
+image_kind_configs() {
+	_ikcf=$(image_kind_ctr query content get "sha256:$1" </dev/null) || return 1
+	_ikcf=$(printf '%s' "$_ikcf" | printable | tr -d ' \n\t\r')
+	case $_ikcf in
+	*'"manifests":'*)
+		_ikcf_list=
+		for _ikcf_m in $(printf '%s' "$_ikcf" | sed -n 's/^.*"manifests":\[\(.*\)\].*$/\1/p' | grep -o '"digest":"sha256:[0-9a-f]\{64\}"' | sed 's/^.*sha256://; s/"$//'); do
+			_ikcf_c=$(image_kind_ctr query content get "sha256:$_ikcf_m" </dev/null 2>/dev/null) || continue
+			_ikcf_c=$(printf '%s' "$_ikcf_c" | printable | tr -d ' \n\t\r' | sed -n 's/^.*"config":{[^}]*"digest":"sha256:\([0-9a-f]\{64\}\)".*$/\1/p')
+			[ -z "$_ikcf_c" ] || _ikcf_list="$_ikcf_list $_ikcf_c"
+		done
+		# shellcheck disable=SC2086 # the split into words is the point
+		image_words $_ikcf_list
+		;;
+	*) printf '%s' "$_ikcf" | sed -n 's/^.*"config":{[^}]*"digest":"sha256:\([0-9a-f]\{64\}\)".*$/\1/p' ;;
+	esac
+}
+
 # image_loaded <engine>: the image loaded on the engine is the one built:
 # the same platform, labels, layers and configuration (an engine may give
 # it another ID: Docker's image store gives the configuration's digest, its
@@ -1702,6 +1880,11 @@ image_deliver() {
 		[ "$DRY_RUN" = 1 ] || image_tag_check
 		image_stream "$_img_at" "$RESOLVED_IMAGE" image_import image_import_verify
 		say "image: $RESOLVED_IMAGE imported into the containerd of the cluster's one node"
+		;;
+	kind)
+		[ "$DRY_RUN" = 1 ] || image_tag_check
+		image_stream "$_img_at" "$RESOLVED_IMAGE" image_kind_ctr image_kind_verify images import -
+		say "image: $RESOLVED_IMAGE imported into the containerd of the node $_kind_node"
 		;;
 	local)
 		if [ "$_img_at" = image_build_engine ] && [ -n "$_img_build_host" ]; then

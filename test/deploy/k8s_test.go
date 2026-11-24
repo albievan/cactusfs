@@ -3202,6 +3202,45 @@ func TestK8sUninstall(t *testing.T) {
 	})
 }
 
+// purgeKinds is the kinds the fake API offers to list in a namespace, as
+// the purge lists them (events left out).
+const purgeKinds = "configmaps,pods,serviceaccounts,secrets,endpoints,endpointslices.discovery.k8s.io,deployments.apps"
+
+// purgeClaims is the claims of an installed standalone deployment named
+// cactusfs, as kubectl lists them.
+var purgeClaims = kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}})
+
+// purgePV is a PersistentVolume bound to the claim of the namespace
+// cactusfs, in the phase and with the reclaim policy given.
+func purgePV(name, claim, phase, policy string) obj {
+	return obj{"metadata": obj{"name": name}, "spec": obj{"claimRef": obj{"namespace": "cactusfs", "name": claim}, "persistentVolumeReclaimPolicy": policy}, "status": obj{"phase": phase}}
+}
+
+// purgeBase is the fake cluster k of an installed standalone deployment as
+// a purge finds it: its claims and the volumes bound to them, gone once
+// deleted; its Secrets, gone once deleted; what its namespace holds; and
+// the pods and workloads of every namespace.
+func purgeBase(k kube) kube {
+	claims, pv := purgeClaims, purgePV
+	k.extra = append(k.extra,
+		rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, After: []string{"delete", "persistentvolumeclaim/meta-cactusfs-node-0-0"}, Stdout: kjsonNoT(kubeList())},
+		rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(claims)},
+		rule{Tool: k.tool, Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList(
+			pv("pvc-1", "meta-cactusfs-node-0-0", "Released", "Retain"),
+			pv("pvc-other", "meta-cactusfs-node-0-0", "Bound", "Delete")))},
+		rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, After: []string{"delete", "secret/cactusfs-root"}, Stdout: ""},
+		rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
+		rule{Tool: k.tool, Contains: []string{"api-resources", "--namespaced"}, Stdout: "configmaps\npods\nserviceaccounts\nsecrets\nendpoints\nendpointslices.discovery.k8s.io\ndeployments.apps\nevents\nevents.events.k8s.io\n"},
+		// What is left: what every namespace holds, and the
+		// deployment's own objects on their way out.
+		rule{Tool: k.tool, Contains: []string{"get", purgeKinds}, Stdout: "configmap/kube-root-ca.crt\nserviceaccount/default\npod/cactusfs-node-0-0\nendpoints/cactusfs\nendpointslice.discovery.k8s.io/cactusfs-x7k2p\n"},
+		rule{Tool: k.tool, Contains: []string{"get", "pods", "-A"}, Stdout: kjsonNoT(kubeList(podOf("web-0", "u", "r", "registry.example.test/web:1", true, false)))},
+		rule{Tool: k.tool, Contains: []string{"get", "statefulsets,deployments,daemonsets,jobs,cronjobs", "-A"}, Stdout: kjsonNoT(kubeList())},
+		rule{Tool: k.tool, Contains: []string{"delete", "--raw"}, SaveStdin: "delete.json"},
+	)
+	return k
+}
+
 // TestK8sPurge: --uninstall --purge, confirmed, deletes in the order of
 // ADR-0033 section 3 - the workload, the release's claims, a listing that
 // proves none and no PersistentVolume bound to one is left (a Released one
@@ -3210,34 +3249,8 @@ func TestK8sUninstall(t *testing.T) {
 // again, deleted by "delete --raw" with preconditions on its uid and
 // resourceVersion), the image tags it imported - and last STATE_DIR's
 // entry, a sibling entry kept; a step that fails keeps the entry.
-// purgeKinds is the kinds the fake API offers to list in a namespace, as
-// the purge lists them (events left out).
-const purgeKinds = "configmaps,pods,serviceaccounts,secrets,endpoints,endpointslices.discovery.k8s.io,deployments.apps"
-
 func TestK8sPurge(t *testing.T) {
-	claims := kubeList(obj{"metadata": obj{"name": "meta-cactusfs-node-0-0"}}, obj{"metadata": obj{"name": "data1-cactusfs-node-0-0"}})
-	pv := func(name, claim, phase, policy string) obj {
-		return obj{"metadata": obj{"name": name}, "spec": obj{"claimRef": obj{"namespace": "cactusfs", "name": claim}, "persistentVolumeReclaimPolicy": policy}, "status": obj{"phase": phase}}
-	}
-	base := func(k kube) kube {
-		k.extra = append(k.extra,
-			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, After: []string{"delete", "persistentvolumeclaim/meta-cactusfs-node-0-0"}, Stdout: kjsonNoT(kubeList())},
-			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumeclaims"}, Stdout: kjsonNoT(claims)},
-			rule{Tool: k.tool, Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList(
-				pv("pvc-1", "meta-cactusfs-node-0-0", "Released", "Retain"),
-				pv("pvc-other", "meta-cactusfs-node-0-0", "Bound", "Delete")))},
-			rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, After: []string{"delete", "secret/cactusfs-root"}, Stdout: ""},
-			rule{Tool: k.tool, Contains: []string{"get", "secrets", "io.cactusfs.deploy.name=cactusfs,app.kubernetes.io/managed-by=cactusfs-deploy"}, Stdout: "secret/cactusfs-root\nsecret/cactusfs-tls\n"},
-			rule{Tool: k.tool, Contains: []string{"api-resources", "--namespaced"}, Stdout: "configmaps\npods\nserviceaccounts\nsecrets\nendpoints\nendpointslices.discovery.k8s.io\ndeployments.apps\nevents\nevents.events.k8s.io\n"},
-			// What is left: what every namespace holds, and the
-			// deployment's own objects on their way out.
-			rule{Tool: k.tool, Contains: []string{"get", purgeKinds}, Stdout: "configmap/kube-root-ca.crt\nserviceaccount/default\npod/cactusfs-node-0-0\nendpoints/cactusfs\nendpointslice.discovery.k8s.io/cactusfs-x7k2p\n"},
-			rule{Tool: k.tool, Contains: []string{"get", "pods", "-A"}, Stdout: kjsonNoT(kubeList(podOf("web-0", "u", "r", "registry.example.test/web:1", true, false)))},
-			rule{Tool: k.tool, Contains: []string{"get", "statefulsets,deployments,daemonsets,jobs,cronjobs", "-A"}, Stdout: kjsonNoT(kubeList())},
-			rule{Tool: k.tool, Contains: []string{"delete", "--raw"}, SaveStdin: "delete.json"},
-		)
-		return k
-	}
+	claims, pv, base := purgeClaims, purgePV, purgeBase
 	// The PV of another namespace's claim of the same name is not ours.
 	otherNS := func(k kube) kube {
 		k.extra = append([]rule{{Tool: "kubectl", Contains: []string{"get", "persistentvolumes"}, Stdout: kjsonNoT(kubeList(

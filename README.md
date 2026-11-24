@@ -949,6 +949,7 @@ A cluster on the local KMS shares one key file among its nodes and is refused un
 | Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | yes: the k3s and k8s path through the context `rancher-desktop`, the image built on the engine its k3s sees (`nerdctl --namespace k8s.io` on containerd, `docker --context rancher-desktop` on moby) and run with `imagePullPolicy: Never` | yes | Rancher Desktop 1.25 for macOS (its k3s v1.25), on moby and on containerd: install, round trip through a port-forward, an upgrade to another image, uninstall, reinstall, purge (PLAN 10.6) |
 | k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge; standalone on a remote k3s server over `K3S_SSH` with `K8S_STORAGE=pvc` (local-path): install, round trip through the NodePort, upgrade, uninstall, reinstall and purge (PLAN 10.13) |
 | Kubernetes (1.27 or later aimed at; the version is not checked) | `k8s` with `K8S_CONTEXT` (the current context is never assumed) | yes | yes | no: the fakes only |
+| Docker Desktop's Kubernetes | `k8s` with `K8S_CONTEXT=docker-desktop` | yes, in both of its modes, told apart by asking the cluster: in kubeadm mode the node shares the Docker engine's images, and the image built there is run with `imagePullPolicy: Never`; in kind mode (its one node, `desktop-control-plane`, a container of the engine with a containerd of its own) the image built there is imported into that node with `docker exec -i desktop-control-plane ctr --namespace k8s.io images import -`, checked there, run with `imagePullPolicy: Never`, and removed by a purge | yes | kind mode, Docker Desktop 4.x for macOS (Kubernetes v1.34.3, node `desktop-control-plane` on containerd 2.2.0), 2026-11-24: standalone installed from build 364 (the image imported into the node and recorded), a round trip of 5 MiB (put, get, list) through `kubectl port-forward` - a NodePort was not used, and in kind mode remains unchecked - a rolling upgrade to build 370 (its tag recorded, the object kept), uninstall keeping the claims, reinstall reading the object back, and a purge that removed the namespace and both imported tags from the node (none left); another project's namespace and every cluster-scoped object (namespaces, PVs, StorageClasses, CRDs, cluster roles and bindings, by resourceVersion) unchanged. Kubeadm mode: the fakes only |
 
 Every target is also run by the harness of `make deploy-check`, against recording fakes
 of each tool. On Docker targets S3 is published on `BIND` (default `127.0.0.1`) and the
@@ -962,7 +963,13 @@ unless `K8S_ADMIN_SERVICE_TYPE` and `K8S_ADMIN_ALLOW_FROM` are both set. The ima
 reaches a cluster by a push to `K8S_REGISTRY`; by an import into k3s's containerd
 (`K3S_SSH`, the command `K3S_IMPORT`, or the k3s of this machine; a cluster of one node
 only); for the contexts `docker-desktop` and `rancher-desktop`, from the engine on this
-machine; or, with `IMAGE_SOURCE=image`, by the nodes pulling `IMAGE` by its digest.
+machine - imported into the node's own containerd when Docker Desktop's Kubernetes runs
+in kind mode; or, with `IMAGE_SOURCE=image`, by the nodes pulling `IMAGE` by its digest.
+A pod that cannot start because its image is not on the node (`ErrImageNeverPull`) or
+its reference is not one (`InvalidImageName`) stops the wait at once, naming the image
+and the route it took, instead of waiting out `WAIT_TIMEOUT`: the kubelet syncs the pod
+again, but neither can clear by itself here, as the image was delivered (and on an
+import checked on the node) before the apply.
 
 ### Secrets, and where they live
 
@@ -1061,7 +1068,7 @@ is the target and its Docker or kubectl context - `dd-default`, `ce-default`,
 | `ssh-known-hosts` | `CE_HOST`: the host keys pinned at the first install ([below](#adding-a-servers-host-key)) |
 | `compose/` | a compose cluster on this machine: `compose.yaml`, the generated `override.yaml` and `compose.env`, and `secrets/` |
 | `namespace`, `namespace-uid` | Kubernetes: the namespace and its marker, without which the script treats a namespace as somebody else's |
-| `images` | the image tags the script made: on k3s those it imported; on a Docker engine and Rancher Desktop's Kubernetes `target <tag> <engine ID>` for those it built or loaded on the target's engine, and `here:<context> <tag> <engine ID>` for a copy built on this machine for `CE_HOST` ([Image tags](#image-tags)) |
+| `images` | the image tags the script made: on k3s those it imported; on Docker Desktop's Kubernetes in kind mode `kind <name> <kube-system UID>/<node>` for those it imported into its node; on a Docker engine and Rancher Desktop's Kubernetes `target <tag> <engine ID>` for those it built or loaded on the target's engine, and `here:<context> <tag> <engine ID>` for a copy built on this machine for `CE_HOST` ([Image tags](#image-tags)) |
 
 A secret you give as a file is read from that file: keep it, as you keep `STATE_DIR`.
 
@@ -1259,7 +1266,11 @@ the first install until an uninstall removes it. A purge removes, before the ent
 every recorded tag no container uses, on `dd`, `ce` (here, or on `CE_HOST` over its SSH
 route), `podman`, `rancher` and Rancher Desktop's Kubernetes, each with the engine's own
 CLI (`docker --context`, `podman`, `nerdctl` in its namespace); on k3s the tags it
-imported, as above. On Rancher Desktop's Kubernetes, after an upgrade and at a purge, a
+imported, as above; on Docker Desktop's Kubernetes in kind mode those it imported into
+its node, through `docker exec <node> ctr --namespace k8s.io images rm`, while the
+cluster (its `kube-system` UID) and the node are the ones the line names, and kept
+while a pod or a workload's template of any namespace names the tag or a digest of its
+image. On Rancher Desktop's Kubernetes, after an upgrade and at a purge, a
 tag is also kept while a pod or a workload's template (StatefulSet, Deployment,
 DaemonSet, Job, CronJob) of any namespace names it, or the digest of its image (a pod's
 `imageID`); when those cannot be listed, every tag is kept.

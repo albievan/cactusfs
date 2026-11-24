@@ -504,7 +504,7 @@ one, else one made the same way for it), for `IMAGE_SOURCE=binaries` and `source
 only - with `IMAGE_SOURCE=image` dev-init runs `IMAGE`. `RESOLVED_IMAGE` is the
 reference the target runs, `RESOLVED_ARCH` its architecture, `RESOLVED_NATIVE_IMAGE`
 dev-init's. The installs run it with `--pull never` on Docker, give the pods
-`imagePullPolicy: Never` on the routes import and local, and split `repo@digest` and
+`imagePullPolicy: Never` on the routes import, local and kind, and split `repo@digest` and
 `repo:tag` for the chart's values.
 
 The routes: on the engine that runs it (nothing moves; `BUILD_HOST` equal to `CE_HOST`
@@ -531,6 +531,43 @@ pulling `IMAGE`, which must be named `@sha256:<64 hex>` and is first present on 
 engine here (pulled there when absent) and checked there as any image is.
 `K8S_REGISTRY` and `K3S_IMPORT` together are refused, as are nodes of more than one
 architecture and a cluster none of the routes reaches.
+
+**Docker Desktop's Kubernetes has two modes (route `kind`, 2026-11-24).** The route
+`local` assumed the older one, kubeadm, whose node uses the Docker engine's images. In
+kind mode (Docker Desktop 4.x, upstream Kubernetes v1.34.3 on a real engine) the one
+node, `desktop-control-plane`, is a container of that engine - hidden from `docker ps`,
+reached by `docker exec` - with a containerd of its own (2.2.0, the node's
+`containerRuntimeVersion` `containerd://2.2.0`) that does not see the engine's images:
+the pods failed with `ErrImageNeverPull`. For `K8S_CONTEXT=docker-desktop` the script
+now asks, read-only, before anything changes: the nodes (`get nodes -o json`), and when
+there is exactly one whose runtime is `containerd://...`, the Docker engine of the
+settings' context for a container of that node's name (`docker inspect --type
+container`, which must answer `/<name>`). Both true: the route `kind`; else `local`, as
+before. On `kind` the image is made on the Docker engine as for `local`, saved, and
+streamed into `docker --context <context> exec -i <node> ctr --namespace k8s.io images
+import -` - the tar checked against the image before it is sent, as for k3s; then the
+node must list it (`ctr images ls -q name==<name>`), and the target of that name
+(`ctr images ls`, read through `ctr content get`: a manifest, or an index of which the
+manifests the node holds are read) must name the configuration of the tar sent. The
+flags were checked in containerd v2.2.0's `cmd/ctr`: `--namespace` is the global flag;
+`images import` without `--all-platforms` imports and unpacks the node's own platform
+(the image is built for it), where `--all-platforms` would fail on a tar whose index
+names platforms whose content it lacks; `--digests` is not given, since the tar names
+the image by its tag and a digest image would be a name no record holds. Two or more
+nodes of a containerd runtime on that context are kind mode with several nodes: the
+route stays `local`, and the one-node check refuses it, saying so, for `K8S_REGISTRY`.
+A tag the node lacked before is recorded in the entry's `images` as `kind <name>
+<kube-system UID>/<node>` (the rule of an engine's ID of PLAN 10.14: the node is a
+container, made again with the cluster) BEFORE the import - as on the route `import`,
+by its name - and the line is taken out only when the import itself fails: an import
+whose check fails, or a run killed between the import and its end, leaves a tag the
+record names. The tag is removed by a purge through `docker exec
+<node> ctr --namespace k8s.io images rm` when the cluster and the node reached then are
+the ones the line names and no pod or workload's template of any namespace names the
+tag or a digest of its image (its target's, or a configuration that names); else it is
+said and left. The tag built on the Docker engine itself is not recorded, as on the
+route `local` (PLAN 10.14 records none on the engine of a Kubernetes target other than
+Rancher Desktop's).
 
 An image is looked up by its full ID from the moment it is made: Docker builds through
 BuildKit's builder named with `--builder` (the context's own, of the docker driver, or
@@ -673,7 +710,8 @@ no longer holds, and that the script applied (`cactusfs-deploy` with the operati
 after it - but a StatefulSet that is not a node of the
 settings (`DEPLOY_MODE` or the name changed) refuses the install before any change,
 since it holds a node and its data. The values give `image.pullPolicy: Never` on the
-routes `import` and `local` of section 5, and the image by digest or by tag, never both.
+routes `import`, `local` and `kind` of section 5, and the image by digest or by tag,
+never both.
 
 
 ### 7. Namespace isolation on shared clusters
@@ -792,7 +830,25 @@ nothing.
   unless both `K8S_ADMIN_SERVICE_TYPE` and `K8S_ADMIN_ALLOW_FROM` are set. `--status`
   prints the `kubectl port-forward` command for the admin port; with `K3S_SSH` it
   prints the pair that reaches it from the operator's machine: `ssh -L` to the
-  server's loopback, and `k3s kubectl port-forward` on the server.
+  server's loopback, and `k3s kubectl port-forward` on the server. On Docker Desktop's
+  Kubernetes in kind mode (v1.34.3, run on a real engine on 2026-11-24) the round trip
+  reached S3 through `kubectl port-forward service/<name> <port>:9000`; whether a
+  NodePort is reached from this machine in kind mode, as in kubeadm mode, remains
+  unchecked.
+- **A pod that cannot start (2026-11-24).** The wait for a node's pod - after an
+  install, and for each node of an upgrade - reads its containers' (init containers'
+  included) waiting reason. `ErrImageNeverPull` (the image is not in the node's runtime
+  under `imagePullPolicy: Never`) and `InvalidImageName` cannot clear by themselves
+  here: the kubelet syncs the pod again, but the image was delivered to the cluster - and
+  on an import checked on the node - before the apply, and the pod's reference is the
+  one applied, so nothing the run waits for changes the answer. The run fails at once,
+  on every route, naming the pod, the reason and the kubelet's message, the image, and
+  the route it took to the cluster (in an upgrade, with the note that the nodes after
+  it were not moved and the image to go back to), rather than waiting out
+  `WAIT_TIMEOUT`. Only a pod of the deployment on its new UID that runs the image of
+  the run counts: the old pod of an upgrade, or a pod on another image, does not.
+  Other waiting reasons (`ImagePullBackOff`, `CrashLoopBackOff`) can clear by themselves
+  and are waited for as before.
 - **Docker.** S3 on `BIND`; the admin port on the loopback address. For `CE_HOST`,
   `--status` prints the `ssh -L` command that reaches it. There the loopback address
   is the server's, so whether a port is free and whether the node is ready are asked
