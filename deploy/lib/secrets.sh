@@ -37,7 +37,10 @@
 #   as tar streams like a volume. On Rancher Desktop (PLAN 10.6) the copy is
 #   the same two volumes, on its moby engine through the Docker CLI and on
 #   its containerd engine through nerdctl (deploy/lib/rancher.sh: a put
-#   there is a tar stream owned by 65532, nerdctl's cp having no -a). On
+#   there is a tar stream owned by 65532, nerdctl's cp having no -a,
+#   extracted as root where the volume is in Rancher Desktop's VM -
+#   nerdctl_volume_put; a read is archived there, nerdctl_volume_get - as
+#   nerdctl's cp sees no volume of a container that never ran). On
 #   Kubernetes (PLAN 10.10) the target's copy is the Secrets of the
 #   deployment's namespace, read back and compared by deploy/lib/k8s.sh
 #   (k8s_secrets_ensure, PLAN 10.9), what neither copy holds made here
@@ -512,6 +515,9 @@ secrets_check() {
 	if [ -n "$_s_ce_host" ]; then
 		host_key_check "$_s_ce_host"
 	fi
+	# On Rancher Desktop's containerd a put goes through its VM, by rdctl
+	# (nerdctl_put): none is refused before anything is changed.
+	! on_nerdctl || rancher_rdctl || refuse "$(rancher_rdctl_missing)"
 	engine_id_check
 
 	# What the target holds: one listing, which must succeed, of the volumes
@@ -818,20 +824,29 @@ secrets_fetch() {
 		[ "$_sf_unit" = secrets ] && [ -n "$_s_secdir" ] && continue
 		_sf_vols="$_sf_vols $_sf_unit"
 	done
+	# On nerdctl a volume is read where it is in Rancher Desktop's VM: its cp
+	# does not see the volumes of a container that never ran (rancher.sh).
 	# shellcheck disable=SC2086 # unit names, without spaces
-	[ -z "$_sf_vols" ] || io_container "$_sf_ctr" $_sf_vols
+	[ -z "$_sf_vols" ] || on_nerdctl || io_container "$_sf_ctr" $_sf_vols
 	for _sf_unit in $1; do
 		if [ "$_sf_unit" = secrets ] && [ -n "$_s_secdir" ]; then
 			secdir_fetch "$SECRETS_WORK/fetch.tar"
 		else
-			target_engine query cp "$_sf_ctr:/var/lib/cactusfs/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
+			if on_nerdctl; then
+				nerdctl_volume_get "$_s_name-$_sf_unit" "$_sf_unit" "$SECRETS_WORK/fetch.tar"
+			else
+				target_engine query cp "$_sf_ctr:/var/lib/cactusfs/$_sf_unit" - </dev/null >"$SECRETS_WORK/fetch.tar"
+			fi
 			[ "$TARGET" != podman ] || volume_root_check "$SECRETS_WORK/fetch.tar" "$_s_name-$_sf_unit"
 		fi
 		tar -x -o -f "$SECRETS_WORK/fetch.tar" -C "$SECRETS_WORK/target"
 		rm -f "$SECRETS_WORK/fetch.tar"
 		[ -d "$SECRETS_WORK/target/$_sf_unit" ] || mkdir "$SECRETS_WORK/target/$_sf_unit"
 	done
-	[ -z "$_sf_vols" ] || target_engine run rm -f "$_sf_ctr" </dev/null
+	if [ -n "$_sf_vols" ] && ! on_nerdctl; then
+		target_engine run rm -f "$_sf_ctr" </dev/null
+		target_engine helper_done rm -f "$_sf_ctr"
+	fi
 	only_plain "$SECRETS_WORK/target" "a volume of the deployment"
 }
 
@@ -896,6 +911,33 @@ io_container() {
 	# shellcheck disable=SC2086 # the mounts are words without spaces
 	target_engine run create --name "$_io_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
 		--user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges $_io_mounts "$_si_img" true </dev/null
+	# Removed however the run ends: a put through it may have failed half
+	# way, and a rerun meets its name (helper_later).
+	target_engine helper_later rm -f "$_io_ctr"
+}
+
+# helper_later <engine words>... rm -f <container>: the removal of a
+# helper container, as target_engine or local_engine hands it over ("$1"
+# of them), added to the run's EXIT trap (cleanup_add): with every word of
+# the engine - its CLI, context, namespace or DOCKER_HOST - written into
+# the trap now, so that the container is removed by the engine that made
+# it. helper_done drops it, once the run has removed the container itself.
+helper_later() {
+	cleanup_add helper_remove "$@"
+}
+
+# helper_done <engine words>... rm -f <container>: the removal helper_later
+# added, dropped.
+helper_done() {
+	cleanup_drop helper_remove "$@"
+}
+
+# helper_remove <engine words>... rm -f <container>: the cleanup of
+# helper_later - the container removed; a failure is said, and the other
+# cleanups still run.
+helper_remove() {
+	run "$@" </dev/null ||
+		warn "the helper container of the deployment could not be removed ($(show_command "$@") failed, its message is above): remove it before the next run"
 }
 
 # given_check <file given> <key> <unit> <file> <keep|rotate>: a file given
@@ -1122,10 +1164,15 @@ devinit_run() {
 	local_engine run create --name "$_dr_ctr" --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" \
 		--platform "linux/$_dr_arch" --user 65532:65532 --pull never --network none --cap-drop ALL --security-opt no-new-privileges "$@" </dev/null ||
 		fail "making the container $_dr_ctr failed (the engine's message is above)"
-	# nerdctl's cp has no -a: the stream is owned by 65532 (rancher_tar_owner).
+	# From here on the container is removed however the run ends: once the
+	# copy has worked it holds the passphrase (helper_later).
+	local_engine helper_later rm -f "$_dr_ctr"
+	# nerdctl's cp has no -a, nor "-" in every release: the stream, owned by
+	# 65532 (rancher_tar_owner), goes in through Rancher Desktop's VM
+	# (nerdctl_put).
 	if on_nerdctl; then
-		local_engine run cp - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar" ||
-			fail "copying the passphrase into $_dr_ctr failed (the engine's message is above)"
+		nerdctl_put "$SECRETS_WORK/dev-init.tar" "$_dr_ctr:/tmp" ||
+			fail "copying the passphrase into $_dr_ctr failed (the message is above)"
 	else
 		local_engine run cp -a - "$_dr_ctr:/tmp" <"$SECRETS_WORK/dev-init.tar" ||
 			fail "copying the passphrase into $_dr_ctr failed (the engine's message is above)"
@@ -1135,9 +1182,17 @@ devinit_run() {
 		local_engine run start -a "$_dr_ctr" </dev/null 2>&1 || echo failed >"$SECRETS_WORK/dev-init.failed"
 	} | printable
 	[ ! -f "$SECRETS_WORK/dev-init.failed" ] || fail "dev-init failed in its container (what it said is above)"
-	local_engine query cp "$_dr_ctr:/tmp/out" - </dev/null >"$SECRETS_WORK/dev-init.tar" ||
-		fail "copying what dev-init wrote out of $_dr_ctr failed (the engine's message is above)"
+	# nerdctl's "cp <container>:<path> -" is not in every release: through
+	# Rancher Desktop's VM (nerdctl_get).
+	if on_nerdctl; then
+		nerdctl_get "$_dr_ctr:/tmp/out" "$SECRETS_WORK/dev-init.tar" ||
+			fail "copying what dev-init wrote out of $_dr_ctr failed (the message is above)"
+	else
+		local_engine query cp "$_dr_ctr:/tmp/out" - </dev/null >"$SECRETS_WORK/dev-init.tar" ||
+			fail "copying what dev-init wrote out of $_dr_ctr failed (the engine's message is above)"
+	fi
 	local_engine run rm -f "$_dr_ctr" </dev/null || fail "removing the container $_dr_ctr failed (the engine's message is above)"
+	local_engine helper_done rm -f "$_dr_ctr"
 	tar -x -o -f "$SECRETS_WORK/dev-init.tar" -C "$_dr_in" || fail "what dev-init wrote is not a tar stream"
 	rm -f "$SECRETS_WORK/dev-init.tar"
 	only_plain "$_dr_in" "what dev-init gave back"
@@ -1225,8 +1280,10 @@ secrets_put() {
 		esac
 	done
 	_sp_ctr=$_s_name-volumes
+	# On nerdctl a volume is filled where it is in Rancher Desktop's VM, with
+	# no helper (unit_put).
 	# shellcheck disable=SC2086 # unit names, without spaces
-	[ -z "$_sp_vols" ] || io_container "$_sp_ctr" $_sp_vols
+	[ -z "$_sp_vols" ] || on_nerdctl || io_container "$_sp_ctr" $_sp_vols
 	for _sp_unit in $_sp_units; do
 		case " $1 " in
 		*" $_sp_unit "*) _sp_made=0 ;;
@@ -1259,7 +1316,10 @@ secrets_put() {
 			say "secrets: rotated in $(unit_place "$_sp_unit"), from the files given:$_sp_names"
 		fi
 	done
-	[ -z "$_sp_vols" ] || target_engine run rm -f "$_sp_ctr" </dev/null
+	if [ -n "$_sp_vols" ] && ! on_nerdctl; then
+		target_engine run rm -f "$_sp_ctr" </dev/null
+		target_engine helper_done rm -f "$_sp_ctr"
+	fi
 }
 
 # recreate_pending_mark: STATE/compose/recreate-pending lists the files a
@@ -1284,7 +1344,8 @@ recreate_pending_mark() {
 
 # unit_put <unit> <tar file> <name>...: a tar stream of those names into the
 # target's copy of the unit - its volume, through the helper secrets_put
-# made, or the directory of compose's file secrets.
+# made (on nerdctl in place, in Rancher Desktop's VM), or the directory of
+# compose's file secrets.
 unit_put() {
 	_up_unit=$1
 	shift
@@ -1292,10 +1353,12 @@ unit_put() {
 		secdir_put "$@"
 		return 0
 	fi
-	# nerdctl's cp has no -a: the stream is owned by 65532
-	# (rancher_tar_owner, secrets_put).
+	# nerdctl's cp sees no volume of a container that never ran: the
+	# stream, owned by 65532 (rancher_tar_owner, secrets_put), is extracted
+	# into the volume where it is in Rancher Desktop's VM
+	# (nerdctl_volume_put, deploy/lib/rancher.sh).
 	if on_nerdctl; then
-		target_engine run cp - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
+		nerdctl_volume_put "$_s_name-$_up_unit" "$1"
 	else
 		target_engine run cp -a - "$_s_name-volumes:/var/lib/cactusfs/$_up_unit" <"$1"
 	fi
@@ -1334,6 +1397,9 @@ secrets_check_k8s() {
 			bad "$_si_key" "is not a file that can be read"
 		fi
 	done
+	# dev-init's input goes in through Rancher Desktop's VM on its
+	# containerd (nerdctl_put): no rdctl is refused before any change.
+	! on_nerdctl || rancher_rdctl || refuse "$(rancher_rdctl_missing)"
 	engine_id_check
 	if [ -n "$_s_cert" ] && [ -z "$_s_ca" ] && [ -f "$STATE/config/s3-ca.pem" ] && [ -f "$STATE/config/s3.pem" ] &&
 		! cmp -s "$_s_cert" "$STATE/config/s3.pem"; then

@@ -21,10 +21,10 @@ control and a hash-chained audit trail.
 > is built up to PLAN 9.10, and is in no published release either: its test on four
 > nodes and its review in a browser are still to come. Milestone 10, one deployment
 > script for every container platform
-> ([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)), is built but for
-> Rancher Desktop's own Kubernetes, and is in no published release; it has been run on
-> Docker Desktop and on a remote k3s server (PLAN 10.13), not yet on Rancher Desktop or
-> another Kubernetes.
+> ([Deploying with deploy/deploy.sh](#deploying-with-deploydeploysh)), is built and is
+> in no published release; it has been run on Docker Desktop, a remote k3s server
+> (PLAN 10.13) and Rancher Desktop 1.25 (moby, containerd and its Kubernetes, PLAN 10.6),
+> not yet on a Kubernetes other than k3s.
 > [What is not there yet](#what-is-not-there-yet) says the rest plainly.
 > CactusFS is not offered as ready for production, and no independent review of its
 > security is recorded here: do not keep data in it that you cannot lose.
@@ -241,7 +241,7 @@ Said plainly, so that nobody finds out by trying:
     refused there, as compose bind-mounts files of `STATE_DIR`);
   - it installs Docker CE (`CE_INSTALL_DOCKER=yes`) on Debian, Ubuntu, RHEL, Rocky
     Linux, AlmaLinux and CentOS Stream only;
-  - not yet run on Rancher Desktop or a Kubernetes other than k3s: those paths are
+  - not yet run on a Kubernetes other than k3s (Rancher Desktop's is k3s): that path is
     proven against recording fakes ([Targets](#targets));
   - the image tags it built, loaded or imported stay until an upgrade on a Docker
     engine replaces them, or a purge ([Image tags](#image-tags)); on Kubernetes only
@@ -944,9 +944,9 @@ A cluster on the local KMS shares one key file among its nodes and is refused un
 | Docker CE on this machine | `ce` | yes | yes | `make test-deploy`, both modes (Docker on Linux) |
 | Docker CE on a server over SSH | `ce` with `CE_HOST=user@server` | yes | yes: compose runs on the server, from `CE_STATE_DIR` | standalone, from macOS to a Linux server |
 | Podman | `podman` | yes | yes: `podman compose`, which needs Podman's API socket (`podman.socket`) | `make test-deploy`, both modes (Podman 5.8 on Linux, SELinux enforcing) |
-| Rancher Desktop, moby | `rancher` (`RANCHER_ENGINE=auto` or `moby`) | yes: Docker Desktop's code through the context `rancher-desktop` | yes | no: the recording fakes of `make deploy-check` only (PLAN 10.6) |
-| Rancher Desktop, containerd | `rancher` (`RANCHER_ENGINE=auto` or `containerd`) | yes, through `nerdctl` | refused: `nerdctl compose` cannot upgrade one node at a time | no: the fakes only (PLAN 10.6) |
-| Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | yes: the k3s and k8s path through the context `rancher-desktop`, the image built on the engine its k3s sees (`nerdctl --namespace k8s.io` on containerd, `docker --context rancher-desktop` on moby) and run with `imagePullPolicy: Never` | yes | no: the fakes only (PLAN 10.6) |
+| Rancher Desktop, moby | `rancher` (`RANCHER_ENGINE=auto` or `moby`) | yes: Docker Desktop's code through the context `rancher-desktop` | yes | Rancher Desktop 1.25 for macOS: standalone and a four-node cluster - install, round trip, upgrade, uninstall, reinstall, purge (PLAN 10.6) |
+| Rancher Desktop, containerd | `rancher` (`RANCHER_ENGINE=auto` or `containerd`) | yes, through `nerdctl` | refused: `nerdctl compose` cannot upgrade one node at a time | Rancher Desktop 1.25 for macOS (nerdctl 2.2.2): standalone - install, round trip, an upgrade to another image, uninstall, reinstall, purge (PLAN 10.6) |
+| Rancher Desktop's Kubernetes | `rancher` with `RANCHER_KUBERNETES=yes` | yes: the k3s and k8s path through the context `rancher-desktop`, the image built on the engine its k3s sees (`nerdctl --namespace k8s.io` on containerd, `docker --context rancher-desktop` on moby) and run with `imagePullPolicy: Never` | yes | Rancher Desktop 1.25 for macOS (its k3s v1.25), on moby and on containerd: install, round trip through a port-forward, an upgrade to another image, uninstall, reinstall, purge (PLAN 10.6) |
 | k3s | `k3s`: here (`k3s kubectl`), on a server (`K3S_SSH=user@server`, where it runs `k3s kubectl`, so the admin kubeconfig stays there), or through a context (`K8S_CONTEXT`) | yes: the chart, rendered and applied | yes | k3s in a container (`make test-k8s`): both modes, an upgrade, uninstall and purge; standalone on a remote k3s server over `K3S_SSH` with `K8S_STORAGE=pvc` (local-path): install, round trip through the NodePort, upgrade, uninstall, reinstall and purge (PLAN 10.13) |
 | Kubernetes (1.27 or later aimed at; the version is not checked) | `k8s` with `K8S_CONTEXT` (the current context is never assumed) | yes | yes | no: the fakes only |
 
@@ -985,6 +985,60 @@ are refused, naming both - the script never chooses. A root credential, passphra
 `kms.json` given as a file must equal the copies there are; a Vault token or a
 certificate of your own given as a file that differs replaces both copies (a rotation),
 and the run says so.
+
+How a secret reaches a container differs on Rancher Desktop's containerd engine.
+
+- **What `nerdctl` lacks.** Its `nerdctl` has no `cp -a`. A tar stream on standard
+  input or output (`nerdctl cp -`) is not in every release Rancher Desktop bundles: the
+  `nerdctl` v2.2.2 of Rancher Desktop 1.25.0 answers "support for reading a tar archive
+  from stdin is not implemented yet", or "... writing a tar archive to stdout ...". And
+  `nerdctl cp` on a container that never ran does not see the volumes mounted into it.
+  So the script uses none of these there.
+- **How it works instead.** Rancher Desktop's `nerdctl` is a wrapper that runs
+  `nerdctl` as root inside Rancher Desktop's VM (`rdctl shell sudo nerdctl ...`), and
+  the script reaches that VM the same way, through `rdctl`.
+- **dev-init's container.** The script makes a private directory under `/dev/shm` in
+  the VM: it is root's, `0700`, and given to the nodes' user 65532. The script checks
+  that it is on a tmpfs before writing anything there, so nothing reaches the VM's
+  disk. (The VM's `/tmp` is on its disk.) It extracts the stream there as root, keeping the
+  owner (65532) and the modes, with the stream on standard input. Then `nerdctl cp
+  <dir>/. <container>:<dir>` copies it in, and the directory is removed. Reading
+  dev-init's output is the reverse: `nerdctl cp <container>:<dir>` into such a
+  directory, archived there into a file of the deployment's entry on this machine,
+  then the directory is removed. If a step fails or the run is stopped, the run's exit
+  trap still removes the directory, and then the container.
+- **The secrets' volumes.** They have no helper container there. The script asks
+  `nerdctl volume inspect` where a volume is in the VM, and accepts only
+  `/var/lib/nerdctl/<digest>/volumes/<namespace>/<volume>/_data`. It then extracts the
+  stream into that directory, or archives it from there, as root, keeping the owner
+  65532 and the modes. Before each put it makes the volume's root 65532 and `0700`. A
+  volume that holds files under another owner or mode is refused, with the commands
+  that fix it. Nothing else is read or written.
+- **`rdctl`.** It must be on `PATH` or beside `nerdctl`: Rancher Desktop puts both in
+  `~/.rd/bin`. Without it, an install there is refused before anything is changed.
+
+Upgrades differ on Rancher Desktop's containerd, for two reasons:
+
+- containerd starts again a container stopped with the restart policy `always`, which
+  the node has. So before the script stops a node - the old one in an upgrade, or the
+  one an uninstall removes - it sets that node's policy to `no` (`nerdctl update
+  --restart no`), and gives it back whenever it starts that node again.
+- `nerdctl` keeps a stopped container's ports until it is removed. So the old node is
+  removed rather than kept as `<name>-previous`, after the script checks that its image
+  is still there.
+
+If the new node cannot run, the script removes it and runs the old image again, by its
+digest, on the same volumes. The run then fails and says it rolled back and nothing was
+upgraded. If the old image does not come up either, the run says the node is down and
+gives the command to run it again. If the new node runs but is not ready within
+`WAIT_TIMEOUT`, it is left running, because it may already have changed the metadata;
+the run fails and gives the command to go back. The same command is printed if the run
+is stopped in between. Volumes are never removed.
+
+On every engine, a helper container the run made is removed when the run fails:
+`<name>-dev-init`, which holds the passphrase once its input is in, and `<name>-volumes`
+(not made on Rancher Desktop's containerd). A rerun removes one left by an earlier run
+only when it carries the deployment's labels; one without them is refused.
 
 `STATE_DIR` is `$XDG_STATE_HOME/cactusfs-deploy`, else
 `~/.local/state/cactusfs-deploy`, unless the env file names another; one inside the

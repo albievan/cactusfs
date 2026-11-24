@@ -223,9 +223,16 @@ func isEngine(tool string) bool {
 
 // mutating is true for a call that changes the engine: a container, a
 // volume, or an image - built, loaded, pulled, tagged or removed. A copy
-// into a container ("cp -a -", or nerdctl's "cp -") is a change; a copy out
-// of one is not.
+// into a container ("cp -a -", or nerdctl's "cp <directory of Rancher
+// Desktop's VM>/. <container>:<dir>") is a change; a copy out of one - to
+// standard output, or on nerdctl into a directory of the VM - is not.
+// Every call of rdctl changes Rancher Desktop's VM (a private directory
+// made, filled or removed: nerdctl_put, nerdctl_get) but its archive of
+// such a directory to standard output (nerdctl_get).
 func mutating(c call) bool {
+	if c.Tool == "rdctl" {
+		return !containsRun(c.Args, []string{"tar", "-c"})
+	}
 	if !isEngine(c.Tool) {
 		return false
 	}
@@ -241,7 +248,7 @@ func mutating(c call) bool {
 	case "image":
 		return len(s) > 1 && (s[1] == "tag" || s[1] == "rm" || s[1] == "load" || s[1] == "pull")
 	case "cp":
-		return slices.Contains(s, "-a") || (len(s) > 1 && s[1] == "-")
+		return len(s) > 2 && strings.Contains(s[len(s)-1], ":")
 	case "volume":
 		return len(s) > 1 && (s[1] == "create" || s[1] == "rm" || s[1] == "prune")
 	}
@@ -280,7 +287,7 @@ func steps(res result) []string {
 			out = append(out, "probe "+c.Args[len(c.Args)-1])
 		case c.Tool == "curl":
 			out = append(out, "readyz")
-		case !isEngine(c.Tool):
+		case !isEngine(c.Tool) && c.Tool != "rdctl":
 		case len(s) == 0:
 		case s[0] == "build" || (s[0] == "buildx" && len(s) > 1 && s[1] == "build"):
 			out = append(out, "build")
@@ -296,8 +303,12 @@ func steps(res result) []string {
 			out = append(out, "volume rm "+strings.Join(s[2:], " "))
 		case s[0] == "volume" && s[1] == "ls" && slices.Contains(s, byLabel):
 			out = append(out, "listing")
-		case s[0] == "cp" && (slices.Contains(s, "-a") || s[1] == "-") && strings.HasPrefix(s[len(s)-1], "cactusfs-volumes:"):
+		case s[0] == "cp" && mutating(c) && strings.HasPrefix(s[len(s)-1], "cactusfs-volumes:"):
 			out = append(out, "put "+s[len(s)-1])
+		case c.Tool == "rdctl" && volumeOf(c, "-x") != "":
+			// On nerdctl a volume is filled in place (nerdctl_volume_put):
+			// the step is named by the unit's place on Docker.
+			out = append(out, "put cactusfs-volumes:/var/lib/cactusfs/"+strings.TrimPrefix(volumeOf(c, "-x"), "cactusfs-"))
 		case s[0] == "start":
 			out = append(out, "dev-init")
 		case s[0] == "run":

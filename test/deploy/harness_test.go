@@ -28,8 +28,10 @@ import (
 // git, which says which commit an image is built from (PLAN 10.4): each is
 // this test binary under that name, and records what it was asked.
 // getenforce and chcon are SELinux's, which a compose cluster asks and
-// relabels its bind-mounted secret files with (PLAN 10.8).
-var fakeTools = []string{"docker", "podman", "nerdctl", "kubectl", "ssh", "ssh-keygen", "k3s", "curl", "helm", "git", "getenforce", "chcon"}
+// relabels its bind-mounted secret files with (PLAN 10.8). rdctl is
+// Rancher Desktop's, through which a tar stream reaches its VM on
+// containerd (PLAN 10.6, nerdctl_put).
+var fakeTools = []string{"docker", "podman", "nerdctl", "rdctl", "kubectl", "ssh", "ssh-keygen", "k3s", "curl", "helm", "git", "getenforce", "chcon"}
 
 // optionalFakes are programs of the machine (hostTools) that a test may
 // put a fake in place of, to make it fail as the machine's would not

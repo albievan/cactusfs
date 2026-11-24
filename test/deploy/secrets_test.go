@@ -245,9 +245,9 @@ func engineRules(t *testing.T, tool, id string, devInit map[string]string, volum
 	rules := append(madeHere(tool, newImgFix(imgCommit)), []rule{
 		// Putting a unit into a volume prints nothing; it must not match
 		// the rule that reads the volume, below - nerdctl's put has no -a,
-		// and holds the words of a read in another order.
+		// and copies a directory of Rancher Desktop's VM (nerdctl_put).
 		{Tool: tool, Contains: []string{"cp", "-a"}},
-		{Tool: tool, Contains: []string{"cp"}, Starts: []string{"cp", "-"}},
+		{Tool: tool, Contains: []string{"cp"}, Starts: []string{"cp", vmDir + "/."}},
 		{Tool: tool, Contains: []string{"info"}, Stdout: id + "\n"},
 		{Tool: tool, Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", devInit)},
 	}...)
@@ -262,6 +262,12 @@ func engineRules(t *testing.T, tool, id string, devInit map[string]string, volum
 		listed += "cactusfs-" + unit + "\n"
 		labels += "cactusfs-" + unit + " cactusfs\n"
 		rules = append(rules, rule{Tool: tool, Contains: []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/" + unit, "-"}, Stdout: tarOf(t, unit, files)})
+		if tool == "nerdctl" {
+			rules = append(rules, volArchive(unit, tarOf(t, unit, files)))
+		}
+	}
+	if tool == "nerdctl" {
+		rules = append(rules, vmArchive("out", tarOf(t, "out", devInit)))
 	}
 	return append(rules,
 		rule{Tool: tool, Contains: []string{"volume", "ls", "name=cactusfs-"}, Stdout: listed},
@@ -1531,6 +1537,108 @@ func TestSecretsLeaveNoHelper(t *testing.T) {
 		res.want(t, 0)
 		if rm := callsOf(res, "docker", "rm", "-f", "cactusfs-dev-init"); len(rm) != 2 {
 			t.Errorf("the left helper was not removed before dev-init ran, and dev-init's after: %d", len(rm))
+		}
+	})
+}
+
+// TestSecretsHelperRemovedOnFailure: a helper container is removed by the
+// run's EXIT trap when the run fails after it was made - dev-init's, which
+// holds the passphrase once its input is copied in, and the volumes'
+// helper - by the engine that made it, with its context (Docker Desktop,
+// Podman, and Docker CE on a server, whose volumes' helper is the server's),
+// after a put, dev-init or a fetch fails; a rerun would otherwise meet its
+// name. (On Rancher Desktop's containerd: TestRancherPutFails.)
+func TestSecretsHelperRemovedOnFailure(t *testing.T) {
+	t.Parallel()
+	// The engines: Docker Desktop, Podman, and Docker CE on a server, whose
+	// volumes' helper is the server's (DOCKER_HOST=ssh://) and whose
+	// dev-init runs here (the Docker CLI's context).
+	type engineCase struct {
+		e     dockerEngine
+		local string
+		env   string
+	}
+	engines := []engineCase{
+		{dockerEngines[0], "docker", "KMS=local\n"},
+		{dockerEngines[2], "podman", "KMS=local\n"},
+		{ceEngine, "docker", ceEnv},
+	}
+	type failCase struct {
+		name    string
+		fresh   bool // on a first install, else on an installed deployment
+		local   bool // the step is the engine's here (dev-init), else the target's
+		words   []string
+		removed string
+	}
+	cases := []failCase{
+		{"the copy of dev-init's input fails", true, true, []string{"cp", "-a", "-", "cactusfs-dev-init:/tmp"}, "cactusfs-dev-init"},
+		{"dev-init fails", true, true, []string{"start", "-a", "cactusfs-dev-init"}, "cactusfs-dev-init"},
+		{"the copy out of dev-init fails", true, true, []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, "cactusfs-dev-init"},
+		{"a volume's put fails", true, false, []string{"cp", "-a", "-", "cactusfs-volumes:/var/lib/cactusfs/secrets"}, "cactusfs-volumes"},
+		{"a volume's fetch fails", false, false, []string{"cp", "cactusfs-volumes:/var/lib/cactusfs/secrets", "-"}, "cactusfs-volumes"},
+	}
+	// removal is whether the call removes the container by force, on the
+	// engine of the tool.
+	removal := func(c call, tool, ctr string) bool {
+		return c.Tool == tool && slices.Equal(sub(c), []string{"rm", "-f", ctr})
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, ec := range engines {
+			ce := ec.e.target == "ce"
+			run := func(r *rig, s engineState, fail rule) result {
+				if ce {
+					r.rules(ceRules(t, r, s, fail)...)
+					return ceRun(r, ec.env, "--install")
+				}
+				r.rules(append([]rule{fail}, s.rules(t)...)...)
+				return dockerRun(r, ec.e, ec.env, "--install")
+			}
+			installed := func() *rig {
+				if ce {
+					return ceInstalled(t, r)
+				}
+				return dockerInstalled(t, r, ec.e, ec.env)
+			}()
+			for _, c := range cases {
+				t.Run(ec.e.target+"/"+c.name, func(t *testing.T) {
+					t.Parallel()
+					tool := ec.e.tool
+					if c.local {
+						tool = ec.local
+					}
+					fail := rule{Tool: tool, Contains: c.words, Stderr: "it broke\n", Exit: 1}
+					var res result
+					var st string
+					if c.fresh {
+						r := secretsRig(t, r.fresh(t))
+						st = r.stateOf(ec.e.targetID)
+						res = run(r, engineState{e: ec.e, devInit: devInitOutput(), ready: true}, fail)
+					} else {
+						r := clone(t, installed)
+						st = r.stateOf(ec.e.targetID)
+						res = run(r, installedState(t, ec.e, st, nodeImage), fail)
+					}
+					res.want(t, 1)
+					failed := slices.IndexFunc(res.calls, func(cl call) bool { return cl.Tool == tool && containsAll(cl.Args, c.words) })
+					var removals []int
+					for i, cl := range res.calls {
+						if removal(cl, tool, c.removed) {
+							removals = append(removals, i)
+						}
+					}
+					if failed < 0 || len(removals) != 1 || removals[0] < failed {
+						t.Errorf("the step failed at %d, %s removed at %v: want once, after", failed, c.removed, removals)
+					}
+					// After the failure, nothing but the removal changes the
+					// engine.
+					for _, cl := range res.calls[failed+1:] {
+						if mutating(cl) && !removal(cl, tool, c.removed) {
+							t.Errorf("after the failure: %s %q", cl.Tool, cl.Args)
+						}
+					}
+					noSecretAnywhere(t, res, st)
+				})
+			}
 		}
 	})
 }

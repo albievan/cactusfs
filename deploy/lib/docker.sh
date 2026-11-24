@@ -44,6 +44,11 @@
 # upgrade - the node is stopped and renamed <name>-previous, the new one is
 # run with the same volumes, and the old one is removed once the new one is
 # ready; if it is not, the run says the node is down and how to go back.
+# On nerdctl (Rancher Desktop's containerd), which keeps a stopped
+# container's ports until it is removed, the old node is removed instead,
+# and run again from its image if the new one cannot run (a
+# rollback: docker_upgrade_nerdctl, docker_rollback); a new one that runs
+# and is not ready is left running (docker_not_ready_nerdctl).
 # Once the node is ready, the image tag the replaced node ran is removed
 # when the script recorded making it and no container uses it (PLAN 10.14,
 # image.sh). S3 published beyond the loopback with TLS_HOSTS empty is
@@ -255,7 +260,12 @@ docker_previous_check() {
 	[ -n "$_dk_found" ] || return 0
 	docker_owned "$_dk_prev"
 	_pv=$(docker_cli)
-	refuse "an upgrade did not finish: $_dk_prev holds the node it replaced (image $_dk_found_image, $_dk_found_state). If $_dk_ctr runs and --status says it is ready, remove the old one: $_pv rm $_dk_prev. Otherwise put it back: $_pv rm -f $_dk_ctr; $_pv rename $_dk_prev $_dk_ctr; $_pv start $_dk_ctr. Then run again"
+	_pv_back="$_pv rm -f $_dk_ctr; $_pv rename $_dk_prev $_dk_ctr; $_pv start $_dk_ctr"
+	# On nerdctl an upgrade makes no <name>-previous any more
+	# (docker_upgrade_nerdctl); one an earlier build left had its restart
+	# policy cleared before it was stopped: it is given back.
+	! on_nerdctl || _pv_back="$_pv_back; $_pv update --restart always $_dk_ctr"
+	refuse "an upgrade did not finish: $_dk_prev holds the node it replaced (image $_dk_found_image, $_dk_found_state). If $_dk_ctr runs and --status says it is ready, remove the old one: $_pv rm $_dk_prev. Otherwise put it back: $_pv_back. Then run again"
 }
 
 # docker_volumes: the data and metadata volumes of the deployment the engine
@@ -467,9 +477,11 @@ docker_run_node() {
 	# podman-restart service, which starts those whose policy is "always" -
 	# not "unless-stopped" (podman-restart.service: start --all --filter
 	# restart-policy=always). nerdctl's policies are what containerd's
-	# restart plugin can do, "always" in every version, and a container
-	# "nerdctl stop" stopped stays stopped under it (deploy/lib/rancher.sh).
-	# Docker keeps "unless-stopped".
+	# restart plugin can do, "always" in every version - under which
+	# containerd's restart monitor starts again a container "nerdctl stop"
+	# stopped (nerdctl v2.2.2, the real Rancher Desktop): a node stopped and
+	# kept has its policy cleared first, and given back when it is started
+	# again (docker_restart_policy). Docker keeps "unless-stopped".
 	_rn_restart=unless-stopped
 	if [ "$TARGET" = podman ] || on_nerdctl; then
 		_rn_restart=always
@@ -545,6 +557,150 @@ docker_down() {
 			_dd_boot=". $_dk_prev keeps the restart policy always, so podman-restart.service would start it at a reboot"
 	fi
 	fail "the node is DOWN: the new $_dk_ctr ($_dk_image) $1; its log: $_dd_cli logs $_dk_ctr. The node it replaced is kept, stopped, as $_dk_prev (image $_dk_ctr_image)$_dd_boot. To go back to it: $_dd_back - or remove $_dk_prev and run --install again with IMAGE_SOURCE=image IMAGE=$_dk_ctr_image"
+}
+
+# docker_upgrade_nerdctl: the first half of an upgrade on nerdctl. nerdctl
+# (v2.2.2, the real Rancher Desktop) keeps the host ports a stopped
+# container published reserved until the container is removed, so the old
+# node cannot be kept, stopped, beside the new one as on Docker and Podman
+# ("port is already allocated"). So, before anything is changed, the image
+# the old node runs is pinned: its tag (_dk_ctr_image, its .Config.Image,
+# by which the script ran it) must be on the engine, and the digest of its
+# target - nerdctl's ID of an image, by which it is found and run (image.sh,
+# image_fields) - is read from its RepoDigests (_dk_old_hex); when the
+# container records the digest it was made from (.Image, "sha256:<hex>" in
+# nerdctl releases that pin it), the tag must still name it, else nothing is
+# stopped. A rollback runs exactly that digest, and the tag stays recorded
+# until the new node is ready (docker_images_replaced). Then the old node's
+# restart policy is cleared (docker_restart_policy: containerd would start
+# it again), it is stopped, then removed - never its volumes. Each step
+# that fails before the removal leaves the old node as it was, running with
+# its policy given back, and fails the run. From the removal until the new
+# node runs, or is given back, the run's EXIT trap says what to run should
+# the run be stopped (docker_upgrade_stopped).
+docker_upgrade_nerdctl() {
+	_un_cli=$(docker_cli)
+	say "upgrade: replacing $_dk_ctr (image $_dk_ctr_image): nerdctl keeps a stopped container's ports until it is removed, so it is removed before the new node runs, and run again from its image if the new one cannot run; its volumes are kept"
+	case $_dk_ctr_image in
+	'' | -* | *[!A-Za-z0-9_./:@-]*) fail "upgrade: the node $_dk_ctr names no image a rollback could run ('$(printf '%s' "$_dk_ctr_image" | printable)'): nothing was stopped or upgraded" ;;
+	esac
+	_un_digests=$(target_engine query image inspect --format '{{range .RepoDigests}}{{.}} {{end}}' "$_dk_ctr_image" </dev/null) ||
+		fail "upgrade: the image $_dk_ctr_image the node runs is not on $(engine) (its message is above), and a rollback would run it: nothing was stopped or upgraded"
+	_dk_old_hex=
+	for _un_d in $(printf '%s' "$_un_digests" | printable); do
+		case $_un_d in
+		*@sha256:*) _dk_old_hex=${_un_d##*@sha256:} ;;
+		esac
+		break
+	done
+	case $_dk_old_hex in
+	*[!0-9a-f]*) _dk_old_hex= ;;
+	esac
+	[ "${#_dk_old_hex}" = 64 ] ||
+		fail "upgrade: nerdctl names no digest of the image $_dk_ctr_image (RepoDigests), by which a rollback would run exactly it: nothing was stopped or upgraded"
+	_un_made=$(target_engine query container inspect --format '{{.Image}}' "$_dk_ctr" </dev/null) ||
+		fail "upgrade: could not inspect $_dk_ctr (the engine's message is above): nothing was stopped or upgraded"
+	_un_made=$(printf '%s' "$_un_made" | printable | tr -d '\n')
+	case $_un_made in
+	"sha256:$_dk_old_hex" | "$_dk_ctr_image") ;;
+	sha256:*) fail "upgrade: $_dk_ctr was made from the image $_un_made, and its tag $_dk_ctr_image now names another (sha256:$_dk_old_hex): a rollback would not run the image it ran, so nothing was stopped or upgraded" ;;
+	*) fail "upgrade: $_dk_ctr says it was made from '$_un_made', not $_dk_ctr_image nor its digest: nothing was stopped or upgraded" ;;
+	esac
+	docker_restart_policy no "$_dk_ctr" ||
+		fail "upgrade: the restart policy of $_dk_ctr could not be cleared (nerdctl's message is above), and containerd would start it again once stopped: nothing was stopped or upgraded"
+	if ! target_engine run stop -t 40 "$_dk_ctr" </dev/null; then
+		docker_restart_policy always "$_dk_ctr" ||
+			warn "the restart policy of $_dk_ctr could not be given back: $_un_cli update --restart always $_dk_ctr"
+		fail "upgrade: $_dk_ctr could not be stopped (the engine's message is above): nothing was upgraded"
+	fi
+	if ! target_engine run rm "$_dk_ctr" </dev/null; then
+		docker_restart_policy always "$_dk_ctr" ||
+			warn "the restart policy of $_dk_ctr could not be given back: $_un_cli update --restart always $_dk_ctr"
+		if target_engine run start "$_dk_ctr" </dev/null; then
+			fail "upgrade: $_dk_ctr could not be removed (the engine's message is above); it was started again and runs $_dk_ctr_image as before - nothing was upgraded"
+		fi
+		fail "upgrade: $_dk_ctr could not be removed, nor started again (the engine's messages are above): the node is DOWN. Start it with: $_un_cli start $_dk_ctr"
+	fi
+	[ "$DRY_RUN" = 1 ] || cleanup_add docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$_un_cli"
+}
+
+# docker_upgrade_stopped <container> <old image> <engine CLI>: the cleanup
+# of an upgrade on nerdctl stopped after the removal of the old node and
+# before a node runs again (a signal, or an error of the script): says that
+# the volumes are kept and how to run the old image again. Changes nothing.
+docker_upgrade_stopped() {
+	warn "the upgrade stopped after the node $1 (image $2) was removed and before a node ran again; the volumes are kept. Run deploy/deploy.sh --install again - or, to run the image it replaced: $3 rm -f $1, then deploy/deploy.sh --install with IMAGE_SOURCE=image IMAGE=$2"
+}
+
+# docker_not_up <run|ready> <why>: the new node could not be run, or ran and
+# was not ready. On an upgrade on nerdctl, a node that never ran is replaced
+# by the old image again (docker_rollback); one that ran is left running
+# (docker_not_ready_nerdctl). Otherwise the run fails, saying how to go back
+# (docker_down).
+docker_not_up() {
+	if [ -n "$_dk_have_ctr" ] && on_nerdctl; then
+		if [ "$1" = run ]; then
+			docker_rollback "$2"
+		fi
+		docker_not_ready_nerdctl "$2"
+	fi
+	docker_down "$2"
+}
+
+# docker_not_ready_nerdctl <why>: an upgrade on nerdctl whose new node ran
+# but was not ready. It is not rolled back - Albie's decision of
+# 2026-11-23, ADR-0033 section 9: once it ran it may have changed the
+# metadata already, which the old image may not read, so the operator
+# decides, as on Docker, where the old node is kept. It is left running and
+# the run fails with the way back.
+docker_not_ready_nerdctl() {
+	_nr_cli=$(docker_cli)
+	cleanup_drop docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$_nr_cli"
+	fail "upgrade: the new $_dk_ctr ($_dk_image) $1; it is left running, as it may have changed the metadata already, and the old image is not run over it. Its log: $_nr_cli logs $_dk_ctr. To go back to the image it replaced: $_nr_cli rm -f $_dk_ctr, then deploy/deploy.sh --install with IMAGE_SOURCE=image IMAGE=$_dk_ctr_image (sha256:$_dk_old_hex)"
+}
+
+# docker_rollback <why>: an upgrade on nerdctl whose new node could not be
+# run - it never started, so the metadata is as the old node left it: the
+# container, if one was made, is removed (its ports would hold the old
+# node's) and the image the old node ran, by its digest (_dk_old_hex), is
+# run again with the same volumes and settings (docker_run_node) and waited
+# for. Then the run fails (exit 1): rolled back, nothing upgraded - or,
+# when the old image does not come up, the node is DOWN, with the command
+# that runs it again. The EXIT trap's notice holds until the old image runs
+# again: the run says what happened itself after that.
+docker_rollback() {
+	_rb_cli=$(docker_cli)
+	_rb_again="$_rb_cli rm -f $_dk_ctr, then deploy/deploy.sh --install with IMAGE_SOURCE=image IMAGE=$_dk_ctr_image (sha256:$_dk_old_hex)"
+	target_engine run rm -f "$_dk_ctr" </dev/null || {
+		cleanup_drop docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$_rb_cli"
+		fail "the node is DOWN: the new $_dk_ctr ($_dk_image) $1, and what was made of it could not be removed to run $_dk_ctr_image again (the engine's message is above). To run the image it replaced: $_rb_again"
+	}
+	say "upgrade: rolling back - running $_dk_ctr_image (sha256:$_dk_old_hex) again, with the same volumes"
+	if ! docker_run_node "$_dk_old_hex"; then
+		cleanup_drop docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$_rb_cli"
+		fail "the node is DOWN: the new $_dk_ctr ($_dk_image) $1, and $_dk_ctr_image could not be run again (the engine's message is above). To run it again: $_rb_again"
+	fi
+	cleanup_drop docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$_rb_cli"
+	if docker_wait_ready; then
+		fail "upgrade: the new $_dk_ctr ($_dk_image) $1; rolled back to $_dk_ctr_image, which is ready: nothing was upgraded"
+	fi
+	fail "the node is DOWN: the new $_dk_ctr ($_dk_image) $1, and $_dk_ctr_image, run again, did not become ready within WAIT_TIMEOUT=$_dk_wait s (/readyz answered $_dk_ready); its log: $_rb_cli logs $_dk_ctr. To run it again: $_rb_again"
+}
+
+# docker_restart_policy <no|always> <container>: on nerdctl, the restart
+# policy of the node's container. containerd's restart monitor starts again
+# a container whose policy is "always" after "nerdctl stop" (nerdctl
+# v2.2.2, the real Rancher Desktop: "Restarting" in "ps -a" after a stop
+# and a rename, and the new node's ports then taken), so a node that is
+# stopped and kept - the old node of an upgrade - or stopped and removed
+# has its policy set to "no" BEFORE it is stopped, and given back
+# ("always") whenever it is started again. nerdctl's "update --restart"
+# takes "no", "always", "on-failure:n" and "unless-stopped". Nothing on the
+# other engines (Podman's is docker_previous_norestart, after the rename:
+# its "always" matters only at a reboot). False when the update failed.
+docker_restart_policy() {
+	on_nerdctl || return 0
+	target_engine run update --restart "$1" "$2" </dev/null
 }
 
 # docker_previous_norestart: on Podman, <name>-previous is kept from being
@@ -654,8 +810,13 @@ docker_install() {
 		target_engine run volume create --label "$LABEL_NAME=$_s_name" --label "$LABEL_TARGET=$TARGET" "$_s_name-meta" </dev/null
 
 	# An upgrade keeps the node it replaces, stopped and renamed, until the
-	# new one is ready.
-	if [ -n "$_dk_have_ctr" ]; then
+	# new one is ready - but on nerdctl, which keeps the published ports of
+	# a stopped container until it is removed: there the old node is
+	# removed, and run again from its image if the new one cannot run
+	# (docker_upgrade_nerdctl, docker_rollback).
+	if [ -n "$_dk_have_ctr" ] && on_nerdctl; then
+		docker_upgrade_nerdctl
+	elif [ -n "$_dk_have_ctr" ]; then
 		say "upgrade: stopping $_dk_ctr (image $_dk_ctr_image) and keeping it as $_dk_prev until the new node is ready; its volumes are kept"
 		target_engine run stop -t 40 "$_dk_ctr" </dev/null
 		if ! target_engine run rename "$_dk_ctr" "$_dk_prev" </dev/null; then
@@ -670,17 +831,25 @@ docker_install() {
 		docker_previous_norestart
 	fi
 	if ! docker_run_node "$_dk_image"; then
-		docker_down "could not be run (the engine's message is above)"
+		docker_not_up run "could not be run (the engine's message is above)"
 	fi
 	if [ "$DRY_RUN" = 1 ]; then
 		say "dry run: would wait up to $_dk_wait s for /readyz of the admin port to answer 200"
-		[ -z "$_dk_have_ctr" ] || say "dry run: then would remove $_dk_prev"
+		if [ -n "$_dk_have_ctr" ] && on_nerdctl; then
+			say "dry run: if it could not run, would remove it and run $_dk_ctr_image again; if it ran and is not ready, would leave it running and say how to go back"
+		elif [ -n "$_dk_have_ctr" ]; then
+			say "dry run: then would remove $_dk_prev"
+		fi
 		return 0
 	fi
 	if ! docker_wait_ready; then
-		docker_down "did not become ready within WAIT_TIMEOUT=$_dk_wait s (/readyz of https://$(docker_dial "$_dk_admin_bind"):$_dk_admin_port answered $_dk_ready)"
+		docker_not_up ready "did not become ready within WAIT_TIMEOUT=$_dk_wait s (/readyz of https://$(docker_dial "$_dk_admin_bind"):$_dk_admin_port answered $_dk_ready)"
 	fi
-	if [ -n "$_dk_have_ctr" ]; then
+	if [ -n "$_dk_have_ctr" ] && on_nerdctl; then
+		cleanup_drop docker_upgrade_stopped "$_dk_ctr" "$_dk_ctr_image" "$(docker_cli)"
+		say "upgrade: $_dk_ctr runs $_dk_image in place of $_dk_ctr_image, removed before it ran"
+		docker_images_replaced "$_dk_ctr_image"
+	elif [ -n "$_dk_have_ctr" ]; then
 		target_engine run rm "$_dk_prev" </dev/null
 		say "upgrade: removed $_dk_prev, the node the new one replaced"
 		docker_images_replaced "$_dk_ctr_image"
@@ -957,6 +1126,10 @@ docker_uninstall() {
 		docker_adopt_record
 	fi
 	if [ -n "$_dk_have_ctr" ]; then
+		# On nerdctl its policy is cleared first, so that containerd does not
+		# start it again between the stop and the removal.
+		docker_restart_policy no "$_dk_ctr" ||
+			fail "the restart policy of $_dk_ctr could not be cleared (nerdctl's message is above), and containerd would start it again once stopped: nothing was stopped or removed"
 		target_engine run stop -t 40 "$_dk_ctr" </dev/null
 		target_engine run rm "$_dk_ctr" </dev/null
 		say "removed the container $_dk_ctr"

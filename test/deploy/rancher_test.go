@@ -5,6 +5,7 @@ package deploy_test
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"io"
 	"maps"
@@ -30,6 +31,78 @@ import (
 // containerdID is what the fake containerd says its ID is.
 const containerdID = "CONTAINERD-UUID-ONE"
 
+// vmDir is the private directory the fake mktemp of Rancher Desktop's VM
+// makes (rdctl shell sudo mktemp -d, nerdctl_put).
+const vmDir = "/dev/shm/cactusfs-deploy.Fx7Kq2"
+
+// vmMktemp is the answer of Rancher Desktop's VM to mktemp, through rdctl.
+var vmMktemp = rule{Tool: "rdctl", Contains: []string{"shell", "sudo", "mktemp", "-d", "/dev/shm/cactusfs-deploy.XXXXXX"}, Stdout: vmDir + "\n"}
+
+// vmStat is the answer of Rancher Desktop's VM to the file system of the
+// private directory: a tmpfs.
+var vmStat = rule{Tool: "rdctl", Contains: []string{"shell", "sudo", "stat", "-f", "-c", "%T", vmDir}, Stdout: "tmpfs\n"}
+
+// oldHex is the digest of the target of the image an installed node runs,
+// as the fake nerdctl names it (RepoDigests) and as the container records
+// it (.Image): a rollback runs it.
+const oldHex = "4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899"
+
+// vmArchive is the answer of Rancher Desktop's VM to the archive of
+// <vmDir>/<name> nerdctl_get reads: the stream, as "docker cp
+// <container>:<dir> -" writes one.
+func vmArchive(name, stream string) rule {
+	return rule{Tool: "rdctl", Contains: vmGetArgs(name), Stdout: stream}
+}
+
+// vmGetArgs are the words of rdctl's archive of <vmDir>/<name>.
+func vmGetArgs(name string) []string {
+	return []string{"shell", "sudo", "tar", "-c", "-C", vmDir, "-f", "-", name}
+}
+
+// nerdctlRoot is where the fake nerdctl keeps its data in Rancher Desktop's
+// VM: its data root and the digest of containerd's address.
+const nerdctlRoot = "/var/lib/nerdctl/1935db59"
+
+// mountpoint is the directory of a volume of the namespace default in the
+// VM, as "volume inspect" names it.
+func mountpoint(volume string) string {
+	return nerdctlRoot + "/volumes/default/" + volume + "/_data"
+}
+
+// mountRule is the answer of nerdctl to where the volume is.
+func mountRule(volume, answer string) rule {
+	return rule{Tool: "nerdctl", Contains: []string{"volume", "inspect", "--format", "{{.Mountpoint}}", volume}, Stdout: answer}
+}
+
+// volPutArgs are the words of rdctl's extraction into a volume in place
+// (nerdctl_volume_put).
+func volPutArgs(volume string) []string {
+	return []string{"shell", "sudo", "tar", "-x", "--same-owner", "-p", "-C", mountpoint(volume), "-f", "-"}
+}
+
+// volGetArgs are the words of rdctl's archive of a volume in place, its
+// entries under the unit's name (nerdctl_volume_get).
+func volGetArgs(volume, unit string) []string {
+	return []string{"shell", "sudo", "tar", "-c", "-C", path.Dir(mountpoint(volume)), "-f", "-", "--transform=s,^_data," + unit + ",", "_data"}
+}
+
+// volArchive is the answer of the VM to the archive of a unit's volume.
+func volArchive(unit, stream string) rule {
+	return rule{Tool: "rdctl", Contains: volGetArgs("cactusfs-"+unit, unit), Stdout: stream}
+}
+
+// volumeOf is the volume a call of rdctl extracts into ("-x") or archives
+// ("-c") in place, or "".
+func volumeOf(c call, op string) string {
+	for _, unit := range []string{"secrets", "config"} {
+		v := "cactusfs-" + unit
+		if (op == "-x" && slices.Equal(c.Args, volPutArgs(v))) || (op == "-c" && slices.Equal(c.Args, volGetArgs(v, unit))) {
+			return v
+		}
+	}
+	return ""
+}
+
 // rancherEngines are Rancher Desktop with each of its engines: the entry's
 // target ID is the target and its Docker context, whichever engine runs.
 var rancherEngines = []dockerEngine{
@@ -53,7 +126,19 @@ func rancherRules(t *testing.T, s engineState) []rule {
 	t.Helper()
 	rules := s.rules(t)
 	if s.e.tool == "nerdctl" {
-		rules = append([]rule{{Tool: "docker", Contains: []string{"--context", "rancher-desktop", "info"}, Stderr: "Cannot connect to the Docker daemon\n", Exit: 1}}, rules...)
+		rules = append([]rule{
+			{Tool: "docker", Contains: []string{"--context", "rancher-desktop", "info"}, Stderr: "Cannot connect to the Docker daemon\n", Exit: 1},
+			vmMktemp, vmStat,
+			mountRule("cactusfs-secrets", mountpoint("cactusfs-secrets")+"\n"), mountRule("cactusfs-config", mountpoint("cactusfs-config")+"\n"),
+		}, rules...)
+		// An installed node: the digest of its image, by its tag and as it
+		// was made from (docker_upgrade_nerdctl).
+		if f := strings.Split(s.ctr, "|"); len(f) == 4 {
+			rules = append([]rule{
+				{Tool: "nerdctl", Contains: []string{"image", "inspect", "--format", "{{range .RepoDigests}}{{.}} {{end}}", f[3]}, Stdout: "cactusfs@sha256:" + oldHex + " \n"},
+				{Tool: "nerdctl", Contains: []string{"container", "inspect", "--format", "{{.Image}}", "cactusfs"}, Stdout: "sha256:" + oldHex + "\n"},
+			}, rules...)
+		}
 	}
 	return rules
 }
@@ -373,24 +458,33 @@ func TestRancherInstall(t *testing.T) {
 						t.Errorf("a volume made with %q", c.Args)
 					}
 				}
-				// Every copy into a container: on containerd "cp - <container>:<dir>"
-				// of a stream owned by 65532 with no names; on moby "cp -a -",
-				// whose owner the engine sets, of the stream as tar made it.
-				puts := 0
-				for _, c := range res.calls {
-					s := sub(c)
-					if !isEngine(c.Tool) || len(s) < 3 || s[0] != "cp" || !mutating(c) {
-						continue
+				// Every copy into a container: on containerd a stream owned by
+				// 65532 with no names, extracted in a private directory of
+				// Rancher Desktop's VM which nerdctl copies in (vmPuts); on
+				// moby "cp -a -", whose owner the engine sets, of the stream as
+				// tar made it.
+				var copies []vmPut
+				if e.tool == "nerdctl" {
+					var gets []vmPut
+					copies, gets = vmCopies(t, res, "default")
+					if len(gets) != 1 || gets[0].to != "cactusfs-dev-init:/tmp/out" {
+						t.Errorf("the reads out of a container: %v, want dev-init's output alone", gets)
 					}
-					puts++
-					if e.tool == "nerdctl" && slices.Contains(s, "-a") {
-						t.Errorf("nerdctl's cp was given -a, which it has not: %q", c.Args)
+				} else {
+					for _, c := range res.calls {
+						if s := sub(c); isEngine(c.Tool) && len(s) >= 3 && s[0] == "cp" && mutating(c) {
+							copies = append(copies, vmPut{stream: c, to: s[len(s)-1]})
+						}
 					}
+				}
+				puts := len(copies)
+				for _, p := range copies {
+					c := p.stream
 					// The secrets unit and dev-init's passphrase are the nodes'
 					// user's alone: nothing for group or others, whoever owns
 					// them.
-					to := s[len(s)-1]
-					secretUnit := to == "cactusfs-volumes:/var/lib/cactusfs/secrets"
+					to := p.to
+					secretUnit := to == "cactusfs-volumes:/var/lib/cactusfs/secrets" || to == "volume cactusfs-secrets"
 					modes := 0
 					for _, h := range r.tarHeaders(c) {
 						owned := h.Uid == 65532 && h.Gid == 65532 && h.Uname == "" && h.Gname == ""
@@ -414,6 +508,127 @@ func TestRancherInstall(t *testing.T) {
 			})
 		}
 	})
+}
+
+// vmPut is one tar stream put into a container: the call that read it
+// and the container's directory it went to.
+type vmPut struct {
+	stream call
+	to     string
+}
+
+// vmArgs are the words of rdctl's calls in nerdctl_put, by step.
+var vmArgs = map[string][]string{
+	"mktemp":  {"shell", "sudo", "mktemp", "-d", "/dev/shm/cactusfs-deploy.XXXXXX"},
+	"stat":    {"shell", "sudo", "stat", "-f", "-c", "%T", vmDir},
+	"chown":   {"shell", "sudo", "chown", "65532:65532", vmDir},
+	"extract": {"shell", "sudo", "tar", "-x", "--same-owner", "-p", "-C", vmDir, "-f", "-"},
+	"remove":  {"shell", "sudo", "rm", "-rf", vmDir},
+}
+
+// vmPuts is every put into a container on nerdctl, and fails the test
+// unless the run's copies are those of nerdctl_put and nerdctl_get
+// (vmCopies).
+func vmPuts(t *testing.T, res result, ns string) []vmPut {
+	t.Helper()
+	puts, _ := vmCopies(t, res, ns)
+	return puts
+}
+
+// volumeRoot is true for rdctl's chown to 65532:65532 or chmod 0700 of a
+// secrets' volume in place (nerdctl_volume_put).
+func volumeRoot(c call) bool {
+	for _, v := range []string{"cactusfs-secrets", "cactusfs-config"} {
+		if slices.Equal(c.Args, []string{"shell", "sudo", "chown", "65532:65532", mountpoint(v)}) || slices.Equal(c.Args, []string{"shell", "sudo", "chmod", "0700", mountpoint(v)}) {
+			return true
+		}
+	}
+	return false
+}
+
+// vmCopies is every put into, and every read out of, a container or a
+// volume on nerdctl, and fails the test unless each is nerdctl_put's,
+// nerdctl_get's, nerdctl_volume_put's or nerdctl_volume_get's:
+//   - into a container: a private directory made in Rancher Desktop's VM
+//     and given to 65532, the stream extracted there by root keeping its
+//     owners and modes, "nerdctl cp <dir>/. <container>:<dir>" in the
+//     namespace ns, the directory removed;
+//   - out of a container: a private directory made, "nerdctl cp
+//     <container>:<dir> <dir>/", its archive under the directory's own name
+//     to standard output, the directory removed;
+//   - into or out of a volume: where the volume is asked of nerdctl, then
+//     at once the stream extracted there by root keeping its owners and
+//     modes, or archived from there under the unit's name - with no helper
+//     container and no cp;
+//
+// with no "cp -" either way, no "-a", every directory made removed, and
+// nothing else run through rdctl. A put is the call that read the stream
+// and where it went ("<container>:<dir>", or "volume <name>"); a read is
+// the call of rdctl that wrote the stream and where it came from.
+func vmCopies(t *testing.T, res result, ns string) (puts, gets []vmPut) {
+	t.Helper()
+	at := func(i int, step string) bool {
+		return i >= 0 && i < len(res.calls) && res.calls[i].Tool == "rdctl" && slices.Equal(res.calls[i].Args, vmArgs[step])
+	}
+	archive := func(i int) bool {
+		a := vmGetArgs("")
+		return i >= 0 && i < len(res.calls) && res.calls[i].Tool == "rdctl" && len(res.calls[i].Args) == len(a) &&
+			slices.Equal(res.calls[i].Args[:len(a)-1], a[:len(a)-1])
+	}
+	asked := func(i int, volume string) bool {
+		return i >= 0 && res.calls[i].Tool == "nerdctl" && slices.Equal(res.calls[i].Args, []string{"--namespace", ns, "volume", "inspect", "--format", "{{.Mountpoint}}", volume})
+	}
+	made, removed, inVM := 0, 0, 0
+	for i, c := range res.calls {
+		switch {
+		case at(i, "mktemp"):
+			made++
+		case at(i, "remove"):
+			removed++
+		case c.Tool == "rdctl" && volumeOf(c, "-x") != "":
+			if v := volumeOf(c, "-x"); asked(i-3, v) && slices.Equal(res.calls[i-2].Args, []string{"shell", "sudo", "chown", "65532:65532", mountpoint(v)}) &&
+				slices.Equal(res.calls[i-1].Args, []string{"shell", "sudo", "chmod", "0700", mountpoint(v)}) {
+				puts = append(puts, vmPut{stream: c, to: "volume " + v})
+			} else {
+				t.Errorf("rdctl extracted into the volume %s without asking nerdctl where it is, then making its root 65532 0700, first: %q", v, c.Args)
+			}
+		case c.Tool == "rdctl" && volumeOf(c, "-c") != "":
+			if v := volumeOf(c, "-c"); asked(i-1, v) {
+				gets = append(gets, vmPut{stream: c, to: "volume " + v})
+			} else {
+				t.Errorf("rdctl archived the volume %s without asking nerdctl where it is first: %q", v, c.Args)
+			}
+		case c.Tool == "rdctl" && !at(i, "chown") && !at(i, "extract") && !at(i, "stat") && !archive(i) && !volumeRoot(c):
+			t.Errorf("rdctl was run otherwise than by nerdctl_put, nerdctl_get and the volumes' own: %q", c.Args)
+		}
+		if c.Tool == "nerdctl" && slices.Contains(c.Args, "cactusfs-volumes") {
+			t.Errorf("a helper container of the volumes on nerdctl, whose cp does not see them: %q", c.Args)
+		}
+		s := sub(c)
+		if c.Tool != "nerdctl" || len(s) == 0 || s[0] != "cp" {
+			continue
+		}
+		inVM++
+		if mutating(c) {
+			if !at(i-4, "mktemp") || !at(i-3, "stat") || !at(i-2, "chown") || !at(i-1, "extract") || !at(i+1, "remove") ||
+				c.Args[1] != ns || len(s) != 3 || s[1] != vmDir+"/." {
+				t.Errorf("nerdctl copied into a container otherwise than through a private directory of the VM: %q", c.Args)
+				continue
+			}
+			puts = append(puts, vmPut{stream: res.calls[i-1], to: s[2]})
+			continue
+		}
+		if !at(i-2, "mktemp") || !at(i-1, "stat") || !archive(i+1) || !at(i+2, "remove") || c.Args[1] != ns || len(s) != 3 ||
+			s[2] != vmDir+"/" || !strings.Contains(s[1], ":") || res.calls[i+1].Args[len(res.calls[i+1].Args)-1] != path.Base(s[1]) {
+			t.Errorf("nerdctl copied out of a container otherwise than through a private directory of the VM: %q", c.Args)
+			continue
+		}
+		gets = append(gets, vmPut{stream: res.calls[i+1], to: s[1]})
+	}
+	if made != removed || made != inVM {
+		t.Errorf("%d directories made in the VM, %d removed, %d copies by nerdctl's cp", made, removed, inVM)
+	}
+	return puts, gets
 }
 
 // rancherInstalled is a rig of the shell of r on which a first install has
@@ -462,7 +677,23 @@ func TestRancherSecrets(t *testing.T) {
 							t.Errorf("a second install made or put the secrets again: %q", c.Args)
 						}
 					}
-					before(t, steps(res), "stop cactusfs", "rename cactusfs cactusfs-previous", "run "+runOf(t, res)[len(runOf(t, res))-2], "readyz", "rm cactusfs-previous")
+					if e.tool == "nerdctl" {
+						puts, gets := vmCopies(t, res, "default")
+						var from []string
+						for _, g := range gets {
+							from = append(from, g.to)
+						}
+						if len(puts) != 0 || !slices.Equal(from, []string{"volume cactusfs-secrets", "volume cactusfs-config"}) {
+							t.Errorf("a second install put %d streams and read %q, want the two volumes read alone", len(puts), from)
+						}
+					}
+					if e.tool == "nerdctl" {
+						// nerdctl keeps a stopped container's ports: the old node
+						// is removed before the new one runs (TestRancherUpgrade).
+						before(t, steps(res), "update --restart no cactusfs", "stop cactusfs", "rm cactusfs", "run "+runOf(t, res)[len(runOf(t, res))-2], "readyz")
+					} else {
+						before(t, steps(res), "stop cactusfs", "rename cactusfs cactusfs-previous", "run "+runOf(t, res)[len(runOf(t, res))-2], "readyz", "rm cactusfs-previous")
+					}
 					if now := filesUnder(t, st); !mapsEqual(was, now) {
 						t.Errorf("the entry changed:\nbefore %v\nafter  %v", keys(was), keys(now))
 					}
@@ -807,9 +1038,9 @@ func rancherKube(t *testing.T, tool string, k kube) []rule {
 		extra = append(extra,
 			rule{Tool: "nerdctl", Contains: []string{"image", "inspect", dockerfileHelm(t)}, Stdout: "[{}]\n"},
 			rule{Tool: "nerdctl", Contains: []string{"--tmpfs", "/work"}, Stdout: kubeRender(k.mode), SaveStdin: "render.tar"},
-			rule{Tool: "nerdctl", Contains: []string{"cp"}, Starts: []string{"cp", "-"}})
+			rule{Tool: "nerdctl", Contains: []string{"cp"}, Starts: []string{"cp", vmDir + "/."}}, vmMktemp, vmStat)
 		if k.devInit != nil {
-			extra = append(extra, rule{Tool: "nerdctl", Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", "-"}, Stdout: tarOf(t, "out", k.devInit)})
+			extra = append(extra, vmArchive("out", tarOf(t, "out", k.devInit)))
 		}
 	}
 	k.extra = append(extra, k.extra...)
@@ -1049,5 +1280,657 @@ func TestRancherKubernetesLifecycle(t *testing.T) {
 				}
 			})
 		}
+	})
+}
+
+// lastCalls fails the test unless the run's last calls are these, in this
+// order, each a tool and its whole argv: what the run's EXIT trap removed
+// after the failure.
+func lastCalls(t *testing.T, res result, want ...call) {
+	t.Helper()
+	if len(res.calls) < len(want) {
+		t.Fatalf("%d calls, want at least %d", len(res.calls), len(want))
+	}
+	got := res.calls[len(res.calls)-len(want):]
+	for i, w := range want {
+		if got[i].Tool != w.Tool || !slices.Equal(got[i].Args, w.Args) {
+			t.Fatalf("the last calls are not the cleanups %v:\n%v", want, got)
+		}
+	}
+}
+
+// TestRancherPutFails: on containerd a put that fails - the stream not
+// extracted in Rancher Desktop's VM, or nerdctl's copy of the directory -
+// fails the run (exit 1), and the run's EXIT trap still removes the
+// private directory of the VM, then the helper container the put went to,
+// in the namespace that made it; dev-init that fails leaves no container
+// either. An answer of mktemp that is not a directory it makes fails the
+// run and is never removed. No secret is in an argument, an environment or
+// the output. Without rdctl an install is refused (exit 2) before anything
+// is changed, and no entry is made.
+func TestRancherPutFails(t *testing.T) {
+	t.Parallel()
+	e := rancherEngines[1]
+	broke := func(r rule) rule {
+		r.Stderr, r.Exit = "it broke\n", 1
+		return r
+	}
+	vmRemove := call{Tool: "rdctl", Args: vmArgs["remove"]}
+	removed := func(ctr string) call {
+		return call{Tool: "nerdctl", Args: []string{"--namespace", "default", "rm", "-f", ctr}}
+	}
+	cases := []struct {
+		name    string
+		fail    rule
+		want    string
+		cleanup []call
+	}{
+		{
+			"the extraction of dev-init's input fails", broke(rule{Tool: "rdctl", Contains: vmArgs["extract"]}),
+			"extracting the stream into " + vmDir + " in Rancher Desktop's VM failed",
+			[]call{vmRemove, removed("cactusfs-dev-init")},
+		},
+		{
+			"the copy of dev-init's input fails", broke(rule{Tool: "nerdctl", Contains: []string{"cp", "cactusfs-dev-init:/tmp"}, Starts: []string{"cp", vmDir + "/."}}),
+			"copying " + vmDir + " of Rancher Desktop's VM into cactusfs-dev-init:/tmp failed",
+			[]call{vmRemove, removed("cactusfs-dev-init")},
+		},
+		{
+			"dev-init fails", broke(rule{Tool: "nerdctl", Contains: []string{"start", "-a", "cactusfs-dev-init"}}),
+			"dev-init failed in its container",
+			[]call{removed("cactusfs-dev-init")},
+		},
+		{
+			// A volume is filled in place: no directory of the VM, no helper.
+			"the extraction into a volume fails",
+			broke(rule{Tool: "rdctl", Contains: volPutArgs("cactusfs-secrets")}),
+			"extracting the stream into the volume cactusfs-secrets in Rancher Desktop's VM failed",
+			[]call{{Tool: "rdctl", Args: volPutArgs("cactusfs-secrets")}},
+		},
+		{
+			"where a volume is cannot be asked",
+			broke(mountRule("cactusfs-secrets", "")),
+			"could not ask nerdctl where the volume cactusfs-secrets is",
+			[]call{{Tool: "nerdctl", Args: []string{"--namespace", "default", "volume", "inspect", "--format", "{{.Mountpoint}}", "cactusfs-secrets"}}},
+		},
+		{
+			"a volume is said to be elsewhere",
+			mountRule("cactusfs-secrets", "/etc\n"),
+			"internal: nerdctl says the volume cactusfs-secrets is at '/etc', which is not /var/lib/nerdctl/<digest>/volumes/default/cactusfs-secrets/_data",
+			[]call{{Tool: "nerdctl", Args: []string{"--namespace", "default", "volume", "inspect", "--format", "{{.Mountpoint}}", "cactusfs-secrets"}}},
+		},
+		{
+			"the copy out of dev-init fails",
+			broke(rule{Tool: "nerdctl", Contains: []string{"cp", "cactusfs-dev-init:/tmp/out", vmDir + "/"}}),
+			"copying cactusfs-dev-init:/tmp/out into " + vmDir + " of Rancher Desktop's VM failed",
+			[]call{vmRemove, removed("cactusfs-dev-init")},
+		},
+		{
+			"the archive of dev-init's output fails",
+			broke(vmArchive("out", "")),
+			"reading " + vmDir + "/out of Rancher Desktop's VM as a tar stream failed",
+			[]call{vmRemove, removed("cactusfs-dev-init")},
+		},
+		{
+			// The second mktemp: the read of dev-init's output.
+			"mktemp of the read of dev-init's output fails",
+			broke(rule{Tool: "rdctl", Contains: vmArgs["mktemp"], After: vmArgs["remove"]}),
+			"making a private directory in Rancher Desktop's VM failed",
+			[]call{removed("cactusfs-dev-init")},
+		},
+		{
+			"mktemp answers another path",
+			rule{Tool: "rdctl", Contains: vmArgs["mktemp"], Stdout: "/etc\n"},
+			"mktemp in Rancher Desktop's VM answered '/etc', which is not a directory of the template /dev/shm/cactusfs-deploy.XXXXXX",
+			[]call{removed("cactusfs-dev-init")},
+		},
+		{
+			"the directory is not on a tmpfs",
+			rule{Tool: "rdctl", Contains: vmArgs["stat"], Stdout: "ext2/ext3\n"},
+			vmDir + " in Rancher Desktop's VM is on 'ext2/ext3', not a tmpfs: a secret would reach the VM's disk, so nothing was written there",
+			[]call{vmRemove, removed("cactusfs-dev-init")},
+		},
+		{
+			"mktemp fails", broke(rule{Tool: "rdctl", Contains: vmArgs["mktemp"]}),
+			"making a private directory in Rancher Desktop's VM failed",
+			[]call{removed("cactusfs-dev-init")},
+		},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := secretsRig(t, r.fresh(t))
+				r.rules(append([]rule{c.fail}, rancherRules(t, engineState{e: e, devInit: devInitOutput(), ready: true})...)...)
+				res := rancherRun(r, "KMS=local\n", "--install")
+				res.want(t, 1, c.want)
+				lastCalls(t, res, c.cleanup...)
+				made, gone := 0, 0
+				for _, call := range res.calls {
+					if call.Tool == "rdctl" && slices.Equal(call.Args, vmArgs["mktemp"]) {
+						made++
+					}
+					if call.Tool == "rdctl" && slices.Equal(call.Args, vmArgs["remove"]) {
+						gone++
+					}
+					if call.Tool == "rdctl" && len(call.Args) > 3 && call.Args[2] == "rm" && !slices.Equal(call.Args, vmArgs["remove"]) {
+						t.Errorf("rdctl removed something other than the directory it made: %q", call.Args)
+					}
+					if s := sub(call); call.Tool == "nerdctl" && len(s) > 1 && s[0] == "run" && slices.Contains(s, "server") {
+						t.Errorf("the node ran after a failed put: %q", call.Args)
+					}
+				}
+				// Every directory made in the VM is removed - but for an
+				// answer of mktemp that is not one it makes, and a mktemp
+				// that failed.
+				if c.fail.Tool == "rdctl" && slices.Equal(c.fail.Contains, vmArgs["mktemp"]) {
+					made--
+				}
+				if made != gone {
+					t.Errorf("%d directories made in the VM, %d removed", made, gone)
+				}
+				noSecretAnywhere(t, res, r.stateOf(e.targetID))
+			})
+		}
+		t.Run("no rdctl", func(t *testing.T) {
+			t.Parallel()
+			r := secretsRig(t, r.fresh(t))
+			r.without("rdctl")
+			r.rules(rancherRules(t, engineState{e: e, devInit: devInitOutput(), ready: true})...)
+			res := rancherRun(r, "KMS=local\n", "--install")
+			res.want(t, 2, "there is no rdctl on PATH or beside nerdctl", "put Rancher Desktop's tools (~/.rd/bin) on PATH")
+			noChange(t, res)
+			if _, err := os.Stat(r.stateDir()); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("a refused run made %s (%v)", r.stateDir(), err)
+			}
+		})
+	})
+}
+
+// TestRancherRotation: on containerd a rotation of the certificate, its key
+// and its CA is put into the volume cactusfs-config through a private
+// directory of Rancher Desktop's VM - only the three files given, owned by
+// the nodes' user, private to it - the volume's copy before the local one;
+// a second run with the same files puts nothing.
+func TestRancherRotation(t *testing.T) {
+	t.Parallel()
+	e := rancherEngines[1]
+	eachShell(t, func(t *testing.T, r *rig) {
+		base, img := rancherInstalled(t, r, e, "KMS=local\n")
+		r = clone(t, base)
+		r.keepStdin()
+		state := r.stateOf(e.targetID)
+		given := map[string]string{"s3.pem": "a new certificate " + rand.Text(), "s3.key": "a new key " + rand.Text(), "s3-ca.pem": "a new CA " + rand.Text()}
+		env := "KMS=local\n"
+		var files []string
+		for _, kv := range [][2]string{{"TLS_CERT_FILE", "s3.pem"}, {"TLS_KEY_FILE", "s3.key"}, {"TLS_CA_FILE", "s3-ca.pem"}} {
+			path := r.envFile(kv[1], given[kv[1]])
+			files = append(files, path)
+			env += kv[0] + "=" + path + "\n"
+		}
+		r.rules(rancherRules(t, installedState(t, e, state, img))...)
+		res := rancherRun(r, env, "--install")
+		res.want(t, 0, "rotated TLS_CERT_FILE: "+state+"/config/s3.pem replaced, after the volume's copy")
+		puts := vmPuts(t, res, "default")
+		if len(puts) != 1 || puts[0].to != "volume cactusfs-config" {
+			t.Fatalf("the rotation's puts: %v", puts)
+		}
+		headers := r.tarHeaders(puts[0].stream)
+		got := map[string]string{}
+		for name, data := range tarFiles(t, []byte(read(t, filepath.Join(r.dir, stdinDir, puts[0].stream.Stdin)))) {
+			got[path.Clean(name)] = data
+		}
+		if !maps.Equal(got, given) || len(headers) != 3 {
+			t.Errorf("the rotation put %v (%d entries), want the three files given", slices.Sorted(maps.Keys(got)), len(headers))
+		}
+		for _, h := range headers {
+			if h.Uid != 65532 || h.Gid != 65532 || h.Uname != "" || h.Gname != "" || h.Mode&0o077 != 0 {
+				t.Errorf("the rotation put %s owned by %d:%d (%q:%q), mode %o", h.Name, h.Uid, h.Gid, h.Uname, h.Gname, h.Mode)
+			}
+		}
+		for f, data := range given {
+			if fileOf(t, filepath.Join(state, "config", f)) != data {
+				t.Errorf("config/%s was not rotated in the entry", f)
+			}
+		}
+		volumeLine := strings.Index(res.stdout, "rotated in the volume")
+		localLine := strings.Index(res.stdout, "rotated TLS_CERT_FILE:")
+		if volumeLine < 0 || volumeLine > localLine {
+			t.Errorf("the local copy was replaced before the volume's:\n%s", res.stdout)
+		}
+		noSecretAnywhere(t, res, state, files...)
+
+		r.rules(rancherRules(t, installedState(t, e, state, img))...)
+		res = rancherRun(r, env, "--install")
+		res.want(t, 0)
+		if len(vmPuts(t, res, "default")) != 0 || strings.Contains(res.output(), "rotated") {
+			t.Errorf("a second run rotated again:\n%s", res.output())
+		}
+	})
+}
+
+// TestRancherFetchFails: on containerd the secrets' volumes are read in
+// place, where nerdctl says they are in Rancher Desktop's VM. A place that
+// cannot be asked, an answer that is not exactly
+// /var/lib/nerdctl/<hex>/volumes/default/<volume>/_data (another path,
+// another volume or namespace, a digest that is not hex, a "..", two
+// lines), and an archive that fails, each fail the run (exit 1) at that
+// call: nothing is read from or written to a place not validated, nothing
+// is put, the node is not touched, no helper container is made, the entry
+// is unchanged, and no secret is in an argument, an environment or the
+// output.
+func TestRancherFetchFails(t *testing.T) {
+	t.Parallel()
+	e := rancherEngines[1]
+	inspect := call{Tool: "nerdctl", Args: []string{"--namespace", "default", "volume", "inspect", "--format", "{{.Mountpoint}}", "cactusfs-secrets"}}
+	said := func(answer string) string {
+		return "internal: nerdctl says the volume cactusfs-secrets is at '" + answer + "', which is not /var/lib/nerdctl/<digest>/volumes/default/cactusfs-secrets/_data"
+	}
+	cases := []struct {
+		name string
+		fail rule
+		want string
+		last call
+	}{
+		{"where it is cannot be asked", rule{Tool: "nerdctl", Contains: inspect.Args[2:], Stderr: "it broke\n", Exit: 1}, "could not ask nerdctl where the volume cactusfs-secrets is", inspect},
+		{"another path", mountRule("cactusfs-secrets", "/etc\n"), said("/etc"), inspect},
+		{"nothing", mountRule("cactusfs-secrets", ""), said(""), inspect},
+		{"another volume", mountRule("cactusfs-secrets", mountpoint("cactusfs-config")+"\n"), said(mountpoint("cactusfs-config")), inspect},
+		{"another namespace", mountRule("cactusfs-secrets", nerdctlRoot+"/volumes/k8s.io/cactusfs-secrets/_data\n"), said(nerdctlRoot + "/volumes/k8s.io/cactusfs-secrets/_data"), inspect},
+		{"a digest that is not hex", mountRule("cactusfs-secrets", "/var/lib/nerdctl/1935XY59/volumes/default/cactusfs-secrets/_data\n"), said("/var/lib/nerdctl/1935XY59/volumes/default/cactusfs-secrets/_data"), inspect},
+		{"a way out", mountRule("cactusfs-secrets", "/var/lib/nerdctl/1935db59/../../../../root/volumes/default/cactusfs-secrets/_data\n"), said("/var/lib/nerdctl/1935db59/../../../../root/volumes/default/cactusfs-secrets/_data"), inspect},
+		{"two lines", mountRule("cactusfs-secrets", mountpoint("cactusfs-secrets")+"\n"+mountpoint("cactusfs-secrets")+"\n"), said(mountpoint("cactusfs-secrets") + " " + mountpoint("cactusfs-secrets")), inspect},
+		{"the archive fails", rule{Tool: "rdctl", Contains: volGetArgs("cactusfs-secrets", "secrets"), Stderr: "it broke\n", Exit: 1}, "reading the volume cactusfs-secrets in Rancher Desktop's VM as a tar stream failed", call{Tool: "rdctl", Args: volGetArgs("cactusfs-secrets", "secrets")}},
+	}
+	eachShell(t, func(t *testing.T, r *rig) {
+		base, img := rancherInstalled(t, r, e, "KMS=local\n")
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				r := clone(t, base)
+				st := r.stateOf(e.targetID)
+				was := filesUnder(t, st)
+				r.rules(append([]rule{c.fail}, rancherRules(t, installedState(t, e, st, img))...)...)
+				res := rancherRun(r, "KMS=local\n", "--install")
+				res.want(t, 1, c.want)
+				lastCalls(t, res, c.last)
+				for _, call := range res.calls {
+					s := sub(call)
+					if call.Tool == "rdctl" && !slices.Equal(call.Args, volGetArgs("cactusfs-secrets", "secrets")) {
+						t.Errorf("rdctl was run on a place not validated, or to change one: %q", call.Args)
+					}
+					// The image is made before the secrets are read; nothing
+					// of the deployment is changed after.
+					touched := len(s) > 0 && (s[0] == "stop" || s[0] == "rename" || s[0] == "create" || s[0] == "start" ||
+						(s[0] == "cp" && mutating(call)) || (s[0] == "volume" && len(s) > 1 && s[1] != "ls" && s[1] != "inspect") ||
+						(s[0] == "run" && slices.Contains(s, "server")))
+					if call.Tool == "nerdctl" && (slices.Contains(call.Args, "cactusfs-volumes") || touched) {
+						t.Errorf("a failed read changed the deployment: %q", s)
+					}
+				}
+				if now := filesUnder(t, st); !mapsEqual(was, now) {
+					t.Errorf("the entry changed:\nbefore %v\nafter  %v", keys(was), keys(now))
+				}
+				noSecretAnywhere(t, res, st)
+			})
+		}
+	})
+}
+
+// TestRancherUpgrade: a standalone upgrade on each engine of Rancher
+// Desktop. On moby it is Docker Desktop's - the old node stopped, renamed
+// cactusfs-previous, removed once the new one is ready - with no restart
+// policy changed. On containerd, whose nerdctl keeps a stopped container's
+// ports until it is removed and whose restart monitor starts again a
+// stopped node with the policy "always" (nerdctl v2.2.2): the old node's
+// image is pinned by the digest its tag names (RepoDigests), which the
+// container must have been made from, its policy is cleared, then it is
+// stopped and removed - no rename, no cactusfs-previous - the new node run
+// and waited for, and only then the old tag removed. Each step that fails
+// before the removal leaves the old node running with its policy given back
+// and nothing upgraded. A new node that cannot run is removed and the old
+// image run again by its digest on the same volumes ("rolled back"; exit 1);
+// a rollback that fails too says the node is DOWN and how to run the old
+// image again. A new node that runs and is not ready is left running (it may
+// have changed the metadata: Albie's decision of 2026-11-23), with the way
+// back. A run stopped by a signal after the removal, also during the
+// rollback's run, says what to run; an upgrade an earlier build left half
+// way is refused with the way back; an uninstall clears the policy before
+// the stop and the removal.
+func TestRancherUpgrade(t *testing.T) {
+	t.Parallel()
+	const env = "KMS=local\n"
+	broke := func(words ...string) rule {
+		return rule{Tool: "nerdctl", Contains: words, Stderr: "it broke\n", Exit: 1}
+	}
+	// The new node's run: the first "run -d --name cactusfs", before the
+	// rollback's "rm -f cactusfs".
+	newRun := []string{"run", "-d", "--name", "cactusfs"}
+	rollback := []string{"rm", "-f", "cactusfs"}
+	firstRunFails := rule{Tool: "nerdctl", Contains: newRun, Until: rollback, Stderr: "port is already allocated\n", Exit: 1}
+	notReady := rule{Tool: "curl", Contains: []string{"--connect-to"}, Stdout: "000"}
+	back := "nerdctl --namespace default rm -f cactusfs, then deploy/deploy.sh --install with IMAGE_SOURCE=image IMAGE="
+	eachShell(t, func(t *testing.T, r *rig) {
+		for _, e := range rancherEngines {
+			t.Run(e.tool, func(t *testing.T) {
+				t.Parallel()
+				base, img := rancherInstalled(t, r, e, env)
+				upgrade := func(t *testing.T, more string, extra ...rule) result {
+					t.Helper()
+					r := clone(t, base)
+					st := r.stateOf(e.targetID)
+					r.rules(append(extra, rancherRules(t, installedState(t, e, st, img))...)...)
+					return rancherRun(r, env+more, "--install")
+				}
+				// unchanged fails the test when the old node was stopped,
+				// removed or renamed, or a node run - but for the steps
+				// allowed.
+				unchanged := func(t *testing.T, res result, allowed ...string) {
+					t.Helper()
+					for _, st := range steps(res) {
+						if slices.Contains(allowed, st) {
+							continue
+						}
+						if strings.HasPrefix(st, "stop ") || strings.HasPrefix(st, "rm ") || strings.HasPrefix(st, "rename ") || strings.HasPrefix(st, "run ") {
+							t.Errorf("the old node was changed or a node run: %q", st)
+						}
+					}
+				}
+				rolledBack := func(t *testing.T, res result) {
+					t.Helper()
+					got := steps(res)
+					rm := index(got, "rm cactusfs")
+					run := slices.IndexFunc(got, func(s string) bool { return strings.HasPrefix(s, "run ") && s != "run "+oldHex })
+					again := index(got, "run "+oldHex)
+					if rm < 0 || run < rm || again < run {
+						t.Errorf("not: old node removed, new node tried, old image run again by its digest: %q", got)
+					}
+					if len(callsOf(res, "nerdctl", "rm", "-f", "cactusfs")) != 1 || again < 0 || slices.Index(got[again:], "readyz") < 0 {
+						t.Errorf("the new node was not removed once, or the old one not waited for: %q", got)
+					}
+					if len(callsOf(res, "nerdctl", "image", "rm", img)) != 0 {
+						t.Errorf("the old image was removed by a rollback")
+					}
+					noVolumeRemoved(t, res)
+				}
+
+				t.Run("upgrade", func(t *testing.T) {
+					res := upgrade(t, "")
+					res.want(t, 0, "ready: cactusfs runs")
+					got := steps(res)
+					if e.tool == "docker" {
+						for _, s := range got {
+							if strings.HasPrefix(s, "update") {
+								t.Errorf("moby was given %q", s)
+							}
+						}
+						before(t, got, "stop cactusfs", "rename cactusfs cactusfs-previous", "run "+runOf(t, res)[len(runOf(t, res))-2], "readyz", "rm cactusfs-previous")
+						return
+					}
+					newImg := runOf(t, res)[len(runOf(t, res))-2]
+					before(t, got, "update --restart no cactusfs", "stop cactusfs", "rm cactusfs", "run "+newImg, "readyz")
+					res.want(t, 0, "upgrade: cactusfs runs "+newImg+" in place of "+img+", removed before it ran")
+					at := func(words ...string) int {
+						return slices.IndexFunc(res.calls, func(c call) bool { return slices.Equal(sub(c), words) })
+					}
+					digest := at("image", "inspect", "--format", "{{range .RepoDigests}}{{.}} {{end}}", img)
+					made := at("container", "inspect", "--format", "{{.Image}}", "cactusfs")
+					update := at("update", "--restart", "no", "cactusfs")
+					if digest < 0 || made < 0 || digest > update || made > update {
+						t.Errorf("the old node's image was not pinned before the upgrade began (%d, %d, %d)", digest, made, update)
+					}
+					for _, c := range res.calls {
+						if slices.Contains(c.Args, "cactusfs-previous") || slices.Contains(sub(c), "rename") {
+							t.Errorf("a rename or cactusfs-previous on nerdctl: %q", c.Args)
+						}
+					}
+					if n := len(callsOf(res, "nerdctl", "update")); n != 1 {
+						t.Errorf("%d updates, want the one before the stop: %q", n, got)
+					}
+					if rm := index(got, "readyz"); slices.ContainsFunc(got[:rm], func(s string) bool { return s == "image rm "+img }) {
+						t.Error("the old tag was removed before the new node was ready")
+					}
+					if strings.Contains(res.output(), "the upgrade stopped after") {
+						t.Error("a finished upgrade said it was stopped")
+					}
+					noVolumeRemoved(t, res)
+				})
+				if e.tool == "docker" {
+					return
+				}
+
+				for _, c := range []struct {
+					name string
+					fail rule
+					want string
+				}{
+					{"the old image is not there", broke("image", "inspect", "--format", "{{range .RepoDigests}}{{.}} {{end}}", img), "the image " + img + " the node runs is not on"},
+					{"the old image names no digest", rule{Tool: "nerdctl", Contains: []string{"image", "inspect", "--format", "{{range .RepoDigests}}{{.}} {{end}}", img}, Stdout: " \n"}, "nerdctl names no digest of the image " + img},
+					{"the tag names another image", rule{Tool: "nerdctl", Contains: []string{"container", "inspect", "--format", "{{.Image}}", "cactusfs"}, Stdout: "sha256:" + strings.Repeat("0", 64) + "\n"}, "and its tag " + img + " now names another (sha256:" + oldHex + ")"},
+					{"the node was made from another name", rule{Tool: "nerdctl", Contains: []string{"container", "inspect", "--format", "{{.Image}}", "cactusfs"}, Stdout: "registry.example.test/other:1\n"}, "says it was made from 'registry.example.test/other:1'"},
+					{"the update fails", broke("update", "--restart", "no", "cactusfs"), "the restart policy of cactusfs could not be cleared"},
+				} {
+					t.Run(c.name, func(t *testing.T) {
+						res := upgrade(t, "", c.fail)
+						res.want(t, 1, c.want, "nothing was stopped or upgraded")
+						unchanged(t, res)
+					})
+				}
+
+				t.Run("a node made from the tag itself", func(t *testing.T) {
+					// A nerdctl that records no digest says the name.
+					res := upgrade(t, "", rule{Tool: "nerdctl", Contains: []string{"container", "inspect", "--format", "{{.Image}}", "cactusfs"}, Stdout: img + "\n"})
+					res.want(t, 0, "ready: cactusfs runs")
+				})
+
+				t.Run("the stop fails", func(t *testing.T) {
+					res := upgrade(t, "", broke("stop", "-t", "40", "cactusfs"))
+					res.want(t, 1, "cactusfs could not be stopped", "nothing was upgraded")
+					before(t, steps(res), "update --restart no cactusfs", "stop cactusfs", "update --restart always cactusfs")
+					unchanged(t, res, "stop cactusfs")
+				})
+
+				t.Run("the removal fails", func(t *testing.T) {
+					res := upgrade(t, "", rule{Tool: "nerdctl", Contains: []string{"rm", "cactusfs"}, Starts: []string{"rm", "cactusfs"}, Stderr: "it broke\n", Exit: 1})
+					res.want(t, 1, "cactusfs could not be removed", "it was started again and runs "+img+" as before - nothing was upgraded")
+					before(t, steps(res), "update --restart no cactusfs", "stop cactusfs", "rm cactusfs", "update --restart always cactusfs")
+					update := slices.IndexFunc(res.calls, func(c call) bool { return slices.Equal(sub(c), []string{"update", "--restart", "always", "cactusfs"}) })
+					start := slices.IndexFunc(res.calls, func(c call) bool { return slices.Equal(sub(c), []string{"start", "cactusfs"}) })
+					if update < 0 || start < update {
+						t.Errorf("the policy was not given back before the node was started again (update at %d, start at %d)", update, start)
+					}
+					unchanged(t, res, "stop cactusfs", "rm cactusfs")
+				})
+
+				t.Run("the new node cannot run", func(t *testing.T) {
+					res := upgrade(t, "", firstRunFails)
+					res.want(t, 1, "could not be run", "rolled back to "+img+", which is ready: nothing was upgraded")
+					rolledBack(t, res)
+					if strings.Contains(res.output(), "the upgrade stopped after") {
+						t.Error("a rollback that ran the old image said the upgrade was stopped")
+					}
+				})
+
+				t.Run("the new node is not ready", func(t *testing.T) {
+					res := upgrade(t, "WAIT_TIMEOUT=1\n", notReady)
+					res.want(t, 1, "did not become ready within WAIT_TIMEOUT=1 s", "it is left running, as it may have changed the metadata already",
+						"To go back to the image it replaced: "+back+img+" (sha256:"+oldHex+")")
+					if len(callsOf(res, "nerdctl", "rm", "-f", "cactusfs")) != 0 || slices.Contains(steps(res), "run "+oldHex) {
+						t.Errorf("a node that ran was rolled back: %q", steps(res))
+					}
+					if strings.Contains(res.output(), "the upgrade stopped after") {
+						t.Error("the notice of a stopped upgrade was said too")
+					}
+					noVolumeRemoved(t, res)
+				})
+
+				t.Run("the rollback cannot run", func(t *testing.T) {
+					res := upgrade(t, "", broke(newRun...))
+					res.want(t, 1, "the node is DOWN", "could not be run again", "To run it again: "+back+img+" (sha256:"+oldHex+")")
+					if !slices.Contains(steps(res), "run "+oldHex) {
+						t.Errorf("the old image was not run again: %q", steps(res))
+					}
+					noVolumeRemoved(t, res)
+				})
+
+				t.Run("the rollback is not ready", func(t *testing.T) {
+					nr := notReady
+					res := upgrade(t, "WAIT_TIMEOUT=1\n", firstRunFails, nr)
+					res.want(t, 1, "the node is DOWN", "run again, did not become ready within WAIT_TIMEOUT=1 s", "To run it again: "+back+img)
+					noVolumeRemoved(t, res)
+				})
+
+				for _, c := range []struct {
+					name  string
+					rules []rule
+				}{
+					{"stopped by a signal in the new node's run", []rule{{Tool: "nerdctl", Contains: newRun, TermParent: true}}},
+					{"stopped by a signal in the rollback's run", []rule{firstRunFails, {Tool: "nerdctl", Contains: newRun, After: rollback, TermParent: true}}},
+				} {
+					t.Run(c.name, func(t *testing.T) {
+						res := upgrade(t, "", c.rules...)
+						if res.code != 143 {
+							t.Fatalf("exit status %d, want 143 (SIGTERM)\n%s", res.code, res.output())
+						}
+						res.want(t, 143, "the upgrade stopped after the node cactusfs (image "+img+") was removed and before a node ran again; the volumes are kept",
+							back+img)
+						noVolumeRemoved(t, res)
+					})
+				}
+
+				t.Run("an upgrade an earlier build left", func(t *testing.T) {
+					res := upgrade(t, "",
+						rule{Tool: "nerdctl", Contains: []string{"ps", "-a", "name=cactusfs-previous"}, Stdout: "cactusfs-previous\n"},
+						rule{Tool: "nerdctl", Contains: []string{"container", "inspect", "cactusfs-previous"}, Stdout: "cactusfs|rancher|exited|" + img + "\n"})
+					res.want(t, 2, "Otherwise put it back: nerdctl --namespace default rm -f cactusfs; nerdctl --namespace default rename cactusfs-previous cactusfs; nerdctl --namespace default start cactusfs; nerdctl --namespace default update --restart always cactusfs")
+					noChange(t, res)
+				})
+
+				t.Run("uninstall", func(t *testing.T) {
+					r := clone(t, base)
+					st := r.stateOf(e.targetID)
+					r.rules(rancherRules(t, installedState(t, e, st, img))...)
+					res := rancherRun(r, env, "--uninstall")
+					res.want(t, 0, "removed the container cactusfs")
+					before(t, steps(res), "update --restart no cactusfs", "stop cactusfs", "rm cactusfs")
+
+					r.rules(append([]rule{broke("update", "--restart", "no", "cactusfs")}, rancherRules(t, installedState(t, e, st, img))...)...)
+					res = rancherRun(r, env, "--uninstall")
+					res.want(t, 1, "the restart policy of cactusfs could not be cleared", "nothing was stopped or removed")
+					unchanged(t, res)
+				})
+			})
+		}
+	})
+}
+
+// noVolumeRemoved fails the test when the run removed a volume.
+func noVolumeRemoved(t *testing.T, res result) {
+	t.Helper()
+	for _, c := range res.calls {
+		if s := sub(c); isEngine(c.Tool) && len(s) > 1 && s[0] == "volume" && (s[1] == "rm" || s[1] == "prune") {
+			t.Errorf("a volume was removed: %q", c.Args)
+		}
+	}
+}
+
+// TestRancherVMDirAnswers: an answer of mktemp in Rancher Desktop's VM that
+// is not exactly the template /dev/shm/cactusfs-deploy.XXXXXX with its X's
+// made letters and digits - another place, the old /tmp, an empty or short
+// suffix, a way out, dots, no dot, a line break, a space - fails the run
+// (exit 1), and nothing is written to it or removed from it: no rdctl call
+// but mktemp's, and dev-init's container removed.
+func TestRancherVMDirAnswers(t *testing.T) {
+	t.Parallel()
+	e := rancherEngines[1]
+	for _, answer := range []string{
+		"/etc",
+		"/tmp/cactusfs-deploy.Fx7Kq2",
+		"/dev/shm/cactusfs-deploy.",
+		"/dev/shm/cactusfs-deploy.Fx7Kq",
+		"/dev/shm/cactusfs-deploy.a/../..",
+		"/dev/shm/cactusfs-deploy...xAbc",
+		"/dev/shm/cactusfs-deployFx7Kq2",
+		"/dev/shm/cactusfs-deploy.Fx7\nKq2",
+		"/dev/shm/cactusfs-deploy.Fx7Kq2\n/dev/shm/cactusfs-deploy.Fx7Kq2",
+		"/dev/shm/cactusfs-deploy.Fx Kq2",
+		"/dev/shm/cactusfs-deploy.Fx7Kq2/",
+	} {
+		t.Run(strings.NewReplacer("/", "_", "\n", "NL", " ", "SP").Replace(answer), func(t *testing.T) {
+			t.Parallel()
+			eachShell(t, func(t *testing.T, r *rig) {
+				r = secretsRig(t, r)
+				r.rules(append([]rule{{Tool: "rdctl", Contains: vmArgs["mktemp"], Stdout: answer + "\n"}}, rancherRules(t, engineState{e: e, devInit: devInitOutput(), ready: true})...)...)
+				res := rancherRun(r, "KMS=local\n", "--install")
+				res.want(t, 1, "which is not a directory of the template /dev/shm/cactusfs-deploy.XXXXXX: nothing is written or removed there")
+				for _, c := range res.calls {
+					if c.Tool == "rdctl" && !slices.Equal(c.Args, vmArgs["mktemp"]) {
+						t.Errorf("rdctl was run on an answer not checked: %q", c.Args)
+					}
+				}
+				lastCalls(t, res, call{Tool: "nerdctl", Args: []string{"--namespace", "default", "rm", "-f", "cactusfs-dev-init"}})
+			})
+		})
+	}
+}
+
+// TestRancherVolumeRoot: on containerd the root of a secrets' volume is the
+// nodes' user's, 0700. A volume that is there and empty - made by a run
+// stopped before its put - whose root is nerdctl's root:root is filled, its
+// root given to 65532 and made 0700 before the stream goes in; one that
+// holds files under such a root is refused (exit 2) with the commands that
+// fix it, before anything is put.
+func TestRancherVolumeRoot(t *testing.T) {
+	t.Parallel()
+	e := rancherEngines[1]
+	const env = "KMS=local\n"
+	eachShell(t, func(t *testing.T, r *rig) {
+		base, img := rancherInstalled(t, r, e, env)
+
+		t.Run("empty, owned by root", func(t *testing.T) {
+			r := clone(t, base)
+			st := r.stateOf(e.targetID)
+			s := installedState(t, e, st, img)
+			s.keys = map[string]map[string]string{"secrets": {}, "config": {}}
+			r.rules(append([]rule{
+				volArchive("secrets", tarOwned(t, "secrets", nil, 0)),
+				volArchive("config", tarOwned(t, "config", nil, 0)),
+			}, rancherRules(t, s)...)...)
+			res := rancherRun(r, env, "--install")
+			res.want(t, 0, "ready: cactusfs runs")
+			for _, unit := range []string{"secrets", "config"} {
+				v := "cactusfs-" + unit
+				chown := slices.IndexFunc(res.calls, func(c call) bool {
+					return c.Tool == "rdctl" && slices.Equal(c.Args, []string{"shell", "sudo", "chown", "65532:65532", mountpoint(v)})
+				})
+				chmod := slices.IndexFunc(res.calls, func(c call) bool {
+					return c.Tool == "rdctl" && slices.Equal(c.Args, []string{"shell", "sudo", "chmod", "0700", mountpoint(v)})
+				})
+				put := slices.IndexFunc(res.calls, func(c call) bool { return c.Tool == "rdctl" && volumeOf(c, "-x") == v })
+				if chown < 0 || chmod < chown || put < chmod {
+					t.Errorf("%s: chown at %d, chmod at %d, put at %d: want the root made 65532 0700 before the put", v, chown, chmod, put)
+				}
+			}
+			puts, _ := vmCopies(t, res, "default")
+			if len(puts) != 2 {
+				t.Errorf("%d puts, want both volumes filled", len(puts))
+			}
+		})
+
+		t.Run("files under a root owned by root", func(t *testing.T) {
+			r := clone(t, base)
+			st := r.stateOf(e.targetID)
+			s := installedState(t, e, st, img)
+			r.rules(append([]rule{volArchive("secrets", tarOwned(t, "secrets", s.keys["secrets"], 0))}, rancherRules(t, s)...)...)
+			res := rancherRun(r, env, "--install")
+			res.want(t, 2, "the root of the volume cactusfs-secrets is not the nodes' user's with the mode 0700 (owner 0:0, mode 700)",
+				"rdctl shell sudo chown 65532:65532 "+mountpoint("cactusfs-secrets")+"; rdctl shell sudo chmod 0700 "+mountpoint("cactusfs-secrets"))
+			for _, c := range res.calls {
+				if c.Tool == "rdctl" && (volumeOf(c, "-x") != "" || volumeRoot(c)) {
+					t.Errorf("a refused run changed a volume: %q", c.Args)
+				}
+			}
+			noSecretAnywhere(t, res, st)
+		})
 	})
 }

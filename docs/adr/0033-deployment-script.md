@@ -1,16 +1,17 @@
 # ADR-0033: One deployment script for every container platform
 
 - **Status:** accepted (2026-11-23, PLAN 10.12; proposed 2026-11-21, PLAN 10.0). Built by
-  PLAN 10.1 to 10.11 and 10.14 in `deploy/deploy.sh` and `deploy/lib/` (10.2, 10.6 and
-  10.14 stay in progress: Podman's run of the from-binaries image check, a real Rancher
-  Desktop with its own Kubernetes, and the gate on the test host); where the build
+  PLAN 10.1 to 10.14 in `deploy/deploy.sh` and `deploy/lib/`, all done (10.2 run on a
+  real Podman, 10.6 on a real Rancher Desktop with its own Kubernetes, 10.14 through
+  the gate on the test host); where the build
   differs from or adds to the decision, the section says so under "As built". Rancher
   Desktop's own Kubernetes (`RANCHER_KUBERNETES=yes`, section 9) is handed to the
   Kubernetes path since PLAN 10.6's second part. Run on real engines: Docker and Podman, standalone
   and cluster (`make test-deploy`), Docker CE over SSH (a `CE_HOST` run), k3s in a
   container (`make test-k8s`), and in the acceptance of PLAN 10.13 standalone on
-  Docker Desktop 29 for macOS and on a remote k3s server over `K3S_SSH`; not yet on
-  Rancher Desktop or a Kubernetes other than k3s. The operator's
+  Docker Desktop 29 for macOS and on a remote k3s server over `K3S_SSH`, and Rancher
+  Desktop 1.25 for macOS (moby standalone and cluster, containerd standalone, its
+  Kubernetes on both, PLAN 10.6); not yet on a Kubernetes other than k3s. The operator's
   documentation is the README, "Deploying with deploy/deploy.sh". It changes no Raft
   entry schema, on-disk format, crypto design or contract. The points under "Open, for
   the owner" are not answered; their defaults are what was built (the threat model,
@@ -847,13 +848,114 @@ engine command `nerdctl --namespace default` (`build`, `run`, `create`, `cp`,
 in its source (v2.4.2): its `cp` has no `-a` and extracts as root keeping the owner a
 stream says, so every tar stream the script puts into a container there (the secrets'
 volumes, dev-init's input) is made owned by 65532 by number with no names (`--owner
---group --numeric-owner`, which GNU tar and bsdtar both take); it copies into and out
-of a container that never ran by mounting its snapshot and the volumes its spec names,
-so the helpers are never started, as on Docker; its `volume inspect` gives `Labels` as
+--group --numeric-owner`, which GNU tar and bsdtar both take); and `cp -` (a stream on
+standard input) is not in every release Rancher Desktop bundles - the `nerdctl` v2.2.2
+of Rancher Desktop 1.25.0 answers "support for reading a tar archive from stdin is not
+implemented yet" although its usage names `-` (found on a real Rancher Desktop,
+2026-11-23), and `cp <container>:<path> -` (a stream to standard output) answers
+"support for writing a tar archive to stdout is not implemented yet" - so the script
+uses neither on any `nerdctl`. Rancher Desktop's `nerdctl`
+is a wrapper, `rdctl shell sudo nerdctl ...`: `nerdctl` runs as root in Rancher
+Desktop's VM, and a path it is given is the VM's. And its `cp` into or out of a
+container that never ran sees only the container's snapshot, not the volumes mounted
+into it ("destination parent does not exist", "source does not exist" on v2.2.2, though
+v2.4.2's `cp_resolve_linux.go` reads the mounts from the spec): so on `nerdctl` the
+secrets' volumes have no helper container and no `cp` (below), and only dev-init's
+container, whose `/tmp` is its snapshot's, is copied into and out of. A stream therefore
+reaches dev-init's container in four steps (`nerdctl_put`): `rdctl shell sudo mktemp -d
+/dev/shm/cactusfs-deploy.XXXXXX` makes a private directory on a tmpfs (root's, `0700`;
+nothing reaches the VM's disk) - not `/tmp`, which on the real VM is the disk (ext4 on
+`/dev/vda1`, mounted at `/mnt/data`; only `/`, `/run` and `/dev/shm` are tmpfs, found by
+the review of 2026-11-23). mktemp's answer must be exactly the template with its X's
+made letters and digits (one line), else the run fails and nothing is written to or
+removed from it; once its removal is in the EXIT trap, `rdctl shell sudo stat -f -c %T
+<dir>` must answer `tmpfs`, else the run fails before anything is written there. The
+directory is then given to 65532 (`chown 65532:65532`, as the
+volume's root and dev-init's `/tmp` then are); `rdctl shell sudo tar -x --same-owner -p
+-C <dir> -f -` extracts the stream there with it on standard input, keeping its owners
+and modes (a `.` entry, when the stream has one, sets the directory's own); `nerdctl
+cp <dir>/. <container>:<dir>` copies it in - `nerdctl` archives the directory and
+extracts it into the container as root, keeping owners and modes
+(`pkg/containerutil/cp_linux.go`); and `rdctl shell sudo rm -rf <dir>` removes it. The
+removal is in the run's one EXIT trap from the moment the directory is made, so a
+step that fails, or a run stopped, still removes it; an answer of `mktemp` that is not
+a directory of that template fails the run and is never removed. A read out of
+dev-init's container (its output) is the mirror (`nerdctl_get`): a private directory made the same way and in the trap at once, `nerdctl
+cp <container>:<dir> <vmdir>/` (the directory copied in under its own name), `rdctl
+shell sudo tar -c -C <vmdir> -f - <name>` to standard output into a file of the run's own
+directory of the entry - the layout of `docker cp <container>:<dir> -`, every entry under
+the directory's name, so the readers are those of every engine, which extract it
+without owners and check it holds only files and directories - and the directory
+removed. No dry run reaches either: dev-init runs, a change, and `nerdctl_get` fails as
+an error of the script if one does; the harness counts the VM's directory as a change
+and its archive as a read. A secrets' volume is read and filled in place, in the VM:
+`nerdctl --namespace <ns> volume inspect --format '{{.Mountpoint}}' <volume>` (a read)
+names its directory, which must be exactly `/var/lib/nerdctl/<hex>/volumes/<ns>/<volume>/_data`
+(nerdctl's data root, the digest of containerd's address, the namespace and that
+volume's own name; one line, nothing else) - any other answer fails the run as an error
+of the script, and nothing is read from or written to it. A put (`nerdctl_volume_put`, a
+change) is `rdctl shell sudo tar -x --same-owner -p -C <mountpoint> -f -` with the
+owner-stamped stream on standard input: owners and modes kept, and the stream's `.`
+entry, in a volume made in the run, makes the volume's root 65532 and `0700`, as `cp -a`
+does on Docker - and before every put the volume's root is given to 65532 and made `0700`
+(`chown`, `chmod` on the validated mount point), as a volume made by an earlier run and
+never filled keeps nerdctl's `root:root 0755`; a rotation is the same put. A fetch (`nerdctl_volume_get`, a read) is
+`rdctl shell sudo tar -c -C <the mountpoint's parent> -f - --transform=s,^_data,<unit>, _data`
+into a file of the run's directory of the entry: every entry under the unit's name,
+the layout `docker cp <helper>:/var/lib/cactusfs/<unit> -` gives, so `secrets_fetch`'s
+reader is that of every engine. The stream's first entry, the volume's root, must be a
+directory owned by 65532:65532 with the mode `0700` (read from its ustar header, as
+Podman's `volume_root_check` does); otherwise a volume that holds anything is refused
+(exit 2) with the `chown` and `chmod` that fix it, and an empty one is left to the put,
+which sets its root. Nothing is made in the VM for a volume, so there is
+nothing to clean up; the volumes are still made by `nerdctl volume create` with the
+deployment's labels, and those labels are still checked before anything is read. No secret is in an
+argument, an environment or the output: it is only ever on a standard input. `rdctl`
+is the one on `PATH`, else the one beside `nerdctl` (Rancher Desktop installs both in
+`~/.rd/bin`); without one, an install there is refused before anything is changed. The
+helper containers are in the same trap from their creation (`helper_later`):
+`<name>-dev-init` on every engine, which holds the passphrase once its input is
+copied in, and `<name>-volumes` on every engine but `nerdctl` (which has none) are removed, by the engine and context that made them,
+when the run fails after making them (one left by an earlier run is removed at the
+next only with the deployment's labels, as before, and refused without). It copies into and out
+of a container that never ran by mounting its snapshot, so dev-init's container is
+never started for a copy, as on Docker; its `volume inspect` gives `Labels` as
 a pointer, nil without labels, read through `with`; its `ps` has no `.State` and a
 container holds none of its image's labels, so `--status` reads the version label of
 the image; the node's restart policy is `always`, the one every containerd restart
-plugin has, under which a container `nerdctl stop` stopped stays stopped. A compose
+plugin has - and under it containerd's restart monitor starts again a container
+`nerdctl stop` stopped (v2.2.2 on the real Rancher Desktop: after the stop and rename
+of an upgrade the old node showed "Restarting", held its ports, and the new node's
+`run` failed with "port is already allocated"). So a node the script stops has its
+policy set to `no` with `nerdctl update --restart no` BEFORE the stop - the old node of
+an upgrade, and the node an uninstall stops and removes; an update that fails stops the
+run before anything is stopped. Whenever the old node is started again - its stop or
+its removal failing, and the way back from an upgrade an earlier build left half way -
+`update --restart always` gives its policy back (`docker_restart_policy`). And a stopped
+container keeps the host ports it published reserved until it is removed (v2.2.2;
+Docker frees them at the stop: the new node's `run` failed with "port is already
+allocated"), so on `nerdctl` the standalone upgrade keeps no `<name>-previous`
+(`docker_upgrade_nerdctl`). Before anything is changed the old node's image is pinned:
+its tag (its `.Config.Image`, by which the script ran it) must be on the engine, the
+digest of its target - nerdctl's ID of an image - is read from its `RepoDigests`, and
+the container's `.Image` (the digest it was made from, in nerdctl releases that record
+it, else the tag) must name the same image, else nothing is stopped. Then its policy is
+cleared, it is stopped and removed - never its volumes - and the new node is run and
+waited for; the old tag stays recorded, and is removed only once the new node is ready.
+A new node that cannot run (`run` fails: it never started, so the metadata is as the old
+node left it) is removed and the old image is run again by its digest with the same
+volumes and settings and waited for (`docker_rollback`): the run then fails (exit 1)
+saying it rolled back and nothing was upgraded - or, when the old image does not come up
+either, that the node is DOWN, with the command that runs it again (`<cli> rm -f
+<name>`, then `deploy/deploy.sh --install` with `IMAGE_SOURCE=image IMAGE=<old tag>`).
+A new node that runs but is not ready within `WAIT_TIMEOUT` is NOT rolled back (Albie's
+decision, 2026-11-23): once it ran it may have changed the metadata already, which the
+old image may not read, so the operator decides, as on Docker, where the old node is
+kept - it is left running and the run fails with its log's command and the way back.
+From the removal until a node runs again the run's EXIT trap says the way back should
+the run be stopped (a signal), also during the rollback's own run.
+Docker and Podman keep their upgrade: the old node stopped and renamed `<name>-previous`
+until the new one is ready. A compose
 cluster on containerd is refused before anything is changed (with
 `RANCHER_ENGINE=containerd`, before the engine is asked anything): `nerdctl compose` has
 no `up --no-deps`, with which a cluster is upgraded one node at a time, and no `compose

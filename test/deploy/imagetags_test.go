@@ -313,7 +313,13 @@ func TestImageTagsUpgrade(t *testing.T) {
 					rules = append(rules, madeHere(e.tool, f2)...)
 					r.rules(append(rules, engineOf(t, s)...)...)
 					res := dockerRun(r, e, "KMS=local\n"+c.env, "--install")
-					res.want(t, c.code, c.want...)
+					want := c.want
+					if c.name == "not ready" && e.tool == "nerdctl" {
+						// On nerdctl the old node was removed, and a new one
+						// that ran is left running (TestRancherUpgrade).
+						want = []string{"it is left running, as it may have changed the metadata already"}
+					}
+					res.want(t, c.code, want...)
 					removals := imageRemovals(res, e.tool)
 					record := read(t, filepath.Join(r.stateOf(e.targetID), "images"))
 					switch {
@@ -324,9 +330,18 @@ func TestImageTagsUpgrade(t *testing.T) {
 						if record != "target "+f2.ref()+" "+e.id+"\n" {
 							t.Errorf("the record is %q", record)
 						}
-						// After the old node is gone, never before.
-						prev := callIndex(res, e.tool, "rm", "cactusfs-previous")
 						rm := callIndex(res, e.tool, "image", "rm", f1.ref())
+						// After the old node is gone, never before - on nerdctl
+						// removed before the new node ran (its ports are held
+						// until it is), elsewhere kept as cactusfs-previous until
+						// the new one was ready.
+						prev := callIndex(res, e.tool, "rm", "cactusfs-previous")
+						if e.tool == "nerdctl" {
+							prev = slices.IndexFunc(res.calls, func(c call) bool { return c.Tool == "nerdctl" && slices.Equal(sub(c), []string{"rm", "cactusfs"}) })
+							if ready := slices.IndexFunc(res.calls, func(c call) bool { return c.Tool == "curl" && !slices.Contains(c.Args, "%{num_connects}") }); ready < 0 || rm < ready {
+								t.Errorf("the image removed at %d, before the new node was ready (%d)", rm, ready)
+							}
+						}
 						ps := callIndex(res, e.tool, "ps", "-a", "--format", "{{.Image}}")
 						if prev < 0 || ps < prev || rm < ps {
 							t.Errorf("cactusfs-previous removed at %d, the containers listed at %d, the image removed at %d", prev, ps, rm)
